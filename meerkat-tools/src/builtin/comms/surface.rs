@@ -98,6 +98,14 @@ impl AgentToolDispatcher for CommsToolSurface {
         }
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        if self.tool_defs.iter().any(|tool| tool.name == tool_name) {
+            meerkat_core::LiveBridgeEffectKind::Comms
+        } else {
+            meerkat_core::LiveBridgeEffectKind::ExternalIo
+        }
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,

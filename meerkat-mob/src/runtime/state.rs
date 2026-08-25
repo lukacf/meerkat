@@ -575,6 +575,20 @@ pub(super) enum MobCommand {
         payload: Box<SubmitWorkPayload>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    #[cfg(feature = "experimental-gpt-live")]
+    StartLiveBridgeOperation {
+        agent_identity: AgentIdentity,
+        request: super::LiveBridgeOperationRequest,
+        cancellation: super::LiveBridgeOperationCancellationSignal,
+        reply_tx: oneshot::Sender<
+            Result<super::LiveBridgeOperationTerminalFuture, super::LiveBridgeOperationStartError>,
+        >,
+    },
+    #[cfg(feature = "experimental-gpt-live")]
+    ValidateLiveBridgeMemberEligibility {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), super::LiveBridgeOperationStartError>>,
+    },
     /// Sender-aware peer communication between mob members.
     ///
     /// This is not work-lane ingress. The actor resolves the sender member's
@@ -1171,6 +1185,12 @@ impl MobCommand {
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::StartLiveBridgeOperation { .. } => "StartLiveBridgeOperation",
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::ValidateLiveBridgeMemberEligibility { .. } => {
+                "ValidateLiveBridgeMemberEligibility"
+            }
             Self::SendPeerMessage { .. } => "SendPeerMessage",
             Self::DriveRouteInstalls { .. } => "DriveRouteInstalls",
             Self::DeclareMemberOutboundTaint { .. } => "DeclareMemberOutboundTaint",

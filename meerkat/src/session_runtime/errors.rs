@@ -193,6 +193,9 @@ pub enum LiveOpenError {
     /// S5: the freshly minted candidate channel id collided.
     #[error("generated duplicate live channel id {channel_id}")]
     AdmissionRejectedChannelCollision { channel_id: String },
+    /// S5: the candidate channel id was previously revoked and cannot be reused.
+    #[error("generated revoked live channel id {channel_id}")]
+    AdmissionRejectedRevokedChannel { channel_id: String },
     /// S5: the session lifecycle is already Retired/Stopped.
     #[error("session lifecycle is closed to live channel admission")]
     AdmissionRejectedLifecycleClosed,

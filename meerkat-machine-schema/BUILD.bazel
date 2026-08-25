@@ -466,7 +466,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.27",
+        "CARGO_PKG_VERSION": "0.8.28",
         "CARGO_BIN_NAME": "gpt_live_authority_contract",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-schema",
     },

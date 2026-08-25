@@ -6,6 +6,13 @@
 //! dispatch witnesses without exposing a public minting constructor.
 
 use meerkat_core::exact_operation::ExactOperationIdentity;
+pub use meerkat_core::{
+    CanonicalContextRevision, LiveBridgeCancellationReason, LiveBridgeEffectKind,
+    LiveBridgeEffectOutcome, LiveBridgeOperationCorrelation, LiveBridgeOperationPhase,
+    LiveBridgeOutputKind, LiveBridgeProviderCorrelation, LiveBridgeRequestDigest,
+    LiveBridgeSubmissionObservation, LiveBridgeSubmissionState, LiveExecutionCapabilities,
+    LiveExecutionChannelPhase, LiveExecutionMode, MeerkatExecutionTerminal,
+};
 use meerkat_core::{
     FinalLiveUserTranscriptCommitEvidence, FinalLiveUserTranscriptDisposition,
     LiveAppendDeliveryOutcome, LiveChannelId, LiveHandoffReconciliation, LiveResultDisposition,
@@ -18,6 +25,8 @@ use meerkat_live::{
     ProviderWebrtcBinding,
 };
 use sha2::{Digest, Sha256};
+#[cfg(feature = "live")]
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "live")]
@@ -78,6 +87,12 @@ pub enum LiveExecutionAuthorityError {
     AssistantOutputAlreadyReserved,
     #[error("live delegation tool execution admission is already terminal")]
     ToolExecutionAdmissionTerminal,
+    #[error("generated live bridge authority does not match the exact operation")]
+    BridgeOperationMismatch,
+    #[error("generated live bridge effect authority does not match the exact dispatch")]
+    BridgeEffectMismatch,
+    #[error("generated live bridge submission authority does not match the exact output")]
+    BridgeSubmissionMismatch,
 }
 
 /// Read-only projection of the exact generated live runtime binding.
@@ -150,6 +165,1512 @@ impl LiveDelegationRuntimeBinding {
     }
 }
 
+fn bridge_phase_from_dsl(
+    phase: crate::meerkat_machine::dsl::LiveBridgeOperationPhase,
+) -> LiveBridgeOperationPhase {
+    match phase {
+        crate::meerkat_machine::dsl::LiveBridgeOperationPhase::PreFinalInference => {
+            LiveBridgeOperationPhase::PreFinalInference
+        }
+        crate::meerkat_machine::dsl::LiveBridgeOperationPhase::FinalInputAuthorized => {
+            LiveBridgeOperationPhase::FinalInputAuthorized
+        }
+        crate::meerkat_machine::dsl::LiveBridgeOperationPhase::CancellationAuthorized => {
+            LiveBridgeOperationPhase::CancellationAuthorized
+        }
+        crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionTerminal => {
+            LiveBridgeOperationPhase::ExecutionTerminal
+        }
+    }
+}
+
+pub(crate) fn live_execution_mode_to_dsl(
+    mode: LiveExecutionMode,
+) -> crate::meerkat_machine::dsl::LiveExecutionMode {
+    match mode {
+        LiveExecutionMode::FunctionBridge => {
+            crate::meerkat_machine::dsl::LiveExecutionMode::FunctionBridge
+        }
+        LiveExecutionMode::ClientContext => {
+            crate::meerkat_machine::dsl::LiveExecutionMode::ClientContext
+        }
+    }
+}
+
+pub(crate) const fn live_execution_mode_from_dsl(
+    mode: crate::meerkat_machine::dsl::LiveExecutionMode,
+) -> LiveExecutionMode {
+    match mode {
+        crate::meerkat_machine::dsl::LiveExecutionMode::FunctionBridge => {
+            LiveExecutionMode::FunctionBridge
+        }
+        crate::meerkat_machine::dsl::LiveExecutionMode::ClientContext => {
+            LiveExecutionMode::ClientContext
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveExecutionModeAdmission {
+    session_id: SessionId,
+    channel_id: LiveChannelId,
+    profile_id: String,
+    mode: LiveExecutionMode,
+    capabilities: LiveExecutionCapabilities,
+}
+
+#[derive(Debug, Clone)]
+struct LiveExecutionProfileDefinition {
+    profile_id: String,
+    mode: LiveExecutionMode,
+    capabilities: LiveExecutionCapabilities,
+}
+
+impl LiveExecutionProfileDefinition {
+    pub(crate) fn new(
+        profile_id: impl Into<String>,
+        mode: LiveExecutionMode,
+        capabilities: LiveExecutionCapabilities,
+    ) -> Result<Self, LiveExecutionAuthorityError> {
+        let profile_id = profile_id.into();
+        let selected_available = match mode {
+            LiveExecutionMode::FunctionBridge => capabilities.function_bridge,
+            LiveExecutionMode::ClientContext => capabilities.client_context,
+        };
+        if profile_id.is_empty() || !selected_available {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Self {
+            profile_id,
+            mode,
+            capabilities,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveExecutionProfileSelection {
+    definition: LiveExecutionProfileDefinition,
+}
+
+impl LiveExecutionProfileSelection {
+    /// Mint a profile selection only while holding lower Gate0 qualification.
+    /// Meerkat's admission owner supplies mode and atoms from its configured
+    /// catalog; surfaces and MobKit never receive this lower witness.
+    #[cfg(feature = "live")]
+    pub fn from_experimental_qualification(
+        _qualification: &meerkat_llm_core::provider_runtime::ExperimentalRealtimeQualificationWitness,
+        profile_id: impl Into<String>,
+        mode: LiveExecutionMode,
+        capabilities: LiveExecutionCapabilities,
+    ) -> Result<Self, LiveExecutionAuthorityError> {
+        let definition = LiveExecutionProfileDefinition::new(profile_id, mode, capabilities)?;
+        Ok(Self { definition })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __test_new(
+        profile_id: impl Into<String>,
+        mode: LiveExecutionMode,
+        capabilities: LiveExecutionCapabilities,
+    ) -> Result<Self, LiveExecutionAuthorityError> {
+        let definition = LiveExecutionProfileDefinition::new(profile_id, mode, capabilities)?;
+        Ok(Self { definition })
+    }
+
+    #[must_use]
+    pub fn profile_id(&self) -> &str {
+        &self.definition.profile_id
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> LiveExecutionMode {
+        self.definition.mode
+    }
+
+    #[must_use]
+    pub const fn capabilities(&self) -> LiveExecutionCapabilities {
+        self.definition.capabilities
+    }
+}
+
+impl LiveExecutionModeAdmission {
+    pub(crate) fn from_generated_effect(
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        profile_id: &str,
+        mode: LiveExecutionMode,
+        capabilities: LiveExecutionCapabilities,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveExecutionModeAdmissionResolved {
+            session_id: effect_session,
+            channel_id: effect_channel,
+            profile_id: effect_profile,
+            resolved_mode,
+            function_bridge_available,
+            client_context_available,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        if effect_session != &session_id.to_string()
+            || effect_channel != channel_id.as_str()
+            || effect_profile != profile_id
+            || *resolved_mode != live_execution_mode_to_dsl(mode)
+            || *function_bridge_available != capabilities.function_bridge
+            || *client_context_available != capabilities.client_context
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            session_id: session_id.clone(),
+            channel_id: channel_id.clone(),
+            profile_id: profile_id.to_string(),
+            mode,
+            capabilities,
+        }))
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> LiveExecutionMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn capabilities(&self) -> LiveExecutionCapabilities {
+        self.capabilities
+    }
+}
+
+pub(crate) fn bridge_effect_to_dsl(
+    kind: LiveBridgeEffectKind,
+) -> crate::meerkat_machine::dsl::LiveBridgeEffectKind {
+    match kind {
+        LiveBridgeEffectKind::ModelComputation => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::ModelComputation
+        }
+        LiveBridgeEffectKind::ReadOnlyMemorySnapshot => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::ReadOnlyMemorySnapshot
+        }
+        LiveBridgeEffectKind::ToolDispatch => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::ToolDispatch
+        }
+        LiveBridgeEffectKind::DurableMemoryMutation => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::DurableMemoryMutation
+        }
+        LiveBridgeEffectKind::Comms => crate::meerkat_machine::dsl::LiveBridgeEffectKind::Comms,
+        LiveBridgeEffectKind::HelperSpawn => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::HelperSpawn
+        }
+        LiveBridgeEffectKind::ExternalIo => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectKind::ExternalIo
+        }
+    }
+}
+
+pub(crate) fn bridge_effect_outcome_to_dsl(
+    outcome: LiveBridgeEffectOutcome,
+) -> crate::meerkat_machine::dsl::LiveBridgeEffectOutcome {
+    match outcome {
+        LiveBridgeEffectOutcome::Committed => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectOutcome::Committed
+        }
+        LiveBridgeEffectOutcome::Failed => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectOutcome::Failed
+        }
+        LiveBridgeEffectOutcome::Unknown => {
+            crate::meerkat_machine::dsl::LiveBridgeEffectOutcome::Unknown
+        }
+    }
+}
+
+pub(crate) fn bridge_terminal_to_dsl(
+    terminal: MeerkatExecutionTerminal,
+) -> crate::meerkat_machine::dsl::MeerkatExecutionTerminal {
+    use crate::meerkat_machine::dsl::MeerkatExecutionTerminal as Dsl;
+    match terminal {
+        MeerkatExecutionTerminal::Completed => Dsl::Completed,
+        MeerkatExecutionTerminal::Rejected => Dsl::Rejected,
+        MeerkatExecutionTerminal::Failed => Dsl::Failed,
+        MeerkatExecutionTerminal::TimedOut => Dsl::TimedOut,
+        MeerkatExecutionTerminal::Unrecoverable => Dsl::Unrecoverable,
+        MeerkatExecutionTerminal::Cancelled => Dsl::Cancelled,
+        MeerkatExecutionTerminal::Superseded => Dsl::Superseded,
+    }
+}
+
+pub(crate) fn bridge_output_kind_to_dsl(
+    kind: LiveBridgeOutputKind,
+) -> crate::meerkat_machine::dsl::LiveBridgeOutputKind {
+    match kind {
+        LiveBridgeOutputKind::Success => crate::meerkat_machine::dsl::LiveBridgeOutputKind::Success,
+        LiveBridgeOutputKind::FailureProjection => {
+            crate::meerkat_machine::dsl::LiveBridgeOutputKind::FailureProjection
+        }
+    }
+}
+
+pub(crate) fn bridge_submission_observation_to_dsl(
+    observation: LiveBridgeSubmissionObservation,
+) -> crate::meerkat_machine::dsl::LiveBridgeSubmissionObservation {
+    use crate::meerkat_machine::dsl::LiveBridgeSubmissionObservation as Dsl;
+    match observation {
+        LiveBridgeSubmissionObservation::ProviderProcessed => Dsl::ProviderProcessed,
+        LiveBridgeSubmissionObservation::ProviderRejected => Dsl::ProviderRejected,
+        LiveBridgeSubmissionObservation::SubmissionAmbiguous => Dsl::SubmissionAmbiguous,
+        LiveBridgeSubmissionObservation::CallExpired => Dsl::CallExpired,
+        LiveBridgeSubmissionObservation::CallAbandonedByClose => Dsl::CallAbandonedByClose,
+    }
+}
+
+pub(crate) const fn bridge_submission_state_for_observation(
+    observation: LiveBridgeSubmissionObservation,
+) -> LiveBridgeSubmissionState {
+    match observation {
+        LiveBridgeSubmissionObservation::ProviderProcessed => {
+            LiveBridgeSubmissionState::ProviderProcessed
+        }
+        LiveBridgeSubmissionObservation::ProviderRejected => {
+            LiveBridgeSubmissionState::ProviderRejected
+        }
+        LiveBridgeSubmissionObservation::SubmissionAmbiguous => {
+            LiveBridgeSubmissionState::SubmissionAmbiguous
+        }
+        LiveBridgeSubmissionObservation::CallExpired => LiveBridgeSubmissionState::CallExpired,
+        LiveBridgeSubmissionObservation::CallAbandonedByClose => {
+            LiveBridgeSubmissionState::CallAbandonedByClose
+        }
+    }
+}
+
+pub(crate) fn bridge_submission_state_to_dsl(
+    state: LiveBridgeSubmissionState,
+) -> crate::meerkat_machine::dsl::LiveBridgeSubmissionState {
+    use crate::meerkat_machine::dsl::LiveBridgeSubmissionState as Dsl;
+    match state {
+        LiveBridgeSubmissionState::SubmissionAuthorized => Dsl::SubmissionAuthorized,
+        LiveBridgeSubmissionState::SubmissionAttemptClaimed => Dsl::SubmissionAttemptClaimed,
+        LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof => {
+            Dsl::LocalWriteCompletedAwaitingProof
+        }
+        LiveBridgeSubmissionState::ProviderProcessed => Dsl::ProviderProcessed,
+        LiveBridgeSubmissionState::ProviderRejected => Dsl::ProviderRejected,
+        LiveBridgeSubmissionState::SubmissionAmbiguous => Dsl::SubmissionAmbiguous,
+        LiveBridgeSubmissionState::CallExpired => Dsl::CallExpired,
+        LiveBridgeSubmissionState::CallAbandonedByClose => Dsl::CallAbandonedByClose,
+    }
+}
+
+/// Sealed generated admission for one Responses bridge operation executed by
+/// the channel-bound durable member.
+#[derive(Clone)]
+pub struct LiveBridgeOperationAdmission {
+    session_id: SessionId,
+    binding: LiveDelegationRuntimeBinding,
+    operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+    agent_identity: String,
+    canonical_context_revision: CanonicalContextRevision,
+    request_digest: LiveBridgeRequestDigest,
+    phase: LiveBridgeOperationPhase,
+}
+
+impl std::fmt::Debug for LiveBridgeOperationAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveBridgeOperationAdmission")
+            .field("session_id", &self.session_id)
+            .field("channel_id", self.binding.channel_id())
+            .field("operation_id", self.operation.operation_id())
+            .field("agent_identity", &self.agent_identity)
+            .field("canonical_context_revision", &"[REDACTED]")
+            .field("request_digest", &self.request_digest)
+            .field("phase", &self.phase)
+            .finish()
+    }
+}
+
+impl LiveBridgeOperationAdmission {
+    pub(crate) fn from_generated_effect(
+        session_id: &SessionId,
+        binding: &LiveDelegationRuntimeBinding,
+        operation: &ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        agent_identity: &str,
+        canonical_context_revision: &CanonicalContextRevision,
+        request_digest: &LiveBridgeRequestDigest,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeOperationAdmitted {
+            session_id: effect_session,
+            channel_id,
+            interaction_id,
+            operation_id,
+            provider_turn_ref,
+            provider_delegation_ref,
+            provider_call_ref,
+            agent_identity: effect_agent_identity,
+            canonical_context_revision: effect_context_revision,
+            request_digest: effect_request_digest,
+            phase,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = operation.domain_correlation();
+        if effect_session != &session_id.to_string()
+            || channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(operation.operation_id())
+            || provider_turn_ref != correlation.provider().provider_turn_ref()
+            || provider_delegation_ref != correlation.provider().provider_delegation_ref()
+            || provider_call_ref != correlation.provider().provider_call_ref()
+            || effect_agent_identity.0 != agent_identity
+            || effect_context_revision != canonical_context_revision.as_str()
+            || effect_request_digest != request_digest.as_str()
+            || binding.session_id() != session_id
+            || binding.channel_id() != correlation.channel_id()
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            session_id: session_id.clone(),
+            binding: binding.clone(),
+            operation: operation.clone(),
+            agent_identity: agent_identity.to_string(),
+            canonical_context_revision: canonical_context_revision.clone(),
+            request_digest: request_digest.clone(),
+            phase: bridge_phase_from_dsl(*phase),
+        }))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        session_id: SessionId,
+        binding: LiveDelegationRuntimeBinding,
+        operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        agent_identity: impl Into<String>,
+        canonical_context_revision: CanonicalContextRevision,
+        request_digest: LiveBridgeRequestDigest,
+    ) -> Self {
+        Self {
+            session_id,
+            binding,
+            operation,
+            agent_identity: agent_identity.into(),
+            canonical_context_revision,
+            request_digest,
+            phase: LiveBridgeOperationPhase::PreFinalInference,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &ExactOperationIdentity<LiveBridgeOperationCorrelation> {
+        &self.operation
+    }
+
+    #[must_use]
+    pub fn agent_identity(&self) -> &str {
+        &self.agent_identity
+    }
+
+    #[must_use]
+    pub fn canonical_context_revision(&self) -> &CanonicalContextRevision {
+        &self.canonical_context_revision
+    }
+
+    #[must_use]
+    pub fn request_digest(&self) -> &LiveBridgeRequestDigest {
+        &self.request_digest
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> LiveBridgeOperationPhase {
+        self.phase
+    }
+}
+
+#[cfg(feature = "live")]
+fn same_live_bridge_admission(
+    left: &LiveBridgeOperationAdmission,
+    right: &LiveBridgeOperationAdmission,
+) -> bool {
+    left.session_id() == right.session_id()
+        && left.operation() == right.operation()
+        && left.binding().runtime_id() == right.binding().runtime_id()
+        && left.binding().fence_token() == right.binding().fence_token()
+        && left.binding().generation() == right.binding().generation()
+}
+
+#[derive(Clone)]
+#[cfg(feature = "live")]
+enum LiveBridgeToolGateState {
+    AwaitingFinalInput,
+    Released(LiveBridgeFinalInputAuthority),
+    Closed,
+}
+
+#[cfg(feature = "live")]
+struct LiveBridgeToolDispatchGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+static LIVE_BRIDGE_TOOL_DISPATCH_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    LiveBridgeToolDispatchGeneratedAuthorityBridgeToken =
+    LiveBridgeToolDispatchGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+fn live_bridge_tool_dispatch_generated_authority_bridge_token()
+-> &'static (dyn std::any::Any + Send + Sync) {
+    &LIVE_BRIDGE_TOOL_DISPATCH_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[cfg(feature = "live")]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_bridge_tool_dispatch_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn live_bridge_tool_dispatch_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<LiveBridgeToolDispatchGeneratedAuthorityBridgeToken>()
+}
+
+#[cfg(feature = "live")]
+fn seal_live_bridge_tool_dispatch_admission(
+    operation_id: Arc<str>,
+    admission: Arc<dyn ToolDispatchAdmission>,
+) -> Result<meerkat_core::LiveBridgeToolDispatchAdmission, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_core_runtime_generated_live_bridge_tool_dispatch_admission_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn core_runtime_generated_live_bridge_tool_dispatch_admission_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            operation_id: Arc<str>,
+            admission: Arc<dyn ToolDispatchAdmission>,
+        ) -> Result<meerkat_core::LiveBridgeToolDispatchAdmission, String>;
+    }
+
+    #[allow(unsafe_code)]
+    unsafe {
+        core_runtime_generated_live_bridge_tool_dispatch_admission_build(
+            live_bridge_tool_dispatch_generated_authority_bridge_token(),
+            operation_id,
+            admission,
+        )
+    }
+}
+
+/// Process-local dispatch gate for one exact durable-member bridge operation.
+/// It waits for generated final-input authority, then authorizes and consumes
+/// one generated effect authority immediately before each actual dispatch.
+#[cfg(feature = "live")]
+pub struct LiveBridgeToolExecutionAdmissionGate {
+    machine: crate::meerkat_machine::MeerkatMachine,
+    admission: LiveBridgeOperationAdmission,
+    state_tx: crate::tokio::sync::watch::Sender<LiveBridgeToolGateState>,
+    in_flight: crate::tokio::sync::Mutex<HashMap<String, LiveBridgeInFlightEffect>>,
+    reserved_call_ids: crate::tokio::sync::Mutex<HashSet<String>>,
+}
+
+#[cfg(feature = "live")]
+struct LiveBridgeInFlightEffect {
+    dispatch: Arc<LiveBridgeEffectDispatchAuthority>,
+    outcome: Option<LiveBridgeEffectOutcome>,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveBridgeToolExecutionAdmissionGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveBridgeToolExecutionAdmissionGate")
+            .field("session_id", &"[REDACTED]")
+            .field("operation_id", &"[REDACTED]")
+            .field("provider_correlation", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveBridgeToolExecutionAdmissionGate {
+    pub(crate) fn new(
+        machine: crate::meerkat_machine::MeerkatMachine,
+        admission: LiveBridgeOperationAdmission,
+    ) -> Self {
+        let (state_tx, _) =
+            crate::tokio::sync::watch::channel(LiveBridgeToolGateState::AwaitingFinalInput);
+        Self {
+            machine,
+            admission,
+            state_tx,
+            in_flight: crate::tokio::sync::Mutex::new(HashMap::new()),
+            reserved_call_ids: crate::tokio::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+
+    #[must_use]
+    pub fn tool_dispatch_admission(self: &Arc<Self>) -> Arc<dyn ToolDispatchAdmission> {
+        Arc::clone(self) as Arc<dyn ToolDispatchAdmission>
+    }
+
+    /// Seal this exact generated gate for installation on an Agent's private
+    /// noncommitting bridge seam.
+    pub fn sealed_agent_dispatch_admission(
+        self: &Arc<Self>,
+    ) -> Result<meerkat_core::LiveBridgeToolDispatchAdmission, String> {
+        seal_live_bridge_tool_dispatch_admission(
+            Arc::from(self.admission.operation().operation_id().to_string()),
+            self.tool_dispatch_admission(),
+        )
+    }
+
+    pub fn release_final_input(
+        &self,
+        authority: &LiveBridgeFinalInputAuthority,
+    ) -> Result<(), LiveExecutionAuthorityError> {
+        if !same_live_bridge_admission(&self.admission, authority.admission()) {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        match self.state_tx.borrow().clone() {
+            LiveBridgeToolGateState::AwaitingFinalInput => {
+                self.state_tx
+                    .send_replace(LiveBridgeToolGateState::Released(authority.clone()));
+                Ok(())
+            }
+            LiveBridgeToolGateState::Released(existing)
+                if same_live_bridge_admission(existing.admission(), authority.admission()) =>
+            {
+                Ok(())
+            }
+            LiveBridgeToolGateState::Released(_) | LiveBridgeToolGateState::Closed => {
+                Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal)
+            }
+        }
+    }
+
+    pub fn close_after_terminal(
+        &self,
+        terminal: &LiveBridgeExecutionTerminalReceipt,
+    ) -> Result<(), LiveExecutionAuthorityError> {
+        if !same_live_bridge_admission(&self.admission, terminal.admission()) {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        self.state_tx.send_replace(LiveBridgeToolGateState::Closed);
+        Ok(())
+    }
+
+    /// Close dispatch admission and settle every consumed effect whose
+    /// physical callback did not complete. A callback that already chose an
+    /// outcome is retried with that exact outcome; a dropped callback becomes
+    /// terminal `Unknown` and can never be retried as fresh IO.
+    pub async fn settle_effects_before_terminal(
+        &self,
+        admission: &LiveBridgeOperationAdmission,
+    ) -> Result<(), LiveExecutionAuthorityError> {
+        if !same_live_bridge_admission(&self.admission, admission) {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        self.state_tx.send_replace(LiveBridgeToolGateState::Closed);
+        loop {
+            let next = {
+                let mut in_flight = self.in_flight.lock().await;
+                in_flight.iter_mut().next().map(|(call_id, effect)| {
+                    let outcome = *effect
+                        .outcome
+                        .get_or_insert(LiveBridgeEffectOutcome::Unknown);
+                    (call_id.clone(), Arc::clone(&effect.dispatch), outcome)
+                })
+            };
+            let Some((call_id, dispatch, outcome)) = next else {
+                self.reserved_call_ids.lock().await.clear();
+                return Ok(());
+            };
+            self.machine
+                .record_live_bridge_effect_outcome(dispatch.as_ref(), outcome)
+                .await
+                .map_err(|_| LiveExecutionAuthorityError::BridgeEffectMismatch)?;
+            let mut in_flight = self.in_flight.lock().await;
+            if in_flight
+                .get(&call_id)
+                .is_some_and(|effect| Arc::ptr_eq(&effect.dispatch, &dispatch))
+            {
+                in_flight.remove(&call_id);
+                self.reserved_call_ids.lock().await.remove(&call_id);
+            }
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg(feature = "live")]
+impl ToolDispatchAdmission for LiveBridgeToolExecutionAdmissionGate {
+    async fn await_dispatch_admission(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+        effect_kind: LiveBridgeEffectKind,
+    ) -> Result<(), meerkat_core::ToolError> {
+        if context
+            .and_then(ToolDispatchContext::live_bridge_admission)
+            .is_some_and(|context_admission| {
+                context_admission.operation_id()
+                    != self.admission.operation().operation_id().to_string()
+            })
+        {
+            return Err(meerkat_core::ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+            ));
+        }
+        let mut state_rx = self.state_tx.subscribe();
+        loop {
+            let state = { state_rx.borrow().clone() };
+            match state {
+                LiveBridgeToolGateState::Released(authority)
+                    if same_live_bridge_admission(&self.admission, authority.admission()) =>
+                {
+                    {
+                        let mut reserved = self.reserved_call_ids.lock().await;
+                        if !reserved.insert(call.id.to_string()) {
+                            return Err(meerkat_core::ToolError::unavailable(
+                                call.name,
+                                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                            ));
+                        }
+                    }
+                    let issued = self
+                        .machine
+                        .authorize_live_bridge_effect(&self.admission, effect_kind)
+                        .await
+                        .map_err(|_| {
+                            meerkat_core::ToolError::unavailable(
+                                call.name,
+                                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                            )
+                        });
+                    let issued = match issued {
+                        Ok(issued) => issued,
+                        Err(error) => {
+                            self.reserved_call_ids.lock().await.remove(call.id);
+                            return Err(error);
+                        }
+                    };
+                    let dispatch = self
+                        .machine
+                        .consume_live_bridge_effect_authority(&issued)
+                        .await
+                        .map(Arc::new)
+                        .map_err(|_| {
+                            meerkat_core::ToolError::unavailable(
+                                call.name,
+                                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                            )
+                        });
+                    let dispatch = match dispatch {
+                        Ok(dispatch) => dispatch,
+                        Err(error) => {
+                            self.reserved_call_ids.lock().await.remove(call.id);
+                            return Err(error);
+                        }
+                    };
+                    self.in_flight.lock().await.insert(
+                        call.id.to_string(),
+                        LiveBridgeInFlightEffect {
+                            dispatch,
+                            outcome: None,
+                        },
+                    );
+                    return Ok(());
+                }
+                LiveBridgeToolGateState::Released(_) | LiveBridgeToolGateState::Closed => {
+                    return Err(meerkat_core::ToolError::unavailable(
+                        call.name,
+                        ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                    ));
+                }
+                LiveBridgeToolGateState::AwaitingFinalInput => {}
+            }
+            if state_rx.changed().await.is_err() {
+                return Err(meerkat_core::ToolError::unavailable(
+                    call.name,
+                    ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                ));
+            }
+        }
+    }
+
+    async fn record_dispatch_outcome(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+        effect_kind: LiveBridgeEffectKind,
+        outcome: LiveBridgeEffectOutcome,
+    ) -> Result<(), meerkat_core::ToolError> {
+        if context
+            .and_then(ToolDispatchContext::live_bridge_admission)
+            .is_some_and(|context_admission| {
+                context_admission.operation_id()
+                    != self.admission.operation().operation_id().to_string()
+            })
+        {
+            return Err(meerkat_core::ToolError::unavailable(
+                call.name,
+                ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+            ));
+        }
+        let dispatch = {
+            let mut in_flight = self.in_flight.lock().await;
+            let effect = in_flight.get_mut(call.id).ok_or_else(|| {
+                meerkat_core::ToolError::unavailable(
+                    call.name,
+                    ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                )
+            })?;
+            if effect.dispatch.effect().kind() != effect_kind
+                || effect.outcome.is_some_and(|existing| existing != outcome)
+            {
+                return Err(meerkat_core::ToolError::unavailable(
+                    call.name,
+                    ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                ));
+            }
+            effect.outcome = Some(outcome);
+            Arc::clone(&effect.dispatch)
+        };
+        self.machine
+            .record_live_bridge_effect_outcome(dispatch.as_ref(), outcome)
+            .await
+            .map_err(|_| {
+                meerkat_core::ToolError::unavailable(
+                    call.name,
+                    ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                )
+            })?;
+        let mut in_flight = self.in_flight.lock().await;
+        if in_flight
+            .get(call.id)
+            .is_some_and(|effect| Arc::ptr_eq(&effect.dispatch, &dispatch))
+        {
+            in_flight.remove(call.id);
+            self.reserved_call_ids.lock().await.remove(call.id);
+        }
+        Ok(())
+    }
+}
+
+/// One-use generated effect authority. Issuance alone does not permit IO;
+/// dispatch requires the separately returned consumed receipt.
+#[derive(Clone, Debug)]
+pub struct LiveBridgeEffectAuthority {
+    admission: LiveBridgeOperationAdmission,
+    authority_id: String,
+    kind: LiveBridgeEffectKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBridgeFinalInputAuthority(LiveBridgeOperationAdmission);
+
+impl LiveBridgeFinalInputAuthority {
+    pub(crate) fn from_generated_effect(
+        admission: &LiveBridgeOperationAdmission,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeFinalInputAuthorized {
+            channel_id,
+            interaction_id,
+            operation_id,
+            phase,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || *phase != crate::meerkat_machine::dsl::LiveBridgeOperationPhase::FinalInputAuthorized
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        let mut confirmed = admission.clone();
+        confirmed.phase = LiveBridgeOperationPhase::FinalInputAuthorized;
+        Ok(Some(Self(confirmed)))
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.0
+    }
+}
+
+impl LiveBridgeEffectAuthority {
+    pub(crate) fn from_generated_effect(
+        admission: &LiveBridgeOperationAdmission,
+        authority_id: &str,
+        kind: LiveBridgeEffectKind,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeEffectAuthorityIssued {
+            channel_id,
+            interaction_id,
+            operation_id,
+            authority_id: effect_authority_id,
+            kind: effect_kind,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || effect_authority_id != authority_id
+            || *effect_kind != bridge_effect_to_dsl(kind)
+        {
+            return Err(LiveExecutionAuthorityError::BridgeEffectMismatch);
+        }
+        Ok(Some(Self {
+            admission: admission.clone(),
+            authority_id: authority_id.to_string(),
+            kind,
+        }))
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+
+    #[must_use]
+    pub fn authority_id(&self) -> &str {
+        &self.authority_id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> LiveBridgeEffectKind {
+        self.kind
+    }
+}
+
+#[derive(Debug)]
+pub struct LiveBridgeEffectDispatchAuthority {
+    effect: LiveBridgeEffectAuthority,
+    run_permit_sealed: AtomicBool,
+}
+
+/// Sealed observation of one generated terminal effect outcome.
+///
+/// Exact replay returns another receipt with `replayed() == true`. A different
+/// outcome for the same authority is rejected by generated authority.
+#[derive(Clone, Debug)]
+pub struct LiveBridgeEffectOutcomeReceipt {
+    admission: LiveBridgeOperationAdmission,
+    authority_id: String,
+    kind: LiveBridgeEffectKind,
+    outcome: LiveBridgeEffectOutcome,
+    replayed: bool,
+}
+
+impl LiveBridgeEffectOutcomeReceipt {
+    pub(crate) fn from_generated_effect(
+        dispatch: &LiveBridgeEffectDispatchAuthority,
+        outcome: LiveBridgeEffectOutcome,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeEffectOutcomeRecorded {
+            channel_id,
+            operation_id,
+            authority_id,
+            kind,
+            outcome: recorded_outcome,
+            replay,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let authority = dispatch.effect();
+        if channel_id != authority.admission().binding().channel_id().as_str()
+            || operation_id
+                != &DslOperationId::from_domain(authority.admission().operation().operation_id())
+            || authority_id != authority.authority_id()
+            || *kind != bridge_effect_to_dsl(authority.kind())
+            || *recorded_outcome != bridge_effect_outcome_to_dsl(outcome)
+        {
+            return Err(LiveExecutionAuthorityError::BridgeEffectMismatch);
+        }
+        Ok(Some(Self {
+            admission: authority.admission().clone(),
+            authority_id: authority.authority_id().to_string(),
+            kind: authority.kind(),
+            outcome,
+            replayed: *replay,
+        }))
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+
+    #[must_use]
+    pub fn authority_id(&self) -> &str {
+        &self.authority_id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> LiveBridgeEffectKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> LiveBridgeEffectOutcome {
+        self.outcome
+    }
+
+    #[must_use]
+    pub const fn replayed(&self) -> bool {
+        self.replayed
+    }
+}
+
+#[cfg(feature = "live")]
+struct LiveBridgeNoncommittingRunGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+static LIVE_BRIDGE_NONCOMMITTING_RUN_GENERATED_AUTHORITY_BRIDGE_TOKEN:
+    LiveBridgeNoncommittingRunGeneratedAuthorityBridgeToken =
+    LiveBridgeNoncommittingRunGeneratedAuthorityBridgeToken;
+
+#[cfg(feature = "live")]
+fn live_bridge_noncommitting_run_generated_authority_bridge_token()
+-> &'static (dyn std::any::Any + Send + Sync) {
+    &LIVE_BRIDGE_NONCOMMITTING_RUN_GENERATED_AUTHORITY_BRIDGE_TOKEN
+}
+
+#[cfg(feature = "live")]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_bridge_noncommitting_run_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub extern "Rust" fn live_bridge_noncommitting_run_generated_authority_bridge_token_is_valid(
+    token: &(dyn std::any::Any + Send + Sync),
+) -> bool {
+    token.is::<LiveBridgeNoncommittingRunGeneratedAuthorityBridgeToken>()
+}
+
+#[cfg(feature = "live")]
+fn seal_live_bridge_noncommitting_run_permit(
+    operation_id: Arc<str>,
+    session_id: SessionId,
+    canonical_context_revision: CanonicalContextRevision,
+) -> Result<meerkat_core::LiveBridgeNoncommittingRunPermit, String> {
+    #[allow(improper_ctypes_definitions, unsafe_code)]
+    unsafe extern "Rust" {
+        #[link_name = concat!(
+            "__meerkat_core_runtime_generated_live_bridge_noncommitting_run_permit_build_v1_",
+            env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+        )]
+        fn core_runtime_generated_live_bridge_noncommitting_run_permit_build(
+            token: &'static (dyn std::any::Any + Send + Sync),
+            operation_id: Arc<str>,
+            session_id: SessionId,
+            canonical_context_revision: CanonicalContextRevision,
+        ) -> Result<meerkat_core::LiveBridgeNoncommittingRunPermit, String>;
+    }
+
+    #[allow(unsafe_code)]
+    unsafe {
+        core_runtime_generated_live_bridge_noncommitting_run_permit_build(
+            live_bridge_noncommitting_run_generated_authority_bridge_token(),
+            operation_id,
+            session_id,
+            canonical_context_revision,
+        )
+    }
+}
+
+impl LiveBridgeEffectDispatchAuthority {
+    pub(crate) fn from_generated_effect(
+        authority: &LiveBridgeEffectAuthority,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeEffectDispatchAuthorized {
+            channel_id,
+            operation_id,
+            authority_id,
+            kind,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        if channel_id != authority.admission.binding().channel_id().as_str()
+            || operation_id
+                != &DslOperationId::from_domain(authority.admission.operation().operation_id())
+            || authority_id != authority.authority_id()
+            || *kind != bridge_effect_to_dsl(authority.kind())
+        {
+            return Err(LiveExecutionAuthorityError::BridgeEffectMismatch);
+        }
+        Ok(Some(Self {
+            effect: authority.clone(),
+            run_permit_sealed: AtomicBool::new(false),
+        }))
+    }
+
+    #[must_use]
+    pub fn effect(&self) -> &LiveBridgeEffectAuthority {
+        &self.effect
+    }
+
+    /// Seal the already-consumed model-computation authority into the one-use
+    /// permit required by the private Agent runner.
+    #[cfg(feature = "live")]
+    pub fn sealed_noncommitting_run_permit(
+        &self,
+    ) -> Result<meerkat_core::LiveBridgeNoncommittingRunPermit, String> {
+        if self.effect().kind() != LiveBridgeEffectKind::ModelComputation {
+            return Err(
+                "only consumed model-computation authority can seal a live bridge run permit"
+                    .to_string(),
+            );
+        }
+        self.run_permit_sealed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                "model-computation authority already sealed a noncommitting run permit".to_string()
+            })?;
+        let admission = self.effect().admission();
+        seal_live_bridge_noncommitting_run_permit(
+            Arc::from(admission.operation().operation_id().to_string()),
+            admission.session_id().clone(),
+            admission.canonical_context_revision().clone(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(admission: LiveBridgeOperationAdmission, kind: LiveBridgeEffectKind) -> Self {
+        Self {
+            effect: LiveBridgeEffectAuthority {
+                admission,
+                authority_id: "test-live-bridge-effect-authority".to_string(),
+                kind,
+            },
+            run_permit_sealed: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBridgeOperationCancellationAuthority {
+    admission: LiveBridgeOperationAdmission,
+    reason: LiveBridgeCancellationReason,
+}
+
+impl LiveBridgeOperationCancellationAuthority {
+    pub(crate) fn from_generated_effect(
+        admission: &LiveBridgeOperationAdmission,
+        reason: LiveBridgeCancellationReason,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeOperationCancellationAuthorized {
+            channel_id,
+            interaction_id,
+            operation_id,
+            agent_identity,
+            reason: _,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || agent_identity.0 != admission.agent_identity()
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            admission: admission.clone(),
+            reason,
+        }))
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+
+    #[must_use]
+    pub const fn reason(&self) -> LiveBridgeCancellationReason {
+        self.reason
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBridgeExecutionTerminalReceipt {
+    admission: LiveBridgeOperationAdmission,
+    terminal: MeerkatExecutionTerminal,
+    result_digest: Option<String>,
+    replayed: bool,
+}
+
+impl LiveBridgeExecutionTerminalReceipt {
+    pub(crate) fn from_generated_effect(
+        admission: &LiveBridgeOperationAdmission,
+        terminal: MeerkatExecutionTerminal,
+        result_digest: Option<&str>,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded {
+            channel_id,
+            interaction_id,
+            operation_id,
+            terminal: effect_terminal,
+            result_digest: effect_result_digest,
+            replay,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || *effect_terminal != bridge_terminal_to_dsl(terminal)
+            || effect_result_digest.as_deref() != result_digest
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            admission: admission.clone(),
+            terminal,
+            result_digest: result_digest.map(str::to_string),
+            replayed: *replay,
+        }))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        admission: LiveBridgeOperationAdmission,
+        terminal: MeerkatExecutionTerminal,
+        result_digest: Option<String>,
+    ) -> Self {
+        Self {
+            admission,
+            terminal,
+            result_digest,
+            replayed: false,
+        }
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+
+    #[must_use]
+    pub const fn terminal(&self) -> MeerkatExecutionTerminal {
+        self.terminal
+    }
+
+    #[must_use]
+    pub fn result_digest(&self) -> Option<&str> {
+        self.result_digest.as_deref()
+    }
+
+    #[must_use]
+    pub const fn replayed(&self) -> bool {
+        self.replayed
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBridgeSubmissionAuthority {
+    terminal: LiveBridgeExecutionTerminalReceipt,
+    output_kind: LiveBridgeOutputKind,
+    output_digest: String,
+}
+
+impl LiveBridgeSubmissionAuthority {
+    pub(crate) fn from_generated_effect(
+        terminal: &LiveBridgeExecutionTerminalReceipt,
+        output_kind: LiveBridgeOutputKind,
+        output_digest: &str,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeSubmissionAuthorized {
+            channel_id,
+            interaction_id,
+            operation_id,
+            output_kind: effect_output_kind,
+            output_digest: effect_digest,
+            state,
+            ..
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let admission = terminal.admission();
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || *effect_output_kind != bridge_output_kind_to_dsl(output_kind)
+            || effect_digest != output_digest
+            || *state
+                != crate::meerkat_machine::dsl::LiveBridgeSubmissionState::SubmissionAuthorized
+        {
+            return Err(LiveExecutionAuthorityError::BridgeSubmissionMismatch);
+        }
+        Ok(Some(Self {
+            terminal: terminal.clone(),
+            output_kind,
+            output_digest: output_digest.to_string(),
+        }))
+    }
+
+    #[must_use]
+    pub fn terminal(&self) -> &LiveBridgeExecutionTerminalReceipt {
+        &self.terminal
+    }
+
+    #[must_use]
+    pub const fn output_kind(&self) -> LiveBridgeOutputKind {
+        self.output_kind
+    }
+
+    #[must_use]
+    pub fn output_digest(&self) -> &str {
+        &self.output_digest
+    }
+}
+
+/// Durable pre-IO claim. Possession permits exactly one transport attempt.
+#[derive(Debug)]
+pub struct LiveBridgeSubmissionAttemptAuthority(LiveBridgeSubmissionAuthority);
+
+impl LiveBridgeSubmissionAttemptAuthority {
+    pub(crate) fn from_generated_effect(
+        submission: &LiveBridgeSubmissionAuthority,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeSubmissionAttemptClaimed {
+            channel_id,
+            operation_id,
+            output_digest,
+            state,
+            ..
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let admission = submission.terminal().admission();
+        if channel_id != admission.binding().channel_id().as_str()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || output_digest != submission.output_digest()
+            || *state
+                != crate::meerkat_machine::dsl::LiveBridgeSubmissionState::SubmissionAttemptClaimed
+        {
+            return Err(LiveExecutionAuthorityError::BridgeSubmissionMismatch);
+        }
+        Ok(Some(Self(submission.clone())))
+    }
+
+    #[must_use]
+    pub fn submission(&self) -> &LiveBridgeSubmissionAuthority {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBridgeSubmissionReceipt {
+    submission: LiveBridgeSubmissionAuthority,
+    state: LiveBridgeSubmissionState,
+    retry_allowed: bool,
+}
+
+impl LiveBridgeSubmissionReceipt {
+    pub(crate) fn from_generated_effect(
+        submission: &LiveBridgeSubmissionAuthority,
+        state: LiveBridgeSubmissionState,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let (channel_id, operation_id, output_digest, effect_state, retry_allowed) = match effect {
+            MeerkatMachineEffect::LiveBridgeSubmissionLocalWriteRecorded {
+                channel_id,
+                operation_id,
+                output_digest,
+                state,
+                ..
+            } => (channel_id, operation_id, output_digest, state, false),
+            MeerkatMachineEffect::LiveBridgeSubmissionResolved {
+                channel_id,
+                operation_id,
+                output_digest,
+                state,
+                retry_allowed,
+                ..
+            }
+            | MeerkatMachineEffect::LiveBridgeSubmissionRecoveredAmbiguous {
+                channel_id,
+                operation_id,
+                output_digest,
+                state,
+                retry_allowed,
+                ..
+            } => (
+                channel_id,
+                operation_id,
+                output_digest,
+                state,
+                *retry_allowed,
+            ),
+            _ => return Ok(None),
+        };
+        let admission = submission.terminal().admission();
+        if channel_id != admission.binding().channel_id().as_str()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || output_digest != submission.output_digest()
+            || *effect_state != bridge_submission_state_to_dsl(state)
+            || retry_allowed
+        {
+            return Err(LiveExecutionAuthorityError::BridgeSubmissionMismatch);
+        }
+        Ok(Some(Self {
+            submission: submission.clone(),
+            state,
+            retry_allowed,
+        }))
+    }
+
+    #[must_use]
+    pub fn submission(&self) -> &LiveBridgeSubmissionAuthority {
+        &self.submission
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> LiveBridgeSubmissionState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn retry_allowed(&self) -> bool {
+        self.retry_allowed
+    }
+}
+
+/// Recovery receipt for a durable claim that may already have touched IO.
+/// It intentionally contains no transport attempt authority, so recovery can
+/// only report ambiguity and can never resend.
+#[derive(Clone, Debug)]
+pub struct LiveBridgeRecoveredSubmissionReceipt {
+    session_id: SessionId,
+    operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+    output_digest: String,
+}
+
+impl LiveBridgeRecoveredSubmissionReceipt {
+    pub(crate) fn from_generated_effect(
+        session_id: &SessionId,
+        operation: &ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeSubmissionRecoveredAmbiguous {
+            channel_id,
+            operation_id,
+            provider_call_ref,
+            output_digest,
+            state,
+            retry_allowed,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = operation.domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || operation_id != &DslOperationId::from_domain(operation.operation_id())
+            || provider_call_ref != correlation.provider().provider_call_ref()
+            || *state != crate::meerkat_machine::dsl::LiveBridgeSubmissionState::SubmissionAmbiguous
+            || *retry_allowed
+        {
+            return Err(LiveExecutionAuthorityError::BridgeSubmissionMismatch);
+        }
+        Ok(Some(Self {
+            session_id: session_id.clone(),
+            operation: operation.clone(),
+            output_digest: output_digest.clone(),
+        }))
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &ExactOperationIdentity<LiveBridgeOperationCorrelation> {
+        &self.operation
+    }
+
+    #[must_use]
+    pub fn output_digest(&self) -> &str {
+        &self.output_digest
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> LiveBridgeSubmissionState {
+        LiveBridgeSubmissionState::SubmissionAmbiguous
+    }
+
+    #[must_use]
+    pub const fn retry_allowed(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum LiveToolExecutionAdmissionState {
     AwaitingFinalInput,
@@ -206,6 +1727,7 @@ impl ToolDispatchAdmission for LiveToolExecutionAdmissionGate {
         &self,
         call: meerkat_core::ToolCallView<'_>,
         _context: Option<&ToolDispatchContext>,
+        _effect_kind: meerkat_core::LiveBridgeEffectKind,
     ) -> Result<(), meerkat_core::ToolError> {
         let mut state_rx = self.state_tx.subscribe();
         loop {
@@ -387,6 +1909,20 @@ impl std::fmt::Debug for LiveDelegationCancellationAuthority {
 }
 
 impl LiveDelegationCancellationAuthority {
+    pub(crate) fn from_recovered_generated_state(
+        session_id: &SessionId,
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        worker_identity: &str,
+        reason: LiveDelegationCancellationReason,
+    ) -> Self {
+        Self {
+            session_id: session_id.clone(),
+            operation: operation.clone(),
+            worker_identity: worker_identity.to_string(),
+            reason,
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
@@ -480,6 +2016,14 @@ impl std::fmt::Debug for LiveDelegationNoCancellationReceipt {
 }
 
 impl LiveDelegationNoCancellationReceipt {
+    pub(crate) fn from_recovered_generated_state(
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+    ) -> Self {
+        Self {
+            operation: operation.clone(),
+        }
+    }
+
     pub(crate) fn from_generated_supersession_effect(
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
         superseding_interaction_id: meerkat_core::InteractionId,
@@ -591,6 +2135,22 @@ pub struct LiveDelegationWorkerTerminalReceipt {
 }
 
 impl LiveDelegationWorkerTerminalReceipt {
+    pub(crate) fn from_recovered_generated_state(
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        worker_identity: &str,
+        terminal: LiveDelegationWorkerTerminalKind,
+        late: bool,
+        result_eligible: bool,
+    ) -> Self {
+        Self {
+            operation: operation.clone(),
+            worker_identity: worker_identity.to_string(),
+            terminal,
+            late,
+            result_eligible,
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
         worker_identity: &str,
@@ -662,6 +2222,18 @@ pub struct LiveDelegationWorkerRetirementAuthority {
 }
 
 impl LiveDelegationWorkerRetirementAuthority {
+    pub(crate) fn from_recovered_generated_state(
+        session_id: &SessionId,
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        worker_identity: &str,
+    ) -> Self {
+        Self {
+            session_id: session_id.clone(),
+            operation: operation.clone(),
+            worker_identity: worker_identity.to_string(),
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
@@ -1471,6 +3043,18 @@ impl std::fmt::Debug for LiveDelegationResultReleaseAuthority {
 }
 
 impl LiveDelegationResultReleaseAuthority {
+    pub(crate) fn from_recovered_generated_state(
+        session_id: &SessionId,
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        disposition: LiveResultDisposition,
+    ) -> Self {
+        Self {
+            session_id: session_id.clone(),
+            operation: operation.clone(),
+            disposition,
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
@@ -1564,6 +3148,17 @@ impl std::fmt::Debug for LiveDelegationResultDeliveryAuthority {
 }
 
 impl LiveDelegationResultDeliveryAuthority {
+    pub(crate) fn from_recovered_generated_state(
+        release: &LiveDelegationResultReleaseAuthority,
+        result_digest: String,
+    ) -> Self {
+        Self {
+            release: release.clone(),
+            result_digest,
+            provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         release: &LiveDelegationResultReleaseAuthority,
         expected_result_digest: &str,
@@ -1692,6 +3287,29 @@ pub struct LiveDelegationResultAmbiguityRecoveryAuthority {
 }
 
 impl LiveDelegationResultAmbiguityRecoveryAuthority {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_recovered_generated_state(
+        delivery: &LiveDelegationResultDeliveryAuthority,
+        closing_channel_id: LiveChannelId,
+        replacement_channel_id: LiveChannelId,
+        canonical_seed_cursor: u64,
+        llm_identity: meerkat_core::SessionLlmIdentity,
+        runtime_id: crate::identifiers::LogicalRuntimeId,
+        fence_token: u64,
+        generation: u64,
+    ) -> Self {
+        Self {
+            delivery: delivery.clone(),
+            closing_channel_id,
+            replacement_channel_id,
+            canonical_seed_cursor,
+            llm_identity,
+            runtime_id,
+            fence_token,
+            generation,
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         delivery: &LiveDelegationResultDeliveryAuthority,
         replacement_channel_id: &LiveChannelId,
@@ -1794,6 +3412,21 @@ pub enum LiveDelegationResultDeliveryResolution {
 }
 
 impl LiveDelegationResultDeliveryReceipt {
+    pub(crate) fn from_recovered_generated_state(
+        authority: &LiveDelegationResultDeliveryAuthority,
+        observation: LiveDelegationResultDeliveryObservation,
+    ) -> Self {
+        Self {
+            authority: authority.clone(),
+            observation,
+            retry_allowed: false,
+            recovery_required: matches!(
+                observation,
+                LiveDelegationResultDeliveryObservation::Ambiguous
+            ),
+        }
+    }
+
     pub(crate) fn from_generated_effect(
         authority: &LiveDelegationResultDeliveryAuthority,
         expected_observation: LiveDelegationResultDeliveryObservation,

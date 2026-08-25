@@ -709,6 +709,12 @@ impl Default for TestTurnStateHandle {
 }
 
 impl TurnStateHandle for TestTurnStateHandle {
+    fn isolated_live_bridge_child(
+        &self,
+    ) -> Result<std::sync::Arc<dyn TurnStateHandle>, DslTransitionError> {
+        Ok(std::sync::Arc::new(Self::new()))
+    }
+
     fn apply_turn_input(
         &self,
         turn_input: TurnExecutionInput,

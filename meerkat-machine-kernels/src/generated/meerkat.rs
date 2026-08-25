@@ -1057,6 +1057,34 @@ impl std::fmt::Display for AdmissionValidationResultKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct AgentIdentity(pub String);
+impl From<String> for AgentIdentity {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for AgentIdentity {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for AgentIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct AgentRuntimeId(pub String);
 impl From<String> for AgentRuntimeId {
     fn from(value: String) -> Self {
@@ -2749,6 +2777,436 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveBridgeCancellationReason {
+    #[default]
+    #[serde(rename = "BargeIn")]
+    BargeIn,
+    #[serde(rename = "ChannelClose")]
+    ChannelClose,
+    #[serde(rename = "Restart")]
+    Restart,
+    #[serde(rename = "ProtocolDrift")]
+    ProtocolDrift,
+}
+impl LiveBridgeCancellationReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BargeIn => "BargeIn",
+            Self::ChannelClose => "ChannelClose",
+            Self::Restart => "Restart",
+            Self::ProtocolDrift => "ProtocolDrift",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeCancellationReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "BargeIn" => Ok(Self::BargeIn),
+            "ChannelClose" => Ok(Self::ChannelClose),
+            "Restart" => Ok(Self::Restart),
+            "ProtocolDrift" => Ok(Self::ProtocolDrift),
+            other => Err(format!(
+                "invalid LiveBridgeCancellationReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeCancellationReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeCancellationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeEffectKind {
+    #[default]
+    #[serde(rename = "ModelComputation")]
+    ModelComputation,
+    #[serde(rename = "ReadOnlyMemorySnapshot")]
+    ReadOnlyMemorySnapshot,
+    #[serde(rename = "ToolDispatch")]
+    ToolDispatch,
+    #[serde(rename = "DurableMemoryMutation")]
+    DurableMemoryMutation,
+    #[serde(rename = "Comms")]
+    Comms,
+    #[serde(rename = "HelperSpawn")]
+    HelperSpawn,
+    #[serde(rename = "ExternalIo")]
+    ExternalIo,
+}
+impl LiveBridgeEffectKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ModelComputation => "ModelComputation",
+            Self::ReadOnlyMemorySnapshot => "ReadOnlyMemorySnapshot",
+            Self::ToolDispatch => "ToolDispatch",
+            Self::DurableMemoryMutation => "DurableMemoryMutation",
+            Self::Comms => "Comms",
+            Self::HelperSpawn => "HelperSpawn",
+            Self::ExternalIo => "ExternalIo",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeEffectKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ModelComputation" => Ok(Self::ModelComputation),
+            "ReadOnlyMemorySnapshot" => Ok(Self::ReadOnlyMemorySnapshot),
+            "ToolDispatch" => Ok(Self::ToolDispatch),
+            "DurableMemoryMutation" => Ok(Self::DurableMemoryMutation),
+            "Comms" => Ok(Self::Comms),
+            "HelperSpawn" => Ok(Self::HelperSpawn),
+            "ExternalIo" => Ok(Self::ExternalIo),
+            other => Err(format!("invalid LiveBridgeEffectKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeEffectKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeEffectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeEffectOutcome {
+    #[default]
+    #[serde(rename = "Committed")]
+    Committed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Unknown")]
+    Unknown,
+}
+impl LiveBridgeEffectOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Committed => "Committed",
+            Self::Failed => "Failed",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeEffectOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Committed" => Ok(Self::Committed),
+            "Failed" => Ok(Self::Failed),
+            "Unknown" => Ok(Self::Unknown),
+            other => Err(format!("invalid LiveBridgeEffectOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeEffectOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeEffectOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeOperationPhase {
+    #[default]
+    #[serde(rename = "PreFinalInference")]
+    PreFinalInference,
+    #[serde(rename = "FinalInputAuthorized")]
+    FinalInputAuthorized,
+    #[serde(rename = "CancellationAuthorized")]
+    CancellationAuthorized,
+    #[serde(rename = "ExecutionTerminal")]
+    ExecutionTerminal,
+}
+impl LiveBridgeOperationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PreFinalInference => "PreFinalInference",
+            Self::FinalInputAuthorized => "FinalInputAuthorized",
+            Self::CancellationAuthorized => "CancellationAuthorized",
+            Self::ExecutionTerminal => "ExecutionTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeOperationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PreFinalInference" => Ok(Self::PreFinalInference),
+            "FinalInputAuthorized" => Ok(Self::FinalInputAuthorized),
+            "CancellationAuthorized" => Ok(Self::CancellationAuthorized),
+            "ExecutionTerminal" => Ok(Self::ExecutionTerminal),
+            other => Err(format!("invalid LiveBridgeOperationPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeOperationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeOperationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeOutputKind {
+    #[default]
+    #[serde(rename = "Success")]
+    Success,
+    #[serde(rename = "FailureProjection")]
+    FailureProjection,
+}
+impl LiveBridgeOutputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "Success",
+            Self::FailureProjection => "FailureProjection",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeOutputKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Success" => Ok(Self::Success),
+            "FailureProjection" => Ok(Self::FailureProjection),
+            other => Err(format!("invalid LiveBridgeOutputKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeOutputKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeOutputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeSubmissionObservation {
+    #[default]
+    #[serde(rename = "ProviderProcessed")]
+    ProviderProcessed,
+    #[serde(rename = "ProviderRejected")]
+    ProviderRejected,
+    #[serde(rename = "SubmissionAmbiguous")]
+    SubmissionAmbiguous,
+    #[serde(rename = "CallExpired")]
+    CallExpired,
+    #[serde(rename = "CallAbandonedByClose")]
+    CallAbandonedByClose,
+}
+impl LiveBridgeSubmissionObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProviderProcessed => "ProviderProcessed",
+            Self::ProviderRejected => "ProviderRejected",
+            Self::SubmissionAmbiguous => "SubmissionAmbiguous",
+            Self::CallExpired => "CallExpired",
+            Self::CallAbandonedByClose => "CallAbandonedByClose",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeSubmissionObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ProviderProcessed" => Ok(Self::ProviderProcessed),
+            "ProviderRejected" => Ok(Self::ProviderRejected),
+            "SubmissionAmbiguous" => Ok(Self::SubmissionAmbiguous),
+            "CallExpired" => Ok(Self::CallExpired),
+            "CallAbandonedByClose" => Ok(Self::CallAbandonedByClose),
+            other => Err(format!(
+                "invalid LiveBridgeSubmissionObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeSubmissionObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeSubmissionObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBridgeSubmissionState {
+    #[default]
+    #[serde(rename = "SubmissionAuthorized")]
+    SubmissionAuthorized,
+    #[serde(rename = "SubmissionAttemptClaimed")]
+    SubmissionAttemptClaimed,
+    #[serde(rename = "LocalWriteCompletedAwaitingProof")]
+    LocalWriteCompletedAwaitingProof,
+    #[serde(rename = "ProviderProcessed")]
+    ProviderProcessed,
+    #[serde(rename = "ProviderRejected")]
+    ProviderRejected,
+    #[serde(rename = "SubmissionAmbiguous")]
+    SubmissionAmbiguous,
+    #[serde(rename = "CallExpired")]
+    CallExpired,
+    #[serde(rename = "CallAbandonedByClose")]
+    CallAbandonedByClose,
+}
+impl LiveBridgeSubmissionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SubmissionAuthorized => "SubmissionAuthorized",
+            Self::SubmissionAttemptClaimed => "SubmissionAttemptClaimed",
+            Self::LocalWriteCompletedAwaitingProof => "LocalWriteCompletedAwaitingProof",
+            Self::ProviderProcessed => "ProviderProcessed",
+            Self::ProviderRejected => "ProviderRejected",
+            Self::SubmissionAmbiguous => "SubmissionAmbiguous",
+            Self::CallExpired => "CallExpired",
+            Self::CallAbandonedByClose => "CallAbandonedByClose",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBridgeSubmissionState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SubmissionAuthorized" => Ok(Self::SubmissionAuthorized),
+            "SubmissionAttemptClaimed" => Ok(Self::SubmissionAttemptClaimed),
+            "LocalWriteCompletedAwaitingProof" => Ok(Self::LocalWriteCompletedAwaitingProof),
+            "ProviderProcessed" => Ok(Self::ProviderProcessed),
+            "ProviderRejected" => Ok(Self::ProviderRejected),
+            "SubmissionAmbiguous" => Ok(Self::SubmissionAmbiguous),
+            "CallExpired" => Ok(Self::CallExpired),
+            "CallAbandonedByClose" => Ok(Self::CallAbandonedByClose),
+            other => Err(format!("invalid LiveBridgeSubmissionState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBridgeSubmissionState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBridgeSubmissionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveChannelDegradationReason {
     #[default]
     #[serde(rename = "Unknown")]
@@ -3807,6 +4265,110 @@ impl std::fmt::Display for LiveDelegationWorkerTerminalKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveExecutionChannelPhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Revoked")]
+    Revoked,
+}
+impl LiveExecutionChannelPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Active => "Active",
+            Self::Revoked => "Revoked",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveExecutionChannelPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Active" => Ok(Self::Active),
+            "Revoked" => Ok(Self::Revoked),
+            other => Err(format!("invalid LiveExecutionChannelPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveExecutionChannelPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveExecutionChannelPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveExecutionMode {
+    #[default]
+    #[serde(rename = "FunctionBridge")]
+    FunctionBridge,
+    #[serde(rename = "ClientContext")]
+    ClientContext,
+}
+impl LiveExecutionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FunctionBridge => "FunctionBridge",
+            Self::ClientContext => "ClientContext",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveExecutionMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FunctionBridge" => Ok(Self::FunctionBridge),
+            "ClientContext" => Ok(Self::ClientContext),
+            other => Err(format!("invalid LiveExecutionMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveExecutionMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveOpenAdmissionRejection {
     #[default]
     #[serde(rename = "AlreadyBound")]
@@ -3815,6 +4377,8 @@ pub enum LiveOpenAdmissionRejection {
     ChannelAlreadyBound,
     #[serde(rename = "LifecycleClosed")]
     LifecycleClosed,
+    #[serde(rename = "RevokedChannelId")]
+    RevokedChannelId,
 }
 impl LiveOpenAdmissionRejection {
     pub fn as_str(&self) -> &'static str {
@@ -3822,6 +4386,7 @@ impl LiveOpenAdmissionRejection {
             Self::AlreadyBound => "AlreadyBound",
             Self::ChannelAlreadyBound => "ChannelAlreadyBound",
             Self::LifecycleClosed => "LifecycleClosed",
+            Self::RevokedChannelId => "RevokedChannelId",
         }
     }
 }
@@ -3832,6 +4397,7 @@ impl std::convert::TryFrom<&str> for LiveOpenAdmissionRejection {
             "AlreadyBound" => Ok(Self::AlreadyBound),
             "ChannelAlreadyBound" => Ok(Self::ChannelAlreadyBound),
             "LifecycleClosed" => Ok(Self::LifecycleClosed),
+            "RevokedChannelId" => Ok(Self::RevokedChannelId),
             other => Err(format!(
                 "invalid LiveOpenAdmissionRejection value `{other}`"
             )),
@@ -4313,6 +4879,76 @@ impl std::convert::TryFrom<String> for McpServerState {
     }
 }
 impl std::fmt::Display for McpServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MeerkatExecutionTerminal {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Rejected")]
+    Rejected,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "TimedOut")]
+    TimedOut,
+    #[serde(rename = "Unrecoverable")]
+    Unrecoverable,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Superseded")]
+    Superseded,
+}
+impl MeerkatExecutionTerminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Rejected => "Rejected",
+            Self::Failed => "Failed",
+            Self::TimedOut => "TimedOut",
+            Self::Unrecoverable => "Unrecoverable",
+            Self::Cancelled => "Cancelled",
+            Self::Superseded => "Superseded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MeerkatExecutionTerminal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Rejected" => Ok(Self::Rejected),
+            "Failed" => Ok(Self::Failed),
+            "TimedOut" => Ok(Self::TimedOut),
+            "Unrecoverable" => Ok(Self::Unrecoverable),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Superseded" => Ok(Self::Superseded),
+            other => Err(format!("invalid MeerkatExecutionTerminal value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MeerkatExecutionTerminal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MeerkatExecutionTerminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -11999,12 +12635,25 @@ pub struct State {
     pub live_execution_runtime_id_by_channel: std::collections::BTreeMap<String, AgentRuntimeId>,
     pub live_execution_fence_by_channel: std::collections::BTreeMap<String, FenceToken>,
     pub live_execution_generation_by_channel: std::collections::BTreeMap<String, Generation>,
+    pub live_execution_phase_by_channel:
+        std::collections::BTreeMap<String, LiveExecutionChannelPhase>,
+    pub live_revoked_execution_channels: std::collections::BTreeSet<String>,
+    pub live_execution_profile_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_execution_mode_by_channel: std::collections::BTreeMap<String, LiveExecutionMode>,
+    pub live_function_bridge_capable_channels: std::collections::BTreeSet<String>,
+    pub live_client_context_capable_channels: std::collections::BTreeSet<String>,
+    pub live_playback_owner_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_playback_readiness_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_activation_receipt_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_active_control_operation_by_authority: std::collections::BTreeMap<String, String>,
+    pub live_consumed_active_control_authorities: std::collections::BTreeSet<String>,
     pub live_experimental_staged_runtime_by_channel:
         std::collections::BTreeMap<String, AgentRuntimeId>,
     pub live_experimental_staged_fence_by_channel: std::collections::BTreeMap<String, FenceToken>,
     pub live_experimental_staged_generation_by_channel:
         std::collections::BTreeMap<String, Generation>,
     pub live_experimental_staged_seed_cursor_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_experimental_pending_receipt_by_channel: std::collections::BTreeMap<String, String>,
     pub live_experimental_execution_channels: std::collections::BTreeSet<String>,
     pub live_interaction_channel_by_id: std::collections::BTreeMap<String, String>,
     pub live_active_interaction_by_channel: std::collections::BTreeMap<String, String>,
@@ -12053,6 +12702,40 @@ pub struct State {
         std::collections::BTreeMap<String, AgentRuntimeId>,
     pub live_result_recovery_fence_by_channel: std::collections::BTreeMap<String, FenceToken>,
     pub live_result_recovery_generation_by_channel: std::collections::BTreeMap<String, Generation>,
+    pub live_bridge_operation_by_channel: std::collections::BTreeMap<String, OperationId>,
+    pub live_bridge_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_interaction_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_provider_turn_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_provider_delegation_by_operation:
+        std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_provider_call_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_agent_identity_by_operation:
+        std::collections::BTreeMap<OperationId, AgentIdentity>,
+    pub live_bridge_context_revision_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_request_digest_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_phase_by_operation:
+        std::collections::BTreeMap<OperationId, LiveBridgeOperationPhase>,
+    pub live_bridge_effect_operation_by_authority: std::collections::BTreeMap<String, OperationId>,
+    pub live_bridge_effect_kind_by_authority:
+        std::collections::BTreeMap<String, LiveBridgeEffectKind>,
+    pub live_bridge_consumed_effect_authorities: std::collections::BTreeSet<String>,
+    pub live_bridge_in_flight_effect_authorities: std::collections::BTreeSet<String>,
+    pub live_bridge_effect_outcome_by_authority:
+        std::collections::BTreeMap<String, LiveBridgeEffectOutcome>,
+    pub live_bridge_model_computation_authorized_operations:
+        std::collections::BTreeSet<OperationId>,
+    pub live_bridge_read_snapshot_authorized_operations: std::collections::BTreeSet<OperationId>,
+    pub live_bridge_execution_terminal_by_operation:
+        std::collections::BTreeMap<OperationId, MeerkatExecutionTerminal>,
+    pub live_bridge_execution_result_digest_by_operation:
+        std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_cancellation_reason_by_operation:
+        std::collections::BTreeMap<OperationId, LiveBridgeCancellationReason>,
+    pub live_bridge_submission_output_kind_by_operation:
+        std::collections::BTreeMap<OperationId, LiveBridgeOutputKind>,
+    pub live_bridge_submission_digest_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_bridge_submission_state_by_operation:
+        std::collections::BTreeMap<OperationId, LiveBridgeSubmissionState>,
     pub live_context_cursor_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_context_queued_session_by_append: std::collections::BTreeMap<String, String>,
     pub live_context_queued_cursor_by_append: std::collections::BTreeMap<String, u64>,
@@ -13452,6 +14135,58 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub canonical_seed_cursor: u64,
+        pub pending_receipt: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveExecutionModeAdmission {
+        pub session_id: String,
+        pub channel_id: String,
+        pub profile_id: String,
+        pub requested_mode: LiveExecutionMode,
+        pub function_bridge_available: bool,
+        pub client_context_available: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RegisterLivePlaybackOwner {
+        pub session_id: String,
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub owner_id: String,
+        pub readiness_id: String,
+        pub pending_receipt: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveActiveChannelControl {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub activation_receipt: String,
+        pub control_authority_id: String,
+        pub operation: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeLiveActiveChannelControl {
+        pub channel_id: String,
+        pub activation_receipt: String,
+        pub control_authority_id: String,
+        pub operation: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RevokeLivePlaybackOwner {
+        pub session_id: String,
+        pub channel_id: String,
+        pub owner_id: String,
+        pub readiness_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RevokeLiveChannelCloseCustody {
+        pub session_id: String,
+        pub channel_id: String,
+        pub pending_receipt: Option<String>,
+        pub activation_receipt: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveProviderTurnStarted {
@@ -13678,6 +14413,130 @@ pub mod inputs {
         pub canonical_seed_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitLiveBridgeOperation {
+        pub session_id: String,
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_ref: String,
+        pub provider_delegation_ref: String,
+        pub provider_call_ref: String,
+        pub agent_identity: AgentIdentity,
+        pub canonical_context_revision: String,
+        pub request_digest: String,
+        pub structural_lineage_proven: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConfirmLiveBridgeFinalInput {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_ref: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveBridgeEffect {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeLiveBridgeEffectAuthority {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveBridgeEffectOutcome {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+        pub outcome: LiveBridgeEffectOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelLiveBridgeOperation {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub reason: LiveBridgeCancellationReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveBridgeExecutionTerminal {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub terminal: MeerkatExecutionTerminal,
+        pub result_digest: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveBridgeSubmission {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_kind: LiveBridgeOutputKind,
+        pub output_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClaimLiveBridgeSubmissionAttempt {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveBridgeSubmissionLocalWrite {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveBridgeSubmission {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+        pub observation: LiveBridgeSubmissionObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverLiveBridgeSubmission {
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeLiveContextAppend {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -13798,6 +14657,7 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub canonical_seed_cursor: u64,
+        pub activation_receipt: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveWebsocketTokenIssued {
@@ -14479,6 +15339,12 @@ pub enum Input {
     ResolveLiveOpenAdmission(inputs::ResolveLiveOpenAdmission),
     BindLiveExecutionChannel(inputs::BindLiveExecutionChannel),
     StageExperimentalLiveExecution(inputs::StageExperimentalLiveExecution),
+    ResolveLiveExecutionModeAdmission(inputs::ResolveLiveExecutionModeAdmission),
+    RegisterLivePlaybackOwner(inputs::RegisterLivePlaybackOwner),
+    AuthorizeLiveActiveChannelControl(inputs::AuthorizeLiveActiveChannelControl),
+    ConsumeLiveActiveChannelControl(inputs::ConsumeLiveActiveChannelControl),
+    RevokeLivePlaybackOwner(inputs::RevokeLivePlaybackOwner),
+    RevokeLiveChannelCloseCustody(inputs::RevokeLiveChannelCloseCustody),
     ObserveLiveProviderTurnStarted(inputs::ObserveLiveProviderTurnStarted),
     ObserveLiveAssistantTurnStarted(inputs::ObserveLiveAssistantTurnStarted),
     AdmitLiveInteraction(inputs::AdmitLiveInteraction),
@@ -14502,6 +15368,18 @@ pub enum Input {
     AuthorizeLiveDelegationResultDelivery(inputs::AuthorizeLiveDelegationResultDelivery),
     ResolveLiveDelegationResultDelivery(inputs::ResolveLiveDelegationResultDelivery),
     BindLiveDelegationResultRecoveryChannel(inputs::BindLiveDelegationResultRecoveryChannel),
+    AdmitLiveBridgeOperation(inputs::AdmitLiveBridgeOperation),
+    ConfirmLiveBridgeFinalInput(inputs::ConfirmLiveBridgeFinalInput),
+    AuthorizeLiveBridgeEffect(inputs::AuthorizeLiveBridgeEffect),
+    ConsumeLiveBridgeEffectAuthority(inputs::ConsumeLiveBridgeEffectAuthority),
+    RecordLiveBridgeEffectOutcome(inputs::RecordLiveBridgeEffectOutcome),
+    CancelLiveBridgeOperation(inputs::CancelLiveBridgeOperation),
+    RecordLiveBridgeExecutionTerminal(inputs::RecordLiveBridgeExecutionTerminal),
+    AuthorizeLiveBridgeSubmission(inputs::AuthorizeLiveBridgeSubmission),
+    ClaimLiveBridgeSubmissionAttempt(inputs::ClaimLiveBridgeSubmissionAttempt),
+    RecordLiveBridgeSubmissionLocalWrite(inputs::RecordLiveBridgeSubmissionLocalWrite),
+    ResolveLiveBridgeSubmission(inputs::ResolveLiveBridgeSubmission),
+    RecoverLiveBridgeSubmission(inputs::RecoverLiveBridgeSubmission),
     AuthorizeLiveContextAppend(inputs::AuthorizeLiveContextAppend),
     EnqueueLiveContextRow(inputs::EnqueueLiveContextRow),
     AdvanceLiveContextCanonicalCoverage(inputs::AdvanceLiveContextCanonicalCoverage),
@@ -14882,6 +15760,16 @@ impl Input {
             Self::ResolveLiveOpenAdmission(_) => InputKind::ResolveLiveOpenAdmission,
             Self::BindLiveExecutionChannel(_) => InputKind::BindLiveExecutionChannel,
             Self::StageExperimentalLiveExecution(_) => InputKind::StageExperimentalLiveExecution,
+            Self::ResolveLiveExecutionModeAdmission(_) => {
+                InputKind::ResolveLiveExecutionModeAdmission
+            }
+            Self::RegisterLivePlaybackOwner(_) => InputKind::RegisterLivePlaybackOwner,
+            Self::AuthorizeLiveActiveChannelControl(_) => {
+                InputKind::AuthorizeLiveActiveChannelControl
+            }
+            Self::ConsumeLiveActiveChannelControl(_) => InputKind::ConsumeLiveActiveChannelControl,
+            Self::RevokeLivePlaybackOwner(_) => InputKind::RevokeLivePlaybackOwner,
+            Self::RevokeLiveChannelCloseCustody(_) => InputKind::RevokeLiveChannelCloseCustody,
             Self::ObserveLiveProviderTurnStarted(_) => InputKind::ObserveLiveProviderTurnStarted,
             Self::ObserveLiveAssistantTurnStarted(_) => InputKind::ObserveLiveAssistantTurnStarted,
             Self::AdmitLiveInteraction(_) => InputKind::AdmitLiveInteraction,
@@ -14929,6 +15817,26 @@ impl Input {
             Self::BindLiveDelegationResultRecoveryChannel(_) => {
                 InputKind::BindLiveDelegationResultRecoveryChannel
             }
+            Self::AdmitLiveBridgeOperation(_) => InputKind::AdmitLiveBridgeOperation,
+            Self::ConfirmLiveBridgeFinalInput(_) => InputKind::ConfirmLiveBridgeFinalInput,
+            Self::AuthorizeLiveBridgeEffect(_) => InputKind::AuthorizeLiveBridgeEffect,
+            Self::ConsumeLiveBridgeEffectAuthority(_) => {
+                InputKind::ConsumeLiveBridgeEffectAuthority
+            }
+            Self::RecordLiveBridgeEffectOutcome(_) => InputKind::RecordLiveBridgeEffectOutcome,
+            Self::CancelLiveBridgeOperation(_) => InputKind::CancelLiveBridgeOperation,
+            Self::RecordLiveBridgeExecutionTerminal(_) => {
+                InputKind::RecordLiveBridgeExecutionTerminal
+            }
+            Self::AuthorizeLiveBridgeSubmission(_) => InputKind::AuthorizeLiveBridgeSubmission,
+            Self::ClaimLiveBridgeSubmissionAttempt(_) => {
+                InputKind::ClaimLiveBridgeSubmissionAttempt
+            }
+            Self::RecordLiveBridgeSubmissionLocalWrite(_) => {
+                InputKind::RecordLiveBridgeSubmissionLocalWrite
+            }
+            Self::ResolveLiveBridgeSubmission(_) => InputKind::ResolveLiveBridgeSubmission,
+            Self::RecoverLiveBridgeSubmission(_) => InputKind::RecoverLiveBridgeSubmission,
             Self::AuthorizeLiveContextAppend(_) => InputKind::AuthorizeLiveContextAppend,
             Self::EnqueueLiveContextRow(_) => InputKind::EnqueueLiveContextRow,
             Self::AdvanceLiveContextCanonicalCoverage(_) => {
@@ -15284,6 +16192,12 @@ pub enum InputKind {
     ResolveLiveOpenAdmission,
     BindLiveExecutionChannel,
     StageExperimentalLiveExecution,
+    ResolveLiveExecutionModeAdmission,
+    RegisterLivePlaybackOwner,
+    AuthorizeLiveActiveChannelControl,
+    ConsumeLiveActiveChannelControl,
+    RevokeLivePlaybackOwner,
+    RevokeLiveChannelCloseCustody,
     ObserveLiveProviderTurnStarted,
     ObserveLiveAssistantTurnStarted,
     AdmitLiveInteraction,
@@ -15305,6 +16219,18 @@ pub enum InputKind {
     AuthorizeLiveDelegationResultDelivery,
     ResolveLiveDelegationResultDelivery,
     BindLiveDelegationResultRecoveryChannel,
+    AdmitLiveBridgeOperation,
+    ConfirmLiveBridgeFinalInput,
+    AuthorizeLiveBridgeEffect,
+    ConsumeLiveBridgeEffectAuthority,
+    RecordLiveBridgeEffectOutcome,
+    CancelLiveBridgeOperation,
+    RecordLiveBridgeExecutionTerminal,
+    AuthorizeLiveBridgeSubmission,
+    ClaimLiveBridgeSubmissionAttempt,
+    RecordLiveBridgeSubmissionLocalWrite,
+    ResolveLiveBridgeSubmission,
+    RecoverLiveBridgeSubmission,
     AuthorizeLiveContextAppend,
     EnqueueLiveContextRow,
     AdvanceLiveContextCanonicalCoverage,
@@ -16093,6 +17019,7 @@ pub mod effects {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub canonical_seed_cursor: u64,
+        pub activation_receipt: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveWebsocketTokenIssued {
@@ -16144,6 +17071,51 @@ pub mod effects {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub canonical_seed_cursor: u64,
+        pub pending_receipt: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveExecutionModeAdmissionResolved {
+        pub session_id: String,
+        pub channel_id: String,
+        pub profile_id: String,
+        pub resolved_mode: LiveExecutionMode,
+        pub function_bridge_available: bool,
+        pub client_context_available: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LivePlaybackOwnerReady {
+        pub session_id: String,
+        pub channel_id: String,
+        pub owner_id: String,
+        pub readiness_id: String,
+        pub phase: LiveExecutionChannelPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveActiveChannelControlAuthorityIssued {
+        pub channel_id: String,
+        pub activation_receipt: String,
+        pub control_authority_id: String,
+        pub operation: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveActiveChannelControlDispatchAuthorized {
+        pub channel_id: String,
+        pub control_authority_id: String,
+        pub operation: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LivePlaybackOwnerRevoked {
+        pub session_id: String,
+        pub channel_id: String,
+        pub owner_id: String,
+        pub phase: LiveExecutionChannelPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveChannelCloseCustodyRevoked {
+        pub session_id: String,
+        pub channel_id: String,
+        pub phase: LiveExecutionChannelPhase,
+        pub already_closed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveInteractionAdmitted {
@@ -16331,6 +17303,127 @@ pub mod effects {
         pub runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeOperationAdmitted {
+        pub session_id: String,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_ref: String,
+        pub provider_delegation_ref: String,
+        pub provider_call_ref: String,
+        pub agent_identity: AgentIdentity,
+        pub canonical_context_revision: String,
+        pub request_digest: String,
+        pub phase: LiveBridgeOperationPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeOperationReplayObserved {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_delegation_ref: String,
+        pub provider_call_ref: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeProtocolDriftCloseAuthorized {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub provider_delegation_ref: String,
+        pub provider_call_ref: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeFinalInputAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub phase: LiveBridgeOperationPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeEffectAuthorityIssued {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeEffectDispatchAuthorized {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeEffectOutcomeRecorded {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub authority_id: String,
+        pub kind: LiveBridgeEffectKind,
+        pub outcome: LiveBridgeEffectOutcome,
+        pub replay: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeOperationCancellationAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub agent_identity: AgentIdentity,
+        pub reason: LiveBridgeCancellationReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeExecutionTerminalRecorded {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub terminal: MeerkatExecutionTerminal,
+        pub result_digest: Option<String>,
+        pub replay: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeSubmissionAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_kind: LiveBridgeOutputKind,
+        pub output_digest: String,
+        pub state: LiveBridgeSubmissionState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeSubmissionAttemptClaimed {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+        pub state: LiveBridgeSubmissionState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeSubmissionLocalWriteRecorded {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+        pub state: LiveBridgeSubmissionState,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeSubmissionResolved {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+        pub state: LiveBridgeSubmissionState,
+        pub retry_allowed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeSubmissionRecoveredAmbiguous {
+        pub channel_id: String,
+        pub operation_id: OperationId,
+        pub provider_call_ref: String,
+        pub output_digest: String,
+        pub state: LiveBridgeSubmissionState,
+        pub retry_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextAppendAuthorized {
@@ -16809,6 +17902,12 @@ pub enum Effect {
     LiveOpenAdmissionAbandoned(effects::LiveOpenAdmissionAbandoned),
     LiveExecutionChannelBound(effects::LiveExecutionChannelBound),
     ExperimentalLiveExecutionStaged(effects::ExperimentalLiveExecutionStaged),
+    LiveExecutionModeAdmissionResolved(effects::LiveExecutionModeAdmissionResolved),
+    LivePlaybackOwnerReady(effects::LivePlaybackOwnerReady),
+    LiveActiveChannelControlAuthorityIssued(effects::LiveActiveChannelControlAuthorityIssued),
+    LiveActiveChannelControlDispatchAuthorized(effects::LiveActiveChannelControlDispatchAuthorized),
+    LivePlaybackOwnerRevoked(effects::LivePlaybackOwnerRevoked),
+    LiveChannelCloseCustodyRevoked(effects::LiveChannelCloseCustodyRevoked),
     LiveInteractionAdmitted(effects::LiveInteractionAdmitted),
     LiveDelegationAdmitted(effects::LiveDelegationAdmitted),
     LiveInteractionDelegationAdmitted(effects::LiveInteractionDelegationAdmitted),
@@ -16836,6 +17935,20 @@ pub enum Effect {
         effects::LiveDelegationResultAmbiguityRecoveryAuthorized,
     ),
     LiveDelegationResultRecoveryChannelBound(effects::LiveDelegationResultRecoveryChannelBound),
+    LiveBridgeOperationAdmitted(effects::LiveBridgeOperationAdmitted),
+    LiveBridgeOperationReplayObserved(effects::LiveBridgeOperationReplayObserved),
+    LiveBridgeProtocolDriftCloseAuthorized(effects::LiveBridgeProtocolDriftCloseAuthorized),
+    LiveBridgeFinalInputAuthorized(effects::LiveBridgeFinalInputAuthorized),
+    LiveBridgeEffectAuthorityIssued(effects::LiveBridgeEffectAuthorityIssued),
+    LiveBridgeEffectDispatchAuthorized(effects::LiveBridgeEffectDispatchAuthorized),
+    LiveBridgeEffectOutcomeRecorded(effects::LiveBridgeEffectOutcomeRecorded),
+    LiveBridgeOperationCancellationAuthorized(effects::LiveBridgeOperationCancellationAuthorized),
+    LiveBridgeExecutionTerminalRecorded(effects::LiveBridgeExecutionTerminalRecorded),
+    LiveBridgeSubmissionAuthorized(effects::LiveBridgeSubmissionAuthorized),
+    LiveBridgeSubmissionAttemptClaimed(effects::LiveBridgeSubmissionAttemptClaimed),
+    LiveBridgeSubmissionLocalWriteRecorded(effects::LiveBridgeSubmissionLocalWriteRecorded),
+    LiveBridgeSubmissionResolved(effects::LiveBridgeSubmissionResolved),
+    LiveBridgeSubmissionRecoveredAmbiguous(effects::LiveBridgeSubmissionRecoveredAmbiguous),
     LiveContextAppendAuthorized(effects::LiveContextAppendAuthorized),
     LiveContextRowQueued(effects::LiveContextRowQueued),
     LiveContextCanonicalCoverageAdvanced(effects::LiveContextCanonicalCoverageAdvanced),
@@ -17022,6 +18135,12 @@ pub enum EffectKind {
     LiveOpenAdmissionAbandoned,
     LiveExecutionChannelBound,
     ExperimentalLiveExecutionStaged,
+    LiveExecutionModeAdmissionResolved,
+    LivePlaybackOwnerReady,
+    LiveActiveChannelControlAuthorityIssued,
+    LiveActiveChannelControlDispatchAuthorized,
+    LivePlaybackOwnerRevoked,
+    LiveChannelCloseCustodyRevoked,
     LiveInteractionAdmitted,
     LiveDelegationAdmitted,
     LiveInteractionDelegationAdmitted,
@@ -17045,6 +18164,20 @@ pub enum EffectKind {
     LiveDelegationResultDeliveryResolved,
     LiveDelegationResultAmbiguityRecoveryAuthorized,
     LiveDelegationResultRecoveryChannelBound,
+    LiveBridgeOperationAdmitted,
+    LiveBridgeOperationReplayObserved,
+    LiveBridgeProtocolDriftCloseAuthorized,
+    LiveBridgeFinalInputAuthorized,
+    LiveBridgeEffectAuthorityIssued,
+    LiveBridgeEffectDispatchAuthorized,
+    LiveBridgeEffectOutcomeRecorded,
+    LiveBridgeOperationCancellationAuthorized,
+    LiveBridgeExecutionTerminalRecorded,
+    LiveBridgeSubmissionAuthorized,
+    LiveBridgeSubmissionAttemptClaimed,
+    LiveBridgeSubmissionLocalWriteRecorded,
+    LiveBridgeSubmissionResolved,
+    LiveBridgeSubmissionRecoveredAmbiguous,
     LiveContextAppendAuthorized,
     LiveContextRowQueued,
     LiveContextCanonicalCoverageAdvanced,
@@ -18744,6 +19877,9 @@ pub enum TransitionId {
     ResolveLiveOpenAdmissionChannelAlreadyBoundIdle,
     ResolveLiveOpenAdmissionChannelAlreadyBoundAttached,
     ResolveLiveOpenAdmissionChannelAlreadyBoundRunning,
+    ResolveLiveOpenAdmissionRevokedChannelIdIdle,
+    ResolveLiveOpenAdmissionRevokedChannelIdAttached,
+    ResolveLiveOpenAdmissionRevokedChannelIdRunning,
     ResolveLiveOpenAdmissionDrainingIdle,
     ResolveLiveOpenAdmissionDrainingAttached,
     ResolveLiveOpenAdmissionDrainingRunning,
@@ -18756,9 +19892,32 @@ pub enum TransitionId {
     AbandonLiveOpenAdmissionRunning,
     AbandonLiveOpenAdmissionRetired,
     AbandonLiveOpenAdmissionStopped,
+    ResolveLiveExecutionModeAdmissionIdle,
+    ResolveLiveExecutionModeAdmissionAttached,
+    ResolveLiveExecutionModeAdmissionRunning,
     StageExperimentalLiveExecutionIdle,
     StageExperimentalLiveExecutionAttached,
     StageExperimentalLiveExecutionRunning,
+    RegisterLivePlaybackOwnerIdle,
+    RegisterLivePlaybackOwnerAttached,
+    RegisterLivePlaybackOwnerRunning,
+    AuthorizeLiveActiveChannelControlIdle,
+    AuthorizeLiveActiveChannelControlAttached,
+    AuthorizeLiveActiveChannelControlRunning,
+    ConsumeLiveActiveChannelControlIdle,
+    ConsumeLiveActiveChannelControlAttached,
+    ConsumeLiveActiveChannelControlRunning,
+    RevokeLivePlaybackOwnerIdle,
+    RevokeLivePlaybackOwnerAttached,
+    RevokeLivePlaybackOwnerRunning,
+    RevokeLiveChannelCloseCustodyIdle,
+    RevokeLiveChannelCloseCustodyAttached,
+    RevokeLiveChannelCloseCustodyRunning,
+    RevokeLiveChannelCloseCustodyClosedReplayIdle,
+    RevokeLiveChannelCloseCustodyClosedReplayAttached,
+    RevokeLiveChannelCloseCustodyClosedReplayRunning,
+    RevokeLiveChannelCloseCustodyClosedReplayRetired,
+    RevokeLiveChannelCloseCustodyClosedReplayStopped,
     BindLiveExecutionChannelIdle,
     BindLiveExecutionChannelAttached,
     BindLiveExecutionChannelRunning,
@@ -18862,6 +20021,60 @@ pub enum TransitionId {
     BindLiveDelegationResultRecoveryChannelIdle,
     BindLiveDelegationResultRecoveryChannelAttached,
     BindLiveDelegationResultRecoveryChannelRunning,
+    AdmitLiveBridgeOperationFreshIdle,
+    AdmitLiveBridgeOperationFreshAttached,
+    AdmitLiveBridgeOperationFreshRunning,
+    AdmitLiveBridgeOperationExactReplayIdle,
+    AdmitLiveBridgeOperationExactReplayAttached,
+    AdmitLiveBridgeOperationExactReplayRunning,
+    AdmitLiveBridgeOperationProtocolDriftIdle,
+    AdmitLiveBridgeOperationProtocolDriftAttached,
+    AdmitLiveBridgeOperationProtocolDriftRunning,
+    ConfirmLiveBridgeFinalInputIdle,
+    ConfirmLiveBridgeFinalInputAttached,
+    ConfirmLiveBridgeFinalInputRunning,
+    AuthorizeLiveBridgeEffectIdle,
+    AuthorizeLiveBridgeEffectAttached,
+    AuthorizeLiveBridgeEffectRunning,
+    ConsumeLiveBridgeEffectAuthorityIdle,
+    ConsumeLiveBridgeEffectAuthorityAttached,
+    ConsumeLiveBridgeEffectAuthorityRunning,
+    RecordLiveBridgeEffectOutcomeFreshIdle,
+    RecordLiveBridgeEffectOutcomeFreshAttached,
+    RecordLiveBridgeEffectOutcomeFreshRunning,
+    RecordLiveBridgeEffectOutcomeFreshRetired,
+    RecordLiveBridgeEffectOutcomeFreshStopped,
+    RecordLiveBridgeEffectOutcomeExactReplayIdle,
+    RecordLiveBridgeEffectOutcomeExactReplayAttached,
+    RecordLiveBridgeEffectOutcomeExactReplayRunning,
+    RecordLiveBridgeEffectOutcomeExactReplayRetired,
+    RecordLiveBridgeEffectOutcomeExactReplayStopped,
+    CancelLiveBridgeOperationIdle,
+    CancelLiveBridgeOperationAttached,
+    CancelLiveBridgeOperationRunning,
+    RecordLiveBridgeExecutionTerminalFreshIdle,
+    RecordLiveBridgeExecutionTerminalFreshAttached,
+    RecordLiveBridgeExecutionTerminalFreshRunning,
+    RecordLiveBridgeExecutionTerminalExactReplayIdle,
+    RecordLiveBridgeExecutionTerminalExactReplayAttached,
+    RecordLiveBridgeExecutionTerminalExactReplayRunning,
+    AuthorizeLiveBridgeSubmissionIdle,
+    AuthorizeLiveBridgeSubmissionAttached,
+    AuthorizeLiveBridgeSubmissionRunning,
+    ClaimLiveBridgeSubmissionAttemptIdle,
+    ClaimLiveBridgeSubmissionAttemptAttached,
+    ClaimLiveBridgeSubmissionAttemptRunning,
+    RecordLiveBridgeSubmissionLocalWriteIdle,
+    RecordLiveBridgeSubmissionLocalWriteAttached,
+    RecordLiveBridgeSubmissionLocalWriteRunning,
+    ResolveLiveBridgeSubmissionIdle,
+    ResolveLiveBridgeSubmissionAttached,
+    ResolveLiveBridgeSubmissionRunning,
+    RecoverLiveBridgeSubmissionIdle,
+    RecoverLiveBridgeSubmissionAttached,
+    RecoverLiveBridgeSubmissionRunning,
+    RecoverLiveBridgeSubmissionRetired,
+    RecoverLiveBridgeSubmissionStopped,
     EnqueueLiveContextRowIdle,
     EnqueueLiveContextRowAttached,
     EnqueueLiveContextRowRunning,
@@ -19914,10 +21127,22 @@ pub fn initial_state() -> State {
         live_execution_runtime_id_by_channel: Default::default(),
         live_execution_fence_by_channel: Default::default(),
         live_execution_generation_by_channel: Default::default(),
+        live_execution_phase_by_channel: Default::default(),
+        live_revoked_execution_channels: Default::default(),
+        live_execution_profile_by_channel: Default::default(),
+        live_execution_mode_by_channel: Default::default(),
+        live_function_bridge_capable_channels: Default::default(),
+        live_client_context_capable_channels: Default::default(),
+        live_playback_owner_by_channel: Default::default(),
+        live_playback_readiness_by_channel: Default::default(),
+        live_activation_receipt_by_channel: Default::default(),
+        live_active_control_operation_by_authority: Default::default(),
+        live_consumed_active_control_authorities: Default::default(),
         live_experimental_staged_runtime_by_channel: Default::default(),
         live_experimental_staged_fence_by_channel: Default::default(),
         live_experimental_staged_generation_by_channel: Default::default(),
         live_experimental_staged_seed_cursor_by_channel: Default::default(),
+        live_experimental_pending_receipt_by_channel: Default::default(),
         live_experimental_execution_channels: Default::default(),
         live_interaction_channel_by_id: Default::default(),
         live_active_interaction_by_channel: Default::default(),
@@ -19956,6 +21181,29 @@ pub fn initial_state() -> State {
         live_result_recovery_runtime_id_by_channel: Default::default(),
         live_result_recovery_fence_by_channel: Default::default(),
         live_result_recovery_generation_by_channel: Default::default(),
+        live_bridge_operation_by_channel: Default::default(),
+        live_bridge_channel_by_operation: Default::default(),
+        live_bridge_interaction_by_operation: Default::default(),
+        live_bridge_provider_turn_by_operation: Default::default(),
+        live_bridge_provider_delegation_by_operation: Default::default(),
+        live_bridge_provider_call_by_operation: Default::default(),
+        live_bridge_agent_identity_by_operation: Default::default(),
+        live_bridge_context_revision_by_operation: Default::default(),
+        live_bridge_request_digest_by_operation: Default::default(),
+        live_bridge_phase_by_operation: Default::default(),
+        live_bridge_effect_operation_by_authority: Default::default(),
+        live_bridge_effect_kind_by_authority: Default::default(),
+        live_bridge_consumed_effect_authorities: Default::default(),
+        live_bridge_in_flight_effect_authorities: Default::default(),
+        live_bridge_effect_outcome_by_authority: Default::default(),
+        live_bridge_model_computation_authorized_operations: Default::default(),
+        live_bridge_read_snapshot_authorized_operations: Default::default(),
+        live_bridge_execution_terminal_by_operation: Default::default(),
+        live_bridge_execution_result_digest_by_operation: Default::default(),
+        live_bridge_cancellation_reason_by_operation: Default::default(),
+        live_bridge_submission_output_kind_by_operation: Default::default(),
+        live_bridge_submission_digest_by_operation: Default::default(),
+        live_bridge_submission_state_by_operation: Default::default(),
         live_context_cursor_by_channel: Default::default(),
         live_context_queued_session_by_append: Default::default(),
         live_context_queued_cursor_by_append: Default::default(),

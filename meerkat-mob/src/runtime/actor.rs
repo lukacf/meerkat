@@ -21145,6 +21145,110 @@ impl MobActor {
                         }
                     }
                 }
+                #[cfg(feature = "experimental-gpt-live")]
+                MobCommand::ValidateLiveBridgeMemberEligibility {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = async {
+                        let entry = self
+                            .roster
+                            .read()
+                            .await
+                            .get(&agent_identity)
+                            .cloned()
+                            .ok_or(super::LiveBridgeOperationStartError::Unavailable)?;
+                        let session_id = entry
+                            .bridge_session_id()
+                            .cloned()
+                            .ok_or(super::LiveBridgeOperationStartError::Rejected)?;
+                        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                        let dsl_runtime = self
+                            .dsl_authority
+                            .state()
+                            .identity_to_runtime
+                            .get(&dsl_identity);
+                        let dsl_session = self
+                            .dsl_authority
+                            .state()
+                            .member_session_bindings
+                            .get(&dsl_identity);
+                        if dsl_runtime.is_none_or(|runtime| {
+                            runtime.0 != entry.agent_runtime_id.to_string()
+                        }) || dsl_session.is_none_or(|session| {
+                            session.0 != session_id.to_string()
+                        }) || !dsl_runtime.is_some_and(|runtime| {
+                            self.dsl_authority.state().live_runtime_ids.contains(runtime)
+                        }) {
+                            return Err(super::LiveBridgeOperationStartError::Rejected);
+                        }
+                        self.session_service
+                            .validate_live_bridge_member_eligibility(&session_id)
+                            .await
+                            .map_err(|_| super::LiveBridgeOperationStartError::Rejected)
+                    }
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(feature = "experimental-gpt-live")]
+                MobCommand::StartLiveBridgeOperation {
+                    agent_identity,
+                    request,
+                    cancellation,
+                    reply_tx,
+                } => {
+                    let result = async {
+                        if !request.has_execution_authorities()
+                            || request.admission().agent_identity() != agent_identity.as_str()
+                            || request.snapshot().agent_identity() != agent_identity.as_str()
+                        {
+                            return Err(
+                                super::LiveBridgeOperationStartError::Rejected,
+                            );
+                        }
+                        let entry = self
+                            .roster
+                            .read()
+                            .await
+                            .get(&agent_identity)
+                            .cloned()
+                            .ok_or(super::LiveBridgeOperationStartError::Unavailable)?;
+                        let binding = request.admission().binding();
+                        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                        let dsl_runtime = self
+                            .dsl_authority
+                            .state()
+                            .identity_to_runtime
+                            .get(&dsl_identity);
+                        let dsl_session = self
+                            .dsl_authority
+                            .state()
+                            .member_session_bindings
+                            .get(&dsl_identity);
+                        if entry.agent_runtime_id.to_string() != binding.runtime_id().0.as_str()
+                            || entry.generation.get() != binding.generation()
+                            || entry.fence_token.get() != binding.fence_token()
+                            || dsl_runtime.is_none_or(|runtime| runtime.0 != binding.runtime_id().0)
+                            || dsl_session.is_none_or(|session| {
+                                session.0 != request.admission().session_id().to_string()
+                            })
+                            || !dsl_runtime.is_some_and(|runtime| {
+                                self.dsl_authority.state().live_runtime_ids.contains(runtime)
+                            })
+                            || request.snapshot().session().id()
+                                != request.admission().session_id()
+                            || request.snapshot().canonical_context_revision()
+                                != request.admission().canonical_context_revision()
+                        {
+                            return Err(super::LiveBridgeOperationStartError::Rejected);
+                        }
+                        self.session_service
+                            .start_live_bridge_member_operation(request, cancellation)
+                            .await
+                    }
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::SendPeerMessage {
                     from,
                     to,

@@ -107,7 +107,8 @@ pub use image_generation::{
 };
 pub use jobs::*;
 pub use live::{
-    LIVE_EXECUTION_IDENTITY_V1_CAPABILITY, LiveAssistantOutputAvailableParams, LiveChannelParams,
+    LIVE_CLIENT_CONTEXT_V1_CAPABILITY, LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
+    LIVE_FUNCTION_BRIDGE_V1_CAPABILITY, LiveAssistantOutputAvailableParams, LiveChannelParams,
     LiveCloseResult, LiveCloseStatus, LiveCommitInputParams, LiveCommitInputResult,
     LiveCommitInputStatus, LiveInputChunkWire, LiveInterruptResult, LiveInterruptStatus,
     LiveOpenParams, LiveOpenResult, LiveOpenTransport, LivePlaybackCompleteParams,

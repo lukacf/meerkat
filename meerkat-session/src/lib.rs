@@ -34,10 +34,12 @@ pub mod persistent;
 pub mod projector;
 
 pub use ephemeral::{
-    EphemeralSessionService, LiveSessionActorRegistry, LiveSessionActorWitness,
+    EphemeralSessionService, LiveBridgePreparedSessionOperation, LiveBridgeSessionOperationRequest,
+    LiveBridgeSessionOperationTerminalReceiver, LiveSessionActorRegistry, LiveSessionActorWitness,
     LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
     SessionSnapshot,
 };
+pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
 pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};
 
 /// Metadata key used to store session labels in the `Session.metadata` map.

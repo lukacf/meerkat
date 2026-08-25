@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use meerkat_core::{AuthBindingUseWitness, ProviderAuthMetadata};
 use meerkat_llm_core::provider_runtime::{NormalizedBackendKind, ResolvedRealtimeTarget};
 use oai_rt_rs::experimental::gpt_live::{
-    CallSession, ClientDelegation, ClientEvent, ContextChannel, CreateCallRequest,
-    DelegationContextAppend, ExtraFields, GptLiveCredentials, GptLiveTransport, InputTextContent,
-    ServerEvent, SessionAudio, SessionAudioOutput, SidebandHeaders, SidebandReceiver,
-    SidebandSender, TransportError,
+    CallSession, ClientEvent, CreateCallRequest, Delegation, DelegationFunctionCallOutput,
+    EventCarrier, ExtraFields, FunctionCallId, FunctionCallOutput, FunctionTool,
+    GptLiveCredentials, GptLiveTransport, MAX_FUNCTION_OUTPUT_BYTES, MAX_RAW_JSON_EVENT_BYTES,
+    ReceivedServerEvent, ResponsesConfig, ResponsesDelegation, ServerEvent, SessionAudio,
+    SessionAudioOutput, SidebandHeaders, SidebandReceiver, SidebandSender, TransportError,
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -22,6 +23,144 @@ use crate::OpenAiBackendKind;
 /// Fixed declaration emitted by sanitized evidence. It is not a protocol
 /// digest and cannot satisfy any qualified-build admission predicate.
 pub const GATE0_CANDIDATE_CONTRACT: &str = "unqualified-direct-gate0-v1";
+
+pub const GATE0_RESPONSES_BRIDGE_TOOL: &str = "invoke_meerkat";
+
+const GATE0_RESPONSES_BRIDGE_DESCRIPTION: &str =
+    "Delegate this request to the channel-bound Meerkat agent.";
+
+fn strict_bridge_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "request": { "type": "string" }
+        },
+        "required": ["request"],
+        "additionalProperties": false
+    })
+}
+
+/// Explicit status of this candidate-only transport. This value cannot be
+/// converted into any shipping qualification or admission witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate0CandidateQualification {
+    LiveUnqualified,
+}
+
+/// Provider-owned Responses bridge configuration for one unqualified Gate0
+/// run. Its only tool is the strict authority-free `invoke_meerkat` bridge.
+#[derive(Clone)]
+pub struct Gate0ResponsesCandidateConfig {
+    responses: ResponsesConfig,
+}
+
+impl Gate0ResponsesCandidateConfig {
+    pub fn try_new(
+        bridge_model: impl Into<String>,
+        candidate_instructions: impl Into<String>,
+    ) -> Result<Self, Gate0CandidateError> {
+        let bridge_model = bridge_model.into();
+        let candidate_instructions = candidate_instructions.into();
+        if bridge_model.trim().is_empty() || candidate_instructions.trim().is_empty() {
+            return Err(Gate0CandidateError::InvalidResponsesConfiguration);
+        }
+        Ok(Self {
+            responses: ResponsesConfig {
+                model: bridge_model,
+                instructions: Some(candidate_instructions),
+                tools: vec![FunctionTool::new(
+                    GATE0_RESPONSES_BRIDGE_TOOL,
+                    GATE0_RESPONSES_BRIDGE_DESCRIPTION,
+                    strict_bridge_parameters(),
+                    ExtraFields::new(),
+                )],
+                extra: ExtraFields::new(),
+            },
+        })
+    }
+
+    #[must_use]
+    pub const fn qualification(&self) -> Gate0CandidateQualification {
+        Gate0CandidateQualification::LiveUnqualified
+    }
+
+    #[must_use]
+    pub const fn delegation_type(&self) -> &'static str {
+        "responses"
+    }
+
+    #[must_use]
+    pub fn bridge_model_present(&self) -> bool {
+        !self.responses.model.trim().is_empty()
+    }
+
+    #[must_use]
+    pub fn candidate_instructions_present(&self) -> bool {
+        self.responses
+            .instructions
+            .as_ref()
+            .is_some_and(|instructions| !instructions.trim().is_empty())
+    }
+
+    #[must_use]
+    pub fn tool_count(&self) -> usize {
+        self.responses.tools.len()
+    }
+
+    #[must_use]
+    pub fn tool_name(&self) -> Option<&str> {
+        self.responses.tools.first().map(|tool| tool.name.as_str())
+    }
+
+    #[must_use]
+    pub fn strict_arguments_schema(&self) -> bool {
+        self.responses.tools.len() == 1
+            && self.responses.tools[0].parameters == strict_bridge_parameters()
+    }
+
+    /// Proves that the actual candidate delegation serializes to the exact
+    /// model/instructions/single-tool allow-list, with no extra authority or
+    /// provider fields at any level.
+    #[must_use]
+    pub fn exact_authority_free_shape(&self) -> bool {
+        let Some(instructions) = self.responses.instructions.as_ref() else {
+            return false;
+        };
+        let expected = serde_json::json!({
+            "type": "responses",
+            "responses": {
+                "model": &self.responses.model,
+                "instructions": instructions,
+                "tools": [{
+                    "type": "function",
+                    "name": GATE0_RESPONSES_BRIDGE_TOOL,
+                    "description": GATE0_RESPONSES_BRIDGE_DESCRIPTION,
+                    "parameters": strict_bridge_parameters()
+                }]
+            }
+        });
+        serde_json::to_value(self.delegation()).is_ok_and(|actual| actual == expected)
+    }
+
+    fn delegation(&self) -> Delegation {
+        Delegation::Responses(ResponsesDelegation::new(
+            self.responses.clone(),
+            ExtraFields::new(),
+        ))
+    }
+}
+
+impl std::fmt::Debug for Gate0ResponsesCandidateConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Gate0ResponsesCandidateConfig")
+            .field("bridge_model", &"<redacted>")
+            .field("candidate_instructions", &"<redacted>")
+            .field("tool_count", &self.tool_count())
+            .field("qualification", &"live-unqualified")
+            .finish()
+    }
+}
 
 /// Exact registry target plus explicit binding-use authorization for one
 /// unqualified Gate0 run.
@@ -69,6 +208,7 @@ impl Gate0CandidateRealtimeTarget {
 
 pub struct Gate0CandidateBrokerFactory {
     model: String,
+    responses: Gate0ResponsesCandidateConfig,
     transport: GptLiveTransport,
     credentials: GptLiveCredentials,
 }
@@ -78,6 +218,7 @@ impl std::fmt::Debug for Gate0CandidateBrokerFactory {
         formatter
             .debug_struct("Gate0CandidateBrokerFactory")
             .field("model", &"<registry-validated>")
+            .field("responses", &self.responses)
             .field("transport", &"<private-transport>")
             .field("credentials", &"<redacted>")
             .field("qualification", &"unqualified-candidate")
@@ -88,6 +229,7 @@ impl std::fmt::Debug for Gate0CandidateBrokerFactory {
 impl Gate0CandidateBrokerFactory {
     pub fn try_from_candidate(
         candidate: Gate0CandidateRealtimeTarget,
+        responses: Gate0ResponsesCandidateConfig,
     ) -> Result<Self, Gate0CandidateError> {
         let target = candidate.into_target();
         let (identity, _, connection) = target.into_parts();
@@ -117,16 +259,26 @@ impl Gate0CandidateBrokerFactory {
             GptLiveTransport::try_new().map_err(|_| Gate0CandidateError::TransportConfiguration)?;
         Ok(Self {
             model: identity.model,
+            responses,
             transport,
             credentials,
         })
+    }
+
+    #[must_use]
+    pub const fn qualification(&self) -> Gate0CandidateQualification {
+        Gate0CandidateQualification::LiveUnqualified
+    }
+
+    #[must_use]
+    pub const fn responses_config(&self) -> &Gate0ResponsesCandidateConfig {
+        &self.responses
     }
 
     pub async fn answer(
         &self,
         offer_sdp: String,
         voice: String,
-        instructions: Option<String>,
     ) -> Result<Gate0CandidateBootstrap, Gate0CandidateError> {
         if offer_sdp.trim().is_empty() || voice.trim().is_empty() {
             return Err(Gate0CandidateError::InvalidOpen);
@@ -142,11 +294,8 @@ impl Gate0CandidateBrokerFactory {
                     },
                     extra: ExtraFields::new(),
                 },
-                delegation: Some(ClientDelegation {
-                    delegation_type: "client".to_string(),
-                    extra: ExtraFields::new(),
-                }),
-                instructions: instructions.filter(|value| !value.trim().is_empty()),
+                delegation: Some(self.responses.delegation()),
+                instructions: None,
                 extra: ExtraFields::new(),
             },
         };
@@ -214,47 +363,77 @@ impl Gate0CandidateSideband {
     pub async fn next_observation(
         &self,
     ) -> Result<Option<Gate0CandidateObservation>, Gate0CandidateError> {
-        let event = self.receiver.lock().await.next_event().await?;
-        let Some(event) = event else {
+        let observation = self.receiver.lock().await.next_observation().await?;
+        let Some(observation) = observation else {
             return Ok(None);
         };
         let mut correlations = self.correlations.lock().await;
-        Ok(Some(correlations.lower(event)?))
+        Ok(Some(correlations.lower(observation)?))
     }
 
-    /// Append one reconciled worker result to the exact observed delegation.
-    /// The returned ref is opaque and later compared with the provider ack.
-    pub async fn append_delegation_context(
+    /// Write one exact Responses function-call output to the candidate
+    /// sideband. Success proves only local WebSocket write completion. It does
+    /// not prove provider receipt, processing, or automatic continuation.
+    pub async fn send_function_call_output(
         &self,
-        delegation: &Gate0CandidateDelegationRef,
-        text: impl Into<String>,
-    ) -> Result<Gate0CandidateAppendRef, Gate0CandidateError> {
-        let text = text.into();
-        if text.trim().is_empty() {
-            return Err(Gate0CandidateError::InvalidAppend);
+        call_id: Gate0CandidateOpaqueCallId,
+        output: impl Into<String>,
+    ) -> Result<Gate0CandidateFunctionOutputWrite, Gate0CandidateError> {
+        let output = output.into();
+        if output.len() > MAX_FUNCTION_OUTPUT_BYTES {
+            return Err(Gate0CandidateError::InvalidFunctionOutput);
         }
         self.sender
-            .send(&ClientEvent::DelegationContextAppend(
-                DelegationContextAppend {
-                    delegation_item_id: delegation.provider_id.clone(),
-                    channel: Some(ContextChannel::Commentary),
-                    content: vec![InputTextContent {
-                        content_type: "input_text".to_string(),
-                        text,
-                        extra: ExtraFields::new(),
-                    }],
-                    extra: ExtraFields::new(),
-                },
+            .send(&candidate_function_output_event(
+                call_id.into_inner(),
+                output,
             ))
             .await?;
-        Ok(Gate0CandidateAppendRef {
-            delegation: delegation.clone(),
-        })
+        Ok(Gate0CandidateFunctionOutputWrite::LocalWriteCompleted)
     }
 
     pub async fn close(&self) -> Result<(), Gate0CandidateError> {
         self.sender.close().await.map_err(Gate0CandidateError::from)
     }
+}
+
+/// Opaque server-issued call field copied from one ephemeral raw Gate0 event.
+/// Construction does not type or validate the unknown event schema.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Gate0CandidateOpaqueCallId(FunctionCallId);
+
+impl Gate0CandidateOpaqueCallId {
+    pub fn try_from_observed_raw_field(
+        value: impl Into<String>,
+    ) -> Result<Self, Gate0CandidateError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(Gate0CandidateError::InvalidFunctionOutput);
+        }
+        Ok(Self(FunctionCallId::new(value)))
+    }
+
+    fn into_inner(self) -> FunctionCallId {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Gate0CandidateOpaqueCallId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Gate0CandidateOpaqueCallId(<redacted>)")
+    }
+}
+
+fn candidate_function_output_event(call_id: FunctionCallId, output: String) -> ClientEvent {
+    ClientEvent::DelegationFunctionCallOutput(DelegationFunctionCallOutput::new(
+        FunctionCallOutput::new(call_id, output),
+    ))
+}
+
+/// The strongest positive fact returned by candidate output custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate0CandidateFunctionOutputWrite {
+    LocalWriteCompleted,
 }
 
 #[derive(Default)]
@@ -264,7 +443,6 @@ struct Gate0CandidateCorrelations {
     next_transcript_item: u64,
     next_output_transcript_item: u64,
     turns: HashMap<String, Gate0CandidateTurnRef>,
-    delegations: HashMap<String, Gate0CandidateDelegationRef>,
 }
 
 impl Gate0CandidateCorrelations {
@@ -286,8 +464,14 @@ impl Gate0CandidateCorrelations {
 
     fn lower(
         &mut self,
-        event: ServerEvent,
+        received: ReceivedServerEvent,
     ) -> Result<Gate0CandidateObservation, Gate0CandidateError> {
+        let carrier = Gate0CandidateEventCarrier::from(received.carrier());
+        let byte_count = received.byte_count();
+        if byte_count == 0 || byte_count > MAX_RAW_JSON_EVENT_BYTES {
+            return Err(Gate0CandidateError::ProtocolDrift);
+        }
+        let event = received.into_event();
         match event {
             ServerEvent::SessionStarted(_) => Ok(Gate0CandidateObservation::SessionStarted),
             ServerEvent::TurnCreated(created) => Ok(Gate0CandidateObservation::TurnStarted {
@@ -311,9 +495,8 @@ impl Gate0CandidateCorrelations {
                 self.next_delegation = self.next_delegation.saturating_add(1);
                 let delegation = Gate0CandidateDelegationRef {
                     adapter_key: format!("delegation:{}", self.next_delegation),
-                    provider_id: created.item.id.clone(),
+                    _provider_id: created.item.id,
                 };
-                self.delegations.insert(created.item.id, delegation.clone());
                 Ok(Gate0CandidateObservation::DelegationCreated {
                     turn,
                     delegation,
@@ -330,14 +513,7 @@ impl Gate0CandidateCorrelations {
                     transcript: done.turn.transcript,
                 })
             }
-            ServerEvent::DelegationContextAppended(appended) => {
-                let delegation = self
-                    .delegations
-                    .get(&appended.delegation_item_id)
-                    .cloned()
-                    .ok_or(Gate0CandidateError::ProtocolDrift)?;
-                Ok(Gate0CandidateObservation::DelegationContextAppended { delegation })
-            }
+            ServerEvent::DelegationContextAppended(_) => Err(Gate0CandidateError::ProtocolDrift),
             ServerEvent::InputTranscriptAdded(added) => {
                 if added.item.id.trim().is_empty() || added.item.text.trim().is_empty() {
                     return Err(Gate0CandidateError::ProtocolDrift);
@@ -373,9 +549,15 @@ impl Gate0CandidateCorrelations {
                     text: added.item.text,
                 })
             }
-            ServerEvent::SessionContextAppended(_) | ServerEvent::Unknown(_) => {
-                Ok(Gate0CandidateObservation::Other)
-            }
+            ServerEvent::SessionContextAppended(_) => Ok(Gate0CandidateObservation::Other),
+            ServerEvent::Unknown(unknown) => Ok(Gate0CandidateObservation::RawUnknownEvent(
+                Gate0CandidateRawUnknownEvent {
+                    carrier,
+                    byte_count,
+                    kind: unknown.kind().to_string(),
+                    raw: unknown.raw().clone(),
+                },
+            )),
         }
     }
 }
@@ -405,7 +587,7 @@ impl std::fmt::Debug for Gate0CandidateTurnRef {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Gate0CandidateDelegationRef {
     adapter_key: String,
-    provider_id: String,
+    _provider_id: String,
 }
 
 impl Gate0CandidateDelegationRef {
@@ -419,12 +601,6 @@ impl std::fmt::Debug for Gate0CandidateDelegationRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("Gate0CandidateDelegationRef(<redacted>)")
     }
-}
-
-/// Opaque identity of the exact append attempted by the candidate harness.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Gate0CandidateAppendRef {
-    delegation: Gate0CandidateDelegationRef,
 }
 
 /// Redacted transcript item identity. The private event carries no turn id,
@@ -470,16 +646,67 @@ impl std::fmt::Debug for Gate0CandidateOutputTranscriptItemRef {
     }
 }
 
-impl Gate0CandidateAppendRef {
-    #[must_use]
-    pub fn acknowledged_by(&self, delegation: &Gate0CandidateDelegationRef) -> bool {
-        &self.delegation == delegation
+/// Mechanical carrier observed by the unqualified direct-protocol harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate0CandidateEventCarrier {
+    Sideband,
+    OrderedOaiEvents,
+}
+
+impl From<EventCarrier> for Gate0CandidateEventCarrier {
+    fn from(carrier: EventCarrier) -> Self {
+        match carrier {
+            EventCarrier::Sideband => Self::Sideband,
+            EventCarrier::OrderedOaiEvents => Self::OrderedOaiEvents,
+        }
     }
 }
 
-impl std::fmt::Debug for Gate0CandidateAppendRef {
+/// Bounded raw event retained only in the Gate0 process until its private
+/// discriminant and fields have been directly qualified. No typed function
+/// call or semantic correlation is inferred from this payload.
+#[derive(Clone, PartialEq)]
+pub struct Gate0CandidateRawUnknownEvent {
+    carrier: Gate0CandidateEventCarrier,
+    byte_count: usize,
+    kind: String,
+    raw: serde_json::Value,
+}
+
+impl Gate0CandidateRawUnknownEvent {
+    #[must_use]
+    pub const fn carrier(&self) -> Gate0CandidateEventCarrier {
+        self.carrier
+    }
+
+    #[must_use]
+    pub const fn byte_count(&self) -> usize {
+        self.byte_count
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Borrow the bounded raw JSON for ephemeral local Gate0 collection. The
+    /// value must never enter logs, durable evidence, or shipping projection.
+    #[must_use]
+    pub const fn raw_json(&self) -> &serde_json::Value {
+        &self.raw
+    }
+}
+
+impl std::fmt::Debug for Gate0CandidateRawUnknownEvent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Gate0CandidateAppendRef(<redacted>)")
+        formatter
+            .debug_struct("Gate0CandidateRawUnknownEvent")
+            .field("carrier", &self.carrier)
+            .field("byte_count", &self.byte_count)
+            .field("kind", &"<preserved-redacted>")
+            .field("raw", &"<redacted>")
+            .field("qualification", &"live-unqualified")
+            .finish()
     }
 }
 
@@ -516,9 +743,7 @@ pub enum Gate0CandidateObservation {
         end_ms: u64,
         text: String,
     },
-    DelegationContextAppended {
-        delegation: Gate0CandidateDelegationRef,
-    },
+    RawUnknownEvent(Gate0CandidateRawUnknownEvent),
     Other,
 }
 
@@ -532,7 +757,7 @@ impl std::fmt::Debug for Gate0CandidateObservation {
             Self::TurnDone { .. } => "turn_done",
             Self::UserTranscriptAdded { .. } => "user_transcript_added",
             Self::OutputTranscriptAdded { .. } => "output_transcript_added",
-            Self::DelegationContextAppended { .. } => "delegation_context_appended",
+            Self::RawUnknownEvent(_) => "raw_unknown_event",
             Self::Other => "other",
         };
         formatter
@@ -555,12 +780,14 @@ pub enum Gate0CandidateError {
     TransportConfiguration,
     #[error("Gate0 candidate open input is invalid")]
     InvalidOpen,
+    #[error("Gate0 candidate Responses configuration is invalid")]
+    InvalidResponsesConfiguration,
     #[error("Gate0 candidate private transport failed")]
     Transport,
     #[error("Gate0 candidate sideband closed before session.started")]
     SessionStartedMissing,
-    #[error("Gate0 candidate append input is invalid")]
-    InvalidAppend,
+    #[error("Gate0 candidate function-call output is invalid")]
+    InvalidFunctionOutput,
     #[error("Gate0 candidate private protocol drifted")]
     ProtocolDrift,
 }
@@ -575,6 +802,10 @@ impl From<TransportError> for Gate0CandidateError {
 mod tests {
     use super::*;
     use meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget;
+    use oai_rt_rs::experimental::gpt_live::{
+        CodecError, MAX_BRIDGE_ARGUMENT_BYTES, decode_bridge_arguments,
+        decode_received_server_event, encode_client_event,
+    };
 
     trait AmbiguousIfCandidateConverts<Marker> {
         fn witness() {}
@@ -586,5 +817,157 @@ mod tests {
     #[test]
     fn candidate_target_has_no_conversion_into_shipping_admission() {
         let _ = <Gate0CandidateRealtimeTarget as AmbiguousIfCandidateConverts<_>>::witness;
+    }
+
+    fn candidate_config() -> Gate0ResponsesCandidateConfig {
+        Gate0ResponsesCandidateConfig::try_new(
+            "bridge-model-private",
+            "candidate-instructions-private",
+        )
+        .expect("valid candidate Responses configuration")
+    }
+
+    #[test]
+    fn responses_candidate_config_is_exact_and_explicitly_unqualified() {
+        let config = candidate_config();
+
+        assert_eq!(
+            config.qualification(),
+            Gate0CandidateQualification::LiveUnqualified
+        );
+        assert_eq!(config.delegation_type(), "responses");
+        assert!(config.bridge_model_present());
+        assert!(config.candidate_instructions_present());
+        assert_eq!(config.tool_count(), 1);
+        assert_eq!(config.tool_name(), Some(GATE0_RESPONSES_BRIDGE_TOOL));
+        assert!(config.strict_arguments_schema());
+        assert!(config.exact_authority_free_shape());
+
+        let wire = serde_json::to_value(config.delegation()).expect("serialize delegation");
+        assert_eq!(wire["type"], "responses");
+        assert_eq!(wire["responses"]["model"], "bridge-model-private");
+        assert_eq!(
+            wire["responses"]["instructions"],
+            "candidate-instructions-private"
+        );
+        assert_eq!(wire["responses"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            wire["responses"]["tools"][0]["name"],
+            GATE0_RESPONSES_BRIDGE_TOOL
+        );
+        assert_eq!(
+            wire["responses"]["tools"][0]["parameters"],
+            strict_bridge_parameters()
+        );
+    }
+
+    #[test]
+    fn responses_candidate_configuration_and_raw_observation_debug_are_redacted() {
+        let config = candidate_config();
+        let config_debug = format!("{config:?}");
+        assert!(!config_debug.contains("bridge-model-private"));
+        assert!(!config_debug.contains("candidate-instructions-private"));
+        assert!(config_debug.contains("live-unqualified"));
+
+        let raw = r#"{"type":"private.responses.call","call_id":"provider-secret","arguments":"conversation-secret"}"#;
+        let received = decode_received_server_event(EventCarrier::Sideband, raw)
+            .expect("bounded unknown event");
+        let observation = Gate0CandidateCorrelations::default()
+            .lower(received)
+            .expect("candidate lowering");
+        let Gate0CandidateObservation::RawUnknownEvent(observation) = observation else {
+            panic!("unknown event must remain raw")
+        };
+        let debug = format!("{observation:?}");
+        assert!(!debug.contains("private.responses.call"));
+        assert!(!debug.contains("provider-secret"));
+        assert!(!debug.contains("conversation-secret"));
+        assert_eq!(observation.carrier(), Gate0CandidateEventCarrier::Sideband);
+        assert_eq!(observation.byte_count(), raw.len());
+        assert_eq!(observation.kind(), "private.responses.call");
+        assert_eq!(observation.raw_json()["call_id"], "provider-secret");
+    }
+
+    #[test]
+    fn raw_unknown_event_preserves_ordered_carrier_without_promoting_schema() {
+        let raw = r#"{"type":"candidate.only.unknown","opaque":{"x":1}}"#;
+        let received = decode_received_server_event(EventCarrier::OrderedOaiEvents, raw)
+            .expect("bounded unknown event");
+        let observation = Gate0CandidateCorrelations::default()
+            .lower(received)
+            .expect("candidate lowering");
+        let Gate0CandidateObservation::RawUnknownEvent(observation) = observation else {
+            panic!("unknown event must remain raw")
+        };
+        assert_eq!(
+            observation.carrier(),
+            Gate0CandidateEventCarrier::OrderedOaiEvents
+        );
+        assert_eq!(observation.kind(), "candidate.only.unknown");
+        assert_eq!(observation.raw_json()["opaque"]["x"], 1);
+    }
+
+    #[test]
+    fn exact_function_call_output_envelope_and_bounds_are_mechanical() {
+        let opaque =
+            Gate0CandidateOpaqueCallId::try_from_observed_raw_field("provider-call-secret")
+                .expect("nonempty raw call field");
+        assert!(!format!("{opaque:?}").contains("provider-call-secret"));
+        let event = candidate_function_output_event(
+            opaque.into_inner(),
+            "meerkat-result-secret".to_string(),
+        );
+        let encoded = encode_client_event(&event).expect("bounded output envelope");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("valid JSON");
+        assert_eq!(value["type"], "delegation.function_call_output.create");
+        assert_eq!(value["item"]["type"], "function_call_output");
+        assert_eq!(value["item"]["call_id"], "provider-call-secret");
+        assert_eq!(value["item"]["output"], "meerkat-result-secret");
+        assert!(value.get("response").is_none());
+
+        let at_bound = candidate_function_output_event(
+            FunctionCallId::new("call"),
+            "x".repeat(MAX_FUNCTION_OUTPUT_BYTES),
+        );
+        assert!(encode_client_event(&at_bound).is_ok());
+        let oversized = candidate_function_output_event(
+            FunctionCallId::new("call"),
+            "x".repeat(MAX_FUNCTION_OUTPUT_BYTES + 1),
+        );
+        assert!(matches!(
+            encode_client_event(&oversized),
+            Err(CodecError::OversizedFunctionOutput)
+        ));
+    }
+
+    #[test]
+    fn raw_event_and_decoded_bridge_argument_bounds_fail_closed() {
+        let oversized_raw = format!(
+            r#"{{"type":"unknown","padding":"{}"}}"#,
+            "x".repeat(MAX_RAW_JSON_EVENT_BYTES)
+        );
+        assert!(matches!(
+            decode_received_server_event(EventCarrier::Sideband, &oversized_raw),
+            Err(CodecError::OversizedRawEvent)
+        ));
+
+        let at_bound = format!(
+            r#"{{"request":"{}"}}"#,
+            "x".repeat(MAX_BRIDGE_ARGUMENT_BYTES)
+        );
+        let decoded = decode_bridge_arguments(&at_bound).expect("decoded request at bound");
+        assert_eq!(decoded.request().len(), MAX_BRIDGE_ARGUMENT_BYTES);
+        let oversized = format!(
+            r#"{{"request":"{}"}}"#,
+            "x".repeat(MAX_BRIDGE_ARGUMENT_BYTES + 1)
+        );
+        assert!(matches!(
+            decode_bridge_arguments(&oversized),
+            Err(CodecError::OversizedBridgeArguments)
+        ));
+        assert!(matches!(
+            decode_bridge_arguments(r#"{"request":"ok","member_id":"shadow"}"#),
+            Err(CodecError::MalformedBridgeArguments)
+        ));
     }
 }

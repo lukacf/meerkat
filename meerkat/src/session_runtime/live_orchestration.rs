@@ -446,11 +446,74 @@ pub enum ExperimentalLiveChannelOpenError {
     Projection(#[from] RealtimeSessionOpenProjectionError),
     #[error(transparent)]
     Open(#[from] crate::session_runtime::errors::LiveOpenError),
+    #[error("experimental live execution profile admission failed: {0}")]
+    ExecutionProfile(String),
     #[error("experimental live channel binding failed: {binding}; cleanup failed: {cleanup}")]
     BindingCleanup {
         binding: crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
         cleanup: String,
     },
+}
+
+/// Opaque pending-phase carrier returned by the shared strict open flow.
+///
+/// The receipt is machine-minted and may only be used to reacquire the exact
+/// current pending authority. Surfaces must not infer phase from a successful
+/// provider open or retain a parallel phase ledger.
+#[cfg(feature = "experimental-gpt-live")]
+pub struct ExperimentalLivePendingChannel {
+    open: meerkat_contracts::LiveOpenResult,
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    pending_receipt: String,
+    execution_mode: meerkat_core::LiveExecutionMode,
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+impl std::fmt::Debug for ExperimentalLivePendingChannel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLivePendingChannel")
+            .field("open", &self.open)
+            .field("session_id", &"[REDACTED]")
+            .field("channel_id", &"[REDACTED]")
+            .field("pending_receipt", &"[REDACTED]")
+            .field("execution_mode", &self.execution_mode)
+            .finish()
+    }
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+impl ExperimentalLivePendingChannel {
+    #[must_use]
+    pub fn open(&self) -> &meerkat_contracts::LiveOpenResult {
+        &self.open
+    }
+
+    #[must_use]
+    pub fn into_open(self) -> meerkat_contracts::LiveOpenResult {
+        self.open
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn pending_receipt(&self) -> &str {
+        &self.pending_receipt
+    }
+
+    #[must_use]
+    pub const fn execution_mode(&self) -> meerkat_core::LiveExecutionMode {
+        self.execution_mode
+    }
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
@@ -1883,7 +1946,8 @@ mod orchestrator {
             turning_mode: Option<RealtimeTurningMode>,
             seed_window: Option<LiveSeedWindow>,
             requested_transport: Option<LiveOpenTransport>,
-        ) -> Result<LiveOpenResult, super::ExperimentalLiveChannelOpenError> {
+        ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
+        {
             if requested_transport != Some(LiveOpenTransport::Webrtc) {
                 return Err(super::ExperimentalLiveChannelOpenError::InvalidTransport);
             }
@@ -1910,7 +1974,32 @@ mod orchestrator {
                 .await
                 .map_err(super::ExperimentalLiveChannelOpenError::Open)?;
             let channel_id = LiveChannelId::new(&result.channel_id);
-            let _stage_authority = match self
+            let execution_profile = pending.execution_profile().clone();
+            if let Err(error) = self
+                .runtime_adapter
+                .resolve_live_execution_profile_admission(
+                    session_id,
+                    &channel_id,
+                    &execution_profile,
+                )
+                .await
+            {
+                let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
+                authority.unbind_channel(&channel_id, session_id).await;
+                if let Err(cleanup) = self
+                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .await
+                {
+                    return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
+                        binding,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(super::ExperimentalLiveChannelOpenError::ExecutionProfile(
+                    error.to_string(),
+                ));
+            }
+            let stage_authority = match self
                 .runtime_adapter
                 .stage_experimental_live_execution(session_id, &channel_id, canonical_seed_cursor)
                 .await
@@ -1944,7 +2033,13 @@ mod orchestrator {
                 }
                 return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
             }
-            Ok(result)
+            Ok(super::ExperimentalLivePendingChannel {
+                open: result,
+                session_id: session_id.clone(),
+                channel_id,
+                pending_receipt: stage_authority.pending_receipt().to_string(),
+                execution_mode: execution_profile.mode(),
+            })
         }
 
         /// Retire a bound experimental channel that cannot be published by
@@ -2196,6 +2291,11 @@ mod orchestrator {
                     }
                     Some(LiveOpenAdmissionRejection::ChannelAlreadyBound) => {
                         LiveOpenError::AdmissionRejectedChannelCollision {
+                            channel_id: candidate_channel_id.to_string(),
+                        }
+                    }
+                    Some(LiveOpenAdmissionRejection::RevokedChannelId) => {
+                        LiveOpenError::AdmissionRejectedRevokedChannel {
                             channel_id: candidate_channel_id.to_string(),
                         }
                     }

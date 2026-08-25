@@ -574,6 +574,20 @@ where
     ) -> Result<(), crate::error::AgentError> {
         use crate::error::AgentError;
 
+        if self.noncommitting_live_bridge_run
+            && effects.iter().any(|effect| {
+                !matches!(
+                    effect,
+                    crate::ops::SessionEffect::AppendAssistantBlocks { .. }
+                )
+            })
+        {
+            return Err(AgentError::ConfigError(
+                "live bridge tools may append output to the disposable operation transcript but may not mutate deferred-tool or mob authority state"
+                    .to_string(),
+            ));
+        }
+
         let mut build_state = self.session.build_state().ok_or_else(|| {
             AgentError::InternalError(format!(
                 "session {} is missing session build state",
@@ -968,6 +982,12 @@ where
         self.cancel_after_boundary_tx.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn pending_cancel_after_boundary_commands(&self) -> usize {
+        self.cancel_after_boundary_rx.len()
+    }
+
     /// Get the runtime-backed turn-state handle, when this agent was built with one.
     pub fn turn_state_handle(&self) -> Option<Arc<dyn crate::TurnStateHandle>> {
         self.turn_state_handle.clone()
@@ -1310,6 +1330,66 @@ where
     pub fn transient_turn_context_state(&self) -> crate::session::TransientTurnContextStateHandle {
         self.transient_turn_context_state.clone()
     }
+
+    /// Validate the policy surface supported by the experimental
+    /// noncommitting live bridge profile.
+    pub fn validate_noncommitting_live_bridge_policy(&self) -> Result<(), AgentError> {
+        if self.hook_engine.is_some() {
+            return Err(AgentError::ConfigError(
+                "live bridge execution requires an explicitly bridge-qualified hook profile; this member has ordinary-turn hooks"
+                .to_string(),
+            ));
+        }
+        let visible_tools = self.tool_scope.visible_tools_result().map_err(|error| {
+            AgentError::ConfigError(format!(
+                "live bridge could not resolve the member's committed tool surface: {error}"
+            ))
+        })?;
+        if visible_tools.iter().any(|tool| {
+            tool.provenance
+                .as_ref()
+                .is_some_and(|provenance| provenance.kind == crate::ToolSourceKind::Callback)
+        }) {
+            return Err(AgentError::ConfigError(
+                "live bridge execution does not support callback-provenance tools".to_string(),
+            ));
+        }
+        if self.tools.tool_catalog_capabilities().exact_catalog {
+            let visible_names = visible_tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let has_non_fast_contract = self.tools.tool_catalog().iter().any(|entry| {
+                visible_names.contains(&entry.tool.name)
+                    && (entry.execution.default_mode() != crate::ToolExecutionMode::Fast
+                        || entry.execution.supported_modes().len() != 1
+                        || !entry
+                            .execution
+                            .supported_modes()
+                            .contains(&crate::ToolExecutionMode::Fast))
+            });
+            if has_non_fast_contract {
+                return Err(AgentError::ConfigError(
+                    "live bridge execution supports only tools with a Fast-only execution contract"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Side-effect-free eligibility preflight for the experimental
+    /// noncommitting live bridge profile.
+    ///
+    /// This validates the exact current member policy/tool surface and proves
+    /// that its installed client can mint an event-isolated operation fork.
+    /// The fork is discarded without provider I/O and no operation authority
+    /// is consumed.
+    pub fn validate_noncommitting_live_bridge_eligibility(&self) -> Result<(), AgentError> {
+        self.validate_noncommitting_live_bridge_policy()?;
+        let _isolated_client = self.client.fork_noncommitting_live_bridge()?;
+        Ok(())
+    }
     /// Clone the current Session and install the authorized durable tool
     /// visibility projection. Transient turn context is deliberately absent.
     pub fn session_with_control_state(&self) -> Result<Session, AgentControlStateError> {
@@ -1631,6 +1711,219 @@ where
             .await
     }
 
+    /// Execute one live bridge request through this exact agent's client,
+    /// dispatcher, tool scope, and policy objects without committing a second
+    /// user turn to the durable member transcript.
+    ///
+    /// The session actor serializes this call with ordinary member work. This
+    /// method temporarily installs the retained canonical Session clone and
+    /// suppresses ambient persistence, comms-drain, hooks, and compaction.
+    /// Explicit tools still use the original dispatcher objects and are gated
+    /// at dispatch time by `dispatch_admission`. The canonical live Session is
+    /// restored after success, failure, or operation-local cancellation.
+    #[cfg(test)]
+    pub(crate) async fn run_live_bridge_noncommitting(
+        &mut self,
+        snapshot: Session,
+        semantic_request: ContentInput,
+        dispatch_admission: crate::LiveBridgeToolDispatchAdmission,
+        run_permit: crate::LiveBridgeNoncommittingRunPermit,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<RunResult, AgentError> {
+        if snapshot.id() != self.session.id() {
+            return Err(AgentError::ConfigError(
+                "live bridge snapshot does not belong to this durable member session".to_string(),
+            ));
+        }
+        let expected_revision = snapshot
+            .canonical_context_revision()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        let current_revision = self
+            .session
+            .canonical_context_revision()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        if expected_revision != current_revision {
+            return Err(AgentError::ConfigError(
+                "live bridge snapshot revision is no longer the durable member head".to_string(),
+            ));
+        }
+        self.validate_noncommitting_live_bridge_policy()?;
+
+        let frozen_tool_defs = self.tool_scope.visible_tools_result().map_err(|error| {
+            AgentError::InternalError(format!(
+                "live bridge could not capture the durable member's committed tool scope: {error}"
+            ))
+        })?;
+
+        run_permit.consume(
+            dispatch_admission.operation_id(),
+            snapshot.id(),
+            &expected_revision,
+        )?;
+
+        let isolated_turn_state_handle = self
+            .turn_state_handle
+            .as_ref()
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "durable member has no turn-state authority from which to mint an isolated live bridge child"
+                        .to_string(),
+                )
+            })?
+            .isolated_live_bridge_child()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+
+        let canonical_session = std::mem::replace(&mut self.session, snapshot);
+        let saved_checkpointer = self.checkpointer.take();
+        let saved_comms_runtime = self.comms_runtime.take();
+        let saved_hook_engine = self.hook_engine.take();
+        let saved_event_tap =
+            std::mem::replace(&mut self.event_tap, crate::event_tap::new_event_tap());
+        // Provider adapters can retain clones of the original tap Arc. Taking
+        // its subscriber state suppresses those emissions too; replacing only
+        // the Agent field would still leak adapter-originated TextDelta.
+        let saved_event_tap_state = saved_event_tap.lock().take();
+        let (bridge_cancel_after_boundary_tx, bridge_cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let saved_cancel_after_boundary_tx = std::mem::replace(
+            &mut self.cancel_after_boundary_tx,
+            bridge_cancel_after_boundary_tx,
+        );
+        let saved_cancel_after_boundary_rx = std::mem::replace(
+            &mut self.cancel_after_boundary_rx,
+            bridge_cancel_after_boundary_rx,
+        );
+        let saved_transient_turn_context_state = std::mem::replace(
+            &mut self.transient_turn_context_state,
+            crate::session::TransientTurnContextStateHandle::new(),
+        );
+        let saved_compactor = self.compactor.take();
+        let saved_compaction_curator = self.compaction_curator.take();
+        let saved_last_input_tokens = self.last_input_tokens;
+        let saved_compaction_cadence = self.compaction_cadence.clone();
+        let saved_pending_compaction_boundary_index = self.pending_compaction_boundary_index.take();
+        let saved_pending_compaction_request_pressure =
+            self.pending_compaction_request_pressure.take();
+        let saved_pending_compaction_request_budget = self.pending_compaction_request_budget.take();
+        let saved_post_compaction_pressure_check = self.post_compaction_pressure_check.take();
+        let saved_compaction_transaction = self.compaction_transaction.take();
+        let saved_in_flight_compaction_stage = self.in_flight_compaction_stage.take();
+        let saved_memory_store = self.memory_store.take();
+        let saved_compaction_coordinator = self.compaction_commit_coordinator.take();
+        let saved_skill_references = self.pending_skill_references.take();
+        let saved_default_event_tx = self.default_event_tx.take();
+        let saved_completion_feed = self.completion_feed.take();
+        let saved_completion_enrichment = self.completion_enrichment.take();
+        let saved_turn_state_handle = self.turn_state_handle.take();
+        let saved_model_routing_handle = self.model_routing_handle.take();
+        let saved_sticky_coordinator = self.sticky_model_fallback_commit_coordinator.take();
+        let saved_runtime_execution_kind_required = self.runtime_execution_kind_required;
+        let saved_runtime_execution_kind = self.runtime_execution_kind;
+        let saved_runtime_started_run_id = self.runtime_started_run_id.take();
+        let saved_runtime_terminal_failure_witness = self.runtime_terminal_failure_witness.take();
+        let saved_active_transcript_identity = self.active_transcript_identity.take();
+        let saved_active_turn_request_contexts =
+            std::mem::take(&mut self.active_turn_request_contexts);
+        let saved_latest_run_checkpoint_receipt = self.latest_run_checkpoint_receipt.take();
+        let saved_terminal_error_detail = self.terminal_error_detail.take();
+        let saved_terminal_error_metadata = self.terminal_error_metadata.take();
+        let saved_run_completed_hooks_applied = self.run_completed_hooks_applied;
+        let saved_run_completed_event_emitted = self.run_completed_event_emitted;
+        let saved_extraction_state = std::mem::take(&mut self.extraction_state);
+        let saved_pending_callback_async_ops = self.pending_callback_async_ops.take();
+        let saved_dispatch_admission = self.live_bridge_dispatch_admission.take();
+        let saved_live_bridge_tool_defs = self.live_bridge_tool_defs.take();
+        let saved_noncommitting = self.noncommitting_live_bridge_run;
+        let saved_tool_dispatch_context = std::mem::take(&mut self.tool_dispatch_context);
+
+        self.runtime_execution_kind_required = false;
+        // A live bridge operation is not an ordinary content turn. Its typed
+        // authority is the LiveBridge admission/effect/terminal machine.
+        self.runtime_execution_kind = None;
+        // The ordinary member handle projects into its durable runtime
+        // machine and cannot authorize this noncommitting operation. This
+        // fresh generated, process-local turn machine is discarded below.
+        self.turn_state_handle = Some(isolated_turn_state_handle);
+        self.live_bridge_dispatch_admission = Some(dispatch_admission);
+        self.live_bridge_tool_defs = Some(frozen_tool_defs);
+        self.noncommitting_live_bridge_run = true;
+
+        let result = {
+            let run = self.run(semantic_request);
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => result,
+                () = async {
+                    loop {
+                        if *cancellation.borrow() {
+                            break;
+                        }
+                        if cancellation.changed().await.is_err() {
+                            // Losing the observer is not operation-local
+                            // cancellation authority. The actor keeps custody
+                            // until execution reaches its own terminal.
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                } => Err(AgentError::Cancelled),
+            }
+        };
+        if matches!(result, Err(AgentError::Cancelled)) {
+            // The bridge run intentionally detached the durable member's
+            // runtime turn handle above. This resets only the Agent-local run
+            // authority whose future was just dropped, never Mob/session
+            // lifecycle or a successor ordinary run.
+            self.cancel();
+        }
+
+        self.session = canonical_session;
+        self.checkpointer = saved_checkpointer;
+        self.comms_runtime = saved_comms_runtime;
+        self.hook_engine = saved_hook_engine;
+        *saved_event_tap.lock() = saved_event_tap_state;
+        self.event_tap = saved_event_tap;
+        self.cancel_after_boundary_tx = saved_cancel_after_boundary_tx;
+        self.cancel_after_boundary_rx = saved_cancel_after_boundary_rx;
+        self.transient_turn_context_state = saved_transient_turn_context_state;
+        self.compactor = saved_compactor;
+        self.compaction_curator = saved_compaction_curator;
+        self.last_input_tokens = saved_last_input_tokens;
+        self.compaction_cadence = saved_compaction_cadence;
+        self.pending_compaction_boundary_index = saved_pending_compaction_boundary_index;
+        self.pending_compaction_request_pressure = saved_pending_compaction_request_pressure;
+        self.pending_compaction_request_budget = saved_pending_compaction_request_budget;
+        self.post_compaction_pressure_check = saved_post_compaction_pressure_check;
+        self.compaction_transaction = saved_compaction_transaction;
+        self.in_flight_compaction_stage = saved_in_flight_compaction_stage;
+        self.memory_store = saved_memory_store;
+        self.compaction_commit_coordinator = saved_compaction_coordinator;
+        self.pending_skill_references = saved_skill_references;
+        self.default_event_tx = saved_default_event_tx;
+        self.completion_feed = saved_completion_feed;
+        self.completion_enrichment = saved_completion_enrichment;
+        self.turn_state_handle = saved_turn_state_handle;
+        self.model_routing_handle = saved_model_routing_handle;
+        self.sticky_model_fallback_commit_coordinator = saved_sticky_coordinator;
+        self.runtime_execution_kind_required = saved_runtime_execution_kind_required;
+        self.runtime_execution_kind = saved_runtime_execution_kind;
+        self.runtime_started_run_id = saved_runtime_started_run_id;
+        self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
+        self.active_transcript_identity = saved_active_transcript_identity;
+        self.active_turn_request_contexts = saved_active_turn_request_contexts;
+        self.latest_run_checkpoint_receipt = saved_latest_run_checkpoint_receipt;
+        self.terminal_error_detail = saved_terminal_error_detail;
+        self.terminal_error_metadata = saved_terminal_error_metadata;
+        self.run_completed_hooks_applied = saved_run_completed_hooks_applied;
+        self.run_completed_event_emitted = saved_run_completed_event_emitted;
+        self.extraction_state = saved_extraction_state;
+        self.pending_callback_async_ops = saved_pending_callback_async_ops;
+        self.live_bridge_dispatch_admission = saved_dispatch_admission;
+        self.live_bridge_tool_defs = saved_live_bridge_tool_defs;
+        self.noncommitting_live_bridge_run = saved_noncommitting;
+        self.tool_dispatch_context = saved_tool_dispatch_context;
+        result
+    }
+
     /// Run the agent with provider-facing prompt content derived from typed
     /// runtime appends, while persisting those appends according to their roles.
     ///
@@ -1896,6 +2189,12 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
+        if let Some(admission) = self.live_bridge_dispatch_admission.clone() {
+            self.tool_dispatch_context = self
+                .tool_dispatch_context
+                .clone()
+                .with_live_bridge_admission(admission);
+        }
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2216,6 +2515,173 @@ where
     }
 }
 
+impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
+    /// Prepare one concurrent noncommitting bridge execution from this exact
+    /// live member without borrowing or mutating the ordinary Agent.
+    ///
+    /// Preparation consumes the generated model-computation permit before the
+    /// caller may publish acceptance. The returned future owns only
+    /// operation-local mutable state; provider/auth and dispatcher/policy
+    /// identity remain shared with the durable member.
+    pub fn prepare_live_bridge_noncommitting(
+        &self,
+        snapshot: Session,
+        semantic_request: ContentInput,
+        dispatch_admission: crate::LiveBridgeToolDispatchAdmission,
+        run_permit: crate::LiveBridgeNoncommittingRunPermit,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<RunResult, AgentError>> + Send + 'static>,
+        >,
+        AgentError,
+    > {
+        if snapshot.id() != self.session.id() {
+            return Err(AgentError::ConfigError(
+                "live bridge snapshot does not belong to this durable member session".to_string(),
+            ));
+        }
+        let expected_revision = snapshot
+            .canonical_context_revision()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        let current_revision = self
+            .session
+            .canonical_context_revision()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        if expected_revision != current_revision {
+            return Err(AgentError::ConfigError(
+                "live bridge snapshot revision is no longer the durable member head".to_string(),
+            ));
+        }
+        self.validate_noncommitting_live_bridge_policy()?;
+
+        let frozen_tool_defs = self.tool_scope.visible_tools_result().map_err(|error| {
+            AgentError::InternalError(format!(
+                "live bridge could not capture the durable member's committed tool scope: {error}"
+            ))
+        })?;
+        let isolated_client = self.client.fork_noncommitting_live_bridge()?;
+        let isolated_turn_state_handle = self
+            .turn_state_handle
+            .as_ref()
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "durable member has no turn-state authority from which to mint an isolated live bridge child"
+                        .to_string(),
+                )
+            })?
+            .isolated_live_bridge_child()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+
+        run_permit.consume(
+            dispatch_admission.operation_id(),
+            snapshot.id(),
+            &expected_revision,
+        )?;
+
+        let (cancel_after_boundary_tx, cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let mut operation_agent = Agent {
+            config: self.config.clone(),
+            client: isolated_client,
+            tools: Arc::clone(&self.tools),
+            tool_scope: self.tool_scope.clone(),
+            store: Arc::clone(&self.store),
+            session: snapshot,
+            budget: self.budget.fork_shared_accounting(),
+            retry_policy: self.retry_policy.clone(),
+            depth: self.depth,
+            comms_runtime: None,
+            hook_engine: None,
+            hook_run_overrides: self.hook_run_overrides.clone(),
+            compactor: None,
+            compaction_curator: None,
+            last_input_tokens: self.last_input_tokens,
+            compaction_cadence: self.compaction_cadence.clone(),
+            pending_compaction_boundary_index: None,
+            pending_compaction_request_pressure: None,
+            pending_compaction_request_budget: None,
+            post_compaction_pressure_check: None,
+            memory_store: None,
+            compaction_commit_coordinator: None,
+            compaction_transaction: None,
+            in_flight_compaction_stage: None,
+            skill_engine: self.skill_engine.clone(),
+            pending_skill_references: None,
+            event_tap: crate::event_tap::new_event_tap(),
+            transient_turn_context_state: crate::session::TransientTurnContextStateHandle::new(),
+            default_event_tx: None,
+            checkpointer: None,
+            latest_run_checkpoint_receipt: None,
+            blob_store: self.blob_store.clone(),
+            terminal_error_detail: None,
+            terminal_error_metadata: None,
+            run_completed_hooks_applied: false,
+            run_completed_event_emitted: false,
+            silent_comms_intents: self.silent_comms_intents.clone(),
+            ops_lifecycle: None,
+            completion_feed: None,
+            epoch_cursor_state: None,
+            applied_cursor: self.applied_cursor,
+            completion_enrichment: None,
+            mob_authority_handle: self.mob_authority_handle.clone(),
+            turn_state_handle: Some(isolated_turn_state_handle),
+            model_routing_handle: None,
+            sticky_model_fallback_commit_coordinator: None,
+            pending_sticky_model_fallback_activation: None,
+            pending_callback_async_ops: None,
+            effective_model_registry: self.effective_model_registry.clone(),
+            active_model_profile: self.active_model_profile.clone(),
+            runtime_execution_kind_required: false,
+            runtime_execution_kind: None,
+            runtime_started_run_id: None,
+            runtime_terminal_failure_witness: None,
+            active_transcript_identity: None,
+            active_turn_request_contexts: Vec::new(),
+            external_tool_surface_handle: None,
+            auth_lease_handle: None,
+            mcp_server_lifecycle_handle: None,
+            cancel_after_boundary_tx,
+            cancel_after_boundary_rx,
+            model_defaults_resolver: self.model_defaults_resolver.clone(),
+            call_timeout_override: self.call_timeout_override.clone(),
+            extraction_state: super::extraction::ExtractionState::default(),
+            last_hidden_deferred_catalog_names: Default::default(),
+            last_pending_catalog_sources: Default::default(),
+            tool_dispatch_context: Default::default(),
+            live_bridge_dispatch_admission: Some(dispatch_admission),
+            live_bridge_tool_defs: Some(frozen_tool_defs),
+            noncommitting_live_bridge_run: true,
+            turn_tool_dispatch_metadata: Default::default(),
+            tools_config: self.tools_config.clone(),
+        };
+
+        Ok(Box::pin(async move {
+            let result = {
+                let run = operation_agent.run(semantic_request);
+                tokio::pin!(run);
+                tokio::select! {
+                    result = &mut run => result,
+                    () = async {
+                        loop {
+                            if *cancellation.borrow() {
+                                break;
+                            }
+                            if cancellation.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => Err(AgentError::Cancelled),
+                }
+            };
+            if matches!(result, Err(AgentError::Cancelled)) {
+                operation_agent.cancel();
+            }
+            result
+        }))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod typed_transcript_contract_tests {
@@ -2393,6 +2859,31 @@ mod skill_activation_effect_tests {
         }
     }
 
+    struct PendingLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for PendingLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            std::future::pending().await
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "pending-mock-model"
+        }
+    }
+
     struct ProjectionRejectingLlmClient {
         called: Arc<AtomicBool>,
     }
@@ -2431,6 +2922,20 @@ mod skill_activation_effect_tests {
     }
 
     struct NoTools;
+
+    struct AllowBridgeDispatch;
+
+    #[async_trait]
+    impl crate::ToolDispatchAdmission for AllowBridgeDispatch {
+        async fn await_dispatch_admission(
+            &self,
+            _call: crate::ToolCallView<'_>,
+            _context: Option<&crate::ToolDispatchContext>,
+            _effect_kind: crate::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -3028,6 +3533,151 @@ mod skill_activation_effect_tests {
             .expect("effect should persist a block assistant message");
         assert_eq!(assistant.identity.interaction_id, Some(interaction_id));
         assert_eq!(assistant.identity.run_id, Some(run_id));
+    }
+
+    #[tokio::test]
+    async fn noncommitting_live_bridge_rejects_deferred_tool_effect_without_mutation() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let session_before = serde_json::to_value(agent.session()).expect("serialize session");
+        let tool_scope_before = agent.tool_scope_snapshot();
+        agent.noncommitting_live_bridge_run = true;
+
+        let error = agent
+            .apply_session_effects(
+                &[crate::ops::SessionEffect::RequestDeferredTools {
+                    authorities: vec![crate::DeferredToolLoadAuthority::new(
+                        "deferred_tool",
+                        crate::ToolVisibilityWitness {
+                            last_seen_provenance: Some(crate::ToolProvenance {
+                                kind: crate::ToolSourceKind::Callback,
+                                source_id: "bridge-effect-test".into(),
+                            }),
+                        },
+                    )],
+                }],
+                None,
+            )
+            .expect_err("noncommitting bridge must reject deferred-tool mutation");
+
+        assert!(error.to_string().contains("may not mutate deferred-tool"));
+        assert_eq!(
+            serde_json::to_value(agent.session()).expect("serialize session after rejection"),
+            session_before
+        );
+        assert_eq!(agent.tool_scope_snapshot(), tool_scope_before);
+
+        let mob_authority = crate::service::MobToolAuthorityContext::generated_for_test(
+            crate::service::OpaquePrincipalToken::new("bridge-effect-test"),
+            true,
+            true,
+            true,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
+        let error = agent
+            .apply_session_effects(
+                &[crate::ops::SessionEffect::ReplaceMobToolAuthorityContext {
+                    authority_context: mob_authority,
+                }],
+                None,
+            )
+            .expect_err("noncommitting bridge must reject mob authority mutation");
+        assert!(error.to_string().contains("may not mutate deferred-tool"));
+        assert_eq!(
+            serde_json::to_value(agent.session())
+                .expect("serialize session after second rejection"),
+            session_before
+        );
+        assert_eq!(agent.tool_scope_snapshot(), tool_scope_before);
+    }
+
+    #[tokio::test]
+    async fn live_bridge_cancellation_preserves_pending_ordinary_transient_context_boundary() {
+        let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(SucceedingSkillEngine)));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_skill_engine(skill_runtime)
+            .build_standalone(
+                Arc::new(PendingLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let ordinary_context_state = agent.transient_turn_context_state();
+        let ordinary_run_id = crate::RunId::new();
+        ordinary_context_state
+            .open_next_boundary(&ordinary_run_id)
+            .expect("open ordinary context boundary");
+        let prepare_state = ordinary_context_state.clone();
+        let prepare_run_id = ordinary_run_id.clone();
+        let prepare_task = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![
+                        crate::lifecycle::run_primitive::TurnRequestContext::new(
+                            "ordinary pending context",
+                        )
+                        .expect("context"),
+                    ],
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let take_state = ordinary_context_state.clone();
+        let take_run_id = ordinary_run_id.clone();
+        let take_task = tokio::spawn(async move {
+            take_state
+                .take_pending_at_exact_boundary(&take_run_id)
+                .await
+        });
+        let mut prepared = tokio::time::timeout(std::time::Duration::from_secs(1), prepare_task)
+            .await
+            .expect("ordinary context preparation parked")
+            .expect("preparation task")
+            .expect("prepare ordinary context");
+
+        let snapshot = agent.session().clone();
+        let revision = snapshot
+            .canonical_context_revision()
+            .expect("canonical revision");
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+        let cancelled = agent
+            .run_live_bridge_noncommitting(
+                snapshot.clone(),
+                "temporary bridge request".to_string().into(),
+                crate::LiveBridgeToolDispatchAdmission::__test_new(
+                    "ordinary-context-preservation",
+                    Arc::new(AllowBridgeDispatch),
+                ),
+                crate::LiveBridgeNoncommittingRunPermit::__test_new(
+                    "ordinary-context-preservation",
+                    snapshot.id().clone(),
+                    revision,
+                ),
+                cancel_rx,
+            )
+            .await
+            .expect_err("pre-signalled bridge cancellation");
+        assert!(matches!(cancelled, AgentError::Cancelled));
+
+        crate::lifecycle::core_executor::CoreBoundaryStageCommitAuthority::commit(&mut prepared)
+            .expect("commit original ordinary context boundary");
+        let contexts = tokio::time::timeout(std::time::Duration::from_secs(1), take_task)
+            .await
+            .expect("ordinary boundary resumed")
+            .expect("take task")
+            .expect("take original ordinary context");
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].as_str(), "ordinary pending context");
+        assert!(
+            ordinary_context_state
+                .take_pending_at_exact_boundary(&ordinary_run_id)
+                .await
+                .is_err(),
+            "original ordinary context request must resolve exactly once"
+        );
     }
 
     /// Ask 1 direct-path lowering: each injected-context entry materializes as

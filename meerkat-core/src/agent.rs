@@ -183,6 +183,19 @@ pub trait AgentLlmClient: Send + Sync {
     /// after hot-swap.
     fn model(&self) -> &str;
 
+    /// Fork this exact provider/model/auth client for one concurrent
+    /// noncommitting live-bridge operation.
+    ///
+    /// The fork must share provider and credential ownership with this client
+    /// while isolating all per-response stream counters and event sinks. The
+    /// default fails closed so a decorator cannot accidentally cross-wire
+    /// bridge deltas into the ordinary member stream.
+    fn fork_noncommitting_live_bridge(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError> {
+        Err(AgentError::ConfigError(
+            "LLM client does not support an event-isolated concurrent live bridge fork".to_string(),
+        ))
+    }
+
     /// Prepare the next prebuilt fallback model after the generated turn
     /// authority has classified the LLM failure as recoverable.
     ///
@@ -569,7 +582,7 @@ pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAf
 /// lets tool surfaces resolve typed turn-scoped references, such as a
 /// `source=current_turn, index=0` image ref, without writing surface-local
 /// metadata into canonical transcript history.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct ToolDispatchContext {
     current_turn: Option<CurrentTurnContent>,
     turn_metadata: BTreeMap<String, serde_json::Value>,
@@ -577,7 +590,273 @@ pub struct ToolDispatchContext {
     interaction_lineage_id: Option<crate::interaction::InteractionId>,
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
+    live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
 }
+
+/// Process-local live bridge authority carried to the last actual tool
+/// dispatch boundary. The opaque id participates in equality and diagnostics;
+/// the authority object itself is deliberately never rendered.
+#[derive(Clone)]
+pub struct LiveBridgeToolDispatchAdmission {
+    operation_id: Arc<str>,
+    admission: Arc<dyn crate::ToolDispatchAdmission>,
+}
+
+/// One-use generated authority for entering the private noncommitting Agent
+/// runner. Clones share the same consumption bit so request custody may move
+/// across actors without creating a second model-computation authorization.
+#[derive(Clone)]
+pub struct LiveBridgeNoncommittingRunPermit {
+    operation_id: Arc<str>,
+    session_id: crate::SessionId,
+    canonical_context_revision: crate::CanonicalContextRevision,
+    consumed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LiveBridgeNoncommittingRunPermit {
+    #[allow(dead_code)] // Called by the generated linker bridge in shipping compositions.
+    fn new(
+        operation_id: Arc<str>,
+        session_id: crate::SessionId,
+        canonical_context_revision: crate::CanonicalContextRevision,
+    ) -> Self {
+        Self {
+            operation_id,
+            session_id,
+            canonical_context_revision,
+            consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Validate exact request binding without consuming model authority.
+    pub fn validate_binding(
+        &self,
+        operation_id: &str,
+        session_id: &crate::SessionId,
+        canonical_context_revision: &crate::CanonicalContextRevision,
+    ) -> Result<(), crate::AgentError> {
+        if self.operation_id.as_ref() != operation_id
+            || &self.session_id != session_id
+            || &self.canonical_context_revision != canonical_context_revision
+        {
+            return Err(crate::AgentError::ConfigError(
+                "live bridge run permit does not match the exact operation, session, and snapshot revision"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn consume(
+        &self,
+        operation_id: &str,
+        session_id: &crate::SessionId,
+        canonical_context_revision: &crate::CanonicalContextRevision,
+    ) -> Result<(), crate::AgentError> {
+        self.validate_binding(operation_id, session_id, canonical_context_revision)?;
+        self.consumed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| {
+                crate::AgentError::ConfigError(
+                    "live bridge model-computation authority was already consumed".to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        operation_id: impl Into<Arc<str>>,
+        session_id: crate::SessionId,
+        canonical_context_revision: crate::CanonicalContextRevision,
+    ) -> Self {
+        Self::new(operation_id.into(), session_id, canonical_context_revision)
+    }
+}
+
+impl std::fmt::Debug for LiveBridgeNoncommittingRunPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveBridgeNoncommittingRunPermit")
+            .field("operation_id", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("canonical_context_revision", &"[REDACTED]")
+            .field(
+                "consumed",
+                &self.consumed.load(std::sync::atomic::Ordering::Acquire),
+            )
+            .finish()
+    }
+}
+
+impl LiveBridgeToolDispatchAdmission {
+    #[must_use]
+    #[allow(dead_code)] // Called by the generated linker bridge in shipping compositions.
+    pub(crate) fn new(
+        operation_id: impl Into<Arc<str>>,
+        admission: Arc<dyn crate::ToolDispatchAdmission>,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            admission,
+        }
+    }
+
+    /// Test-only constructor for exercising the final Agent dispatch seam
+    /// without linking a generated runtime machine.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_new(
+        operation_id: impl Into<Arc<str>>,
+        admission: Arc<dyn crate::ToolDispatchAdmission>,
+    ) -> Self {
+        Self::new(operation_id, admission)
+    }
+
+    #[must_use]
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &Arc<dyn crate::ToolDispatchAdmission> {
+        &self.admission
+    }
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_bridge_tool_dispatch_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_live_bridge_tool_dispatch_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_live_bridge_tool_dispatch_admission_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_live_bridge_tool_dispatch_admission_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    operation_id: Arc<str>,
+    admission: Arc<dyn crate::ToolDispatchAdmission>,
+) -> Result<LiveBridgeToolDispatchAdmission, String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        runtime_live_bridge_tool_dispatch_generated_authority_bridge_token_is_valid(token)
+    };
+    if !valid {
+        return Err(
+            "live bridge tool dispatch admission requires generated runtime authority".to_string(),
+        );
+    }
+    Ok(LiveBridgeToolDispatchAdmission::new(
+        operation_id,
+        admission,
+    ))
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = concat!(
+        "__meerkat_runtime_generated_authority_bridge_token_is_valid_v1_live_bridge_noncommitting_run_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn runtime_live_bridge_noncommitting_run_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
+}
+
+#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = concat!(
+    "__meerkat_core_runtime_generated_live_bridge_noncommitting_run_permit_build_v1_",
+    env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+))]
+pub(crate) extern "Rust" fn runtime_generated_live_bridge_noncommitting_run_permit_build(
+    token: &'static (dyn std::any::Any + Send + Sync),
+    operation_id: Arc<str>,
+    session_id: crate::SessionId,
+    canonical_context_revision: crate::CanonicalContextRevision,
+) -> Result<LiveBridgeNoncommittingRunPermit, String> {
+    #[allow(unsafe_code)]
+    let valid = unsafe {
+        runtime_live_bridge_noncommitting_run_generated_authority_bridge_token_is_valid(token)
+    };
+    if !valid {
+        return Err(
+            "live bridge noncommitting run permit requires generated runtime authority".to_string(),
+        );
+    }
+    Ok(LiveBridgeNoncommittingRunPermit::new(
+        operation_id,
+        session_id,
+        canonical_context_revision,
+    ))
+}
+
+impl std::fmt::Debug for LiveBridgeToolDispatchAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveBridgeToolDispatchAdmission")
+            .field("operation_id", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for LiveBridgeToolDispatchAdmission {
+    fn eq(&self, other: &Self) -> bool {
+        self.operation_id == other.operation_id && Arc::ptr_eq(&self.admission, &other.admission)
+    }
+}
+
+impl Eq for LiveBridgeToolDispatchAdmission {}
+
+impl std::fmt::Debug for ToolDispatchContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolDispatchContext")
+            .field("current_turn", &self.current_turn)
+            .field("turn_metadata", &self.turn_metadata)
+            .field("origin_session_id", &self.origin_session_id)
+            .field("interaction_lineage_id", &self.interaction_lineage_id)
+            .field("run_id", &self.run_id)
+            .field("streaming", &self.streaming)
+            .field("live_bridge_admission", &self.live_bridge_admission)
+            .finish()
+    }
+}
+
+impl PartialEq for ToolDispatchContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_turn == other.current_turn
+            && self.turn_metadata == other.turn_metadata
+            && self.origin_session_id == other.origin_session_id
+            && self.interaction_lineage_id == other.interaction_lineage_id
+            && self.run_id == other.run_id
+            && self.streaming == other.streaming
+            && self.live_bridge_admission == other.live_bridge_admission
+    }
+}
+
+impl Eq for ToolDispatchContext {}
 
 /// Dispatch-context key carrying the current durable objective id.
 pub const TOOL_DISPATCH_OBJECTIVE_ID_KEY: &str = "meerkat.objective_id";
@@ -595,6 +874,7 @@ impl ToolDispatchContext {
             interaction_lineage_id: None,
             run_id: None,
             streaming: None,
+            live_bridge_admission: None,
         }
     }
 
@@ -665,6 +945,21 @@ impl ToolDispatchContext {
     pub(crate) fn with_streaming(mut self, streaming: crate::ToolStreamingDispatchContext) -> Self {
         self.streaming = Some(streaming);
         self
+    }
+
+    /// Bind one exact live bridge operation's generated dispatch authority.
+    #[must_use]
+    pub fn with_live_bridge_admission(
+        mut self,
+        admission: LiveBridgeToolDispatchAdmission,
+    ) -> Self {
+        self.live_bridge_admission = Some(admission);
+        self
+    }
+
+    #[must_use]
+    pub fn live_bridge_admission(&self) -> Option<&LiveBridgeToolDispatchAdmission> {
+        self.live_bridge_admission.as_ref()
     }
 
     pub fn current_turn_image(
@@ -840,6 +1135,12 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// the owner's declaration and not the wrapper's default.
     fn tool_mutation_class(&self, _tool_name: &str) -> crate::ToolMutationClass {
         crate::ToolMutationClass::Unknown
+    }
+
+    /// Provider-neutral effect class for one tool owned by this dispatcher.
+    /// Unknown or undeclared tools fail closed as external IO.
+    fn live_bridge_effect_kind(&self, _tool_name: &str) -> crate::LiveBridgeEffectKind {
+        crate::LiveBridgeEffectKind::ExternalIo
     }
 
     /// Live generation for one logical tool binding.
@@ -1310,6 +1611,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         // dispatcher's declaration is forwarded unchanged, and a name this
         // filter hides is denied by the allow-set check before dispatch.
         self.inner.tool_mutation_class(tool_name)
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> crate::LiveBridgeEffectKind {
+        self.inner.live_bridge_effect_kind(tool_name)
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
@@ -2230,6 +2535,15 @@ where
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
     /// Dispatch-time projection of the current turn input for contextual tools.
     pub(crate) tool_dispatch_context: ToolDispatchContext,
+    /// Exact per-operation dispatch authority for a noncommitting live bridge
+    /// run. Ordinary turns always leave this absent.
+    pub(crate) live_bridge_dispatch_admission: Option<LiveBridgeToolDispatchAdmission>,
+    /// Immutable provider-visible tool surface captured from the durable
+    /// member at bridge preparation.
+    pub(crate) live_bridge_tool_defs: Option<Arc<[Arc<ToolDef>]>>,
+    /// Suppress every SessionStore/checkpointer write while the live member is
+    /// temporarily executing against a retained canonical snapshot clone.
+    pub(crate) noncommitting_live_bridge_run: bool,
     /// Runtime-owned dispatch metadata for this turn.
     pub(crate) turn_tool_dispatch_metadata: BTreeMap<String, serde_json::Value>,
     /// Typed tool-execution policy (per-call timeouts + concurrency bound)
@@ -3400,6 +3714,36 @@ mod tests {
         assert!(
             json.get("job_id").is_some(),
             "job_id must be the app-facing control noun"
+        );
+    }
+
+    #[test]
+    fn live_bridge_noncommitting_run_permit_is_exact_and_one_use_across_clones() {
+        let session_id = crate::SessionId::new();
+        let revision = crate::CanonicalContextRevision::from_transcript_revision(
+            "test-canonical-revision".to_string(),
+        );
+        let permit = crate::LiveBridgeNoncommittingRunPermit::__test_new(
+            "operation-1",
+            session_id.clone(),
+            revision.clone(),
+        );
+        let clone = permit.clone();
+
+        assert!(
+            permit
+                .consume("operation-2", &session_id, &revision)
+                .is_err(),
+            "mismatched operation must fail without consuming the permit"
+        );
+        permit
+            .consume("operation-1", &session_id, &revision)
+            .expect("exact binding consumes permit once");
+        assert!(
+            clone
+                .consume("operation-1", &session_id, &revision)
+                .is_err(),
+            "a cloned permit must share the one-use consumption bit"
         );
     }
 }

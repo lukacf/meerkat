@@ -250,6 +250,20 @@ pub enum RealtimeTranscriptEvent {
         item_id: String,
         content_index: u32,
     },
+    /// Persist the exact playback terminal fact after generated authority has
+    /// accepted it while provider final text is still absent. This is a raw
+    /// recovery carrier, not a canonical transcript or hearing claim.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    AssistantPlaybackTerminalObserved {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+        stop_reason: StopReason,
+        usage: crate::types::TurnUsage,
+    },
     /// Consume the exact one-use playback target after generated terminal
     /// authority has resolved it. Exact replay is rejected so stale browser
     /// reports cannot affect a later assistant turn.
@@ -274,13 +288,22 @@ pub enum RealtimeTranscriptEvent {
 /// Durable session-owned correlation for one foreground assistant playback
 /// target. Fields are read-only outside core so surfaces can resolve but not
 /// manufacture the semantic identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveAssistantPlaybackTarget {
     channel_id: String,
     interaction_id: crate::InteractionId,
     response_id: String,
     item_id: String,
     content_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_terminal: Option<LiveAssistantPlaybackPendingTerminal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveAssistantPlaybackPendingTerminal {
+    pub(crate) evidence: crate::LiveAssistantPlaybackEvidence,
+    pub(crate) stop_reason: StopReason,
+    pub(crate) usage: crate::types::TurnUsage,
 }
 
 impl LiveAssistantPlaybackTarget {
@@ -297,6 +320,7 @@ impl LiveAssistantPlaybackTarget {
             response_id,
             item_id,
             content_index,
+            pending_terminal: None,
         }
     }
 
@@ -323,6 +347,28 @@ impl LiveAssistantPlaybackTarget {
     #[must_use]
     pub const fn content_index(&self) -> u32 {
         self.content_index
+    }
+
+    #[must_use]
+    pub fn pending_terminal(&self) -> Option<&LiveAssistantPlaybackPendingTerminal> {
+        self.pending_terminal.as_ref()
+    }
+}
+
+impl LiveAssistantPlaybackPendingTerminal {
+    #[must_use]
+    pub fn evidence(&self) -> &crate::LiveAssistantPlaybackEvidence {
+        &self.evidence
+    }
+
+    #[must_use]
+    pub const fn stop_reason(&self) -> StopReason {
+        self.stop_reason
+    }
+
+    #[must_use]
+    pub fn usage(&self) -> &crate::types::TurnUsage {
+        &self.usage
     }
 }
 

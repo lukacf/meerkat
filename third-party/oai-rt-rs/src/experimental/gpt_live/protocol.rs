@@ -50,7 +50,7 @@ pub struct CallSession {
     pub model: String,
     pub audio: SessionAudio,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub delegation: Option<ClientDelegation>,
+    pub delegation: Option<Delegation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(flatten)]
@@ -72,11 +72,197 @@ pub struct SessionAudioOutput {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Delegation {
+    Client(ClientDelegation),
+    Responses(ResponsesDelegation),
+}
+
+impl fmt::Debug for Delegation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Delegation")
+            .field(
+                "kind",
+                &match self {
+                    Self::Client(_) => "client",
+                    Self::Responses(_) => "responses",
+                },
+            )
+            .field("configuration", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ClientDelegationType {
+    Client,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClientDelegation {
     #[serde(rename = "type")]
-    pub delegation_type: String,
+    delegation_type: ClientDelegationType,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+impl ClientDelegation {
+    #[must_use]
+    pub const fn new(extra: ExtraFields) -> Self {
+        Self {
+            delegation_type: ClientDelegationType::Client,
+            extra,
+        }
+    }
+}
+
+impl Default for ClientDelegation {
+    fn default() -> Self {
+        Self::new(ExtraFields::new())
+    }
+}
+
+impl fmt::Debug for ClientDelegation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientDelegation")
+            .field("delegation_type", &"client")
+            .field("extra_fields", &self.extra.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ResponsesDelegationType {
+    Responses,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResponsesDelegation {
+    #[serde(rename = "type")]
+    delegation_type: ResponsesDelegationType,
+    pub responses: ResponsesConfig,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl ResponsesDelegation {
+    #[must_use]
+    pub const fn new(responses: ResponsesConfig, extra: ExtraFields) -> Self {
+        Self {
+            delegation_type: ResponsesDelegationType::Responses,
+            responses,
+            extra,
+        }
+    }
+}
+
+impl fmt::Debug for ResponsesDelegation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponsesDelegation")
+            .field("delegation_type", &"responses")
+            .field("responses", &self.responses)
+            .field("extra_fields", &self.extra.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResponsesConfig {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    pub tools: Vec<FunctionTool>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl fmt::Debug for ResponsesConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponsesConfig")
+            .field("model", &"<redacted>")
+            .field(
+                "instructions",
+                &self.instructions.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tool_count", &self.tools.len())
+            .field("extra_fields", &self.extra.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FunctionToolType {
+    Function,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct FunctionTool {
+    #[serde(rename = "type")]
+    tool_type: FunctionToolType,
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl FunctionTool {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+        extra: ExtraFields,
+    ) -> Self {
+        Self {
+            tool_type: FunctionToolType::Function,
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            extra,
+        }
+    }
+}
+
+impl fmt::Debug for FunctionTool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FunctionTool")
+            .field("tool_type", &"function")
+            .field("name", &"<redacted>")
+            .field("description", &"<redacted>")
+            .field("parameters", &"<redacted>")
+            .field("extra_fields", &self.extra.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct BridgeArguments {
+    pub(crate) request: String,
+}
+
+impl BridgeArguments {
+    #[must_use]
+    pub fn request(&self) -> &str {
+        &self.request
+    }
+}
+
+impl fmt::Debug for BridgeArguments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BridgeArguments")
+            .field("request", &"<redacted>")
+            .finish()
+    }
 }
 
 pub struct CreateCallResponse {
@@ -125,18 +311,122 @@ impl fmt::Debug for InputTextContent {
 pub enum ClientEvent {
     SessionContextAppend(SessionContextAppend),
     DelegationContextAppend(DelegationContextAppend),
+    DelegationFunctionCallOutput(DelegationFunctionCallOutput),
+}
+
+impl ClientEvent {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionContextAppend(_) => "session.context.append",
+            Self::DelegationContextAppend(_) => "delegation.context.append",
+            Self::DelegationFunctionCallOutput(_) => "delegation.function_call_output.create",
+        }
+    }
 }
 
 impl fmt::Debug for ClientEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self {
-            Self::SessionContextAppend(_) => "session.context.append",
-            Self::DelegationContextAppend(_) => "delegation.context.append",
-        };
         formatter
             .debug_struct("ClientEvent")
-            .field("kind", &kind)
+            .field("kind", &self.kind())
             .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FunctionCallId(String);
+
+impl FunctionCallId {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for FunctionCallId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FunctionCallId(<redacted>)")
+    }
+}
+
+impl Serialize for FunctionCallId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionCallId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FunctionCallOutputType {
+    FunctionCallOutput,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct FunctionCallOutput {
+    #[serde(rename = "type")]
+    output_type: FunctionCallOutputType,
+    pub call_id: FunctionCallId,
+    pub output: String,
+}
+
+impl FunctionCallOutput {
+    #[must_use]
+    pub fn new(call_id: FunctionCallId, output: impl Into<String>) -> Self {
+        Self {
+            output_type: FunctionCallOutputType::FunctionCallOutput,
+            call_id,
+            output: output.into(),
+        }
+    }
+}
+
+impl fmt::Debug for FunctionCallOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FunctionCallOutput")
+            .field("output_type", &"function_call_output")
+            .field("call_id", &self.call_id)
+            .field("output", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct DelegationFunctionCallOutput {
+    pub item: FunctionCallOutput,
+}
+
+impl DelegationFunctionCallOutput {
+    #[must_use]
+    pub const fn new(item: FunctionCallOutput) -> Self {
+        Self { item }
+    }
+}
+
+impl fmt::Debug for DelegationFunctionCallOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DelegationFunctionCallOutput")
+            .field("item", &self.item)
             .finish()
     }
 }
@@ -227,6 +517,68 @@ impl ServerEvent {
             Self::DelegationContextAppended(_) => "delegation.context.appended",
             Self::Unknown(event) => event.kind(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventCarrier {
+    Sideband,
+    OrderedOaiEvents,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct ReceivedServerEvent {
+    carrier: EventCarrier,
+    byte_count: usize,
+    event: ServerEvent,
+}
+
+impl ReceivedServerEvent {
+    pub(crate) const fn new(carrier: EventCarrier, byte_count: usize, event: ServerEvent) -> Self {
+        Self {
+            carrier,
+            byte_count,
+            event,
+        }
+    }
+
+    #[must_use]
+    pub const fn carrier(&self) -> EventCarrier {
+        self.carrier
+    }
+
+    #[must_use]
+    pub const fn byte_count(&self) -> usize {
+        self.byte_count
+    }
+
+    #[must_use]
+    pub const fn event(&self) -> &ServerEvent {
+        &self.event
+    }
+
+    #[must_use]
+    pub fn into_event(self) -> ServerEvent {
+        self.event
+    }
+}
+
+impl fmt::Debug for ReceivedServerEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReceivedServerEvent")
+            .field("carrier", &self.carrier)
+            .field("byte_count", &self.byte_count)
+            .field(
+                "kind",
+                &if matches!(self.event, ServerEvent::Unknown(_)) {
+                    "unknown"
+                } else {
+                    self.event.kind()
+                },
+            )
+            .field("payload", &"<redacted>")
+            .finish()
     }
 }
 

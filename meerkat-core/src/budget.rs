@@ -5,6 +5,7 @@
 use crate::error::AgentError;
 use crate::time_compat::{Duration, Instant};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Resource limits for an agent run
@@ -177,12 +178,17 @@ impl BudgetLimits {
 #[derive(Debug)]
 pub struct Budget {
     limits: BudgetLimits,
-    tokens_used: AtomicU64,
-    tool_calls_made: AtomicU64,
+    accounting: Arc<BudgetAccounting>,
     /// Agent-lifetime horizon epoch. Set once at construction, never re-armed.
     start_time: Instant,
     /// Per-turn horizon epoch. Re-armed by [`Budget::begin_turn`] at run entry.
     turn_start: Instant,
+}
+
+#[derive(Debug)]
+struct BudgetAccounting {
+    tokens_used: AtomicU64,
+    tool_calls_made: AtomicU64,
 }
 
 impl Budget {
@@ -191,8 +197,10 @@ impl Budget {
         let now = Instant::now();
         Self {
             limits,
-            tokens_used: AtomicU64::new(0),
-            tool_calls_made: AtomicU64::new(0),
+            accounting: Arc::new(BudgetAccounting {
+                tokens_used: AtomicU64::new(0),
+                tool_calls_made: AtomicU64::new(0),
+            }),
             start_time: now,
             turn_start: now,
         }
@@ -253,7 +261,7 @@ impl Budget {
     pub fn observe(&self) -> BudgetObservation {
         // Check token limit
         if let Some(limit) = self.limits.max_tokens {
-            let used = self.tokens_used.load(Ordering::Relaxed);
+            let used = self.accounting.tokens_used.load(Ordering::Relaxed);
             if used >= limit {
                 return BudgetObservation::Exceeded(BudgetExceeded {
                     dimension: BudgetDimension::Tokens,
@@ -308,7 +316,7 @@ impl Budget {
 
         // Check tool call limit
         if let Some(limit) = self.limits.max_tool_calls {
-            let count = self.tool_calls_made.load(Ordering::Relaxed) as usize;
+            let count = self.accounting.tool_calls_made.load(Ordering::Relaxed) as usize;
             if count >= limit {
                 return BudgetObservation::Exceeded(BudgetExceeded {
                     dimension: BudgetDimension::ToolCalls,
@@ -333,12 +341,15 @@ impl Budget {
 
     /// Record token usage
     pub fn record_tokens(&self, tokens: u64) {
-        self.tokens_used.fetch_add(tokens, Ordering::Relaxed);
+        self.accounting
+            .tokens_used
+            .fetch_add(tokens, Ordering::Relaxed);
     }
 
     /// Record tool calls
     pub fn record_calls(&self, count: usize) {
-        self.tool_calls_made
+        self.accounting
+            .tool_calls_made
             .fetch_add(count as u64, Ordering::Relaxed);
     }
 
@@ -356,7 +367,7 @@ impl Budget {
     pub fn token_usage(&self) -> Option<(u64, u64)> {
         self.limits
             .max_tokens
-            .map(|limit| (self.tokens_used.load(Ordering::Relaxed), limit))
+            .map(|limit| (self.accounting.tokens_used.load(Ordering::Relaxed), limit))
     }
 
     /// The time horizon that currently binds, as `(elapsed, limit)`.
@@ -398,15 +409,18 @@ impl Budget {
 
     /// Get call usage (count, limit) if limit is set
     pub fn call_usage(&self) -> Option<(usize, usize)> {
-        self.limits
-            .max_tool_calls
-            .map(|limit| (self.tool_calls_made.load(Ordering::Relaxed) as usize, limit))
+        self.limits.max_tool_calls.map(|limit| {
+            (
+                self.accounting.tool_calls_made.load(Ordering::Relaxed) as usize,
+                limit,
+            )
+        })
     }
 
     /// Get remaining tokens (None if unlimited)
     pub fn remaining_tokens(&self) -> Option<u64> {
         self.limits.max_tokens.map(|limit| {
-            let used = self.tokens_used.load(Ordering::Relaxed);
+            let used = self.accounting.tokens_used.load(Ordering::Relaxed);
             limit.saturating_sub(used)
         })
     }
@@ -421,14 +435,33 @@ impl Budget {
         self.binding_time_horizon()
             .map(|(elapsed, limit)| limit.saturating_sub(elapsed))
     }
+
+    /// Fork an operation-local turn clock while retaining this agent's exact
+    /// lifetime token and tool-call accounting.
+    ///
+    /// Noncommitting live-bridge execution uses this narrow seam so concurrent
+    /// ordinary and bridge turns cannot overwrite each other's per-turn clock,
+    /// while neither path can evade the durable member's aggregate limits.
+    pub(crate) fn fork_shared_accounting(&self) -> Self {
+        Self {
+            limits: self.limits.clone(),
+            accounting: Arc::clone(&self.accounting),
+            start_time: self.start_time,
+            turn_start: Instant::now(),
+        }
+    }
 }
 
 impl Clone for Budget {
     fn clone(&self) -> Self {
         Self {
             limits: self.limits.clone(),
-            tokens_used: AtomicU64::new(self.tokens_used.load(Ordering::Relaxed)),
-            tool_calls_made: AtomicU64::new(self.tool_calls_made.load(Ordering::Relaxed)),
+            accounting: Arc::new(BudgetAccounting {
+                tokens_used: AtomicU64::new(self.accounting.tokens_used.load(Ordering::Relaxed)),
+                tool_calls_made: AtomicU64::new(
+                    self.accounting.tool_calls_made.load(Ordering::Relaxed),
+                ),
+            }),
             start_time: self.start_time,
             turn_start: self.turn_start,
         }

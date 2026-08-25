@@ -48,6 +48,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -64,12 +65,12 @@ meerkat-providers = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-uuid = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 tracing-subscriber = { workspace = true }
 meerkat-core = { workspace = true, features = [
     "jsonschema",
     "__meerkat-facade-agent-factory-build",
+    "test-support",
 ] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde = { workspace = true }

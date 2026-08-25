@@ -740,6 +740,9 @@ impl AgentBuilder {
             last_hidden_deferred_catalog_names: Default::default(),
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),
+            live_bridge_dispatch_admission: None,
+            live_bridge_tool_defs: None,
+            noncommitting_live_bridge_run: false,
             turn_tool_dispatch_metadata: Default::default(),
             tools_config: self.tools_config,
         };

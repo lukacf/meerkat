@@ -58,7 +58,7 @@ fn assistant_first_target_without_foreground_interaction_is_rejected() {
 }
 
 #[test]
-fn exact_target_blocks_early_completion_and_terminal_is_one_use() {
+fn final_then_terminal_joins_once_and_validates_exact_prefix() {
     let mut authority = interaction_authority();
     admit_target(&mut authority);
 
@@ -72,49 +72,8 @@ fn exact_target_blocks_early_completion_and_terminal_is_one_use() {
             .is_err(),
         "staged assistant text cannot become terminal before playback evidence"
     );
-    assert!(
-        authority
-            .resolve_live_assistant_playback_terminal(
-                key(),
-                CHANNEL.to_string(),
-                INTERACTION.to_string(),
-                RESPONSE.to_string(),
-                "wrong-item".to_string(),
-                CONTENT_INDEX,
-                12,
-                "authoritative-digest".to_string(),
-                false,
-                LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
-                5,
-                "prefix-digest".to_string(),
-                true,
-            )
-            .is_err(),
-        "a mismatched response target cannot authorize canonical text"
-    );
-    assert!(
-        authority
-            .resolve_live_assistant_playback_terminal(
-                key(),
-                CHANNEL.to_string(),
-                INTERACTION.to_string(),
-                RESPONSE.to_string(),
-                ITEM.to_string(),
-                CONTENT_INDEX,
-                12,
-                "authoritative-digest".to_string(),
-                false,
-                LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
-                5,
-                "prefix-digest".to_string(),
-                false,
-            )
-            .is_err(),
-        "reported text that is not an exact prefix cannot authorize canonical replacement"
-    );
-
     let effects = authority
-        .resolve_live_assistant_playback_terminal(
+        .observe_live_assistant_playback_final(
             key(),
             CHANNEL.to_string(),
             INTERACTION.to_string(),
@@ -123,10 +82,51 @@ fn exact_target_blocks_early_completion_and_terminal_is_one_use() {
             CONTENT_INDEX,
             12,
             "authoritative-digest".to_string(),
+            LiveAssistantPlaybackTerminalObservation::Unmeasured,
+            0,
+            String::new(),
             false,
+        )
+        .expect("final fact is retained while terminal evidence is absent");
+    assert!(matches!(
+        effects.as_slice(),
+        [SessionDocumentEffect::LiveAssistantPlaybackFinalObserved { .. }]
+    ));
+    assert!(
+        authority
+            .observe_live_assistant_playback_terminal(
+                key(),
+                CHANNEL.to_string(),
+                INTERACTION.to_string(),
+                RESPONSE.to_string(),
+                ITEM.to_string(),
+                CONTENT_INDEX,
+                LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
+                5,
+                "prefix-digest".to_string(),
+                12,
+                "authoritative-digest".to_string(),
+                true,
+                false,
+            )
+            .is_err(),
+        "reported text that is not an exact prefix cannot authorize canonical replacement"
+    );
+
+    let effects = authority
+        .observe_live_assistant_playback_terminal(
+            key(),
+            CHANNEL.to_string(),
+            INTERACTION.to_string(),
+            RESPONSE.to_string(),
+            ITEM.to_string(),
+            CONTENT_INDEX,
             LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
             5,
             "prefix-digest".to_string(),
+            12,
+            "authoritative-digest".to_string(),
+            true,
             true,
         )
         .expect("exact reported prefix terminalizes the target");
@@ -142,19 +142,19 @@ fn exact_target_blocks_early_completion_and_terminal_is_one_use() {
     ));
     assert!(
         authority
-            .resolve_live_assistant_playback_terminal(
+            .observe_live_assistant_playback_terminal(
                 key(),
                 CHANNEL.to_string(),
                 INTERACTION.to_string(),
                 RESPONSE.to_string(),
                 ITEM.to_string(),
                 CONTENT_INDEX,
-                12,
-                "authoritative-digest".to_string(),
-                false,
                 LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
                 5,
                 "prefix-digest".to_string(),
+                12,
+                "authoritative-digest".to_string(),
+                true,
                 true,
             )
             .is_err(),
@@ -166,7 +166,7 @@ fn exact_target_blocks_early_completion_and_terminal_is_one_use() {
 }
 
 #[test]
-fn recovered_target_classifies_complete_and_unmeasured_without_hearing_claims() {
+fn terminal_then_final_and_recovery_join_without_hearing_claims() {
     let mut complete = SessionDocumentMachineAuthority::new();
     complete
         .recover_live_assistant_playback_target(
@@ -178,28 +178,29 @@ fn recovered_target_classifies_complete_and_unmeasured_without_hearing_claims() 
             CONTENT_INDEX,
         )
         .expect("durable exact target recovers correlation");
-    assert!(
-        complete
-            .resolve_live_assistant_playback_terminal(
-                key(),
-                CHANNEL.to_string(),
-                INTERACTION.to_string(),
-                RESPONSE.to_string(),
-                ITEM.to_string(),
-                CONTENT_INDEX,
-                12,
-                "full-digest".to_string(),
-                false,
-                LiveAssistantPlaybackTerminalObservation::PlaybackComplete,
-                0,
-                String::new(),
-                false,
-            )
-            .is_err(),
-        "playback complete cannot canonicalize a non-final assistant segment"
-    );
     let effects = complete
-        .resolve_live_assistant_playback_terminal(
+        .observe_live_assistant_playback_terminal(
+            key(),
+            CHANNEL.to_string(),
+            INTERACTION.to_string(),
+            RESPONSE.to_string(),
+            ITEM.to_string(),
+            CONTENT_INDEX,
+            LiveAssistantPlaybackTerminalObservation::PlaybackComplete,
+            0,
+            String::new(),
+            0,
+            String::new(),
+            false,
+            false,
+        )
+        .expect("early playback terminal is retained by generated authority");
+    assert!(matches!(
+        effects.as_slice(),
+        [SessionDocumentEffect::LiveAssistantPlaybackTerminalObserved { .. }]
+    ));
+    let effects = complete
+        .observe_live_assistant_playback_final(
             key(),
             CHANNEL.to_string(),
             INTERACTION.to_string(),
@@ -208,13 +209,12 @@ fn recovered_target_classifies_complete_and_unmeasured_without_hearing_claims() 
             CONTENT_INDEX,
             12,
             "full-digest".to_string(),
-            true,
             LiveAssistantPlaybackTerminalObservation::PlaybackComplete,
             0,
             String::new(),
             false,
         )
-        .expect("provider-final complete playback authorizes full staged text");
+        .expect("late final joins the retained complete terminal");
     assert!(matches!(
         effects.as_slice(),
         [SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
@@ -226,22 +226,74 @@ fn recovered_target_classifies_complete_and_unmeasured_without_hearing_claims() 
         }] if digest == "full-digest"
     ));
 
-    let mut unmeasured = interaction_authority();
-    admit_target(&mut unmeasured);
-    let effects = unmeasured
-        .resolve_live_assistant_playback_terminal(
+    let mut recovered = SessionDocumentMachineAuthority::new();
+    recovered
+        .recover_live_assistant_playback_target(
             key(),
             CHANNEL.to_string(),
             INTERACTION.to_string(),
             RESPONSE.to_string(),
             ITEM.to_string(),
             CONTENT_INDEX,
-            0,
-            String::new(),
-            false,
+        )
+        .expect("target recovers");
+    recovered
+        .recover_live_assistant_playback_terminal(
+            key(),
+            CHANNEL.to_string(),
+            INTERACTION.to_string(),
+            RESPONSE.to_string(),
+            ITEM.to_string(),
+            CONTENT_INDEX,
+            LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
+            5,
+            "prefix-digest".to_string(),
+        )
+        .expect("independent terminal fact recovers");
+    let effects = recovered
+        .observe_live_assistant_playback_final(
+            key(),
+            CHANNEL.to_string(),
+            INTERACTION.to_string(),
+            RESPONSE.to_string(),
+            ITEM.to_string(),
+            CONTENT_INDEX,
+            12,
+            "full-digest".to_string(),
+            LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
+            5,
+            "prefix-digest".to_string(),
+            true,
+        )
+        .expect("recovered terminal joins a late final");
+    assert!(matches!(
+        effects.as_slice(),
+        [
+            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
+                disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
+                canonical_chars: Some(5),
+                biological_hearing_claimed: false,
+                ..
+            }
+        ]
+    ));
+
+    let mut unmeasured = interaction_authority();
+    admit_target(&mut unmeasured);
+    let effects = unmeasured
+        .observe_live_assistant_playback_terminal(
+            key(),
+            CHANNEL.to_string(),
+            INTERACTION.to_string(),
+            RESPONSE.to_string(),
+            ITEM.to_string(),
+            CONTENT_INDEX,
             LiveAssistantPlaybackTerminalObservation::Unmeasured,
             0,
             String::new(),
+            0,
+            String::new(),
+            false,
             false,
         )
         .expect("unmeasured explicitly abandons the exact staged target");

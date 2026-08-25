@@ -3088,6 +3088,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.live_session_actor_witness(id).await
     }
 
+    /// Side-effect-free bridge eligibility preflight for one live member.
+    pub async fn validate_live_bridge_member_eligibility(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.inner.validate_live_bridge_member_eligibility(id).await
+    }
+
+    /// Transfer a noncommitting bridge run to the already-materialized inner
+    /// actor. The core agent suppresses checkpointer/store writes for the
+    /// duration, so this does not enter the durable turn-finalization path.
+    pub async fn start_live_bridge_operation(
+        &self,
+        id: &SessionId,
+        request: crate::LiveBridgeSessionOperationRequest,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<crate::LiveBridgeSessionOperationTerminalReceiver, SessionError> {
+        self.inner
+            .start_live_bridge_operation(id, request, cancellation)
+            .await
+    }
+
     async fn export_session_with_labels(&self, id: &SessionId) -> Result<Session, SessionError> {
         // Immutable labels are installed into the actor-owned Session before
         // the task starts. Final persistence must never patch catalog-only
@@ -5813,6 +5835,72 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )
             .await?;
         if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(receipt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_live_assistant_playback_terminal(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<crate::LiveAssistantPlaybackObservationResult, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let outcome = self
+            .inner
+            .observe_live_assistant_playback_terminal(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                stop_reason,
+                usage,
+            )
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_live_assistant_playback_final(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let receipt = self
+            .inner
+            .observe_live_assistant_playback_final(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            )
+            .await?;
+        if receipt.is_some()
+            && let Err(error) = self.persist_full_session(id).await
+        {
             let _ = self.discard_live_session_unfenced(id).await;
             return Err(error);
         }

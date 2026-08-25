@@ -113,6 +113,8 @@ impl TryFrom<WireProvider> for Provider {
 /// credential-bearing override. The strict `LiveOpenParams` decoder provides
 /// the server-side half: an older contract cannot silently ignore the field.
 pub const LIVE_EXECUTION_IDENTITY_V1_CAPABILITY: &str = "live.execution_identity.v1";
+pub const LIVE_FUNCTION_BRIDGE_V1_CAPABILITY: &str = "live.execution.function_bridge.v1";
+pub const LIVE_CLIENT_CONTEXT_V1_CAPABILITY: &str = "live.execution.client_context.v1";
 
 /// Version discriminator for [`WireLiveExecutionIdentityOverrideV1`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1931,6 +1933,7 @@ impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
                 Err(WireConversionError::InternalRealtimeUserContent)
             }
             RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
+            | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. } => {
                 Err(WireConversionError::InternalRealtimePlaybackAuthority)
             }
@@ -2302,6 +2305,9 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 usage: _,
             } => Self::Unknown {
                 debug: "internal_assistant_playback_completed_filtered".to_string(),
+            },
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved { .. } => Self::Unknown {
+                debug: "internal_assistant_playback_terminal_filtered".to_string(),
             },
             LiveAdapterObservation::RealtimeTranscript { event } => {
                 match WireRealtimeTranscriptEvent::try_from(event) {

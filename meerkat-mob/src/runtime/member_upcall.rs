@@ -1060,6 +1060,15 @@ impl AgentToolDispatcher for MemberUpcallToolDispatcher {
         Arc::clone(&self.tools)
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        match tool_name {
+            TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS => {
+                meerkat_core::LiveBridgeEffectKind::HelperSpawn
+            }
+            _ => meerkat_core::LiveBridgeEffectKind::ExternalIo,
+        }
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let op = self.map_call(call)?;
         let outcome = self

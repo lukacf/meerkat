@@ -51,6 +51,314 @@ use crate::meerkat_machine_types::{
     SwitchTurnRequest,
 };
 
+#[tokio::test]
+async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-worker-convergence");
+    let interaction_id = meerkat_core::InteractionId::new();
+    let provider =
+        meerkat_core::OpaqueProviderCorrelation::new("provider-delegation", "provider-turn")
+            .expect("opaque provider correlation");
+    let correlation =
+        meerkat_core::LiveUserTurnCorrelation::new(channel.clone(), interaction_id, provider)
+            .expect("live turn correlation");
+    let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        OperationId::new(),
+        correlation.clone(),
+    );
+    let provisional = meerkat_core::ProvisionalLiveHandoff::new(
+        correlation,
+        "delegate exact work",
+        meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+    )
+    .expect("provisional handoff");
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-convergence");
+    let fence_token = 71;
+    let generation = 9;
+
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        let dsl_channel = channel.to_string();
+        let dsl_operation = mm_dsl::OperationId::from_domain(operation.operation_id());
+        state.active_runtime_id = Some(mm_dsl::AgentRuntimeId::from_domain(&runtime_id));
+        state.active_fence_token = Some(mm_dsl::FenceToken::from_domain(fence_token));
+        state.active_runtime_generation = Some(mm_dsl::Generation::from_domain(generation));
+        state
+            .live_active_channel_by_session
+            .insert(session_id.to_string(), dsl_channel.clone());
+        state
+            .live_channel_session_by_channel
+            .insert(dsl_channel.clone(), session_id.to_string());
+        state.live_channel_identity_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::SessionLlmIdentity {
+                model: "experimental-live".to_string(),
+                provider: mm_dsl::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params_repr: None,
+                auth_binding: None,
+            },
+        );
+        state.live_execution_runtime_id_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        );
+        state.live_execution_fence_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::FenceToken::from_domain(fence_token),
+        );
+        state.live_execution_generation_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::Generation::from_domain(generation),
+        );
+        state
+            .live_interaction_channel_by_id
+            .insert(interaction_id.to_string(), dsl_channel.clone());
+        state
+            .live_active_interaction_by_channel
+            .insert(dsl_channel.clone(), interaction_id.to_string());
+        state
+            .live_delegation_interaction_by_channel
+            .insert(dsl_channel.clone(), interaction_id.to_string());
+        state
+            .live_delegation_operation_by_channel
+            .insert(dsl_channel.clone(), dsl_operation.clone());
+        state
+            .live_delegation_provider_turn_by_channel
+            .insert(dsl_channel, "provider-turn".to_string());
+        state
+            .live_delegation_interaction_by_operation
+            .insert(dsl_operation.clone(), interaction_id.to_string());
+        state
+            .live_delegation_provider_turn_by_operation
+            .insert(dsl_operation.clone(), "provider-turn".to_string());
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_operation,
+            mm_dsl::LiveDelegationReconciliation::Provisional,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed exact live delegation state");
+    }
+
+    let admission = machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &operation,
+            &provisional,
+            "live-worker-convergence",
+        )
+        .await
+        .expect("authorize worker start");
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            true,
+        )
+        .await
+        .expect("commit worker start");
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            true,
+        )
+        .await
+        .expect("recover committed worker start without replay");
+    assert!(
+        machine
+            .resolve_live_delegation_worker_start(
+                &runtime_id,
+                fence_token + 1,
+                generation,
+                &admission,
+                true,
+            )
+            .await
+            .is_err(),
+        "committed start recovery must reject a stale fence"
+    );
+    assert!(
+        machine
+            .record_live_delegation_worker_terminal(
+                &runtime_id,
+                fence_token,
+                generation + 1,
+                &admission,
+                crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .is_err(),
+        "terminal recording must reject a stale generation"
+    );
+    let terminal = machine
+        .record_live_delegation_worker_terminal(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+        )
+        .await
+        .expect("record worker terminal");
+    let recovered_terminal = machine
+        .record_live_delegation_worker_terminal(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+        )
+        .await
+        .expect("recover committed worker terminal without replay");
+    assert_eq!(recovered_terminal.late(), terminal.late());
+    assert_eq!(
+        recovered_terminal.result_eligible(),
+        terminal.result_eligible()
+    );
+    let retirement = machine
+        .authorize_live_delegation_worker_retirement(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+        )
+        .await
+        .expect("authorize worker retirement");
+    assert!(
+        machine
+            .authorize_live_delegation_worker_retirement(
+                &crate::identifiers::LogicalRuntimeId::new("live:stale-runtime"),
+                fence_token,
+                generation,
+                &admission,
+            )
+            .await
+            .is_err(),
+        "committed retirement authority recovery must reject a stale runtime"
+    );
+    let recovered_retirement = machine
+        .authorize_live_delegation_worker_retirement(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+        )
+        .await
+        .expect("recover committed retirement authority without replay");
+    machine
+        .resolve_live_delegation_worker_retirement(
+            &runtime_id,
+            fence_token,
+            generation,
+            &retirement,
+            true,
+        )
+        .await
+        .expect("resolve worker retirement");
+    assert!(
+        machine
+            .resolve_live_delegation_worker_retirement(
+                &runtime_id,
+                fence_token + 1,
+                generation,
+                &recovered_retirement,
+                true,
+            )
+            .await
+            .is_err(),
+        "committed retirement resolution must reject a stale fence"
+    );
+    machine
+        .resolve_live_delegation_worker_retirement(
+            &runtime_id,
+            fence_token,
+            generation,
+            &recovered_retirement,
+            true,
+        )
+        .await
+        .expect("recover committed retirement resolution without replay");
+
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority after retirement");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        let operation_id = mm_dsl::OperationId::from_domain(operation.operation_id());
+        state
+            .live_experimental_execution_channels
+            .insert(channel.to_string());
+        state.live_delegation_reconciliation_by_operation.insert(
+            operation_id.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        state
+            .live_delegation_result_eligible_operations
+            .insert(operation_id.clone());
+        state
+            .live_result_released_operations
+            .insert(operation_id.clone());
+        state.live_result_release_disposition_by_operation.insert(
+            operation_id,
+            mm_dsl::LiveDelegationResultDisposition::OpenTurn,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed committed result release state");
+    }
+    let release =
+        crate::live_execution::LiveDelegationResultReleaseAuthority::from_recovered_generated_state(
+            &session_id,
+            &operation,
+            meerkat_core::LiveResultDisposition::OpenTurn,
+        );
+    let delivery = machine
+        .authorize_live_delegation_result_delivery(&release, "bounded terminal result")
+        .await
+        .expect("authorize result delivery");
+    let recovered_delivery = machine
+        .authorize_live_delegation_result_delivery(&release, "bounded terminal result")
+        .await
+        .expect("recover committed result delivery authority without replay");
+    machine
+        .resolve_live_delegation_result_delivery(
+            &delivery,
+            crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered,
+        )
+        .await
+        .expect("resolve result delivery");
+    machine
+        .resolve_live_delegation_result_delivery(
+            &recovered_delivery,
+            crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered,
+        )
+        .await
+        .expect("recover committed result resolution without replay");
+}
+
 fn uuid(n: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(n)
 }
@@ -45791,6 +46099,7 @@ fn recovered_terminal_completion_batches_have_a_generated_disposition() {
 }
 
 #[test]
+#[cfg(feature = "live")]
 fn assistant_output_handle_is_exact_channel_scoped_and_two_phase_one_use() {
     let session_id = meerkat_core::SessionId::new();
     let channel_id = meerkat_core::LiveChannelId::new("assistant-output-channel");

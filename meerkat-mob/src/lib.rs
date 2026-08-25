@@ -267,6 +267,15 @@ pub use runtime::{
     WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
     profile_to_wire, stored_realm_profile_to_wire,
 };
+#[cfg(feature = "experimental-gpt-live")]
+pub use runtime::{
+    DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
+    LiveBridgeAcceptedExecution, LiveBridgeExecutionSnapshot,
+    LiveBridgeOperationCancellationHandle, LiveBridgeOperationCancellationSignal,
+    LiveBridgeOperationExecutor, LiveBridgeOperationRequest, LiveBridgeOperationService,
+    LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
+    LiveBridgeOperationTerminalFuture,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,

@@ -1,14 +1,16 @@
-//! Shared provider-neutral coordinator for experimental GPT Live delegation.
+//! Shared provider-neutral coordinator for experimental GPT Live execution.
 //!
-//! Provider mechanics only emit typed observations and deliver authorized
-//! context appends. Generated MeerkatMachine effects own every semantic edge;
-//! MobMachine and the delegation service realize the worker lifecycle.
+//! Client-context delegation and Responses function bridging are distinct
+//! capabilities. The existing client-context lane may use a helper worker.
+//! Responses bridging uses only an injected [`LiveBridgeOperationExecutor`]
+//! against a machine-sealed operation on the already-bound durable member.
+//! There is no fallback or authority conversion between the two lanes.
 
 use std::sync::Arc;
 
 use meerkat::experimental_gpt_live::{
-    ExperimentalGptLiveControlObservation, ExperimentalGptLiveControlPlane,
-    ExperimentalGptLiveResultDeliveryDispatch,
+    ExperimentalGptLiveBridgeError, ExperimentalGptLiveControlObservation,
+    ExperimentalGptLiveControlPlane, ExperimentalGptLiveResultDeliveryDispatch,
 };
 use meerkat_core::exact_operation::ExactOperationIdentity;
 use meerkat_core::ops::OperationId;
@@ -21,27 +23,322 @@ use meerkat_live::{
     LiveSidebandTurnRef, ProviderWebrtcBinding,
 };
 use meerkat_mob::{
-    AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionRequest,
-    DelegationExecutionService, DelegationTerminalizedExecution, DelegationTurnTerminal,
+    AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionHandle,
+    DelegationExecutionRequest, DelegationExecutionService, DelegationTerminalizedExecution,
+    DelegationTurnTerminal, DurableMemberLiveBridgeOperationExecutor, LiveBridgeAcceptedExecution,
+    LiveBridgeExecutionSnapshot, LiveBridgeOperationCancellationHandle,
+    LiveBridgeOperationExecutor, LiveBridgeOperationRequest, LiveBridgeOperationService,
+    LiveBridgeOperationStartError, LiveBridgeOperationTerminal,
 };
 use meerkat_runtime::live_execution::{
+    LiveBridgeExecutionTerminalReceipt, LiveBridgeOperationAdmission,
+    LiveBridgeRecoveredSubmissionReceipt, LiveBridgeSubmissionAttemptAuthority,
+    LiveBridgeSubmissionAuthority, LiveBridgeSubmissionReceipt,
     LiveDelegationCancellationDirective, LiveDelegationCancellationOutcome,
     LiveDelegationExecutionAdmission, LiveDelegationResultDeliveryAuthority,
-    LiveDelegationResultDeliveryResolution, LiveDelegationResultReleaseAuthority,
-    LiveDelegationWorkerTerminalKind, LiveHandoffReconciliationReceipt,
+    LiveDelegationResultDeliveryObservation, LiveDelegationResultDeliveryResolution,
+    LiveDelegationResultReleaseAuthority, LiveDelegationWorkerTerminalKind,
+    LiveHandoffReconciliationReceipt,
 };
-use tokio::sync::{Mutex, oneshot};
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
+const LIVE_DELEGATION_CLEANUP_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(25);
+const LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(1);
+const LIVE_BRIDGE_EXECUTION_RESULT_DIGEST_DOMAIN: &[u8] =
+    b"meerkat.live-bridge-execution-result.v1\0";
+const LIVE_BRIDGE_SUBMISSION_OUTPUT_DIGEST_DOMAIN: &[u8] =
+    b"meerkat.live-bridge-submission-output.v1\0";
 
 type ActiveChannelKey = (SessionId, meerkat_core::LiveChannelId);
+
+fn live_bridge_execution_result_digest(terminal: &LiveBridgeOperationTerminal) -> Option<String> {
+    terminal.output().map(|output| {
+        let mut hasher = Sha256::new();
+        hasher.update(LIVE_BRIDGE_EXECUTION_RESULT_DIGEST_DOMAIN);
+        hasher.update((output.len() as u64).to_be_bytes());
+        hasher.update(output.as_bytes());
+        format!("sha256:{:x}", hasher.finalize())
+    })
+}
+
+fn live_bridge_submission_output_digest(output: &str) -> Result<String, String> {
+    if output.is_empty() {
+        return Err("live bridge submission output must not be empty".to_string());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(LIVE_BRIDGE_SUBMISSION_OUTPUT_DIGEST_DOMAIN);
+    hasher.update((output.len() as u64).to_be_bytes());
+    hasher.update(output.as_bytes());
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn live_bridge_admission_matches_current_owner(
+    admission: &LiveBridgeOperationAdmission,
+    current_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    durable_identity: &AgentIdentity,
+) -> bool {
+    admission.binding() == current_binding
+        && durable_identity.as_str() == admission.agent_identity()
+        && admission.session_id() == current_binding.session_id()
+}
+
+fn signal_local_cancellation_if_generated_matches(
+    cancellation: &LiveBridgeOperationCancellationHandle,
+    authorized_operation_id: Option<&OperationId>,
+) -> bool {
+    if authorized_operation_id != Some(cancellation.operation_id()) {
+        return false;
+    }
+    cancellation.cancel();
+    true
+}
 
 struct ActiveDelegation {
     retained: Arc<RetainedDelegation>,
     cancellation: DelegationCancellationHandle,
     task: JoinHandle<()>,
+}
+
+struct OwnedDelegationCleanup {
+    binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    task: JoinHandle<()>,
+}
+
+struct OwnedResultRecovery {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    cancellation: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+struct ActiveResponsesExecution {
+    admission: Arc<LiveBridgeOperationAdmission>,
+    tool_gate: Arc<meerkat_runtime::live_execution::LiveBridgeToolExecutionAdmissionGate>,
+    cancellation: LiveBridgeOperationCancellationHandle,
+    terminal_custody: Arc<Mutex<Option<PendingResponsesTerminalCustody>>>,
+    task: JoinHandle<()>,
+}
+
+struct PendingResponsesTerminalCustody {
+    terminal: LiveBridgeOperationTerminal,
+    result_digest: Option<String>,
+}
+
+fn accepted_terminal_blocks_operation_cancellation(
+    custody: Option<&PendingResponsesTerminalCustody>,
+) -> bool {
+    custody.is_some()
+}
+
+fn live_bridge_terminal_recording_retryable(error: &meerkat_runtime::RuntimeDriverError) -> bool {
+    matches!(
+        error,
+        meerkat_runtime::RuntimeDriverError::NotReady { state }
+            if *state != meerkat_runtime::RuntimeState::Destroyed
+    ) || matches!(
+        error,
+        meerkat_runtime::RuntimeDriverError::RecoveryBackoff { .. }
+    )
+}
+
+async fn record_live_bridge_terminal_with_typed_recovery<F, Fut>(
+    mut record: F,
+) -> Result<LiveBridgeExecutionTerminalReceipt, meerkat_runtime::RuntimeDriverError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                LiveBridgeExecutionTerminalReceipt,
+                meerkat_runtime::RuntimeDriverError,
+            >,
+        >,
+{
+    let mut backoff = std::time::Duration::from_millis(5);
+    loop {
+        match record().await {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) if live_bridge_terminal_recording_retryable(&error) => {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(250));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Exact prepared request retained only across a retry-safe failure before the
+/// member actor accepts execution custody. Its already-consumed model
+/// authority must never be reissued or rebuilt from a later Session read.
+struct PreparedResponsesExecution {
+    admission: Arc<LiveBridgeOperationAdmission>,
+    request: LiveBridgeOperationRequest,
+    tool_gate: Arc<meerkat_runtime::live_execution::LiveBridgeToolExecutionAdmissionGate>,
+}
+
+type PreparedResponsesMap = std::collections::HashMap<OperationId, PreparedResponsesExecution>;
+type ActiveResponsesMap = std::collections::HashMap<OperationId, ActiveResponsesExecution>;
+
+fn prepared_responses_execution_matches(
+    existing: &PreparedResponsesExecution,
+    admission: &LiveBridgeOperationAdmission,
+    snapshot: &LiveBridgeExecutionSnapshot,
+    semantic_request: &str,
+) -> bool {
+    Arc::ptr_eq(
+        &existing.request.snapshot().session_arc(),
+        &snapshot.session_arc(),
+    ) && existing.admission.operation() == admission.operation()
+        && existing.admission.binding() == admission.binding()
+        && existing.admission.session_id() == admission.session_id()
+        && existing.admission.agent_identity() == admission.agent_identity()
+        && existing.admission.canonical_context_revision() == admission.canonical_context_revision()
+        && existing.admission.request_digest() == admission.request_digest()
+        && existing.request.semantic_request() == semantic_request
+}
+
+/// Cross the local pre-accept boundary while retaining the exact sealed
+/// request on the sole retry-safe failure class. The returned map guard keeps
+/// a concurrent retry fenced until the caller publishes accepted custody.
+async fn accept_prepared_responses_execution<F, Fut>(
+    prepared: Arc<Mutex<PreparedResponsesMap>>,
+    active: &Arc<Mutex<ActiveResponsesMap>>,
+    service: &LiveBridgeOperationService,
+    admission: Arc<LiveBridgeOperationAdmission>,
+    snapshot: &LiveBridgeExecutionSnapshot,
+    semantic_request: &str,
+    prepare_once: F,
+) -> Result<
+    (
+        LiveBridgeAcceptedExecution,
+        Arc<LiveBridgeOperationAdmission>,
+        Arc<meerkat_runtime::live_execution::LiveBridgeToolExecutionAdmissionGate>,
+        OwnedMutexGuard<PreparedResponsesMap>,
+    ),
+    String,
+>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<PreparedResponsesExecution, String>>,
+{
+    let operation_id = admission.operation().operation_id().clone();
+    let mut custody = prepared.lock_owned().await;
+    if active.lock().await.contains_key(&operation_id) {
+        return Err("live bridge operation already has local execution custody".to_string());
+    }
+    if let Some(existing) = custody.get(&operation_id) {
+        if !prepared_responses_execution_matches(
+            existing,
+            admission.as_ref(),
+            snapshot,
+            semantic_request,
+        ) {
+            return Err(
+                "live bridge retry does not match the exact prepared operation".to_string(),
+            );
+        }
+    } else {
+        let prepared_execution = prepare_once().await?;
+        if !prepared_responses_execution_matches(
+            &prepared_execution,
+            admission.as_ref(),
+            snapshot,
+            semantic_request,
+        ) {
+            return Err(
+                "new live bridge preparation did not match the exact operation".to_string(),
+            );
+        }
+        custody.insert(operation_id.clone(), prepared_execution);
+    }
+    let existing = custody
+        .get(&operation_id)
+        .ok_or_else(|| "live bridge prepared custody disappeared before acceptance".to_string())?;
+    let request = existing.request.clone();
+    let execution_admission = Arc::clone(&existing.admission);
+    let tool_gate = Arc::clone(&existing.tool_gate);
+    let accepted = match service.start(request).await {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            if !matches!(error, LiveBridgeOperationStartError::TemporarilyUnavailable) {
+                custody.remove(&operation_id);
+            }
+            return Err(error.to_string());
+        }
+    };
+    if accepted.operation_id() != &operation_id {
+        custody.remove(&operation_id);
+        return Err("live bridge executor accepted a different operation".to_string());
+    }
+    Ok((accepted, execution_admission, tool_gate, custody))
+}
+
+/// Independent Meerkat execution completion. This carries no provider send
+/// authority and has no canonical parent-session publication side effect.
+pub struct ExperimentalLiveBridgeExecutionCompletion {
+    terminal: LiveBridgeExecutionTerminalReceipt,
+    output: Option<String>,
+}
+
+impl ExperimentalLiveBridgeExecutionCompletion {
+    #[must_use]
+    pub fn terminal(&self) -> &LiveBridgeExecutionTerminalReceipt {
+        &self.terminal
+    }
+
+    #[must_use]
+    pub fn output(&self) -> Option<&str> {
+        self.output.as_deref()
+    }
+
+    #[must_use]
+    pub fn into_output(self) -> Option<String> {
+        self.output
+    }
+}
+
+/// One coordinator-owned accepted Responses execution. Dropping this waiter
+/// does not drop operation custody; channel cancellation still reaches the
+/// exact background task.
+pub struct ExperimentalLiveBridgeExecutionWaiter {
+    operation_id: OperationId,
+    completion: oneshot::Receiver<Result<ExperimentalLiveBridgeExecutionCompletion, String>>,
+}
+
+impl ExperimentalLiveBridgeExecutionWaiter {
+    #[must_use]
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    pub async fn await_completion(
+        self,
+    ) -> Result<ExperimentalLiveBridgeExecutionCompletion, String> {
+        self.completion
+            .await
+            .map_err(|_| "live bridge execution completion owner stopped".to_string())?
+    }
+}
+
+async fn cancel_and_settle_result_recovery(recovery: OwnedResultRecovery) {
+    recovery.cancellation.cancel();
+    let _ = recovery.task.await;
+}
+
+async fn await_result_recovery_attempt_or_shutdown<T>(
+    cancellation: CancellationToken,
+    attempt: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        result = attempt => Some(result),
+    }
 }
 
 struct RetainedDelegation {
@@ -61,7 +358,40 @@ struct RetainedDelegationResult {
     release_authority: Option<LiveDelegationResultReleaseAuthority>,
     delivery_authority: Option<LiveDelegationResultDeliveryAuthority>,
     terminal_ineligible: bool,
-    delivery_in_flight: bool,
+    delivery_reservation: Option<ResultDeliveryReservation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResultDeliveryReservation(uuid::Uuid);
+
+impl RetainedDelegationResult {
+    fn reserve_delivery(&mut self) -> Option<ResultDeliveryReservation> {
+        if self.terminal_ineligible || self.delivery_reservation.is_some() {
+            return None;
+        }
+        let reservation = ResultDeliveryReservation(uuid::Uuid::new_v4());
+        self.delivery_reservation = Some(reservation);
+        Some(reservation)
+    }
+
+    fn release_delivery(&mut self, reservation: ResultDeliveryReservation) {
+        if self.delivery_reservation == Some(reservation) {
+            self.delivery_reservation = None;
+        }
+    }
+}
+
+enum StartedDelegationTaskCommand {
+    Run,
+    CleanupAfterStartPublicationFailure,
+}
+
+async fn await_started_delegation_task_command(
+    receiver: oneshot::Receiver<StartedDelegationTaskCommand>,
+) -> StartedDelegationTaskCommand {
+    receiver
+        .await
+        .unwrap_or(StartedDelegationTaskCommand::CleanupAfterStartPublicationFailure)
 }
 
 struct ActiveProviderTurn {
@@ -218,8 +548,27 @@ async fn release_bound_channel(
 pub struct ExperimentalLiveDelegationCoordinator {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
+    /// Optional injected executor retained for deterministic service tests.
+    responses_service: Option<LiveBridgeOperationService>,
+    /// Production composition resolves the exact current durable member only
+    /// after the machine admission and snapshot owner have been revalidated.
+    durable_member_responses_executor: bool,
+    responses_prepared: Arc<Mutex<PreparedResponsesMap>>,
+    responses_active: Arc<Mutex<ActiveResponsesMap>>,
     active: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveDelegation>>>,
     retained: Arc<Mutex<std::collections::HashMap<OperationId, Arc<RetainedDelegation>>>>,
+    failed_start_cleanups:
+        Arc<Mutex<std::collections::HashMap<OperationId, OwnedDelegationCleanup>>>,
+    result_delivery_tasks: Arc<Mutex<std::collections::HashMap<OperationId, JoinHandle<()>>>>,
+    pending_result_recoveries: Arc<
+        Mutex<
+            std::collections::HashMap<
+                OperationId,
+                meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+            >,
+        >,
+    >,
+    result_recovery_tasks: Arc<Mutex<std::collections::HashMap<OperationId, OwnedResultRecovery>>>,
     active_turns: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveProviderTurn>>>,
     bound_channels: BoundChannelMap,
 }
@@ -232,7 +581,27 @@ pub fn compose_experimental_live_delegation_coordinator(
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
 ) -> Arc<ExperimentalLiveDelegationCoordinator> {
-    Arc::new(ExperimentalLiveDelegationCoordinator::new(runtime, mobs))
+    Arc::new(
+        ExperimentalLiveDelegationCoordinator::new_with_durable_member_responses_executor(
+            runtime, mobs,
+        ),
+    )
+}
+
+/// Compose a coordinator with a qualified Responses execution host.
+///
+/// This does not qualify provider ingress. Gate 0 must separately establish
+/// the exact raw function-call carrier and output-settlement observations
+/// before a caller may route a Responses operation into this coordinator.
+#[must_use]
+pub fn compose_experimental_live_delegation_coordinator_with_responses_executor(
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    mobs: Arc<crate::MobMcpState>,
+    executor: Arc<dyn LiveBridgeOperationExecutor>,
+) -> Arc<ExperimentalLiveDelegationCoordinator> {
+    Arc::new(
+        ExperimentalLiveDelegationCoordinator::new_with_responses_executor(runtime, mobs, executor),
+    )
 }
 
 impl ExperimentalLiveDelegationCoordinator {
@@ -243,11 +612,460 @@ impl ExperimentalLiveDelegationCoordinator {
         Self {
             runtime,
             mobs,
+            responses_service: None,
+            durable_member_responses_executor: false,
+            responses_prepared: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            responses_active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retained: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            failed_start_cleanups: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            result_delivery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pending_result_recoveries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            result_recovery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bound_channels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    #[must_use]
+    pub fn new_with_responses_executor(
+        runtime: Arc<meerkat_runtime::MeerkatMachine>,
+        mobs: Arc<crate::MobMcpState>,
+        executor: Arc<dyn LiveBridgeOperationExecutor>,
+    ) -> Self {
+        let mut coordinator = Self::new(runtime, mobs);
+        coordinator.responses_service = Some(LiveBridgeOperationService::new(executor));
+        coordinator
+    }
+
+    #[must_use]
+    pub fn new_with_durable_member_responses_executor(
+        runtime: Arc<meerkat_runtime::MeerkatMachine>,
+        mobs: Arc<crate::MobMcpState>,
+    ) -> Self {
+        let mut coordinator = Self::new(runtime, mobs);
+        coordinator.durable_member_responses_executor = true;
+        coordinator
+    }
+
+    /// Whether Meerkat has supplied the detached execution half of Responses
+    /// bridging. Provider ingress and settlement Gate 0 remain independent.
+    #[must_use]
+    pub const fn responses_executor_available(&self) -> bool {
+        self.responses_service.is_some() || self.durable_member_responses_executor
+    }
+
+    /// Capture the exact durable-member Session clone before machine
+    /// admission. The caller derives `canonical_context_revision` from this
+    /// opaque value, admits the operation, then supplies the same value to
+    /// [`Self::start_admitted_responses_execution`].
+    #[doc(hidden)]
+    pub async fn prepare_responses_execution_snapshot(
+        &self,
+        binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<LiveBridgeExecutionSnapshot, String> {
+        let current_binding = self
+            .runtime
+            .live_delegation_runtime_binding(binding.session_id(), binding.channel_id())
+            .await
+            .map_err(|error| error.to_string())?;
+        if &current_binding != binding {
+            return Err("live bridge snapshot binding is not current".to_string());
+        }
+        let (_, _, durable_identity) = self
+            .mobs
+            .live_member_owner(binding.session_id())
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "live bridge durable Mob member owner is unavailable".to_string())?;
+        self.mobs
+            .session_service()
+            .capture_live_bridge_execution_snapshot(binding.session_id(), durable_identity.as_str())
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Start one already-admitted Responses bridge operation.
+    ///
+    /// Raw provider ingress is intentionally outside this method. Gate 0 must
+    /// first construct the exact correlation and obtain the sealed machine
+    /// admission. This method then rechecks the current runtime incarnation
+    /// and authoritative durable Mob member before detached execution starts.
+    #[doc(hidden)]
+    pub async fn start_admitted_responses_execution(
+        &self,
+        admission: LiveBridgeOperationAdmission,
+        snapshot: LiveBridgeExecutionSnapshot,
+        semantic_request: String,
+    ) -> Result<ExperimentalLiveBridgeExecutionWaiter, String> {
+        let derived_digest = meerkat_core::LiveBridgeRequestDigest::derive(&semantic_request)
+            .map_err(|error| error.to_string())?;
+        if admission.request_digest() != &derived_digest {
+            return Err("live bridge request does not match the sealed admission".to_string());
+        }
+        let current_binding = self
+            .runtime
+            .live_delegation_runtime_binding(
+                admission.session_id(),
+                admission.binding().channel_id(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let (_, mob_handle, durable_identity) = self
+            .mobs
+            .live_member_owner(admission.session_id())
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "live bridge durable Mob member owner is unavailable".to_string())?;
+        if !live_bridge_admission_matches_current_owner(
+            &admission,
+            &current_binding,
+            &durable_identity,
+        ) {
+            return Err(
+                "live bridge admission does not match the current durable member owner".to_string(),
+            );
+        }
+
+        let admission = Arc::new(admission);
+        let operation_id = admission.operation().operation_id().clone();
+        if self
+            .responses_active
+            .lock()
+            .await
+            .contains_key(&operation_id)
+        {
+            return Err("live bridge operation already has local execution custody".to_string());
+        }
+        if snapshot.session().id() != admission.session_id()
+            || snapshot.agent_identity() != admission.agent_identity()
+            || snapshot.canonical_context_revision() != admission.canonical_context_revision()
+        {
+            return Err(
+                "live bridge admission does not match its retained execution snapshot".to_string(),
+            );
+        }
+        let service = if let Some(service) = self.responses_service.clone() {
+            service
+        } else if self.durable_member_responses_executor {
+            let member = mob_handle
+                .member(&durable_identity)
+                .await
+                .map_err(|error| error.to_string())?;
+            LiveBridgeOperationService::new(Arc::new(
+                DurableMemberLiveBridgeOperationExecutor::new(member),
+            ))
+        } else {
+            return Err("qualified live bridge execution host is unavailable".to_string());
+        };
+        let prepare_runtime = Arc::clone(&self.runtime);
+        let prepare_admission = Arc::clone(&admission);
+        let prepare_snapshot = snapshot.clone();
+        let prepare_request = semantic_request.clone();
+        let (accepted, admission, tool_gate, mut prepared) = accept_prepared_responses_execution(
+            Arc::clone(&self.responses_prepared),
+            &self.responses_active,
+            &service,
+            Arc::clone(&admission),
+            &snapshot,
+            &semantic_request,
+            move || async move {
+                let request = LiveBridgeOperationRequest::new(
+                    Arc::clone(&prepare_admission),
+                    prepare_snapshot,
+                    prepare_request,
+                )
+                .map_err(|error| error.to_string())?;
+                let tool_gate = prepare_runtime.live_bridge_tool_execution_gate(&prepare_admission);
+                let model_computation = Arc::new(
+                    prepare_runtime
+                        .consume_live_bridge_model_computation(&prepare_admission)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+                let request = request
+                    .with_execution_authorities(
+                        model_computation,
+                        tool_gate
+                            .sealed_agent_dispatch_admission()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(PreparedResponsesExecution {
+                    admission: prepare_admission,
+                    request,
+                    tool_gate,
+                })
+            },
+        )
+        .await?;
+        let cancellation = accepted.cancellation_handle();
+        let runtime = Arc::clone(&self.runtime);
+        let active = Arc::clone(&self.responses_active);
+        let task_admission = Arc::clone(&admission);
+        let task_tool_gate = Arc::clone(&tool_gate);
+        let terminal_custody = Arc::new(Mutex::new(None));
+        let task_terminal_custody = Arc::clone(&terminal_custody);
+        let task_operation_id = operation_id.clone();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (start_tx, start_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_rx.await;
+            let terminal = accepted.await_terminal().await;
+            let result_digest = live_bridge_execution_result_digest(&terminal);
+            *task_terminal_custody.lock().await = Some(PendingResponsesTerminalCustody {
+                terminal: terminal.clone(),
+                result_digest: result_digest.clone(),
+            });
+            let outcome = match task_tool_gate
+                .settle_effects_before_terminal(task_admission.as_ref())
+                .await
+            {
+                Ok(()) => record_live_bridge_terminal_with_typed_recovery(|| {
+                    runtime.record_live_bridge_execution_terminal(
+                        task_admission.as_ref(),
+                        terminal.terminal(),
+                        result_digest.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|receipt| {
+                    task_tool_gate
+                        .close_after_terminal(&receipt)
+                        .map(|()| ExperimentalLiveBridgeExecutionCompletion {
+                            terminal: receipt,
+                            output: terminal.into_output(),
+                        })
+                        .map_err(|error| error.to_string())
+                }),
+                Err(error) => Err(error.to_string()),
+            };
+            let generated_terminal_recorded = outcome.is_ok();
+            if generated_terminal_recorded {
+                task_terminal_custody.lock().await.take();
+            }
+            let _ = completion_tx.send(outcome);
+            if generated_terminal_recorded {
+                active.lock().await.remove(&task_operation_id);
+            }
+        });
+        self.responses_active.lock().await.insert(
+            operation_id.clone(),
+            ActiveResponsesExecution {
+                admission,
+                tool_gate,
+                cancellation,
+                terminal_custody,
+                task,
+            },
+        );
+        prepared.remove(&operation_id);
+        drop(prepared);
+        let _ = start_tx.send(());
+        Ok(ExperimentalLiveBridgeExecutionWaiter {
+            operation_id,
+            completion: completion_rx,
+        })
+    }
+
+    /// Release post-final tool effects only from exact canonical transcript
+    /// evidence for the active operation. The provider cannot release this
+    /// gate with prose, a digest, or an inferred turn boundary.
+    pub async fn confirm_responses_final_input(
+        &self,
+        evidence: &FinalLiveUserTranscriptCommitEvidence,
+    ) -> Result<(), String> {
+        let executions = self.responses_active.lock().await;
+        let mut matching = executions.values().filter(|execution| {
+            let correlation = execution.admission.operation().domain_correlation();
+            execution.admission.session_id() == evidence.session_id()
+                && correlation.channel_id() == evidence.channel_id()
+                && correlation.interaction_id() == evidence.interaction_id()
+        });
+        let execution = matching
+            .next()
+            .ok_or_else(|| "final input has no active live bridge operation".to_string())?;
+        if matching.next().is_some() {
+            return Err("final input matches multiple active live bridge operations".to_string());
+        }
+        let admission = Arc::clone(&execution.admission);
+        let tool_gate = Arc::clone(&execution.tool_gate);
+        drop(matching);
+        drop(executions);
+        let authority = self
+            .runtime
+            .confirm_live_bridge_final_input(admission.as_ref(), evidence)
+            .await
+            .map_err(|error| error.to_string())?;
+        tool_gate
+            .release_final_input(&authority)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn cancel_responses_executions_for_binding(&self, binding: &ProviderWebrtcBinding) {
+        {
+            let mut prepared = self.responses_prepared.lock().await;
+            prepared.retain(|_, execution| {
+                let admission = execution.admission.as_ref();
+                admission.session_id() != binding.session_id()
+                    || admission.binding().channel_id() != binding.channel_id()
+                    || admission.binding().generation() != binding.runtime_generation().get()
+                    || admission.binding().fence_token() != binding.runtime_fence().get()
+            });
+        }
+        let operation_ids = {
+            let active = self.responses_active.lock().await;
+            active
+                .iter()
+                .filter_map(|(operation_id, execution)| {
+                    (execution.admission.session_id() == binding.session_id()
+                        && execution.admission.binding().channel_id() == binding.channel_id()
+                        && execution.admission.binding().generation()
+                            == binding.runtime_generation().get()
+                        && execution.admission.binding().fence_token()
+                            == binding.runtime_fence().get())
+                    .then_some(operation_id.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        for operation_id in operation_ids {
+            let Some((admission, cancellation, terminal_custody)) = self
+                .responses_active
+                .lock()
+                .await
+                .get(&operation_id)
+                .map(|execution| {
+                    (
+                        Arc::clone(&execution.admission),
+                        execution.cancellation.clone(),
+                        Arc::clone(&execution.terminal_custody),
+                    )
+                })
+            else {
+                continue;
+            };
+            let terminal_custody = terminal_custody.lock().await;
+            if accepted_terminal_blocks_operation_cancellation(terminal_custody.as_ref()) {
+                let terminal = terminal_custody
+                    .as_ref()
+                    .map(|pending| pending.terminal.terminal());
+                let has_result_digest = terminal_custody
+                    .as_ref()
+                    .is_some_and(|pending| pending.result_digest.is_some());
+                tracing::debug!(
+                    %operation_id,
+                    ?terminal,
+                    has_result_digest,
+                    "accepted live bridge terminal retains recovery custody across channel shutdown"
+                );
+                continue;
+            }
+            drop(terminal_custody);
+            let authority = self
+                .runtime
+                .cancel_live_bridge_operation(
+                    admission.as_ref(),
+                    meerkat_core::LiveBridgeCancellationReason::ChannelClose,
+                )
+                .await;
+            let authorized_operation_id = authority
+                .as_ref()
+                .ok()
+                .map(|authority| authority.admission().operation().operation_id());
+            if !signal_local_cancellation_if_generated_matches(
+                &cancellation,
+                authorized_operation_id,
+            ) {
+                match authority {
+                    Ok(_) => tracing::error!(
+                        %operation_id,
+                        "live bridge cancellation authority mismatched local custody; retaining exact execution"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        %operation_id,
+                        "live bridge cancellation authority failed closed; retaining exact execution"
+                    ),
+                }
+                continue;
+            }
+            let execution = self.responses_active.lock().await.remove(&operation_id);
+            if let Some(execution) = execution {
+                let _ = execution.task.await;
+            } else {
+                // The execution reached its own terminal between generated
+                // authorization and local signaling. No local custody remains
+                // to cancel or reconcile.
+                tracing::debug!(%operation_id, "live bridge execution terminalized before cancellation signal");
+            }
+        }
+    }
+
+    /// Authorize exact function output only after independent Meerkat
+    /// execution terminality has been recorded. This does not claim or send.
+    pub async fn authorize_responses_submission(
+        &self,
+        completion: &ExperimentalLiveBridgeExecutionCompletion,
+        output_kind: meerkat_core::LiveBridgeOutputKind,
+        exact_output: &str,
+    ) -> Result<LiveBridgeSubmissionAuthority, String> {
+        let digest = live_bridge_submission_output_digest(exact_output)?;
+        self.runtime
+            .authorize_live_bridge_submission(completion.terminal(), output_kind, &digest)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Consume the one durable pre-IO claim. A failure before this method
+    /// returns is pre-accept. After it returns, callers must not retry by
+    /// claiming another attempt.
+    pub async fn claim_responses_submission_attempt(
+        &self,
+        submission: &LiveBridgeSubmissionAuthority,
+    ) -> Result<LiveBridgeSubmissionAttemptAuthority, String> {
+        self.runtime
+            .claim_live_bridge_submission_attempt(submission)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Record only that the exact output reached the local transport write
+    /// boundary. Provider processing remains unresolved.
+    pub async fn record_responses_submission_local_write(
+        &self,
+        attempt: LiveBridgeSubmissionAttemptAuthority,
+    ) -> Result<LiveBridgeSubmissionReceipt, String> {
+        self.runtime
+            .record_live_bridge_submission_local_write(attempt)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Settle the server-owned Responses call from an exact provider
+    /// observation. Local write alone must never call this as processed.
+    pub async fn resolve_responses_submission(
+        &self,
+        submission: &LiveBridgeSubmissionAuthority,
+        observation: meerkat_core::LiveBridgeSubmissionObservation,
+    ) -> Result<LiveBridgeSubmissionReceipt, String> {
+        self.runtime
+            .resolve_live_bridge_submission(submission, observation)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Reconcile a claimed submission whose process lost exact settlement.
+    /// The receipt has no transport authority and cannot resend.
+    pub async fn recover_responses_submission(
+        &self,
+        completion: &ExperimentalLiveBridgeExecutionCompletion,
+    ) -> Result<LiveBridgeRecoveredSubmissionReceipt, String> {
+        let admission = completion.terminal().admission();
+        self.runtime
+            .recover_live_bridge_submission(admission.session_id(), admission.operation())
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn prepare_bound_channel(
@@ -363,7 +1181,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     } = observation.kind()
                     {
                         if let Err(error) = self
-                            .start_delegation(
+                            .start_client_context_delegation(
                                 &binding,
                                 Arc::clone(&control),
                                 turn.clone(),
@@ -412,12 +1230,16 @@ impl ExperimentalLiveDelegationCoordinator {
                 ExperimentalGptLiveControlObservation::ResultDeliveryResolved(resolution) => {
                     let (authority, observation) = resolution.into_parts();
                     let operation_id = authority.operation().operation_id().clone();
-                    match self
-                        .runtime
-                        .resolve_live_delegation_result_delivery(&authority, observation)
-                        .await
-                    {
-                        Ok(LiveDelegationResultDeliveryResolution::Resolved(receipt))
+                    let resolution = retry_reconciled_cleanup_step(
+                        "fallback-result-delivery-resolution",
+                        || {
+                            self.runtime
+                                .resolve_live_delegation_result_delivery(&authority, observation)
+                        },
+                    )
+                    .await;
+                    match resolution {
+                        LiveDelegationResultDeliveryResolution::Resolved(receipt)
                             if !receipt.retry_allowed() =>
                         {
                             let retained = self.retained.lock().await.get(&operation_id).cloned();
@@ -425,32 +1247,18 @@ impl ExperimentalLiveDelegationCoordinator {
                                 self.remove_retained_delegation(&retained).await;
                             }
                         }
-                        Ok(LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery)) => {
-                            match self
-                                .runtime
-                                .realize_live_delegation_result_ambiguity_recovery(recovery)
-                                .await
-                            {
-                                Ok(()) => {
-                                    let retained =
-                                        self.retained.lock().await.get(&operation_id).cloned();
-                                    if let Some(retained) = retained {
-                                        self.remove_retained_delegation(&retained).await;
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%error, %operation_id, "generated fallback result recovery handoff failed");
-                                }
+                        LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery) => {
+                            self.retain_and_realize_result_recovery(recovery).await;
+                            let retained = self.retained.lock().await.get(&operation_id).cloned();
+                            if let Some(retained) = retained {
+                                self.remove_retained_delegation(&retained).await;
                             }
                         }
-                        Ok(LiveDelegationResultDeliveryResolution::Resolved(_)) => {
+                        LiveDelegationResultDeliveryResolution::Resolved(_) => {
                             tracing::warn!(
                                 %operation_id,
                                 "generated fallback result delivery unexpectedly allowed retry"
                             );
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, %operation_id, "generated fallback result delivery resolution failed");
                         }
                     }
                 }
@@ -555,7 +1363,9 @@ impl ExperimentalLiveDelegationCoordinator {
             .map_err(|error| error.to_string())
     }
 
-    async fn start_delegation(
+    /// Client-context capability only. Its normalized prose handoff and
+    /// helper lifecycle are not valid Responses function-call evidence.
+    async fn start_client_context_delegation(
         &self,
         provider_binding: &ProviderWebrtcBinding,
         control: Arc<dyn ExperimentalGptLiveControlPlane>,
@@ -746,56 +1556,86 @@ impl ExperimentalLiveDelegationCoordinator {
         let execution = match service.start(request).await {
             Ok(execution) => execution,
             Err(error) => {
-                self.runtime
-                    .resolve_live_delegation_worker_start(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &admission,
-                        false,
+                let start_error = error.to_string();
+                let operation_id = operation.operation_id().clone();
+                let runtime = Arc::clone(&self.runtime);
+                let cleanup_binding = runtime_binding.clone();
+                let cleanup_admission = admission.clone();
+                let cleanup_tasks = Arc::clone(&self.failed_start_cleanups);
+                let cleanup_operation_id = operation_id.clone();
+                let (first_report_tx, first_report_rx) = oneshot::channel();
+                let (cleanup_start_tx, cleanup_start_rx) = oneshot::channel();
+                let cleanup = tokio::spawn(async move {
+                    let _ = cleanup_start_rx.await;
+                    retire_failed_start_with_retry(
+                        runtime,
+                        cleanup_binding,
+                        cleanup_admission,
+                        service,
+                        first_report_tx,
                     )
+                    .await;
+                    cleanup_tasks.lock().await.remove(&cleanup_operation_id);
+                });
+                self.failed_start_cleanups.lock().await.insert(
+                    operation_id,
+                    OwnedDelegationCleanup {
+                        binding: runtime_binding.clone(),
+                        task: cleanup,
+                    },
+                );
+                let _ = cleanup_start_tx.send(());
+                let report_error = first_report_rx
                     .await
-                    .map_err(|resolve_error| resolve_error.to_string())?;
-                let retirement = self
-                    .runtime
-                    .authorize_live_delegation_worker_retirement(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &admission,
-                    )
-                    .await
-                    .map_err(|retirement_error| retirement_error.to_string())?;
-                let retired = service
-                    .retire_live_failed_start(&admission, &retirement)
-                    .await
-                    .is_ok();
-                self.runtime
-                    .resolve_live_delegation_worker_retirement(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &retirement,
-                        retired,
-                    )
-                    .await
-                    .map_err(|retirement_error| retirement_error.to_string())?;
-                return Err(error.to_string());
+                    .ok()
+                    .flatten()
+                    .map(|error| format!("; generated failed-start report pending retry: {error}"))
+                    .unwrap_or_default();
+                return Err(format!("{start_error}{report_error}"));
             }
         };
-        self.runtime
-            .resolve_live_delegation_worker_start(
-                runtime_binding.runtime_id(),
-                runtime_binding.fence_token(),
-                runtime_binding.generation(),
-                &admission,
-                true,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let cancellation = execution
-            .cancellation_handle()
-            .ok_or_else(|| "live execution lost cancellation binding".to_string())?;
+        let Some(cancellation) = execution.cancellation_handle() else {
+            let operation_id = operation.operation_id().clone();
+            let cleanup_operation_id = operation_id.clone();
+            let cleanup_tasks = Arc::clone(&self.failed_start_cleanups);
+            let cleanup_runtime = Arc::clone(&self.runtime);
+            let cleanup_binding = runtime_binding.clone();
+            let cleanup_admission = admission.clone();
+            let (cleanup_start_tx, cleanup_start_rx) = oneshot::channel();
+            let cleanup = tokio::spawn(async move {
+                let _ = cleanup_start_rx.await;
+                retry_reconciled_cleanup_step("missing-cancellation-start-report", || {
+                    cleanup_runtime.resolve_live_delegation_worker_start(
+                        cleanup_binding.runtime_id(),
+                        cleanup_binding.fence_token(),
+                        cleanup_binding.generation(),
+                        &cleanup_admission,
+                        true,
+                    )
+                })
+                .await;
+                let _ = realize_terminal(
+                    cleanup_runtime,
+                    &cleanup_binding,
+                    &cleanup_admission,
+                    &service,
+                    execution.await_terminal().await,
+                )
+                .await;
+                cleanup_tasks.lock().await.remove(&cleanup_operation_id);
+            });
+            self.failed_start_cleanups.lock().await.insert(
+                operation_id,
+                OwnedDelegationCleanup {
+                    binding: runtime_binding.clone(),
+                    task: cleanup,
+                },
+            );
+            let _ = cleanup_start_tx.send(());
+            return Err(
+                "live execution lost cancellation binding; terminal cleanup retained".to_string(),
+            );
+        };
         let retained = Arc::new(RetainedDelegation {
             operation,
             provisional,
@@ -812,9 +1652,26 @@ impl ExperimentalLiveDelegationCoordinator {
         let task_coordinator = Arc::new(self.clone());
         let task_runtime = Arc::clone(&self.runtime);
         let task_retained = Arc::clone(&retained);
+        let task_cancellation = cancellation.clone();
         let (task_start_tx, task_start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
-            if task_start_rx.await.is_err() {
+            let command = await_started_delegation_task_command(task_start_rx).await;
+            if matches!(
+                command,
+                StartedDelegationTaskCommand::CleanupAfterStartPublicationFailure
+            ) {
+                cleanup_started_execution_after_publication_failure(
+                    Arc::clone(&task_runtime),
+                    &task_retained.runtime_binding,
+                    &task_retained.admission,
+                    &service,
+                    &task_cancellation,
+                    execution,
+                )
+                .await;
+                task_coordinator
+                    .remove_retained_delegation(&task_retained)
+                    .await;
                 return;
             }
             let terminal = realize_terminal(
@@ -832,12 +1689,29 @@ impl ExperimentalLiveDelegationCoordinator {
         self.active.lock().await.insert(
             channel_key,
             ActiveDelegation {
-                retained,
+                retained: Arc::clone(&retained),
                 cancellation,
                 task,
             },
         );
-        let _ = task_start_tx.send(());
+        if let Err(error) = self
+            .runtime
+            .resolve_live_delegation_worker_start(
+                retained.runtime_binding.runtime_id(),
+                retained.runtime_binding.fence_token(),
+                retained.runtime_binding.generation(),
+                &retained.admission,
+                true,
+            )
+            .await
+        {
+            let _ = task_start_tx
+                .send(StartedDelegationTaskCommand::CleanupAfterStartPublicationFailure);
+            return Err(format!(
+                "generated successful worker-start publication failed; cleanup retained: {error}"
+            ));
+        }
+        let _ = task_start_tx.send(StartedDelegationTaskCommand::Run);
         Ok(())
     }
 
@@ -855,8 +1729,155 @@ impl ExperimentalLiveDelegationCoordinator {
             self.remove_retained_delegation(retained).await;
             return;
         }
-        if let Err(error) = self.try_release_retained_result(retained).await {
-            tracing::warn!(%error, "experimental live result release remained pending");
+        self.schedule_result_delivery(Arc::clone(retained)).await;
+    }
+
+    async fn schedule_result_delivery(&self, retained: Arc<RetainedDelegation>) {
+        let ready = {
+            let result = retained.result.lock().await;
+            !result.terminal_ineligible
+                && result.reconciliation.is_some()
+                && result.result_text.is_some()
+        };
+        if !ready {
+            return;
+        }
+        let operation_id = retained.operation.operation_id().clone();
+        let mut tasks = self.result_delivery_tasks.lock().await;
+        if tasks.contains_key(&operation_id) {
+            return;
+        }
+        let coordinator = Arc::new(self.clone());
+        let task_operation_id = operation_id.clone();
+        let task_retained = Arc::clone(&retained);
+        let tasks_owner = Arc::clone(&self.result_delivery_tasks);
+        let (start_tx, start_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_rx.await;
+            let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+            loop {
+                if task_retained.result.lock().await.terminal_ineligible {
+                    break;
+                }
+                match coordinator
+                    .try_release_retained_result(&task_retained)
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, %task_operation_id, "owned live result delivery retry remains pending");
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+                    }
+                }
+            }
+            tasks_owner.lock().await.remove(&task_operation_id);
+        });
+        tasks.insert(operation_id, task);
+        drop(tasks);
+        let _ = start_tx.send(());
+    }
+
+    async fn retain_and_realize_result_recovery(
+        &self,
+        recovery: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+    ) {
+        let operation_id = recovery.delivery().operation().operation_id().clone();
+        {
+            let mut pending = self.pending_result_recoveries.lock().await;
+            if pending.contains_key(&operation_id) {
+                tracing::warn!(%operation_id, "duplicate ambiguity recovery observation retained without replay");
+                return;
+            }
+            pending.insert(operation_id.clone(), recovery.clone());
+        }
+        let mut tasks = self.result_recovery_tasks.lock().await;
+        if tasks.contains_key(&operation_id) {
+            return;
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let pending = Arc::clone(&self.pending_result_recoveries);
+        let tasks_owner = Arc::clone(&self.result_recovery_tasks);
+        let task_operation_id = operation_id.clone();
+        let session_id = recovery.session_id().clone();
+        let channel_id = recovery.closing_channel_id().clone();
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let (start_tx, start_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_rx.await;
+            let realization = await_result_recovery_attempt_or_shutdown(
+                task_cancellation,
+                runtime.realize_live_delegation_result_ambiguity_recovery(recovery),
+            )
+            .await;
+            match realization {
+                Some(Ok(())) => {
+                    pending.lock().await.remove(&task_operation_id);
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, %task_operation_id, "generated live result ambiguity recovery remains retained without replay");
+                }
+                None => {}
+            }
+            tasks_owner.lock().await.remove(&task_operation_id);
+        });
+        tasks.insert(
+            operation_id,
+            OwnedResultRecovery {
+                session_id,
+                channel_id,
+                cancellation,
+                task,
+            },
+        );
+        drop(tasks);
+        let _ = start_tx.send(());
+    }
+
+    async fn settle_result_recovery_tasks(&self, binding: &ProviderWebrtcBinding) {
+        let pending_operation_ids = self
+            .pending_result_recoveries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(operation_id, recovery)| {
+                (recovery.session_id() == binding.session_id()
+                    && recovery.closing_channel_id() == binding.channel_id())
+                .then_some(operation_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let owned = {
+            let mut tasks = self.result_recovery_tasks.lock().await;
+            let operation_ids = tasks
+                .iter()
+                .filter_map(|(operation_id, recovery)| {
+                    (recovery.session_id == *binding.session_id()
+                        && recovery.channel_id == *binding.channel_id())
+                    .then_some(operation_id.clone())
+                })
+                .collect::<Vec<_>>();
+            operation_ids
+                .into_iter()
+                .filter_map(|operation_id| {
+                    tasks
+                        .remove(&operation_id)
+                        .map(|recovery| (operation_id, recovery))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (operation_id, recovery) in owned {
+            cancel_and_settle_result_recovery(recovery).await;
+            self.pending_result_recoveries
+                .lock()
+                .await
+                .remove(&operation_id);
+        }
+        let mut pending = self.pending_result_recoveries.lock().await;
+        for operation_id in pending_operation_ids {
+            pending.remove(&operation_id);
         }
     }
 
@@ -884,22 +1905,54 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    async fn settle_result_delivery_task(&self, operation_id: &OperationId) {
+        let task = self.result_delivery_tasks.lock().await.remove(operation_id);
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+
+    async fn settle_failed_start_cleanups(&self, binding: &ProviderWebrtcBinding) {
+        let tasks = {
+            let mut cleanups = self.failed_start_cleanups.lock().await;
+            let operation_ids = cleanups
+                .iter()
+                .filter_map(|(operation_id, cleanup)| {
+                    (cleanup.binding.session_id() == binding.session_id()
+                        && cleanup.binding.channel_id() == binding.channel_id()
+                        && cleanup.binding.generation() == binding.runtime_generation().get()
+                        && cleanup.binding.fence_token() == binding.runtime_fence().get())
+                    .then_some(operation_id.clone())
+                })
+                .collect::<Vec<_>>();
+            operation_ids
+                .into_iter()
+                .filter_map(|operation_id| {
+                    cleanups.remove(&operation_id).map(|cleanup| cleanup.task)
+                })
+                .collect::<Vec<_>>()
+        };
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
     async fn try_release_retained_result(
         &self,
         retained: &Arc<RetainedDelegation>,
     ) -> Result<(), String> {
-        let (reconciliation, result_text, existing_release, existing_delivery) = {
+        let (reservation, reconciliation, result_text, existing_release, existing_delivery) = {
             let mut result = retained.result.lock().await;
-            if result.terminal_ineligible || result.delivery_in_flight {
-                return Ok(());
-            }
             let (Some(reconciliation), Some(result_text)) =
                 (result.reconciliation.clone(), result.result_text.clone())
             else {
                 return Ok(());
             };
-            result.delivery_in_flight = true;
+            let Some(reservation) = result.reserve_delivery() else {
+                return Ok(());
+            };
             (
+                reservation,
                 reconciliation,
                 result_text,
                 result.release_authority.clone(),
@@ -910,7 +1963,7 @@ impl ExperimentalLiveDelegationCoordinator {
         let release = match existing_release {
             Some(release) => release,
             None => {
-                let release = self
+                let release = match self
                     .runtime
                     .authorize_live_delegation_result_release(
                         retained.runtime_binding.session_id(),
@@ -921,7 +1974,13 @@ impl ExperimentalLiveDelegationCoordinator {
                         &reconciliation,
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                {
+                    Ok(release) => release,
+                    Err(error) => {
+                        retained.result.lock().await.release_delivery(reservation);
+                        return Err(error.to_string());
+                    }
+                };
                 retained.result.lock().await.release_authority = Some(release.clone());
                 release
             }
@@ -932,32 +1991,59 @@ impl ExperimentalLiveDelegationCoordinator {
                 let delivery = self
                     .runtime
                     .authorize_live_delegation_result_delivery(&release, &result_text)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                    .await;
+                let delivery = match delivery {
+                    Ok(delivery) => delivery,
+                    Err(error) => {
+                        retained.result.lock().await.release_delivery(reservation);
+                        return Err(error.to_string());
+                    }
+                };
                 retained.result.lock().await.delivery_authority = Some(delivery.clone());
                 delivery
             }
         };
-        let resolution = match retained
+        let ambiguity_authority = delivery.clone();
+        let dispatch = retained
             .control
             .release_delegation_context(delivery, retained.delegation.clone(), result_text)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            ExperimentalGptLiveResultDeliveryDispatch::AwaitingAcknowledgement(waiter) => {
-                waiter.resolve().await.map_err(|error| error.to_string())?
+            .await;
+        let resolution = match dispatch {
+            Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable) => {
+                retained.result.lock().await.release_delivery(reservation);
+                return Err("exact provider binding is temporarily unavailable".to_string());
             }
-            ExperimentalGptLiveResultDeliveryDispatch::Resolved(resolution) => resolution,
+            Err(error) => {
+                tracing::warn!(%error, "result delivery authority may have crossed the provider boundary; resolving ambiguous");
+                self.resolve_ambiguous_result_delivery(&ambiguity_authority)
+                    .await;
+                self.remove_retained_delegation(retained).await;
+                return Ok(());
+            }
+            Ok(ExperimentalGptLiveResultDeliveryDispatch::AwaitingAcknowledgement(waiter)) => {
+                match waiter.resolve().await {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        tracing::warn!(%error, "accepted live result delivery lost acknowledgement; forcing ambiguity recovery");
+                        self.resolve_ambiguous_result_delivery(&ambiguity_authority)
+                            .await;
+                        self.remove_retained_delegation(retained).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(ExperimentalGptLiveResultDeliveryDispatch::Resolved(resolution)) => resolution,
         };
         let (authority, observation) = resolution.into_parts();
-        let resolution = self
-            .runtime
-            .resolve_live_delegation_result_delivery(&authority, observation)
-            .await
-            .map_err(|error| error.to_string())?;
+        let resolution = retry_reconciled_cleanup_step("result-delivery-resolution", || {
+            self.runtime
+                .resolve_live_delegation_result_delivery(&authority, observation)
+        })
+        .await;
         match resolution {
             LiveDelegationResultDeliveryResolution::Resolved(receipt) => {
                 if receipt.retry_allowed() || receipt.recovery_required() {
+                    self.remove_retained_delegation(retained).await;
                     return Err(
                         "generated terminal result delivery returned invalid retry or recovery facts"
                             .to_string(),
@@ -965,14 +2051,35 @@ impl ExperimentalLiveDelegationCoordinator {
                 }
             }
             LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery) => {
-                self.runtime
-                    .realize_live_delegation_result_ambiguity_recovery(recovery)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.retain_and_realize_result_recovery(recovery).await;
             }
         }
         self.remove_retained_delegation(retained).await;
         Ok(())
+    }
+
+    async fn resolve_ambiguous_result_delivery(
+        &self,
+        authority: &LiveDelegationResultDeliveryAuthority,
+    ) {
+        let resolution =
+            retry_reconciled_cleanup_step("ambiguous-result-delivery-resolution", || {
+                self.runtime.resolve_live_delegation_result_delivery(
+                    authority,
+                    LiveDelegationResultDeliveryObservation::Ambiguous,
+                )
+            })
+            .await;
+        match resolution {
+            LiveDelegationResultDeliveryResolution::AmbiguityRecovery(recovery) => {
+                self.retain_and_realize_result_recovery(recovery).await;
+            }
+            LiveDelegationResultDeliveryResolution::Resolved(_) => {
+                tracing::error!(
+                    "generated ambiguous result delivery resolved without mandatory recovery"
+                );
+            }
+        }
     }
 
     /// Supply only SessionDocument-sealed exact final-user evidence. Until the
@@ -1030,7 +2137,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 return Err(error.to_string());
             }
             retained.result.lock().await.reconciliation = Some(receipt);
-            self.try_release_retained_result(&retained).await?;
+            self.schedule_result_delivery(Arc::clone(&retained)).await;
         } else if receipt.cancellation_required() {
             retained.result.lock().await.terminal_ineligible = true;
             let cancellation = self
@@ -1077,6 +2184,9 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn cancel_channel_binding(&self, binding: &ProviderWebrtcBinding) {
         let key = (binding.session_id().clone(), binding.channel_id().clone());
         self.active_turns.lock().await.remove(&key);
+        self.cancel_responses_executions_for_binding(binding).await;
+        self.settle_result_recovery_tasks(binding).await;
+        self.settle_failed_start_cleanups(binding).await;
         if let Some(active) = self.active.lock().await.remove(&key) {
             if active.retained.runtime_binding.session_id() != binding.session_id()
                 || active.retained.runtime_binding.channel_id() != binding.channel_id()
@@ -1117,6 +2227,8 @@ impl ExperimentalLiveDelegationCoordinator {
                         .await;
                 }
                 let _ = active.task.await;
+                self.settle_result_delivery_task(active.retained.operation.operation_id())
+                    .await;
                 self.remove_retained_delegation(&active.retained).await;
             }
         }
@@ -1135,6 +2247,8 @@ impl ExperimentalLiveDelegationCoordinator {
             .collect::<Vec<_>>();
         for retained in retained {
             retained.result.lock().await.terminal_ineligible = true;
+            self.settle_result_delivery_task(retained.operation.operation_id())
+                .await;
             self.remove_retained_delegation(&retained).await;
         }
     }
@@ -1175,6 +2289,146 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator
     }
 }
 
+/// Retry an operation whose runtime entrypoint first reconciles exact generated
+/// state. Callers must not use this for raw generated transitions.
+async fn retry_reconciled_cleanup_step<T, E, F, Fut>(label: &'static str, mut step: F) -> T
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    loop {
+        match step().await {
+            Ok(value) => return value,
+            Err(error) => {
+                tracing::warn!(%error, cleanup_step = label, "live delegation cleanup remains pending");
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
+async fn retire_failed_start_with_retry(
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    admission: LiveDelegationExecutionAdmission,
+    service: DelegationExecutionService,
+    first_report_tx: oneshot::Sender<Option<String>>,
+) {
+    let first_report = runtime
+        .resolve_live_delegation_worker_start(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            &admission,
+            false,
+        )
+        .await;
+    let first_report_error = first_report.as_ref().err().map(ToString::to_string);
+    let _ = first_report_tx.send(first_report_error);
+    if first_report.is_err() {
+        retry_reconciled_cleanup_step("failed-start-report", || {
+            runtime.resolve_live_delegation_worker_start(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &admission,
+                false,
+            )
+        })
+        .await;
+    }
+    let retirement = retry_reconciled_cleanup_step("failed-start-retirement-authority", || {
+        runtime.authorize_live_delegation_worker_retirement(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            &admission,
+        )
+    })
+    .await;
+    retry_reconciled_cleanup_step("failed-start-physical-retirement", || {
+        service.retire_live_failed_start(&admission, &retirement)
+    })
+    .await;
+    retry_reconciled_cleanup_step("failed-start-retirement-resolution", || {
+        runtime.resolve_live_delegation_worker_retirement(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            &retirement,
+            true,
+        )
+    })
+    .await;
+}
+
+async fn cleanup_started_execution_after_publication_failure(
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    admission: &LiveDelegationExecutionAdmission,
+    service: &DelegationExecutionService,
+    cancellation: &DelegationCancellationHandle,
+    execution: DelegationExecutionHandle,
+) {
+    retry_reconciled_cleanup_step("successful-start-report", || {
+        runtime.resolve_live_delegation_worker_start(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            admission,
+            true,
+        )
+    })
+    .await;
+    let directive = retry_reconciled_cleanup_step("unpublished-start-abandonment", || {
+        runtime.abandon_live_delegation(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            admission,
+        )
+    })
+    .await;
+    if let LiveDelegationCancellationDirective::CancellationAuthorized(authority) = directive {
+        let outcome =
+            retry_reconciled_cleanup_step("unpublished-start-physical-cancellation", || async {
+                match cancellation.cancel(&authority).await {
+                    Ok(LiveDelegationCancellationOutcome::Failed) => {
+                        Err("exact worker cancellation failed mechanically".to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                    Ok(outcome) => Ok(outcome),
+                }
+            })
+            .await;
+        if let Err(error) = runtime
+            .resolve_live_delegation_cancellation(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &authority,
+                outcome,
+            )
+            .await
+        {
+            tracing::warn!(%error, "cancellation observation publication was not replayed; terminal observation remains authoritative");
+        }
+    }
+    let _ = realize_terminal(
+        runtime,
+        binding,
+        admission,
+        service,
+        execution.await_terminal().await,
+    )
+    .await;
+}
+
 struct RealizedDelegationTerminal {
     result_text: Option<String>,
     terminal_ineligible: bool,
@@ -1197,58 +2451,40 @@ async fn realize_terminal(
         DelegationTurnTerminal::Failed(_) => None,
         _ => None,
     };
-    let terminal_receipt = match runtime
-        .record_live_delegation_worker_terminal(
+    let terminal_receipt = retry_reconciled_cleanup_step("worker-terminal-record", || {
+        runtime.record_live_delegation_worker_terminal(
             binding.runtime_id(),
             binding.fence_token(),
             binding.generation(),
             admission,
             terminal_kind,
         )
-        .await
-    {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            tracing::warn!(%error, "generated live worker terminal recording failed");
-            return RealizedDelegationTerminal {
-                result_text: None,
-                terminal_ineligible: true,
-            };
-        }
-    };
-    let retirement = runtime
-        .authorize_live_delegation_worker_retirement(
+    })
+    .await;
+    let retirement = retry_reconciled_cleanup_step("worker-retirement-authority", || {
+        runtime.authorize_live_delegation_worker_retirement(
             binding.runtime_id(),
             binding.fence_token(),
             binding.generation(),
             admission,
         )
-        .await;
-    let retired = match retirement {
-        Ok(retirement) => {
-            let retired = service
-                .retire_live_terminalized(&terminalized, &retirement)
-                .await
-                .is_ok();
-            if let Err(error) = runtime
-                .resolve_live_delegation_worker_retirement(
-                    binding.runtime_id(),
-                    binding.fence_token(),
-                    binding.generation(),
-                    &retirement,
-                    retired,
-                )
-                .await
-            {
-                tracing::warn!(%error, "generated live worker retirement resolution failed");
-            }
-            retired
-        }
-        Err(error) => {
-            tracing::warn!(%error, "generated live worker retirement authorization failed");
-            false
-        }
-    };
+    })
+    .await;
+    retry_reconciled_cleanup_step("worker-physical-retirement", || {
+        service.retire_live_terminalized(&terminalized, &retirement)
+    })
+    .await;
+    retry_reconciled_cleanup_step("worker-retirement-resolution", || {
+        runtime.resolve_live_delegation_worker_retirement(
+            binding.runtime_id(),
+            binding.fence_token(),
+            binding.generation(),
+            &retirement,
+            true,
+        )
+    })
+    .await;
+    let retired = true;
     let result_text =
         retain_terminal_result(retired, terminal_kind, terminal_receipt.late(), result_text);
     let terminal_ineligible = result_text.is_none();
@@ -1273,6 +2509,85 @@ fn retain_terminal_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_core::exact_operation::ExactOperationIdentity;
+    use meerkat_core::interaction::InteractionId;
+
+    struct RetryOncePreparedResponsesExecutor {
+        starts: std::sync::atomic::AtomicUsize,
+        snapshots: Mutex<Vec<Arc<meerkat_core::Session>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LiveBridgeOperationExecutor for RetryOncePreparedResponsesExecutor {
+        async fn start(
+            &self,
+            request: LiveBridgeOperationRequest,
+            _cancellation: meerkat_mob::LiveBridgeOperationCancellationSignal,
+        ) -> Result<meerkat_mob::LiveBridgeOperationTerminalFuture, LiveBridgeOperationStartError>
+        {
+            assert!(request.has_execution_authorities());
+            self.snapshots
+                .lock()
+                .await
+                .push(request.snapshot().session_arc());
+            if self
+                .starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Err(LiveBridgeOperationStartError::TemporarilyUnavailable);
+            }
+            let max_output_bytes = request.max_output_bytes();
+            Ok(Box::pin(async move {
+                LiveBridgeOperationTerminal::completed("exact retry result", max_output_bytes)
+                    .expect("bounded test output")
+            }))
+        }
+    }
+
+    fn test_bridge_admission(
+        session_id: SessionId,
+        binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        identity: &str,
+    ) -> LiveBridgeOperationAdmission {
+        let canonical_context_revision = meerkat_core::Session::with_id(session_id.clone())
+            .canonical_context_revision()
+            .expect("test Session mints canonical context revision");
+        test_bridge_admission_with_revision(
+            session_id,
+            binding,
+            identity,
+            canonical_context_revision,
+        )
+    }
+
+    fn test_bridge_admission_with_revision(
+        session_id: SessionId,
+        binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        identity: &str,
+        canonical_context_revision: meerkat_core::CanonicalContextRevision,
+    ) -> LiveBridgeOperationAdmission {
+        let provider = meerkat_core::LiveBridgeProviderCorrelation::new(
+            "turn:opaque",
+            "delegation:opaque",
+            "call:opaque",
+        )
+        .expect("provider correlation");
+        let correlation = meerkat_core::LiveBridgeOperationCorrelation::new(
+            binding.channel_id().clone(),
+            InteractionId::new(),
+            provider,
+        )
+        .expect("bridge correlation");
+        LiveBridgeOperationAdmission::__test_new(
+            session_id,
+            binding,
+            ExactOperationIdentity::for_domain(OperationId::new(), correlation),
+            identity,
+            canonical_context_revision,
+            meerkat_core::LiveBridgeRequestDigest::derive("request").expect("request digest"),
+        )
+    }
 
     fn test_runtime_binding(
         session_id: SessionId,
@@ -1286,6 +2601,132 @@ mod tests {
             generation + 100,
             generation,
         )
+    }
+
+    #[tokio::test]
+    async fn responses_coordinator_pre_accept_retry_reuses_exact_prepared_request_and_permit() {
+        let session_id = SessionId::new();
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                    mob_id: "mob".to_string(),
+                    role: "personal".to_string(),
+                    member: "personal-agent".to_string(),
+                }),
+            })
+            .expect("test session metadata");
+        let snapshot = LiveBridgeExecutionSnapshot::__test_new(session, "personal-agent")
+            .expect("generation-bound test snapshot");
+        let binding = test_runtime_binding(session_id.clone(), "channel:prepared-retry", 17);
+        let admission = Arc::new(test_bridge_admission_with_revision(
+            session_id,
+            binding,
+            "personal-agent",
+            snapshot.canonical_context_revision().clone(),
+        ));
+        let operation_id = admission.operation().operation_id().clone();
+        let executor = Arc::new(RetryOncePreparedResponsesExecutor {
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            snapshots: Mutex::new(Vec::new()),
+        });
+        let service = LiveBridgeOperationService::new(executor.clone());
+        let prepared = Arc::new(Mutex::new(PreparedResponsesMap::new()));
+        let active = Arc::new(Mutex::new(ActiveResponsesMap::new()));
+        let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_admission = Arc::clone(&admission);
+        let first_snapshot = snapshot.clone();
+        let first_machine = Arc::clone(&machine);
+        let first_preparations = Arc::clone(&preparations);
+        let first = accept_prepared_responses_execution(
+            Arc::clone(&prepared),
+            &active,
+            &service,
+            Arc::clone(&admission),
+            &snapshot,
+            "request",
+            move || async move {
+                first_preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let gate = first_machine.live_bridge_tool_execution_gate(&first_admission);
+                let model_authority = Arc::new(
+                    meerkat_runtime::live_execution::LiveBridgeEffectDispatchAuthority::__test_new(
+                        first_admission.as_ref().clone(),
+                        meerkat_core::LiveBridgeEffectKind::ModelComputation,
+                    ),
+                );
+                let request = LiveBridgeOperationRequest::new(
+                    Arc::clone(&first_admission),
+                    first_snapshot,
+                    "request",
+                )
+                .expect("test bridge request")
+                .with_execution_authorities(
+                    model_authority,
+                    gate.sealed_agent_dispatch_admission()
+                        .expect("sealed test dispatch admission"),
+                )
+                .expect("test execution authorities");
+                Ok(PreparedResponsesExecution {
+                    admission: first_admission,
+                    request,
+                    tool_gate: gate,
+                })
+            },
+        )
+        .await;
+        let first_error = match first {
+            Ok(_) => panic!("first start must remain before acceptance"),
+            Err(error) => error,
+        };
+        assert!(first_error.contains("temporarily unavailable"));
+        assert_eq!(preparations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(prepared.lock().await.contains_key(&operation_id));
+
+        let second_preparations = Arc::clone(&preparations);
+        let (accepted, accepted_admission, _gate, mut custody) =
+            accept_prepared_responses_execution(
+                Arc::clone(&prepared),
+                &active,
+                &service,
+                Arc::clone(&admission),
+                &snapshot,
+                "request",
+                move || async move {
+                    second_preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("retry attempted to rebuild sealed preparation".to_string())
+                },
+            )
+            .await
+            .expect("same exact operation is accepted on retry");
+        assert_eq!(preparations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(accepted.operation_id(), &operation_id);
+        assert_eq!(accepted_admission.operation(), admission.operation());
+        custody.remove(&operation_id);
+        drop(custody);
+        let terminal = accepted.await_terminal().await;
+        assert_eq!(terminal.output(), Some("exact retry result"));
+        let snapshots = executor.snapshots.lock().await;
+        assert_eq!(snapshots.len(), 2);
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshot.session_arc()));
     }
 
     #[test]
@@ -1336,6 +2777,146 @@ mod tests {
                 Some("   ".to_string()),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn responses_execution_requires_current_durable_member_without_lifecycle_mutation() {
+        let session_id = SessionId::new();
+        let binding = test_runtime_binding(session_id.clone(), "channel:durable-owner", 9);
+        let admission = test_bridge_admission(session_id, binding.clone(), "personal-agent");
+        assert!(live_bridge_admission_matches_current_owner(
+            &admission,
+            &binding,
+            &AgentIdentity::from("personal-agent")
+        ));
+        assert!(!live_bridge_admission_matches_current_owner(
+            &admission,
+            &binding,
+            &AgentIdentity::from("helper-agent")
+        ));
+
+        let stale = test_runtime_binding(SessionId::new(), "channel:durable-owner", 10);
+        assert!(!live_bridge_admission_matches_current_owner(
+            &admission,
+            &stale,
+            &AgentIdentity::from("personal-agent")
+        ));
+    }
+
+    #[test]
+    fn mismatched_or_failed_generated_cancellation_never_signals_local_execution() {
+        let exact_operation = OperationId::new();
+        let mismatch = OperationId::new();
+        let cancellation =
+            LiveBridgeOperationCancellationHandle::__test_new(exact_operation.clone());
+
+        assert!(!signal_local_cancellation_if_generated_matches(
+            &cancellation,
+            Some(&mismatch),
+        ));
+        assert!(!cancellation.is_cancelled());
+        assert!(!signal_local_cancellation_if_generated_matches(
+            &cancellation,
+            None,
+        ));
+        assert!(!cancellation.is_cancelled());
+
+        assert!(signal_local_cancellation_if_generated_matches(
+            &cancellation,
+            Some(&exact_operation),
+        ));
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn terminal_recording_retries_transient_custody_and_stops_on_exact_receipt() {
+        let session_id = SessionId::new();
+        let binding = test_runtime_binding(session_id.clone(), "terminal-retry", 1);
+        let admission = test_bridge_admission(session_id, binding, "personal-agent");
+        let receipt = LiveBridgeExecutionTerminalReceipt::__test_new(
+            admission,
+            meerkat_core::MeerkatExecutionTerminal::Cancelled,
+            None,
+        );
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovered = record_live_bridge_terminal_with_typed_recovery({
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                let receipt = receipt.clone();
+                async move {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        Err(meerkat_runtime::RuntimeDriverError::RecoveryBackoff {
+                            reason: "transient test recovery".to_string(),
+                        })
+                    } else {
+                        Ok(receipt)
+                    }
+                }
+            }
+        })
+        .await
+        .expect("exact terminal receipt must settle transient custody");
+
+        assert_eq!(
+            recovered.terminal(),
+            meerkat_core::MeerkatExecutionTerminal::Cancelled
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_recording_never_retries_destroyed_session_authority() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = record_live_bridge_terminal_with_typed_recovery({
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<LiveBridgeExecutionTerminalReceipt, _>(
+                        meerkat_runtime::RuntimeDriverError::NotReady {
+                            state: meerkat_runtime::RuntimeState::Destroyed,
+                        },
+                    )
+                }
+            }
+        })
+        .await
+        .expect_err("nonretryable mismatch must retain terminal custody");
+
+        assert!(matches!(
+            error,
+            meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed
+            }
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn channel_shutdown_never_cancels_an_already_accepted_terminal() {
+        let operation_id = OperationId::new();
+        let cancellation = LiveBridgeOperationCancellationHandle::__test_new(operation_id);
+        let pending = PendingResponsesTerminalCustody {
+            terminal: LiveBridgeOperationTerminal::without_output(
+                meerkat_core::MeerkatExecutionTerminal::Failed,
+            )
+            .expect("test terminal"),
+            result_digest: None,
+        };
+
+        if !accepted_terminal_blocks_operation_cancellation(Some(&pending)) {
+            cancellation.cancel();
+        }
+
+        assert!(accepted_terminal_blocks_operation_cancellation(Some(
+            &pending
+        )));
+        assert!(
+            !cancellation.is_cancelled(),
+            "shutdown retains exact terminal recovery custody instead of rewriting it as cancellation"
         );
     }
 
@@ -1437,5 +3018,68 @@ mod tests {
             .await
             .expect("repeated deactivation is idempotent");
         assert!(channels.lock().await.is_empty());
+    }
+
+    #[test]
+    fn one_result_delivery_reservation_prevents_duplicate_parent_context() {
+        let mut result = RetainedDelegationResult::default();
+        let first = result.reserve_delivery().expect("first reservation");
+        assert!(result.reserve_delivery().is_none());
+
+        result.release_delivery(first);
+        assert!(result.reserve_delivery().is_some());
+
+        result.terminal_ineligible = true;
+        assert!(result.reserve_delivery().is_none());
+    }
+
+    #[test]
+    fn responses_submission_digest_is_exact_and_separate_from_execution_terminal() {
+        let terminal = LiveBridgeOperationTerminal::completed("exact output", 1024)
+            .expect("completed terminal");
+        let execution_digest =
+            live_bridge_execution_result_digest(&terminal).expect("execution digest");
+        let first =
+            live_bridge_submission_output_digest("exact output").expect("submission digest");
+        let second =
+            live_bridge_submission_output_digest("exact output").expect("stable submission digest");
+        assert_eq!(first, second);
+        assert_ne!(first, execution_digest);
+        assert!(live_bridge_submission_output_digest("").is_err());
+    }
+
+    #[tokio::test]
+    async fn channel_shutdown_cancels_and_joins_owned_recovery() {
+        let cancellation = CancellationToken::new();
+        let waiter = cancellation.clone();
+        let task = tokio::spawn(async move {
+            waiter.cancelled().await;
+        });
+        let owned = OwnedResultRecovery {
+            session_id: SessionId::new(),
+            channel_id: meerkat_core::LiveChannelId::new("channel:shutdown"),
+            cancellation,
+            task,
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            cancel_and_settle_result_recovery(owned),
+        )
+        .await
+        .expect("recovery shutdown converges");
+    }
+
+    #[tokio::test]
+    async fn failed_ambiguity_recovery_is_observed_once_without_blind_replay() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&attempts);
+        let outcome =
+            await_result_recovery_attempt_or_shutdown(CancellationToken::new(), async move {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), _>("partially realized")
+            })
+            .await;
+        assert_eq!(outcome, Some(Err("partially realized")));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

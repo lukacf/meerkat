@@ -1,15 +1,22 @@
 use super::protocol::{
-    ClientEvent, CreateCallRequest, ExtraFields, InputTextContent, ServerEvent, UnknownEvent,
+    BridgeArguments, ClientEvent, CreateCallRequest, Delegation, EventCarrier, ExtraFields,
+    InputTextContent, ReceivedServerEvent, ServerEvent, UnknownEvent,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+pub const MAX_RAW_JSON_EVENT_BYTES: usize = 1024 * 1024;
+pub const MAX_BRIDGE_ARGUMENT_BYTES: usize = 16 * 1024;
+pub const MAX_FUNCTION_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
 pub enum CodecError {
     #[error("private event is not valid JSON")]
     InvalidJson,
+    #[error("private event exceeds the qualified raw JSON size bound")]
+    OversizedRawEvent,
     #[error("private event must be a JSON object")]
     NotAnObject,
     #[error("private event is missing its type discriminant")]
@@ -20,6 +27,12 @@ pub enum CodecError {
     MalformedKnownEvent { kind: &'static str },
     #[error("private event serialization failed")]
     Serialization,
+    #[error("bridge arguments exceed the qualified decoded size bound")]
+    OversizedBridgeArguments,
+    #[error("bridge arguments do not match the strict request schema")]
+    MalformedBridgeArguments,
+    #[error("function output exceeds the qualified size bound")]
+    OversizedFunctionOutput,
     #[error("private event {scope} extras contain reserved field {field}")]
     ReservedExtraField {
         scope: &'static str,
@@ -35,6 +48,9 @@ pub enum CodecError {
 /// Returns [`CodecError`] when JSON, its discriminant, or a known event body is
 /// malformed.
 pub fn decode_server_event(input: &str) -> Result<ServerEvent, CodecError> {
+    if input.len() > MAX_RAW_JSON_EVENT_BYTES {
+        return Err(CodecError::OversizedRawEvent);
+    }
     let value: Value = serde_json::from_str(input).map_err(|_| CodecError::InvalidJson)?;
     let object = value.as_object().ok_or(CodecError::NotAnObject)?;
     let kind_value = object.get("type").ok_or(CodecError::MissingDiscriminant)?;
@@ -75,6 +91,48 @@ pub fn decode_server_event(input: &str) -> Result<ServerEvent, CodecError> {
     }
 }
 
+/// Decode one private server event and bind it to the mechanical carrier on
+/// which its exact bytes were observed.
+///
+/// # Errors
+///
+/// Returns [`CodecError`] under the same conditions as
+/// [`decode_server_event`].
+pub fn decode_received_server_event(
+    carrier: EventCarrier,
+    input: &str,
+) -> Result<ReceivedServerEvent, CodecError> {
+    let event = decode_server_event(input)?;
+    Ok(ReceivedServerEvent::new(carrier, input.len(), event))
+}
+
+/// Decode the already-extracted JSON arguments of the `invoke_meerkat` bridge.
+///
+/// This helper deliberately does not identify or lower a raw server event. The
+/// raw Responses function-call carrier remains unknown until Gate 0 qualifies
+/// its discriminant and fields.
+///
+/// # Errors
+///
+/// Returns [`CodecError`] when the decoded argument JSON is oversized or does
+/// not match the strict `{ "request": string }` schema.
+pub fn decode_bridge_arguments(input: &str) -> Result<BridgeArguments, CodecError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct WireBridgeArguments {
+        request: String,
+    }
+
+    let arguments: WireBridgeArguments =
+        serde_json::from_str(input).map_err(|_| CodecError::MalformedBridgeArguments)?;
+    if arguments.request.len() > MAX_BRIDGE_ARGUMENT_BYTES {
+        return Err(CodecError::OversizedBridgeArguments);
+    }
+    Ok(BridgeArguments {
+        request: arguments.request,
+    })
+}
+
 fn decode_known<T>(
     mut value: Value,
     kind: &'static str,
@@ -103,6 +161,9 @@ pub fn encode_client_event(event: &ClientEvent) -> Result<String, CodecError> {
         ClientEvent::SessionContextAppend(body) => encode_known("session.context.append", body),
         ClientEvent::DelegationContextAppend(body) => {
             encode_known("delegation.context.append", body)
+        }
+        ClientEvent::DelegationFunctionCallOutput(body) => {
+            encode_known("delegation.function_call_output.create", body)
         }
     }
 }
@@ -151,7 +212,30 @@ pub fn encode_create_call_request(request: &CreateCallRequest) -> Result<Vec<u8>
         &["voice"],
     )?;
     if let Some(delegation) = &request.session.delegation {
-        reject_reserved(&delegation.extra, "client delegation", &["type"])?;
+        match delegation {
+            Delegation::Client(delegation) => {
+                reject_reserved(&delegation.extra, "client delegation", &["type"])?;
+            }
+            Delegation::Responses(delegation) => {
+                reject_reserved(
+                    &delegation.extra,
+                    "responses delegation",
+                    &["type", "responses"],
+                )?;
+                reject_reserved(
+                    &delegation.responses.extra,
+                    "responses configuration",
+                    &["model", "instructions", "tools"],
+                )?;
+                for tool in &delegation.responses.tools {
+                    reject_reserved(
+                        &tool.extra,
+                        "responses function tool",
+                        &["type", "name", "description", "parameters"],
+                    )?;
+                }
+            }
+        }
     }
     serde_json::to_vec(request).map_err(|_| CodecError::Serialization)
 }
@@ -173,6 +257,12 @@ fn validate_client_event(event: &ClientEvent) -> Result<(), CodecError> {
                 &["type", "delegation_item_id", "channel", "content"],
             )?;
             validate_content(&body.content)
+        }
+        ClientEvent::DelegationFunctionCallOutput(body) => {
+            if body.item.output.len() > MAX_FUNCTION_OUTPUT_BYTES {
+                return Err(CodecError::OversizedFunctionOutput);
+            }
+            Ok(())
         }
     }
 }

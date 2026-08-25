@@ -615,6 +615,13 @@ where
                 "failed to sync agent control state before session checkpoint: {error}"
             ))
         })?;
+        // The live bridge has temporarily installed its retained Session
+        // clone, so this synchronization can mutate only that disposable
+        // clone. Return before either the checkpointer or SessionStore seam.
+        if self.noncommitting_live_bridge_run {
+            self.latest_run_checkpoint_receipt = None;
+            return Ok(());
+        }
         if let Some(checkpointer) = self.checkpointer.clone() {
             let previous = match self.latest_run_checkpoint_receipt.take() {
                 Some(receipt)
@@ -4212,6 +4219,14 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
     ) -> Result<Arc<[Arc<ToolDef>]>, AgentError> {
+        if self.noncommitting_live_bridge_run {
+            return self.live_bridge_tool_defs.clone().ok_or_else(|| {
+                AgentError::InternalError(
+                    "live bridge execution material has no frozen admitted tool surface"
+                        .to_string(),
+                )
+            });
+        }
         // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
         let tool_defs = {
             let dispatcher_tools = self.tools.tools();
@@ -5812,6 +5827,17 @@ where
             accumulated_session_effects,
             mut callback_pending,
         } = batch;
+        if self.noncommitting_live_bridge_run
+            && (!pending_op_refs.is_empty() || !callback_pending.is_empty())
+        {
+            let error = AgentError::ConfigError(
+                "live bridge tools may not create asynchronous operations or callback continuations"
+                    .to_string(),
+            );
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
         let barrier_operation_ids = pending_op_refs
             .iter()
             .filter(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier)

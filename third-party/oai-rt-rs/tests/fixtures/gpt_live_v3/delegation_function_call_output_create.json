@@ -1,0 +1,8 @@
+{
+  "type": "delegation.function_call_output.create",
+  "item": {
+    "type": "function_call_output",
+    "call_id": "call_fixture_bridge",
+    "output": "FIXTURE_PRIVATE_FUNCTION_OUTPUT"
+  }
+}

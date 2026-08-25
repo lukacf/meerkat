@@ -4574,6 +4574,7 @@ fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
         | RealtimeTranscriptEvent::ItemSkipped { .. }
         | RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
         | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. }
+        | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
         | RealtimeTranscriptEvent::AssistantTurnCompleted { .. }
         | RealtimeTranscriptEvent::AssistantTurnInterrupted { .. } => 0,
     }

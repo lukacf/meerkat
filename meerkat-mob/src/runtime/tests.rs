@@ -3977,6 +3977,22 @@ impl MobSessionService for MockSessionService {
         })
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn start_live_bridge_member_operation(
+        &self,
+        request: super::LiveBridgeOperationRequest,
+        cancellation: super::LiveBridgeOperationCancellationSignal,
+    ) -> Result<super::LiveBridgeOperationTerminalFuture, super::LiveBridgeOperationStartError>
+    {
+        if request.admission().operation().operation_id() != cancellation.operation_id() {
+            return Err(super::LiveBridgeOperationStartError::Rejected);
+        }
+        Ok(Box::pin(async move {
+            cancellation.cancelled().await;
+            super::LiveBridgeOperationTerminal::cancelled()
+        }))
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -8217,6 +8233,164 @@ async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessi
         .expect("create mob");
 
     (handle, service)
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+#[tokio::test]
+async fn live_bridge_cancellation_keeps_exact_member_incarnation_and_allows_ordinary_turn() {
+    struct AdmitDispatch;
+
+    #[async_trait]
+    impl meerkat_core::ToolDispatchAdmission for AdmitDispatch {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&meerkat_core::ToolDispatchContext>,
+            _effect_kind: meerkat_core::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
+    let definition = with_unique_mob_id(sample_definition(), "live-bridge-cancel-member");
+    let (handle, service) = create_test_mob(definition).await;
+    let identity = AgentIdentity::from("live-bridge-member");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn durable bridge member");
+    let member = handle
+        .member(&identity)
+        .await
+        .expect("durable member handle");
+    let before = member.status().await.expect("member status before bridge");
+    let (runtime_id, fence_token) = before
+        .runtime_identity_fields()
+        .expect("current member incarnation");
+    let runtime_id = runtime_id.clone();
+    let session_id = before
+        .current_bridge_session_id()
+        .cloned()
+        .expect("current member session");
+    let session = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("live member session");
+    let snapshot = super::LiveBridgeExecutionSnapshot::from_generation_bound_session(
+        session,
+        identity.as_str(),
+    )
+    .expect("exact generation-bound session snapshot");
+
+    let channel_id = meerkat_core::LiveChannelId::new("channel:actor-cancel-test");
+    let binding = meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+        session_id.clone(),
+        channel_id.clone(),
+        meerkat_runtime::identifiers::LogicalRuntimeId::new(runtime_id.to_string()),
+        fence_token.get(),
+        runtime_id.generation.get(),
+    );
+    let provider = meerkat_core::LiveBridgeProviderCorrelation::new(
+        "turn:actor-cancel-test",
+        "delegation:actor-cancel-test",
+        "call:actor-cancel-test",
+    )
+    .expect("provider correlation");
+    let correlation = meerkat_core::LiveBridgeOperationCorrelation::new(
+        channel_id,
+        InteractionId::new(),
+        provider,
+    )
+    .expect("operation correlation");
+    let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        meerkat_core::ops::OperationId::new(),
+        correlation,
+    );
+    let request_text = "answer this noncommitting live request";
+    let admission = Arc::new(
+        meerkat_runtime::live_execution::LiveBridgeOperationAdmission::__test_new(
+            session_id.clone(),
+            binding,
+            operation,
+            identity.as_str(),
+            snapshot.canonical_context_revision().clone(),
+            meerkat_core::LiveBridgeRequestDigest::derive(request_text).expect("request digest"),
+        ),
+    );
+    let model_authority = Arc::new(
+        meerkat_runtime::live_execution::LiveBridgeEffectDispatchAuthority::__test_new(
+            admission.as_ref().clone(),
+            meerkat_core::LiveBridgeEffectKind::ModelComputation,
+        ),
+    );
+    let dispatch_admission = meerkat_core::LiveBridgeToolDispatchAdmission::__test_new(
+        admission.operation().operation_id().to_string(),
+        Arc::new(AdmitDispatch),
+    );
+    let request =
+        super::LiveBridgeOperationRequest::new(Arc::clone(&admission), snapshot, request_text)
+            .expect("live bridge request")
+            .with_execution_authorities(Arc::clone(&model_authority), dispatch_admission)
+            .expect("exact execution authorities");
+    assert!(
+        model_authority.sealed_noncommitting_run_permit().is_err(),
+        "one consumed model-computation authority must seal at most one run permit"
+    );
+    let executor = Arc::new(super::DurableMemberLiveBridgeOperationExecutor::new(
+        member.clone(),
+    ));
+    let bridge = super::LiveBridgeOperationService::new(executor);
+    let accepted = bridge.start(request).await.expect("actor accepted bridge");
+    accepted.cancellation_handle().cancel();
+    assert_eq!(
+        accepted.await_terminal().await.terminal(),
+        meerkat_runtime::live_execution::MeerkatExecutionTerminal::Cancelled
+    );
+
+    let after = member
+        .status()
+        .await
+        .expect("member status after bridge cancel");
+    let (after_runtime_id, after_fence) = after
+        .runtime_identity_fields()
+        .expect("member still has a live incarnation");
+    assert_eq!(after_runtime_id, &runtime_id, "member must not respawn");
+    assert_eq!(after_fence, fence_token, "member fence must not rotate");
+    assert_eq!(
+        after.current_bridge_session_id(),
+        Some(&session_id),
+        "member must keep its canonical session binding"
+    );
+    assert!(
+        !after.is_final,
+        "bridge cancellation must not retire the member"
+    );
+
+    let turn_count = service.start_turn_call_count();
+    let delivery = member
+        .internal_turn("ordinary turn after live bridge cancellation")
+        .await
+        .expect("ordinary member turn remains available");
+    assert_eq!(delivery.agent_runtime_id, runtime_id);
+    assert_eq!(delivery.fence_token, fence_token);
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        turn_count + 1,
+        "ordinary member work must run after bridge cancellation",
+    )
+    .await;
+    assert!(
+        service
+            .recorded_start_turn_prompts()
+            .await
+            .iter()
+            .any(|(recorded_session, prompt)| recorded_session == &session_id
+                && prompt == "ordinary turn after live bridge cancellation"),
+        "ordinary work must execute on the unchanged canonical member session"
+    );
+    handle.shutdown().await.expect("shutdown test mob");
 }
 
 #[tokio::test]

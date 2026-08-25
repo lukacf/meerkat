@@ -2784,12 +2784,46 @@ impl AgentFactory {
         &self,
         realm: &RealmId,
         factory: &crate::ExperimentalLiveFactoryIdentity,
-    ) -> Result<&'static [&'static str], crate::ExperimentalLiveAdmissionError> {
+    ) -> Result<Vec<&'static str>, crate::ExperimentalLiveAdmissionError> {
         let qualification = self
             .experimental_live_admission
             .qualify_capability(realm, factory)?;
         self.experimental_live_admission
-            .advertised_feature_capabilities(&qualification)
+            .advertised_feature_capabilities(&qualification, None)
+    }
+
+    /// Advertise independently qualified execution atoms from the same
+    /// Gate0-qualified admission owner. An absent lower qualification cannot
+    /// mint `execution_profile` and therefore cannot reach this path.
+    pub fn experimental_live_execution_feature_capabilities(
+        &self,
+        realm: &RealmId,
+        factory: &crate::ExperimentalLiveFactoryIdentity,
+        execution_profile_id: &str,
+    ) -> Result<Vec<&'static str>, crate::ExperimentalLiveAdmissionError> {
+        let qualification = self
+            .experimental_live_admission
+            .qualify_capability(realm, factory)?;
+        self.experimental_live_admission
+            .advertised_feature_capabilities(&qualification, Some(execution_profile_id))
+    }
+
+    /// Resolve the provider-neutral execution mode owned by this factory's
+    /// configured profile catalog. Callers can name only the profile id.
+    pub fn qualify_experimental_live_execution_profile(
+        &self,
+        realm: &RealmId,
+        factory: &crate::ExperimentalLiveFactoryIdentity,
+        execution_profile_id: &str,
+    ) -> Result<
+        meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+        crate::ExperimentalLiveAdmissionError,
+    > {
+        let qualification = self
+            .experimental_live_admission
+            .qualify_capability(realm, factory)?;
+        self.experimental_live_admission
+            .qualify_execution_profile(&qualification, execution_profile_id)
     }
 
     /// Consume an admission only after revalidating it against this factory's

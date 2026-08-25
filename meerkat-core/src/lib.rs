@@ -109,10 +109,10 @@ pub use agent::{
     AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome, CancelAfterBoundaryCommand,
     CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime, CurrentTurnContent,
     CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError,
-    StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_tool_execution_plan_fenced,
-    resolve_tool_execution_plan_fenced, select_tool_catalog_mode,
-    should_compose_tool_catalog_control_plane,
+    FilteredToolDispatcher, LiveBridgeNoncommittingRunPermit, LiveBridgeToolDispatchAdmission,
+    LlmStreamResult, SnapshotProjectionError, StickyModelFallbackActivationProof,
+    ToolDispatchContext, dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
+    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -261,14 +261,19 @@ pub use lifecycle::{
     RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use live_execution::{
-    AmbiguousDeliveryNoRetryEvidence, CanonicalTranscriptPrefixDigest,
+    AmbiguousDeliveryNoRetryEvidence, CanonicalContextRevision, CanonicalTranscriptPrefixDigest,
     FinalLiveUserTranscriptCommitError, FinalLiveUserTranscriptCommitEvidence,
     FinalLiveUserTranscriptDisposition, LiveAppendDeliveryOutcome, LiveAppendDeliveryReceipt,
     LiveAssistantPlaybackEvidence, LiveAssistantPlaybackTruncationDisposition,
-    LiveAssistantPlaybackTruncationError, LiveAssistantPlaybackTruncationEvidence, LiveChannelId,
-    LiveContextCursor, LiveExecutionIdentityError, LiveHandoffInputProvenance,
-    LiveHandoffReconciliation, LiveResultDisposition, LiveUserTurnCorrelation,
-    NormalizedLiveUserInputDigest, OpaqueProviderCorrelation, ProvisionalLiveHandoff,
+    LiveAssistantPlaybackTruncationError, LiveAssistantPlaybackTruncationEvidence,
+    LiveBridgeCancellationReason, LiveBridgeEffectKind, LiveBridgeEffectOutcome,
+    LiveBridgeOperationCorrelation, LiveBridgeOperationPhase, LiveBridgeOutputKind,
+    LiveBridgeProviderCorrelation, LiveBridgeRequestDigest, LiveBridgeSubmissionObservation,
+    LiveBridgeSubmissionState, LiveChannelId, LiveContextCursor, LiveExecutionCapabilities,
+    LiveExecutionChannelPhase, LiveExecutionIdentityError, LiveExecutionMode,
+    LiveHandoffInputProvenance, LiveHandoffReconciliation, LiveResultDisposition,
+    LiveUserTurnCorrelation, MeerkatExecutionTerminal, NormalizedLiveUserInputDigest,
+    OpaqueProviderCorrelation, ProvisionalLiveHandoff,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use memory::{

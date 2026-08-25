@@ -8,8 +8,8 @@
 //! Transcript admission, delegation meaning, channel policy, recovery, and
 //! model selection remain outside this module.
 
-use meerkat_core::ProviderAuthMetadata;
 use meerkat_core::model_profile::catalog::ModelReleaseStage;
+use meerkat_core::{ModelProfileWitness, Provider, ProviderAuthMetadata};
 use meerkat_llm_core::provider_runtime::errors::ProviderClientError;
 use meerkat_llm_core::provider_runtime::{
     AdmittedExperimentalRealtimeTarget, ExperimentalRealtimeAdmissionRetention,
@@ -18,23 +18,105 @@ use meerkat_llm_core::provider_runtime::{
 #[cfg(feature = "test-realtime-fixtures")]
 use oai_rt_rs::experimental::gpt_live::GptLiveEndpoints;
 use oai_rt_rs::experimental::gpt_live::{
-    CallSession, ClientDelegation, ClientEvent, ContextChannel, CreateCallRequest,
-    DelegationContextAppend, ExtraFields, GptLiveCredentials, GptLiveTransport, InputTextContent,
-    ServerEvent, SessionAudio, SessionAudioOutput, SessionContextAppend, SidebandHeaders,
-    SidebandReceiver, SidebandSender, TransportError,
+    CallSession, ClientEvent, ContextChannel, CreateCallRequest, Delegation,
+    DelegationContextAppend, ExtraFields, FunctionTool, GptLiveCredentials, GptLiveTransport,
+    InputTextContent, ResponsesConfig, ResponsesDelegation, ServerEvent, SessionAudio,
+    SessionAudioOutput, SessionContextAppend, SidebandHeaders, SidebandReceiver, SidebandSender,
+    TransportError,
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::OpenAiBackendKind;
 
+pub const GPT_LIVE_RESPONSES_BRIDGE_TOOL: &str = "invoke_meerkat";
+
+#[allow(
+    dead_code,
+    reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
+)]
+const GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION: &str =
+    "Delegate this request to the channel-bound Meerkat agent.";
+#[allow(
+    dead_code,
+    reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
+)]
+const GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS: &str =
+    "Use invoke_meerkat when the request requires the channel-bound Meerkat agent.";
+
+#[allow(
+    dead_code,
+    reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
+)]
+fn gpt_live_responses_bridge_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "request": { "type": "string" }
+        },
+        "required": ["request"],
+        "additionalProperties": false
+    })
+}
+
+/// Catalog-bound configuration for the server-owned Responses bridge.
+///
+/// The caller supplies only a registry-minted model witness. Instructions,
+/// tool identity, description, and arguments schema are fixed by this profile;
+/// no caller or operator prose can enter the provider session through it.
+#[derive(Clone)]
+pub struct GptLiveResponsesSessionConfig {
+    responses: ResponsesConfig,
+}
+
+impl GptLiveResponsesSessionConfig {
+    #[allow(
+        dead_code,
+        reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
+    )]
+    pub(crate) fn try_from_catalog_model(
+        model: &ModelProfileWitness,
+    ) -> Result<Self, GptLiveBrokerError> {
+        if model.provider() != Provider::OpenAI || model.profile().realtime {
+            return Err(GptLiveBrokerError::InvalidResponsesProfile);
+        }
+        Ok(Self {
+            responses: ResponsesConfig {
+                model: model.model().to_string(),
+                instructions: Some(GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS.to_string()),
+                tools: vec![FunctionTool::new(
+                    GPT_LIVE_RESPONSES_BRIDGE_TOOL,
+                    GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION,
+                    gpt_live_responses_bridge_parameters(),
+                    ExtraFields::new(),
+                )],
+                extra: ExtraFields::new(),
+            },
+        })
+    }
+
+    fn into_delegation(self) -> Delegation {
+        Delegation::Responses(ResponsesDelegation::new(self.responses, ExtraFields::new()))
+    }
+}
+
+impl std::fmt::Debug for GptLiveResponsesSessionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GptLiveResponsesSessionConfig")
+            .field("model", &"<catalog-bound>")
+            .field("instructions", &"<catalog-owned-redacted>")
+            .field("tool", &GPT_LIVE_RESPONSES_BRIDGE_TOOL)
+            .finish()
+    }
+}
+
 /// Provider-owned mechanical configuration for one browser WebRTC bootstrap.
 #[derive(Clone)]
 pub struct GptLiveBrokerOpenConfig {
     offer_sdp: String,
     voice: String,
-    instructions: Option<String>,
-    client_delegation: bool,
+    responses: Option<GptLiveResponsesSessionConfig>,
 }
 
 impl std::fmt::Debug for GptLiveBrokerOpenConfig {
@@ -43,11 +125,7 @@ impl std::fmt::Debug for GptLiveBrokerOpenConfig {
             .debug_struct("GptLiveBrokerOpenConfig")
             .field("offer_sdp", &"<redacted>")
             .field("voice", &"<redacted>")
-            .field(
-                "instructions",
-                &self.instructions.as_ref().map(|_| "<redacted>"),
-            )
-            .field("client_delegation", &self.client_delegation)
+            .field("responses", &self.responses)
             .finish()
     }
 }
@@ -73,22 +151,17 @@ impl GptLiveBrokerOpenConfig {
         Ok(Self {
             offer_sdp,
             voice,
-            instructions: None,
-            client_delegation: false,
+            responses: None,
         })
     }
 
-    /// Carry caller-authored provider instructions without interpreting them.
+    /// Select the catalog-bound Responses function bridge.
+    ///
+    /// There is deliberately no client-delegation variant. Client-context is a
+    /// separate capability and cannot be silently substituted for this mode.
     #[must_use]
-    pub fn with_instructions(mut self, instructions: Option<String>) -> Self {
-        self.instructions = instructions.filter(|value| !value.trim().is_empty());
-        self
-    }
-
-    /// Request the verified provider-owned client delegation event family.
-    #[must_use]
-    pub const fn with_client_delegation(mut self, enabled: bool) -> Self {
-        self.client_delegation = enabled;
+    pub fn with_responses_session(mut self, responses: GptLiveResponsesSessionConfig) -> Self {
+        self.responses = Some(responses);
         self
     }
 }
@@ -258,6 +331,8 @@ pub enum GptLiveBrokerError {
     MissingOfferSdp,
     #[error("GPT Live browser bootstrap requires a non-empty voice")]
     MissingVoice,
+    #[error("GPT Live Responses bridge requires a catalogued non-realtime OpenAI model")]
+    InvalidResponsesProfile,
     #[error("GPT Live context append requires non-empty text")]
     MissingContext,
     #[error("a GPT Live context append is already awaiting acknowledgement")]
@@ -295,6 +370,7 @@ impl std::fmt::Debug for GptLiveBrokerError {
         match self {
             Self::MissingOfferSdp => formatter.write_str("MissingOfferSdp"),
             Self::MissingVoice => formatter.write_str("MissingVoice"),
+            Self::InvalidResponsesProfile => formatter.write_str("InvalidResponsesProfile"),
             Self::MissingContext => formatter.write_str("MissingContext"),
             Self::AppendInFlight => formatter.write_str("AppendInFlight"),
             Self::AppendDeliveryAmbiguous { token } => formatter
@@ -498,11 +574,10 @@ impl GptLiveBrokerFactory {
                     },
                     extra: ExtraFields::new(),
                 },
-                delegation: config.client_delegation.then(|| ClientDelegation {
-                    delegation_type: "client".to_string(),
-                    extra: ExtraFields::new(),
-                }),
-                instructions: config.instructions,
+                delegation: config
+                    .responses
+                    .map(GptLiveResponsesSessionConfig::into_delegation),
+                instructions: None,
                 extra: ExtraFields::new(),
             },
         }
@@ -847,6 +922,22 @@ mod tests {
         ResolvedRealtimeTarget::new(identity, witness, connection).expect("matching target")
     }
 
+    fn responses_model() -> ModelProfileWitness {
+        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("canonical model registry");
+        let entry = registry
+            .entries_for_provider(Provider::OpenAI)
+            .find(|entry| {
+                registry
+                    .profile_for_provider(Provider::OpenAI, &entry.id)
+                    .is_some_and(|profile| !profile.realtime)
+            })
+            .expect("catalogued non-realtime OpenAI model");
+        registry
+            .profile_witness_for_provider(Provider::OpenAI, &entry.id)
+            .expect("catalog model witness")
+    }
+
     #[derive(Default)]
     struct Capture {
         call_body: Option<Value>,
@@ -1112,16 +1203,57 @@ mod tests {
     }
 
     #[test]
-    fn open_config_debug_redacts_sdp_voice_and_instructions() {
+    fn open_config_debug_redacts_sdp_voice_and_catalog_responses_profile() {
+        let responses = GptLiveResponsesSessionConfig::try_from_catalog_model(&responses_model())
+            .expect("catalog responses profile");
         let config = GptLiveBrokerOpenConfig::new("sdp-secret", "voice-secret")
             .unwrap()
-            .with_instructions(Some("instruction-secret".to_string()))
-            .with_client_delegation(true);
+            .with_responses_session(responses);
         let debug = format!("{config:?}");
         assert!(!debug.contains("sdp-secret"));
         assert!(!debug.contains("voice-secret"));
-        assert!(!debug.contains("instruction-secret"));
-        assert!(debug.contains("client_delegation: true"));
+        assert!(debug.contains("catalog-owned-redacted"));
+        assert!(!debug.contains(GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS));
+    }
+
+    #[test]
+    fn function_bridge_open_config_can_only_produce_responses_delegation() {
+        let target = realtime_target(
+            ModelReleaseStage::Experimental,
+            OpenAiBackendKind::ChatGptBackend,
+        );
+        let factory = GptLiveBrokerFactory::from_target_with_transport(
+            target,
+            GptLiveTransport::try_new().expect("test transport"),
+        )
+        .expect("experimental ChatGPT target");
+        let responses = GptLiveResponsesSessionConfig::try_from_catalog_model(&responses_model())
+            .expect("catalog responses profile");
+        let request = factory.call_request(
+            GptLiveBrokerOpenConfig::new("PRIVATE_OFFER_SDP", "cove")
+                .expect("open config")
+                .with_responses_session(responses),
+        );
+        let wire = serde_json::to_value(request).expect("serialize call request");
+
+        assert_eq!(wire["session"]["delegation"]["type"], "responses");
+        assert_ne!(wire["session"]["delegation"]["type"], "client");
+        assert_eq!(
+            wire["session"]["delegation"]["responses"]["tools"]
+                .as_array()
+                .expect("tools array")
+                .len(),
+            1
+        );
+        assert_eq!(
+            wire["session"]["delegation"]["responses"]["tools"][0]["name"],
+            GPT_LIVE_RESPONSES_BRIDGE_TOOL
+        );
+        assert_eq!(
+            wire["session"]["delegation"]["responses"]["tools"][0]["parameters"],
+            gpt_live_responses_bridge_parameters()
+        );
+        assert!(wire["session"]["instructions"].is_null());
     }
 
     #[test]
@@ -1220,7 +1352,10 @@ mod tests {
         .expect("admitted fixture factory");
         let config = GptLiveBrokerOpenConfig::new("PRIVATE_OFFER_SDP", "cove")
             .expect("fixture open config")
-            .with_client_delegation(true);
+            .with_responses_session(
+                GptLiveResponsesSessionConfig::try_from_catalog_model(&responses_model())
+                    .expect("catalog responses profile"),
+            );
         let bootstrap = factory.open(config).await.expect("broker bootstrap");
         assert_eq!(bootstrap.answer_sdp(), "v=0\r\nPRIVATE_ANSWER_SDP");
         let (_, session) = bootstrap.into_parts();
@@ -1300,7 +1435,8 @@ mod tests {
         let capture = capture.lock().expect("capture lock");
         let call_body = capture.call_body.as_ref().expect("captured call body");
         assert_eq!(call_body["sdp"], "PRIVATE_OFFER_SDP");
-        assert_eq!(call_body["session"]["delegation"]["type"], "client");
+        assert_eq!(call_body["session"]["delegation"]["type"], "responses");
+        assert_ne!(call_body["session"]["delegation"]["type"], "client");
         assert_eq!(capture.client_events.len(), 2);
         assert_eq!(capture.client_events[0]["type"], "session.context.append");
         assert_eq!(capture.client_events[0]["channel"], "commentary");
@@ -1327,8 +1463,7 @@ mod tests {
         let bootstrap = factory
             .open(
                 GptLiveBrokerOpenConfig::new("PRIVATE_OFFER_SDP", "cove")
-                    .expect("fixture open config")
-                    .with_client_delegation(true),
+                    .expect("fixture open config"),
             )
             .await
             .expect("broker bootstrap");

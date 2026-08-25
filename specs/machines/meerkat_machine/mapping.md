@@ -3845,6 +3845,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionRevokedChannelIdIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionRevokedChannelIdAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionRevokedChannelIdRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionDrainingIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3881,6 +3890,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonLiveOpenAdmissionStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveExecutionModeAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveExecutionModeAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveExecutionModeAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageExperimentalLiveExecutionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3888,6 +3906,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StageExperimentalLiveExecutionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterLivePlaybackOwnerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterLivePlaybackOwnerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterLivePlaybackOwnerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveActiveChannelControlIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveActiveChannelControlAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveActiveChannelControlRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveActiveChannelControlIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveActiveChannelControlAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveActiveChannelControlRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLivePlaybackOwnerIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLivePlaybackOwnerAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLivePlaybackOwnerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyClosedReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyClosedReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyClosedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyClosedReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeLiveChannelCloseCustodyClosedReplayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindLiveExecutionChannelIdle`
@@ -4197,6 +4275,168 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindLiveDelegationResultRecoveryChannelRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationProtocolDriftIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationProtocolDriftAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveBridgeOperationProtocolDriftRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConfirmLiveBridgeFinalInputIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConfirmLiveBridgeFinalInputAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConfirmLiveBridgeFinalInputRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeEffectIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeEffectAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeEffectRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveBridgeEffectAuthorityIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveBridgeEffectAuthorityAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeLiveBridgeEffectAuthorityRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeFreshRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeEffectOutcomeExactReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveBridgeOperationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveBridgeOperationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelLiveBridgeOperationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeExecutionTerminalExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeSubmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeSubmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeSubmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimLiveBridgeSubmissionAttemptIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimLiveBridgeSubmissionAttemptAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimLiveBridgeSubmissionAttemptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeSubmissionLocalWriteIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeSubmissionLocalWriteAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeSubmissionLocalWriteRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBridgeSubmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBridgeSubmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBridgeSubmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EnqueueLiveContextRowIdle`
@@ -6877,6 +7117,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExperimentalLiveExecutionStaged`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveExecutionModeAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LivePlaybackOwnerReady`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveActiveChannelControlAuthorityIssued`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveActiveChannelControlDispatchAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LivePlaybackOwnerRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveChannelCloseCustodyRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveInteractionAdmitted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6944,6 +7202,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveDelegationResultRecoveryChannelBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeOperationAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeOperationReplayObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeProtocolDriftCloseAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeFinalInputAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeEffectAuthorityIssued`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeEffectDispatchAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeEffectOutcomeRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeOperationCancellationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeExecutionTerminalRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeSubmissionAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeSubmissionAttemptClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeSubmissionLocalWriteRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeSubmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeSubmissionRecoveredAmbiguous`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextAppendAuthorized`
@@ -7108,6 +7408,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_execution_binding_is_complete_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_execution_phase_is_explicit_and_revocation_is_terminal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_operation_identity_is_complete_and_direct`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_effect_authority_is_one_use_and_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_execution_and_provider_settlement_are_independent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_completed_terminal_has_exact_result_digest`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_experimental_execution_custody_is_exact`

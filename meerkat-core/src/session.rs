@@ -4469,6 +4469,35 @@ impl Session {
         Ok(())
     }
 
+    /// Persist one generated-authorized playback terminal fact while the
+    /// independent provider final is still pending.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_live_assistant_playback_terminal(
+        &mut self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+        stop_reason: crate::StopReason,
+        usage: crate::TurnUsage,
+    ) -> Result<(), crate::error::AgentError> {
+        let _ = self.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: response_id.to_string(),
+                item_id: item_id.to_string(),
+                content_index,
+                evidence,
+                stop_reason,
+                usage,
+            },
+        );
+        Ok(())
+    }
+
     /// Resolve the exact durable assistant playback target for a surface
     /// terminal report. No identity is minted by this read.
     #[must_use]
@@ -6100,6 +6129,15 @@ impl Session {
     /// comes from the message buffer and its incremental digest accumulator.
     pub fn transcript_revision(&self) -> Result<String, serde_json::Error> {
         self.transcript_content_digest()
+    }
+
+    /// Mint canonical live context authority from this exact Session clone.
+    /// The execution owner retains this same clone for executor custody.
+    pub fn canonical_context_revision(
+        &self,
+    ) -> Result<crate::CanonicalContextRevision, serde_json::Error> {
+        self.transcript_revision()
+            .map(crate::CanonicalContextRevision::from_transcript_revision)
     }
 
     /// Monotonic durable generation for same-session transcript rewrites.

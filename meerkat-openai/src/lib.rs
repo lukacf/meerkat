@@ -34,10 +34,10 @@ pub use client::{AzureOpenAiWireConfig, OpenAiClient};
 pub use client_compatible::{OpenAiCompatibleClient, OpenAiCompatibleClientOptions};
 #[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
 pub use gpt_live::{
-    GptLiveAppendToken, GptLiveBrokerBootstrap, GptLiveBrokerError, GptLiveBrokerFactory,
-    GptLiveBrokerObservation, GptLiveBrokerOpenConfig, GptLiveBrokerSession,
-    GptLiveBrokerTerminalClass, GptLiveDelegationRef, GptLiveTranscriptItemRef, GptLiveTurnRef,
-    GptLiveTurnRole,
+    GPT_LIVE_RESPONSES_BRIDGE_TOOL, GptLiveAppendToken, GptLiveBrokerBootstrap, GptLiveBrokerError,
+    GptLiveBrokerFactory, GptLiveBrokerObservation, GptLiveBrokerOpenConfig, GptLiveBrokerSession,
+    GptLiveBrokerTerminalClass, GptLiveDelegationRef, GptLiveResponsesSessionConfig,
+    GptLiveTranscriptItemRef, GptLiveTurnRef, GptLiveTurnRole,
 };
 pub use image_generation::{
     OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,

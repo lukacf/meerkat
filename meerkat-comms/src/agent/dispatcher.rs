@@ -246,6 +246,18 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             })
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        if is_comms_tool(tool_name) {
+            meerkat_core::LiveBridgeEffectKind::Comms
+        } else {
+            self.inner
+                .as_ref()
+                .map_or(meerkat_core::LiveBridgeEffectKind::ExternalIo, |inner| {
+                    inner.live_bridge_effect_kind(tool_name)
+                })
+        }
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         let inner = self
             .inner
@@ -481,6 +493,14 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             return comms_tool_mutation_class(tool_name);
         }
         self.inner.tool_mutation_class(tool_name)
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        if is_comms_tool(tool_name) {
+            meerkat_core::LiveBridgeEffectKind::Comms
+        } else {
+            self.inner.live_bridge_effect_kind(tool_name)
+        }
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {

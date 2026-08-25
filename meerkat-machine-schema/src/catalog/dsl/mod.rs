@@ -1116,6 +1116,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::u64("FenceToken"),
             NamedTypeBinding::u64("Generation"),
             NamedTypeBinding::string("AgentRuntimeId"),
+            NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("CommsRuntimeId"),
             // WAVE G1 fold (#51): machine-owned staged realtime transcript item
@@ -1173,6 +1174,82 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "LiveDelegationWorkerTerminalKind",
                 &["Completed", "Cancelled", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveExecutionChannelPhase",
+                &["Pending", "Active", "Revoked"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveExecutionMode",
+                &["FunctionBridge", "ClientContext"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeOperationPhase",
+                &[
+                    "PreFinalInference",
+                    "FinalInputAuthorized",
+                    "CancellationAuthorized",
+                    "ExecutionTerminal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeEffectKind",
+                &[
+                    "ModelComputation",
+                    "ReadOnlyMemorySnapshot",
+                    "ToolDispatch",
+                    "DurableMemoryMutation",
+                    "Comms",
+                    "HelperSpawn",
+                    "ExternalIo",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeEffectOutcome",
+                &["Committed", "Failed", "Unknown"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MeerkatExecutionTerminal",
+                &[
+                    "Completed",
+                    "Rejected",
+                    "Failed",
+                    "TimedOut",
+                    "Unrecoverable",
+                    "Cancelled",
+                    "Superseded",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeCancellationReason",
+                &["BargeIn", "ChannelClose", "Restart", "ProtocolDrift"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeOutputKind",
+                &["Success", "FailureProjection"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeSubmissionState",
+                &[
+                    "SubmissionAuthorized",
+                    "SubmissionAttemptClaimed",
+                    "LocalWriteCompletedAwaitingProof",
+                    "ProviderProcessed",
+                    "ProviderRejected",
+                    "SubmissionAmbiguous",
+                    "CallExpired",
+                    "CallAbandonedByClose",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBridgeSubmissionObservation",
+                &[
+                    "ProviderProcessed",
+                    "ProviderRejected",
+                    "SubmissionAmbiguous",
+                    "CallExpired",
+                    "CallAbandonedByClose",
+                ],
             ),
             // Durable-tail recovery authorization vocabulary. The class
             // mirrors SessionDocumentMachine's classification (same wire
@@ -1573,7 +1650,12 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveOpenAdmissionRejection",
-                &["AlreadyBound", "ChannelAlreadyBound", "LifecycleClosed"],
+                &[
+                    "AlreadyBound",
+                    "ChannelAlreadyBound",
+                    "LifecycleClosed",
+                    "RevokedChannelId",
+                ],
             ),
             NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
             NamedTypeBinding::string_enum("LiveClosePublicStatus", &["Closed"]),

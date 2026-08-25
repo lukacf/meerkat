@@ -11,6 +11,29 @@ use crate::interaction::InteractionId;
 
 const LIVE_CONTEXT_PREFIX_DOMAIN: &[u8] = b"meerkat.live-context-prefix.v1\0";
 const LIVE_NORMALIZED_USER_INPUT_DOMAIN: &[u8] = b"meerkat.live-normalized-user-input.v1\0";
+const LIVE_BRIDGE_REQUEST_DOMAIN: &[u8] = b"meerkat.live-bridge-request.v1\0";
+
+/// Typed transcript-content revision minted only from one exact Session
+/// snapshot. Provider and surface strings cannot construct this witness.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalContextRevision(String);
+
+impl std::fmt::Debug for CanonicalContextRevision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CanonicalContextRevision([REDACTED])")
+    }
+}
+
+impl CanonicalContextRevision {
+    pub(crate) fn from_transcript_revision(revision: String) -> Self {
+        Self(revision)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Opaque identity of one live channel binding.
 ///
@@ -161,6 +184,261 @@ impl LiveUserTurnCorrelation {
     }
 }
 
+/// Opaque structural provider correlation for one Responses bridge call.
+///
+/// These are adapter keys already scoped to the current channel binding. They
+/// are equality material only and never replace Meerkat operation identity.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveBridgeProviderCorrelation {
+    provider_turn_ref: String,
+    provider_delegation_ref: String,
+    provider_call_ref: String,
+}
+
+impl std::fmt::Debug for LiveBridgeProviderCorrelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveBridgeProviderCorrelation")
+            .field("provider_turn_ref", &"[REDACTED]")
+            .field("provider_delegation_ref", &"[REDACTED]")
+            .field("provider_call_ref", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl LiveBridgeProviderCorrelation {
+    pub fn new(
+        provider_turn_ref: impl Into<String>,
+        provider_delegation_ref: impl Into<String>,
+        provider_call_ref: impl Into<String>,
+    ) -> Result<Self, LiveExecutionIdentityError> {
+        Ok(Self {
+            provider_turn_ref: require_nonempty(provider_turn_ref, "provider_turn_ref")?,
+            provider_delegation_ref: require_nonempty(
+                provider_delegation_ref,
+                "provider_delegation_ref",
+            )?,
+            provider_call_ref: require_nonempty(provider_call_ref, "provider_call_ref")?,
+        })
+    }
+
+    #[must_use]
+    pub fn provider_turn_ref(&self) -> &str {
+        &self.provider_turn_ref
+    }
+
+    #[must_use]
+    pub fn provider_delegation_ref(&self) -> &str {
+        &self.provider_delegation_ref
+    }
+
+    #[must_use]
+    pub fn provider_call_ref(&self) -> &str {
+        &self.provider_call_ref
+    }
+}
+
+/// Exact domain correlation for one durable-member Responses bridge
+/// operation. Durable member identity and context revision are sealed in the
+/// generated admission receipt, not accepted as provider tool arguments.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveBridgeOperationCorrelation {
+    channel_id: LiveChannelId,
+    interaction_id: InteractionId,
+    provider: LiveBridgeProviderCorrelation,
+}
+
+impl std::fmt::Debug for LiveBridgeOperationCorrelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveBridgeOperationCorrelation")
+            .field("channel_id", &self.channel_id)
+            .field("interaction_id", &self.interaction_id)
+            .field("provider", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl LiveBridgeOperationCorrelation {
+    pub fn new(
+        channel_id: LiveChannelId,
+        interaction_id: InteractionId,
+        provider: LiveBridgeProviderCorrelation,
+    ) -> Result<Self, LiveExecutionIdentityError> {
+        if channel_id.as_str().trim().is_empty() {
+            return Err(LiveExecutionIdentityError::EmptyField {
+                field: "channel_id",
+            });
+        }
+        Ok(Self {
+            channel_id,
+            interaction_id,
+            provider,
+        })
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> &LiveBridgeProviderCorrelation {
+        &self.provider
+    }
+}
+
+/// Content-safe digest of provider-authored bridge request bytes.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LiveBridgeRequestDigest(String);
+
+impl LiveBridgeRequestDigest {
+    pub fn derive(request: &str) -> Result<Self, LiveExecutionIdentityError> {
+        require_nonempty(request, "request")?;
+        let mut hasher = Sha256::new();
+        hasher.update(LIVE_BRIDGE_REQUEST_DOMAIN);
+        hasher.update((request.len() as u64).to_be_bytes());
+        hasher.update(request.as_bytes());
+        Ok(Self(format!("sha256:{:x}", hasher.finalize())))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveExecutionChannelPhase {
+    Pending,
+    Active,
+    Revoked,
+}
+
+/// Provider-neutral execution strategy selected by the Meerkat profile.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveExecutionMode {
+    FunctionBridge,
+    ClientContext,
+}
+
+/// Independent runtime capability atoms. A mode is admissible only when its
+/// corresponding atom is genuinely available in the current composition.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveExecutionCapabilities {
+    pub function_bridge: bool,
+    pub client_context: bool,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeOperationPhase {
+    PreFinalInference,
+    FinalInputAuthorized,
+    CancellationAuthorized,
+    ExecutionTerminal,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeEffectKind {
+    ModelComputation,
+    ReadOnlyMemorySnapshot,
+    ToolDispatch,
+    DurableMemoryMutation,
+    Comms,
+    HelperSpawn,
+    ExternalIo,
+}
+
+/// Terminal observation for one consumed live bridge effect authority.
+///
+/// `Unknown` means dispatch began but its physical outcome cannot be proven.
+/// It is terminal and must never be retried or relabeled as committed.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeEffectOutcome {
+    Committed,
+    Failed,
+    Unknown,
+}
+
+impl LiveBridgeEffectKind {
+    #[must_use]
+    pub const fn allowed_before_final_input(self) -> bool {
+        matches!(self, Self::ModelComputation | Self::ReadOnlyMemorySnapshot)
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeerkatExecutionTerminal {
+    Completed,
+    Rejected,
+    Failed,
+    TimedOut,
+    Unrecoverable,
+    Cancelled,
+    Superseded,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeCancellationReason {
+    BargeIn,
+    ChannelClose,
+    Restart,
+    ProtocolDrift,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeOutputKind {
+    Success,
+    FailureProjection,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeSubmissionState {
+    SubmissionAuthorized,
+    SubmissionAttemptClaimed,
+    LocalWriteCompletedAwaitingProof,
+    ProviderProcessed,
+    ProviderRejected,
+    SubmissionAmbiguous,
+    CallExpired,
+    CallAbandonedByClose,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBridgeSubmissionObservation {
+    ProviderProcessed,
+    ProviderRejected,
+    SubmissionAmbiguous,
+    CallExpired,
+    CallAbandonedByClose,
+}
+
 /// Provenance of actionable input joined to a provider delegation identity.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -275,7 +553,8 @@ pub enum FinalLiveUserTranscriptDisposition {
 /// A reported prefix is evidence about the playback path only. `Unmeasured`
 /// means no prefix evidence was available. Neither variant asserts delivery to
 /// a person or biological hearing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveAssistantPlaybackEvidence {
     PlaybackComplete,
     ReportedPrefix(String),

@@ -218,6 +218,8 @@ mod handle;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
 mod identity_recovery_test_support;
+#[cfg(feature = "experimental-gpt-live")]
+mod live_bridge_operation;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;
@@ -347,6 +349,15 @@ pub use host_schedule::HostObservationScheduleMobHost;
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey,
+};
+#[cfg(feature = "experimental-gpt-live")]
+pub use live_bridge_operation::{
+    DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
+    LiveBridgeAcceptedExecution, LiveBridgeExecutionSnapshot,
+    LiveBridgeOperationCancellationHandle, LiveBridgeOperationCancellationSignal,
+    LiveBridgeOperationExecutor, LiveBridgeOperationRequest, LiveBridgeOperationService,
+    LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
+    LiveBridgeOperationTerminalFuture,
 };
 pub use member_history_proxy::MemberHistoryPageDomain;
 pub use member_live_proxy::MemberLiveStatusDomain;

@@ -581,6 +581,15 @@ machine! {
             session_live_assistant_playback_response_id: Map<SessionId, String>,
             session_live_assistant_playback_item_id: Map<SessionId, String>,
             session_live_assistant_playback_content_index: Map<SessionId, u64>,
+            // Provider finality and playback terminality are independent
+            // facts. Either may arrive first. SessionDocument owns their
+            // one-use join so provider adapters never retain semantic pending
+            // state while waiting for the other observation.
+            session_live_assistant_final_chars: Map<SessionId, u64>,
+            session_live_assistant_final_digest: Map<SessionId, String>,
+            session_live_assistant_terminal_observation: Map<SessionId, Enum<LiveAssistantPlaybackTerminalObservation>>,
+            session_live_assistant_terminal_prefix_chars: Map<SessionId, u64>,
+            session_live_assistant_terminal_prefix_digest: Map<SessionId, String>,
         }
 
         init(Ready) {
@@ -595,6 +604,11 @@ machine! {
             session_live_assistant_playback_response_id = EmptyMap,
             session_live_assistant_playback_item_id = EmptyMap,
             session_live_assistant_playback_content_index = EmptyMap,
+            session_live_assistant_final_chars = EmptyMap,
+            session_live_assistant_final_digest = EmptyMap,
+            session_live_assistant_terminal_observation = EmptyMap,
+            session_live_assistant_terminal_prefix_chars = EmptyMap,
+            session_live_assistant_terminal_prefix_digest = EmptyMap,
         }
 
         terminal []
@@ -787,7 +801,7 @@ machine! {
                 item_id: String,
                 content_index: u64,
             },
-            ResolveLiveAssistantPlaybackTerminal {
+            ObserveLiveAssistantPlaybackFinal {
                 session_id: SessionId,
                 channel_id: String,
                 interaction_id: String,
@@ -796,11 +810,46 @@ machine! {
                 content_index: u64,
                 authoritative_assistant_chars: u64,
                 authoritative_text_digest: String,
-                authoritative_assistant_final: bool,
+                pending_terminal_observation: Enum<LiveAssistantPlaybackTerminalObservation>,
+                pending_reported_prefix_chars: u64,
+                pending_reported_prefix_digest: String,
+                reported_prefix_matches_authoritative: bool,
+            },
+            RecoverLiveAssistantPlaybackFinal {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                authoritative_assistant_chars: u64,
+                authoritative_text_digest: String,
+            },
+            ObserveLiveAssistantPlaybackTerminal {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
                 observation: Enum<LiveAssistantPlaybackTerminalObservation>,
                 reported_prefix_chars: u64,
                 reported_prefix_digest: String,
+                authoritative_assistant_chars: u64,
+                authoritative_text_digest: String,
+                authoritative_assistant_final: bool,
                 reported_prefix_matches_authoritative: bool,
+            },
+            RecoverLiveAssistantPlaybackTerminal {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                observation: Enum<LiveAssistantPlaybackTerminalObservation>,
+                reported_prefix_chars: u64,
+                reported_prefix_digest: String,
             },
             ClassifyLiveContextCommittedRow {
                 session_id: SessionId,
@@ -1091,6 +1140,48 @@ machine! {
                 response_id: String,
                 item_id: String,
                 content_index: u64,
+            },
+            LiveAssistantPlaybackFinalObserved {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                authoritative_assistant_chars: u64,
+                authoritative_text_digest: String,
+            },
+            LiveAssistantPlaybackFinalRecovered {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                authoritative_assistant_chars: u64,
+                authoritative_text_digest: String,
+            },
+            LiveAssistantPlaybackTerminalObserved {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                observation: Enum<LiveAssistantPlaybackTerminalObservation>,
+                reported_prefix_chars: u64,
+                reported_prefix_digest: String,
+            },
+            LiveAssistantPlaybackTerminalRecovered {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                observation: Enum<LiveAssistantPlaybackTerminalObservation>,
+                reported_prefix_chars: u64,
+                reported_prefix_digest: String,
             },
             LiveAssistantPlaybackTerminalResolved {
                 session_id: SessionId,
@@ -1393,6 +1484,10 @@ machine! {
         disposition LiveInteractionTranscriptCompleted => local seam OwnerRealizationOnly,
         disposition LiveAssistantPlaybackTargetAdmitted => local seam OwnerRealizationOnly,
         disposition LiveAssistantPlaybackTargetRecovered => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackFinalObserved => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackFinalRecovered => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackTerminalObserved => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackTerminalRecovered => local seam OwnerRealizationOnly,
         disposition LiveAssistantPlaybackTerminalResolved => local seam OwnerRealizationOnly,
         disposition LiveContextCommittedRowClassified => local seam OwnerRealizationOnly,
         disposition SessionMetadataPersistAuthorized => local seam NoOwnerRealization,
@@ -1434,6 +1529,16 @@ machine! {
                 == self.session_live_assistant_playback_item_id.keys()
             && self.session_live_assistant_playback_response_id.keys()
                 == self.session_live_assistant_playback_content_index.keys()
+            && self.session_live_assistant_final_chars.keys()
+                == self.session_live_assistant_final_digest.keys()
+            && self.session_live_assistant_terminal_observation.keys()
+                == self.session_live_assistant_terminal_prefix_chars.keys()
+            && self.session_live_assistant_terminal_observation.keys()
+                == self.session_live_assistant_terminal_prefix_digest.keys()
+            && for_all(session_id in self.session_live_assistant_final_digest.keys(),
+                self.session_live_assistant_playback_response_id.contains_key(session_id))
+            && for_all(session_id in self.session_live_assistant_terminal_observation.keys(),
+                self.session_live_assistant_playback_response_id.contains_key(session_id))
             && for_all(session_id in self.session_live_assistant_playback_response_id.keys(),
                 self.session_live_channel_id.contains_key(session_id)
                 && self.session_live_interaction_id.contains_key(session_id))
@@ -3222,6 +3327,11 @@ machine! {
                 self.session_live_assistant_playback_response_id.remove(session_id);
                 self.session_live_assistant_playback_item_id.remove(session_id);
                 self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_final_chars.remove(session_id);
+                self.session_live_assistant_final_digest.remove(session_id);
+                self.session_live_assistant_terminal_observation.remove(session_id);
+                self.session_live_assistant_terminal_prefix_chars.remove(session_id);
+                self.session_live_assistant_terminal_prefix_digest.remove(session_id);
                 self.session_live_channel_id.remove(session_id);
                 self.session_live_interaction_id.remove(session_id);
                 self.session_live_transcript_reconciliation.remove(session_id);
@@ -3242,45 +3352,192 @@ machine! {
             }
         }
 
-        transition ResolveLiveAssistantPlaybackComplete {
-            on input ResolveLiveAssistantPlaybackTerminal {
+        // Final text and playback terminality are independent observations.
+        // The first fact is retained by generated authority; observing the
+        // second performs the one-use join and consumes the target.
+        transition ObserveLiveAssistantPlaybackFinalPendingTerminal {
+            on input ObserveLiveAssistantPlaybackFinal {
                 session_id, channel_id, interaction_id, response_id, item_id,
                 content_index, authoritative_assistant_chars,
-                authoritative_text_digest, authoritative_assistant_final,
-                observation, reported_prefix_chars, reported_prefix_digest,
+                authoritative_text_digest, pending_terminal_observation,
+                pending_reported_prefix_chars, pending_reported_prefix_digest,
                 reported_prefix_matches_authoritative
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
-                && authoritative_assistant_final == true
                 && authoritative_assistant_chars > 0
                 && authoritative_text_digest != ""
-                && reported_prefix_chars == 0
-                && reported_prefix_digest == ""
+                && pending_terminal_observation == LiveAssistantPlaybackTerminalObservation::Unmeasured
+                && pending_reported_prefix_chars == 0
+                && pending_reported_prefix_digest == ""
                 && reported_prefix_matches_authoritative == false
                 && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
                 && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
-                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
-                    == Some(response_id)
-                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
-                    == Some(item_id)
-                && self.session_live_assistant_playback_content_index.get_copied(session_id)
-                    == Some(content_index)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_final_digest.contains_key(session_id)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_final_chars.insert(session_id, authoritative_assistant_chars);
+                self.session_live_assistant_final_digest.insert(session_id, authoritative_text_digest);
+            }
+            to Ready
+            emit LiveAssistantPlaybackFinalObserved {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                authoritative_assistant_chars: authoritative_assistant_chars,
+                authoritative_text_digest: authoritative_text_digest
+            }
+        }
+
+        transition RecoverLiveAssistantPlaybackFinal {
+            on input RecoverLiveAssistantPlaybackFinal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, authoritative_assistant_chars, authoritative_text_digest
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && authoritative_assistant_chars > 0
+                && authoritative_text_digest != ""
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_final_digest.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_final_chars.insert(session_id, authoritative_assistant_chars);
+                self.session_live_assistant_final_digest.insert(session_id, authoritative_text_digest);
+            }
+            to Ready
+            emit LiveAssistantPlaybackFinalRecovered {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                authoritative_assistant_chars: authoritative_assistant_chars,
+                authoritative_text_digest: authoritative_text_digest
+            }
+        }
+
+        transition ObserveLiveAssistantPlaybackTerminalPendingFinal {
+            on input ObserveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, observation, reported_prefix_chars,
+                reported_prefix_digest, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                    || observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                && ((observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                        && reported_prefix_chars == 0 && reported_prefix_digest == "")
+                    || (observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
+                        && reported_prefix_digest != ""))
+                && reported_prefix_matches_authoritative == false
+                && authoritative_assistant_chars == 0
+                && authoritative_text_digest == ""
+                && authoritative_assistant_final == false
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_final_digest.contains_key(session_id)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_terminal_observation.insert(session_id, observation);
+                self.session_live_assistant_terminal_prefix_chars.insert(session_id, reported_prefix_chars);
+                self.session_live_assistant_terminal_prefix_digest.insert(session_id, reported_prefix_digest);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalObserved {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                observation: observation, reported_prefix_chars: reported_prefix_chars,
+                reported_prefix_digest: reported_prefix_digest
+            }
+        }
+
+        transition RecoverLiveAssistantPlaybackTerminal {
+            on input RecoverLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, observation, reported_prefix_chars, reported_prefix_digest
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                    || observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                && ((observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                        && reported_prefix_chars == 0 && reported_prefix_digest == "")
+                    || (observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
+                        && reported_prefix_digest != ""))
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_terminal_observation.insert(session_id, observation);
+                self.session_live_assistant_terminal_prefix_chars.insert(session_id, reported_prefix_chars);
+                self.session_live_assistant_terminal_prefix_digest.insert(session_id, reported_prefix_digest);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalRecovered {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                observation: observation, reported_prefix_chars: reported_prefix_chars,
+                reported_prefix_digest: reported_prefix_digest
+            }
+        }
+
+        transition ObserveLiveAssistantPlaybackFinalJoinsComplete {
+            on input ObserveLiveAssistantPlaybackFinal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, authoritative_assistant_chars,
+                authoritative_text_digest, pending_terminal_observation,
+                pending_reported_prefix_chars, pending_reported_prefix_digest,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && authoritative_assistant_chars > 0 && authoritative_text_digest != ""
+                && reported_prefix_matches_authoritative == false
+                && pending_terminal_observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                && pending_reported_prefix_chars == 0
+                && pending_reported_prefix_digest == ""
+                && self.session_live_assistant_terminal_observation.get_copied(session_id)
+                    == Some(LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_final_digest.contains_key(session_id)
             }
             update {
                 self.session_live_assistant_playback_response_id.remove(session_id);
                 self.session_live_assistant_playback_item_id.remove(session_id);
                 self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_terminal_observation.remove(session_id);
+                self.session_live_assistant_terminal_prefix_chars.remove(session_id);
+                self.session_live_assistant_terminal_prefix_digest.remove(session_id);
             }
             to Ready
             emit LiveAssistantPlaybackTerminalResolved {
-                session_id: session_id,
-                channel_id: channel_id,
-                interaction_id: interaction_id,
-                response_id: response_id,
-                item_id: item_id,
-                content_index: content_index,
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
                 disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
                 canonical_chars: Some(authoritative_assistant_chars),
                 canonical_text_digest: Some(authoritative_text_digest),
@@ -3288,43 +3545,134 @@ machine! {
             }
         }
 
-        transition ResolveLiveAssistantPlaybackReportedPrefix {
-            on input ResolveLiveAssistantPlaybackTerminal {
+        transition ObserveLiveAssistantPlaybackFinalJoinsPrefix {
+            on input ObserveLiveAssistantPlaybackFinal {
                 session_id, channel_id, interaction_id, response_id, item_id,
                 content_index, authoritative_assistant_chars,
-                authoritative_text_digest, authoritative_assistant_final,
-                observation, reported_prefix_chars, reported_prefix_digest,
+                authoritative_text_digest, pending_terminal_observation,
+                pending_reported_prefix_chars, pending_reported_prefix_digest,
                 reported_prefix_matches_authoritative
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
-                && authoritative_text_digest != ""
-                && reported_prefix_digest != ""
+                && authoritative_assistant_chars > 0 && authoritative_text_digest != ""
                 && reported_prefix_matches_authoritative == true
-                && reported_prefix_chars <= authoritative_assistant_chars
+                && pending_terminal_observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
+                && pending_reported_prefix_digest != ""
+                && pending_reported_prefix_chars <= authoritative_assistant_chars
+                && self.session_live_assistant_terminal_observation.get_copied(session_id)
+                    == Some(LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                && self.session_live_assistant_terminal_prefix_digest.get_cloned(session_id)
+                    == Some(pending_reported_prefix_digest)
+                && self.session_live_assistant_terminal_prefix_chars.get_copied(session_id)
+                    == Some(pending_reported_prefix_chars)
                 && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
                 && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
-                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
-                    == Some(response_id)
-                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
-                    == Some(item_id)
-                && self.session_live_assistant_playback_content_index.get_copied(session_id)
-                    == Some(content_index)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_final_digest.contains_key(session_id)
             }
             update {
                 self.session_live_assistant_playback_response_id.remove(session_id);
                 self.session_live_assistant_playback_item_id.remove(session_id);
                 self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_terminal_observation.remove(session_id);
+                self.session_live_assistant_terminal_prefix_chars.remove(session_id);
+                self.session_live_assistant_terminal_prefix_digest.remove(session_id);
             }
             to Ready
             emit LiveAssistantPlaybackTerminalResolved {
-                session_id: session_id,
-                channel_id: channel_id,
-                interaction_id: interaction_id,
-                response_id: response_id,
-                item_id: item_id,
-                content_index: content_index,
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
+                canonical_chars: Some(pending_reported_prefix_chars),
+                canonical_text_digest: Some(pending_reported_prefix_digest),
+                biological_hearing_claimed: false
+            }
+        }
+
+        transition ObserveLiveAssistantPlaybackTerminalJoinsComplete {
+            on input ObserveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, observation, reported_prefix_chars,
+                reported_prefix_digest, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                && reported_prefix_chars == 0 && reported_prefix_digest == ""
+                && reported_prefix_matches_authoritative == false
+                && authoritative_assistant_final == true
+                && authoritative_assistant_chars > 0
+                && authoritative_text_digest != ""
+                && self.session_live_assistant_final_chars.get_copied(session_id) == Some(authoritative_assistant_chars)
+                && self.session_live_assistant_final_digest.get_cloned(session_id) == Some(authoritative_text_digest)
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_final_chars.remove(session_id);
+                self.session_live_assistant_final_digest.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
+                canonical_chars: Some(authoritative_assistant_chars),
+                canonical_text_digest: Some(authoritative_text_digest),
+                biological_hearing_claimed: false
+            }
+        }
+
+        transition ObserveLiveAssistantPlaybackTerminalJoinsPrefix {
+            on input ObserveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, observation, reported_prefix_chars,
+                reported_prefix_digest, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
+                && reported_prefix_digest != "" && reported_prefix_matches_authoritative == true
+                && authoritative_assistant_final == true
+                && authoritative_text_digest != ""
+                && reported_prefix_chars <= authoritative_assistant_chars
+                && self.session_live_assistant_final_chars.get_copied(session_id) == Some(authoritative_assistant_chars)
+                && self.session_live_assistant_final_digest.get_cloned(session_id) == Some(authoritative_text_digest)
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_final_chars.remove(session_id);
+                self.session_live_assistant_final_digest.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
                 disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
                 canonical_chars: Some(reported_prefix_chars),
                 canonical_text_digest: Some(reported_prefix_digest),
@@ -3332,45 +3680,51 @@ machine! {
             }
         }
 
-        transition ResolveLiveAssistantPlaybackUnmeasured {
-            on input ResolveLiveAssistantPlaybackTerminal {
+        transition ObserveLiveAssistantPlaybackUnmeasured {
+            on input ObserveLiveAssistantPlaybackTerminal {
                 session_id, channel_id, interaction_id, response_id, item_id,
-                content_index, authoritative_assistant_chars,
+                content_index, observation, reported_prefix_chars,
+                reported_prefix_digest, authoritative_assistant_chars,
                 authoritative_text_digest, authoritative_assistant_final,
-                observation, reported_prefix_chars, reported_prefix_digest,
                 reported_prefix_matches_authoritative
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && observation == LiveAssistantPlaybackTerminalObservation::Unmeasured
-                && reported_prefix_chars == 0
-                && reported_prefix_digest == ""
+                && reported_prefix_chars == 0 && reported_prefix_digest == ""
                 && reported_prefix_matches_authoritative == false
+                && ((authoritative_assistant_final == false
+                        && authoritative_assistant_chars == 0
+                        && authoritative_text_digest == ""
+                        && !self.session_live_assistant_final_digest.contains_key(session_id))
+                    || (authoritative_assistant_final == true
+                        && authoritative_assistant_chars > 0
+                        && authoritative_text_digest != ""
+                        && self.session_live_assistant_final_chars.get_copied(session_id)
+                            == Some(authoritative_assistant_chars)
+                        && self.session_live_assistant_final_digest.get_cloned(session_id)
+                            == Some(authoritative_text_digest)))
                 && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
                 && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
-                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
-                    == Some(response_id)
-                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
-                    == Some(item_id)
-                && self.session_live_assistant_playback_content_index.get_copied(session_id)
-                    == Some(content_index)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
             }
             update {
                 self.session_live_assistant_playback_response_id.remove(session_id);
                 self.session_live_assistant_playback_item_id.remove(session_id);
                 self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_final_chars.remove(session_id);
+                self.session_live_assistant_final_digest.remove(session_id);
             }
             to Ready
             emit LiveAssistantPlaybackTerminalResolved {
-                session_id: session_id,
-                channel_id: channel_id,
-                interaction_id: interaction_id,
-                response_id: response_id,
-                item_id: item_id,
-                content_index: content_index,
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
                 disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
-                canonical_chars: None,
-                canonical_text_digest: None,
+                canonical_chars: None, canonical_text_digest: None,
                 biological_hearing_claimed: false
             }
         }

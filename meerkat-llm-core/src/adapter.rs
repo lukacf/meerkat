@@ -580,6 +580,17 @@ impl AgentLlmClient for LlmClientAdapter {
         &self.model
     }
 
+    fn fork_noncommitting_live_bridge(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError> {
+        let mut fork = Self::new_bound(
+            Arc::clone(&self.client),
+            self.model.clone(),
+            self.provider,
+            None,
+        );
+        fork.provider_params = self.provider_params.clone();
+        Ok(Arc::new(fork))
+    }
+
     fn begin_stream_output_observation(&self) {
         self.stream_output_observed.store(false, Ordering::SeqCst);
     }

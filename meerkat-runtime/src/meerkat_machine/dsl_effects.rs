@@ -379,6 +379,64 @@ impl MeerkatMachine {
         .await
     }
 
+    /// Typed variant for recovery-owned callers that must distinguish a
+    /// temporarily unavailable session authority from a semantic refusal.
+    pub(super) async fn apply_session_dsl_input_typed(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<(dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects), RuntimeDriverError>
+    {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error);
+        }
+        let (previous_snapshot, effects) = {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous_snapshot = authority.snapshot();
+            let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+                .map(|transition| DslTransitionEffects::new(transition.into_effects()))
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: dsl_authority::map_error(error, context),
+                })?;
+            (previous_snapshot, effects)
+        };
+        drop(sessions);
+        // Terminal recording currently emits a local-only authority receipt.
+        // This narrow test fault exercises the real typed post-commit error
+        // boundary without inventing a composition route for that effect.
+        #[cfg(test)]
+        if self
+            .test_fail_next_typed_dsl_post_commit_dispatch
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(RuntimeDriverError::RecoveryBackoff {
+                reason: format!(
+                    "DSL authority ({context}) committed but routed effect dispatch needs recovery: injected post-commit dispatch failure"
+                ),
+            });
+        }
+        self.dispatch_routed_signals_from_effects(&effects)
+            .await
+            .map_err(|reason| RuntimeDriverError::RecoveryBackoff {
+                reason: format!(
+                    "DSL authority ({context}) committed but routed effect dispatch needs recovery: {reason}"
+                ),
+            })?;
+        Ok((previous_snapshot, effects))
+    }
+
     pub(super) async fn apply_session_dsl_input_with_dispatch_failure(
         &self,
         session_id: &SessionId,

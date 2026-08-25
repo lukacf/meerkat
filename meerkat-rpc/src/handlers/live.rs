@@ -962,7 +962,7 @@ pub(crate) async fn handle_live_open_routed(
             )
             .into();
         };
-        let result = match runtime
+        let pending = match runtime
             .open_live_channel_with_execution_identity(
                 host,
                 transport_ctx,
@@ -980,8 +980,8 @@ pub(crate) async fn handle_live_open_routed(
                 return experimental_live_channel_open_error_response(id, open_error).into();
             }
         };
-        let channel_id = LiveChannelId::new(&result.channel_id);
-        return match serde_json::to_value(&result) {
+        let channel_id = pending.channel_id().clone();
+        return match serde_json::to_value(pending.open()) {
             Ok(value) => LiveOpenHandlerResult {
                 response: RpcResponse::success(id, value),
                 experimental_publication: Some(ExperimentalLiveOpenPublication {

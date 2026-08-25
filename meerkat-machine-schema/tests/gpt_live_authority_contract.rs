@@ -16,6 +16,87 @@ fn variant_names(variants: &[meerkat_machine_schema::VariantSchema]) -> Vec<&str
 }
 
 #[test]
+fn live_bridge_provider_refs_and_effect_outcomes_are_generated_channel_authority() {
+    let machine = dsl_meerkat_machine();
+    let state_fields = machine
+        .state
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(state_fields.contains(&"live_bridge_operation_by_channel"));
+    assert!(state_fields.contains(&"live_bridge_provider_delegation_by_operation"));
+    assert!(state_fields.contains(&"live_bridge_provider_call_by_operation"));
+    assert!(state_fields.contains(&"live_bridge_in_flight_effect_authorities"));
+    assert!(state_fields.contains(&"live_bridge_effect_outcome_by_authority"));
+    assert!(
+        !state_fields.contains(&"live_bridge_operation_by_provider_delegation")
+            && !state_fields.contains(&"live_bridge_operation_by_provider_call"),
+        "opaque provider-local refs must never become global uniqueness indexes"
+    );
+
+    let inputs = variant_names(&machine.inputs.variants);
+    let effects = variant_names(&machine.effects.variants);
+    assert!(inputs.contains(&"RecordLiveBridgeEffectOutcome"));
+    assert!(effects.contains(&"LiveBridgeEffectOutcomeRecorded"));
+    let terminal_effect = machine
+        .effects
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "LiveBridgeExecutionTerminalRecorded")
+        .expect("missing bridge execution terminal effect");
+    assert!(
+        terminal_effect
+            .fields
+            .iter()
+            .any(|field| field.name.as_str() == "replay"),
+        "terminal receipt must distinguish a fresh commit from exact reconciliation"
+    );
+
+    let replay = machine
+        .transitions
+        .iter()
+        .find(|transition| {
+            transition
+                .name
+                .as_str()
+                .starts_with("AdmitLiveBridgeOperationExactReplay")
+        })
+        .expect("missing exact bridge replay transition");
+    let replay_schema = format!("{replay:?}");
+    assert!(replay_schema.contains("live_bridge_operation_by_channel"));
+    assert!(replay_schema.contains("live_bridge_provider_delegation_by_operation"));
+    assert!(replay_schema.contains("live_bridge_provider_call_by_operation"));
+    assert!(!replay_schema.contains("live_bridge_operation_by_provider_call"));
+
+    let transitions = machine
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        transitions
+            .iter()
+            .any(|name| name.starts_with("RecordLiveBridgeEffectOutcomeFresh"))
+    );
+    assert!(
+        transitions
+            .iter()
+            .any(|name| name.starts_with("RecordLiveBridgeEffectOutcomeExactReplay"))
+    );
+    assert!(
+        transitions
+            .iter()
+            .any(|name| name.starts_with("RecordLiveBridgeExecutionTerminalFresh"))
+    );
+    assert!(
+        transitions
+            .iter()
+            .any(|name| name.starts_with("RecordLiveBridgeExecutionTerminalExactReplay"))
+    );
+}
+
+#[test]
 fn meerkat_machine_owns_live_fence_delegation_and_delivery_authority() {
     let machine = dsl_meerkat_machine();
     let inputs = variant_names(&machine.inputs.variants);
@@ -185,7 +266,10 @@ fn session_document_owns_live_transcript_reconciliation_and_playback_terminal() 
         "AdmitLiveAssistantPlaybackTarget",
         "RecoverLiveAssistantPlaybackTarget",
         "ResolveLiveAssistantPlaybackOnChannelClose",
-        "ResolveLiveAssistantPlaybackTerminal",
+        "ObserveLiveAssistantPlaybackFinal",
+        "RecoverLiveAssistantPlaybackFinal",
+        "ObserveLiveAssistantPlaybackTerminal",
+        "RecoverLiveAssistantPlaybackTerminal",
         "ClassifyLiveContextCommittedRow",
     ] {
         assert!(
@@ -201,6 +285,10 @@ fn session_document_owns_live_transcript_reconciliation_and_playback_terminal() 
         "LiveInteractionTranscriptCompleted",
         "LiveAssistantPlaybackTargetAdmitted",
         "LiveAssistantPlaybackTargetRecovered",
+        "LiveAssistantPlaybackFinalObserved",
+        "LiveAssistantPlaybackFinalRecovered",
+        "LiveAssistantPlaybackTerminalObserved",
+        "LiveAssistantPlaybackTerminalRecovered",
         "LiveAssistantPlaybackTerminalResolved",
         "LiveContextCommittedRowClassified",
     ] {
@@ -214,16 +302,17 @@ fn session_document_owns_live_transcript_reconciliation_and_playback_terminal() 
         .transitions
         .iter()
         .filter(|transition| {
-            transition
-                .name
-                .as_str()
-                .starts_with("ResolveLiveAssistantPlayback")
+            transition.name.as_str().contains("LiveAssistant")
+                && transition.name.as_str().contains("Playback")
+                && (transition.name.as_str().contains("Joins")
+                    || transition.name.as_str().contains("Unmeasured")
+                    || transition.name.as_str().contains("OnChannelClose"))
         })
         .collect::<Vec<_>>();
     assert_eq!(
         terminal_arms.len(),
-        4,
-        "playback terminal evidence must include exact channel-close abandonment"
+        6,
+        "playback terminal evidence must join both orders plus exact abandonment"
     );
     assert!(terminal_arms.iter().all(|transition| {
         format!("{:?}", transition.emit).contains("biological_hearing_claimed")

@@ -1961,6 +1961,13 @@ pub struct State {
     pub session_live_assistant_playback_response_id: std::collections::BTreeMap<SessionId, String>,
     pub session_live_assistant_playback_item_id: std::collections::BTreeMap<SessionId, String>,
     pub session_live_assistant_playback_content_index: std::collections::BTreeMap<SessionId, u64>,
+    pub session_live_assistant_final_chars: std::collections::BTreeMap<SessionId, u64>,
+    pub session_live_assistant_final_digest: std::collections::BTreeMap<SessionId, String>,
+    pub session_live_assistant_terminal_observation:
+        std::collections::BTreeMap<SessionId, LiveAssistantPlaybackTerminalObservation>,
+    pub session_live_assistant_terminal_prefix_chars: std::collections::BTreeMap<SessionId, u64>,
+    pub session_live_assistant_terminal_prefix_digest:
+        std::collections::BTreeMap<SessionId, String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -2186,7 +2193,7 @@ pub mod inputs {
         pub content_index: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveLiveAssistantPlaybackTerminal {
+    pub struct ObserveLiveAssistantPlaybackFinal {
         pub session_id: SessionId,
         pub channel_id: String,
         pub interaction_id: String,
@@ -2195,11 +2202,49 @@ pub mod inputs {
         pub content_index: u64,
         pub authoritative_assistant_chars: u64,
         pub authoritative_text_digest: String,
-        pub authoritative_assistant_final: bool,
+        pub pending_terminal_observation: LiveAssistantPlaybackTerminalObservation,
+        pub pending_reported_prefix_chars: u64,
+        pub pending_reported_prefix_digest: String,
+        pub reported_prefix_matches_authoritative: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverLiveAssistantPlaybackFinal {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub authoritative_assistant_chars: u64,
+        pub authoritative_text_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveLiveAssistantPlaybackTerminal {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
         pub observation: LiveAssistantPlaybackTerminalObservation,
         pub reported_prefix_chars: u64,
         pub reported_prefix_digest: String,
+        pub authoritative_assistant_chars: u64,
+        pub authoritative_text_digest: String,
+        pub authoritative_assistant_final: bool,
         pub reported_prefix_matches_authoritative: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverLiveAssistantPlaybackTerminal {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub observation: LiveAssistantPlaybackTerminalObservation,
+        pub reported_prefix_chars: u64,
+        pub reported_prefix_digest: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyLiveContextCommittedRow {
@@ -2328,7 +2373,10 @@ pub enum Input {
     AdmitLiveAssistantPlaybackTarget(inputs::AdmitLiveAssistantPlaybackTarget),
     RecoverLiveAssistantPlaybackTarget(inputs::RecoverLiveAssistantPlaybackTarget),
     ResolveLiveAssistantPlaybackOnChannelClose(inputs::ResolveLiveAssistantPlaybackOnChannelClose),
-    ResolveLiveAssistantPlaybackTerminal(inputs::ResolveLiveAssistantPlaybackTerminal),
+    ObserveLiveAssistantPlaybackFinal(inputs::ObserveLiveAssistantPlaybackFinal),
+    RecoverLiveAssistantPlaybackFinal(inputs::RecoverLiveAssistantPlaybackFinal),
+    ObserveLiveAssistantPlaybackTerminal(inputs::ObserveLiveAssistantPlaybackTerminal),
+    RecoverLiveAssistantPlaybackTerminal(inputs::RecoverLiveAssistantPlaybackTerminal),
     ClassifyLiveContextCommittedRow(inputs::ClassifyLiveContextCommittedRow),
     AuthorizeSessionMetadataPersist(inputs::AuthorizeSessionMetadataPersist),
     AuthorizeSessionBuildStatePersist(inputs::AuthorizeSessionBuildStatePersist),
@@ -2410,8 +2458,17 @@ impl Input {
             Self::ResolveLiveAssistantPlaybackOnChannelClose(_) => {
                 InputKind::ResolveLiveAssistantPlaybackOnChannelClose
             }
-            Self::ResolveLiveAssistantPlaybackTerminal(_) => {
-                InputKind::ResolveLiveAssistantPlaybackTerminal
+            Self::ObserveLiveAssistantPlaybackFinal(_) => {
+                InputKind::ObserveLiveAssistantPlaybackFinal
+            }
+            Self::RecoverLiveAssistantPlaybackFinal(_) => {
+                InputKind::RecoverLiveAssistantPlaybackFinal
+            }
+            Self::ObserveLiveAssistantPlaybackTerminal(_) => {
+                InputKind::ObserveLiveAssistantPlaybackTerminal
+            }
+            Self::RecoverLiveAssistantPlaybackTerminal(_) => {
+                InputKind::RecoverLiveAssistantPlaybackTerminal
             }
             Self::ClassifyLiveContextCommittedRow(_) => InputKind::ClassifyLiveContextCommittedRow,
             Self::AuthorizeSessionMetadataPersist(_) => InputKind::AuthorizeSessionMetadataPersist,
@@ -2469,7 +2526,10 @@ pub enum InputKind {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
-    ResolveLiveAssistantPlaybackTerminal,
+    ObserveLiveAssistantPlaybackFinal,
+    RecoverLiveAssistantPlaybackFinal,
+    ObserveLiveAssistantPlaybackTerminal,
+    RecoverLiveAssistantPlaybackTerminal,
     ClassifyLiveContextCommittedRow,
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
@@ -2600,6 +2660,52 @@ pub mod effects {
         pub content_index: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackFinalObserved {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub authoritative_assistant_chars: u64,
+        pub authoritative_text_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackFinalRecovered {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub authoritative_assistant_chars: u64,
+        pub authoritative_text_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackTerminalObserved {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub observation: LiveAssistantPlaybackTerminalObservation,
+        pub reported_prefix_chars: u64,
+        pub reported_prefix_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackTerminalRecovered {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub observation: LiveAssistantPlaybackTerminalObservation,
+        pub reported_prefix_chars: u64,
+        pub reported_prefix_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveAssistantPlaybackTerminalResolved {
         pub session_id: SessionId,
         pub channel_id: String,
@@ -2713,6 +2819,10 @@ pub enum Effect {
     LiveInteractionTranscriptCompleted(effects::LiveInteractionTranscriptCompleted),
     LiveAssistantPlaybackTargetAdmitted(effects::LiveAssistantPlaybackTargetAdmitted),
     LiveAssistantPlaybackTargetRecovered(effects::LiveAssistantPlaybackTargetRecovered),
+    LiveAssistantPlaybackFinalObserved(effects::LiveAssistantPlaybackFinalObserved),
+    LiveAssistantPlaybackFinalRecovered(effects::LiveAssistantPlaybackFinalRecovered),
+    LiveAssistantPlaybackTerminalObserved(effects::LiveAssistantPlaybackTerminalObserved),
+    LiveAssistantPlaybackTerminalRecovered(effects::LiveAssistantPlaybackTerminalRecovered),
     LiveAssistantPlaybackTerminalResolved(effects::LiveAssistantPlaybackTerminalResolved),
     LiveContextCommittedRowClassified(effects::LiveContextCommittedRowClassified),
     SessionMetadataPersistAuthorized(effects::SessionMetadataPersistAuthorized),
@@ -2754,6 +2864,10 @@ pub enum EffectKind {
     LiveInteractionTranscriptCompleted,
     LiveAssistantPlaybackTargetAdmitted,
     LiveAssistantPlaybackTargetRecovered,
+    LiveAssistantPlaybackFinalObserved,
+    LiveAssistantPlaybackFinalRecovered,
+    LiveAssistantPlaybackTerminalObserved,
+    LiveAssistantPlaybackTerminalRecovered,
     LiveAssistantPlaybackTerminalResolved,
     LiveContextCommittedRowClassified,
     SessionMetadataPersistAuthorized,
@@ -2848,9 +2962,15 @@ pub enum TransitionId {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
-    ResolveLiveAssistantPlaybackComplete,
-    ResolveLiveAssistantPlaybackReportedPrefix,
-    ResolveLiveAssistantPlaybackUnmeasured,
+    ObserveLiveAssistantPlaybackFinalPendingTerminal,
+    RecoverLiveAssistantPlaybackFinal,
+    ObserveLiveAssistantPlaybackTerminalPendingFinal,
+    RecoverLiveAssistantPlaybackTerminal,
+    ObserveLiveAssistantPlaybackFinalJoinsComplete,
+    ObserveLiveAssistantPlaybackFinalJoinsPrefix,
+    ObserveLiveAssistantPlaybackTerminalJoinsComplete,
+    ObserveLiveAssistantPlaybackTerminalJoinsPrefix,
+    ObserveLiveAssistantPlaybackUnmeasured,
     ClassifyLiveContextCommittedRow,
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
@@ -2969,5 +3089,10 @@ pub fn initial_state() -> State {
         session_live_assistant_playback_response_id: Default::default(),
         session_live_assistant_playback_item_id: Default::default(),
         session_live_assistant_playback_content_index: Default::default(),
+        session_live_assistant_final_chars: Default::default(),
+        session_live_assistant_final_digest: Default::default(),
+        session_live_assistant_terminal_observation: Default::default(),
+        session_live_assistant_terminal_prefix_chars: Default::default(),
+        session_live_assistant_terminal_prefix_digest: Default::default(),
     }
 }

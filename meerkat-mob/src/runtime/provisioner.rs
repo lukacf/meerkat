@@ -3792,7 +3792,7 @@ impl SessionBackend {
 
         let completion = handle.wait().await;
         drop(queued_context);
-        let mut delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
         let committed_projection = enqueue_committed_parent_projection_after_runtime_completion(
             self.session_service.as_ref(),
             adapter.as_ref(),
@@ -3801,13 +3801,8 @@ impl SessionBackend {
             &completion,
         )
         .await;
-        let mut result = runtime_completion_to_mob_result(session_id, completion);
-        if result.is_ok()
-            && let Err(error) = committed_projection
-        {
-            result = Err(error);
-            delivery_outcome = DeferredTurnEventOutcome::Failed;
-        }
+        observe_committed_parent_projection_result(session_id, &committed_projection);
+        let result = runtime_completion_to_mob_result(session_id, completion);
         if let Some(delivery) = deferred_delivery {
             delivery.release(delivery_outcome);
         }
@@ -3968,8 +3963,7 @@ impl SessionBackend {
                     Ok((Some(handle), queued_context, owns_committed_parent_projection)) => {
                         let completion = handle.wait().await;
                         drop(queued_context);
-                        let mut delivery_outcome =
-                            deferred_turn_outcome_from_completion(&completion);
+                        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
                         let committed_projection =
                             enqueue_committed_parent_projection_after_runtime_completion(
                                 session_service.as_ref(),
@@ -3979,14 +3973,11 @@ impl SessionBackend {
                                 &completion,
                             )
                             .await;
-                        let mut result =
-                            runtime_completion_to_exact_turn(&task_session_id, completion);
-                        if result.is_ok()
-                            && let Err(error) = committed_projection
-                        {
-                            result = Err(error);
-                            delivery_outcome = DeferredTurnEventOutcome::Failed;
-                        }
+                        let result = runtime_completion_to_exact_turn(&task_session_id, completion);
+                        observe_committed_parent_projection_result(
+                            &task_session_id,
+                            &committed_projection,
+                        );
                         (result, delivery_outcome)
                     }
                     Ok((None, mut queued_context, _)) => {
@@ -4095,7 +4086,7 @@ impl SessionBackend {
             tokio::spawn(async move {
                 let completion = handle.wait().await;
                 drop(queued_context);
-                let mut delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+                let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
                 let committed_projection =
                     enqueue_committed_parent_projection_after_runtime_completion(
                         completion_session_service.as_ref(),
@@ -4105,14 +4096,11 @@ impl SessionBackend {
                         &completion,
                     )
                     .await;
-                let mut result =
-                    runtime_completion_to_exact_turn(&completion_session_id, completion);
-                if result.is_ok()
-                    && let Err(error) = committed_projection
-                {
-                    result = Err(error);
-                    delivery_outcome = DeferredTurnEventOutcome::Failed;
-                }
+                let result = runtime_completion_to_exact_turn(&completion_session_id, completion);
+                observe_committed_parent_projection_result(
+                    &completion_session_id,
+                    &committed_projection,
+                );
                 if let Some(delivery) = deferred_delivery {
                     delivery.release(delivery_outcome);
                 }
@@ -4197,6 +4185,20 @@ async fn enqueue_committed_parent_projection_after_runtime_completion(
     {
         let _ = (session_service, runtime_adapter, session_id);
         Ok(())
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn observe_committed_parent_projection_result(
+    session_id: &SessionId,
+    projection: &Result<(), MobError>,
+) {
+    if let Err(error) = projection {
+        tracing::warn!(
+            %session_id,
+            %error,
+            "committed Mob turn preserved while live-context continuity failed independently"
+        );
     }
 }
 
@@ -6422,7 +6424,8 @@ mod tests {
     use super::{
         DeferredTurnEventOutcome, MemberSessionDisposalArc, MultiBackendProvisioner,
         RuntimeSessionDisposalTarget, RuntimeSessionState, SessionBackend,
-        defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
+        defer_turn_events_until_machine_completion, observe_committed_parent_projection_result,
+        runtime_completion_to_exact_turn, runtime_completion_to_mob_result,
         should_enqueue_committed_parent_projection,
     };
     use crate::error::MobError;
@@ -6794,6 +6797,34 @@ mod tests {
             true,
             &uncommitted
         ));
+    }
+
+    #[test]
+    fn committed_parent_projection_failure_never_rewrites_completed_turn() {
+        let session_id = SessionId::new();
+        let projection = Err(MobError::Internal(
+            "live-context delivery became ambiguous".to_string(),
+        ));
+
+        let synchronous = runtime_completion_to_mob_result(
+            &session_id,
+            Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult),
+        );
+        observe_committed_parent_projection_result(&session_id, &projection);
+        assert!(
+            synchronous.is_ok(),
+            "the committed synchronous turn stays successful"
+        );
+
+        let tracked = runtime_completion_to_exact_turn(
+            &session_id,
+            Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult),
+        );
+        observe_committed_parent_projection_result(&session_id, &projection);
+        assert!(
+            tracked.is_ok(),
+            "the committed tracked turn stays successful"
+        );
     }
 
     #[test]

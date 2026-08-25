@@ -706,6 +706,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        match self.resolve_tool_owner(tool_name) {
+            ResolvedToolOwner::External => self
+                .external
+                .as_ref()
+                .map(|external| external.live_bridge_effect_kind(tool_name))
+                .unwrap_or(meerkat_core::LiveBridgeEffectKind::ExternalIo),
+            _ => meerkat_core::LiveBridgeEffectKind::ExternalIo,
+        }
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: self

@@ -406,6 +406,12 @@ impl AgentToolDispatcher for ToolGateway {
             .unwrap_or_default()
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> crate::LiveBridgeEffectKind {
+        self.declaring_owner(tool_name)
+            .map(|dispatcher| dispatcher.live_bridge_effect_kind(tool_name))
+            .unwrap_or(crate::LiveBridgeEffectKind::ExternalIo)
+    }
+
     fn resolve_execution_plan(
         &self,
         call: ToolCallView<'_>,
@@ -837,6 +843,12 @@ impl AgentToolDispatcher for DynamicToolComposite {
         self.declaring_owner(tool_name)
             .map(|dispatcher| dispatcher.tool_mutation_class(tool_name))
             .unwrap_or_default()
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> crate::LiveBridgeEffectKind {
+        self.declaring_owner(tool_name)
+            .map(|dispatcher| dispatcher.live_bridge_effect_kind(tool_name))
+            .unwrap_or(crate::LiveBridgeEffectKind::ExternalIo)
     }
 
     fn resolve_execution_plan(

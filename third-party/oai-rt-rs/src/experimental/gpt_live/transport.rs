@@ -1,8 +1,10 @@
 use super::codec::{
-    CodecError, decode_server_event, encode_client_event, encode_create_call_request,
+    CodecError, MAX_RAW_JSON_EVENT_BYTES, decode_received_server_event, encode_client_event,
+    encode_create_call_request,
 };
 use super::protocol::{
-    ClientEvent, CreateCallRequest, CreateCallResponse, ProviderCallId, ServerEvent,
+    ClientEvent, CreateCallRequest, CreateCallResponse, EventCarrier, ProviderCallId,
+    ReceivedServerEvent, ServerEvent,
 };
 use super::redaction::{Direction, TerminalClass, WireSummary};
 use futures::{SinkExt, StreamExt};
@@ -15,8 +17,8 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 use url::Url;
 
 const OPENAI_ALPHA: &str = "quicksilver=v2";
@@ -316,16 +318,21 @@ impl GptLiveTransport {
         insert_header(headers, "x-session-id", sideband.x_session_id.as_deref())?;
         insert_header(headers, "user-agent", sideband.user_agent.as_deref())?;
 
-        let (stream, _) = connect_async(request).await.map_err(|source| {
-            WireSummary::terminal(
-                Direction::FromOpenAi,
-                "sideband.connect",
-                0,
-                TerminalClass::WebSocket,
-            )
-            .emit();
-            websocket_failure(&source)
-        })?;
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_RAW_JSON_EVENT_BYTES))
+            .max_frame_size(Some(MAX_RAW_JSON_EVENT_BYTES));
+        let (stream, _) = connect_async_with_config(request, Some(websocket_config), false)
+            .await
+            .map_err(|source| {
+                WireSummary::terminal(
+                    Direction::FromOpenAi,
+                    "sideband.connect",
+                    0,
+                    TerminalClass::WebSocket,
+                )
+                .emit();
+                websocket_failure(&source)
+            })?;
         WireSummary::event(Direction::FromOpenAi, "sideband.connected", 0).emit();
         Ok(Sideband { stream })
     }
@@ -391,11 +398,7 @@ impl Sideband {
     /// Returns [`TransportError`] when encoding or WebSocket transmission fails.
     pub async fn send(&mut self, event: &ClientEvent) -> Result<(), TransportError> {
         let text = encode_client_event(event)?;
-        let kind = match event {
-            ClientEvent::SessionContextAppend(_) => "session.context.append",
-            ClientEvent::DelegationContextAppend(_) => "delegation.context.append",
-        };
-        WireSummary::event(Direction::ToOpenAi, kind, text.len()).emit();
+        WireSummary::event(Direction::ToOpenAi, event.kind(), text.len()).emit();
         self.stream
             .send(Message::Text(text.into()))
             .await
@@ -408,6 +411,21 @@ impl Sideband {
     ///
     /// Returns [`TransportError`] when the WebSocket or private codec fails.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, TransportError> {
+        Ok(self
+            .next_observation()
+            .await?
+            .map(ReceivedServerEvent::into_event))
+    }
+
+    /// Receive the next event with its mechanical carrier and exact wire byte
+    /// count, handling ping frames mechanically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError`] when the WebSocket or private codec fails.
+    pub async fn next_observation(
+        &mut self,
+    ) -> Result<Option<ReceivedServerEvent>, TransportError> {
         while let Some(message) = self.stream.next().await {
             let message = match message {
                 Ok(message) => message,
@@ -416,7 +434,8 @@ impl Sideband {
             };
             match message {
                 Message::Text(text) => {
-                    let decoded = decode_server_event(&text).map_err(|source| {
+                    let observation = decode_received_server_event(EventCarrier::Sideband, &text)
+                        .map_err(|source| {
                         WireSummary::terminal(
                             Direction::FromOpenAi,
                             "malformed",
@@ -428,11 +447,11 @@ impl Sideband {
                     })?;
                     WireSummary::event(
                         Direction::FromOpenAi,
-                        loggable_server_event_kind(&decoded),
+                        loggable_server_event_kind(observation.event()),
                         text.len(),
                     )
                     .emit();
-                    return Ok(Some(decoded));
+                    return Ok(Some(observation));
                 }
                 Message::Close(_) => {
                     WireSummary::terminal(
@@ -486,11 +505,7 @@ impl SidebandSender {
     /// cannot be sent.
     pub async fn send(&self, event: &ClientEvent) -> Result<(), TransportError> {
         let text = encode_client_event(event)?;
-        let kind = match event {
-            ClientEvent::SessionContextAppend(_) => "session.context.append",
-            ClientEvent::DelegationContextAppend(_) => "delegation.context.append",
-        };
-        WireSummary::event(Direction::ToOpenAi, kind, text.len()).emit();
+        WireSummary::event(Direction::ToOpenAi, event.kind(), text.len()).emit();
         self.sink
             .lock()
             .await
@@ -531,6 +546,22 @@ impl SidebandReceiver {
     /// Returns [`TransportError`] when receiving a WebSocket frame fails or a
     /// known private event is malformed.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, TransportError> {
+        Ok(self
+            .next_observation()
+            .await?
+            .map(ReceivedServerEvent::into_event))
+    }
+
+    /// Receive the next event with its mechanical carrier and exact wire byte
+    /// count while the send half remains independently usable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError`] when receiving a WebSocket frame fails or a
+    /// known private event is malformed.
+    pub async fn next_observation(
+        &mut self,
+    ) -> Result<Option<ReceivedServerEvent>, TransportError> {
         while let Some(message) = self.stream.next().await {
             let message = match message {
                 Ok(message) => message,
@@ -539,7 +570,8 @@ impl SidebandReceiver {
             };
             match message {
                 Message::Text(text) => {
-                    let decoded = decode_server_event(&text).map_err(|source| {
+                    let observation = decode_received_server_event(EventCarrier::Sideband, &text)
+                        .map_err(|source| {
                         WireSummary::terminal(
                             Direction::FromOpenAi,
                             "malformed",
@@ -551,11 +583,11 @@ impl SidebandReceiver {
                     })?;
                     WireSummary::event(
                         Direction::FromOpenAi,
-                        loggable_server_event_kind(&decoded),
+                        loggable_server_event_kind(observation.event()),
                         text.len(),
                     )
                     .emit();
-                    return Ok(Some(decoded));
+                    return Ok(Some(observation));
                 }
                 Message::Close(_) => {
                     WireSummary::terminal(
@@ -666,7 +698,7 @@ mod tests {
 
     #[test]
     fn unknown_server_discriminant_is_not_loggable() {
-        let event = decode_server_event(
+        let event = super::super::codec::decode_server_event(
             r#"{"type":"FIXTURE_PRIVATE_UNKNOWN_KIND","secret":"FIXTURE_PRIVATE_SECRET"}"#,
         )
         .expect("unknown event");

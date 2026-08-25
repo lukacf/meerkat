@@ -404,9 +404,37 @@ impl fmt::Debug for LiveSidebandTranscriptItemRef {
     }
 }
 
+/// Channel-incarnation-qualified equality key passed to generated live-turn
+/// authority. The provider-local turn ref may restart at `turn:1` whenever a
+/// replacement adapter is created, so it is never globally canonical by
+/// itself. This codec is injective over `(LiveChannelId, local_ref)` and is
+/// deliberately write-only: shared runtime code compares the opaque result
+/// and never parses provider meaning back out of it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LiveProviderTurnCorrelationKey(String);
+
+impl LiveProviderTurnCorrelationKey {
+    fn from_channel_and_local_ref(
+        channel_id: &LiveChannelId,
+        provider_adapter_local_key: String,
+    ) -> Option<Self> {
+        let channel = channel_id.as_str();
+        (!channel.trim().is_empty() && !provider_adapter_local_key.trim().is_empty()).then(|| {
+            Self(format!(
+                "live-turn-v1:{}:{channel}{provider_adapter_local_key}",
+                channel.len()
+            ))
+        })
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct LiveSidebandTurnRef {
-    provider_adapter_key: String,
+    provider_correlation_key: LiveProviderTurnCorrelationKey,
     provider_turn_id: String,
 }
 
@@ -414,20 +442,27 @@ impl LiveSidebandTurnRef {
     #[doc(hidden)]
     #[must_use]
     pub fn __from_provider_observation(
-        provider_adapter_key: String,
+        channel_id: &LiveChannelId,
+        provider_adapter_local_key: String,
         provider_turn_id: String,
     ) -> Option<Self> {
-        (!provider_adapter_key.trim().is_empty() && !provider_turn_id.trim().is_empty()).then_some(
-            Self {
-                provider_adapter_key,
-                provider_turn_id,
-            },
-        )
+        if provider_turn_id.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            provider_correlation_key: LiveProviderTurnCorrelationKey::from_channel_and_local_ref(
+                channel_id,
+                provider_adapter_local_key,
+            )?,
+            provider_turn_id,
+        })
     }
 
+    /// Stable channel-incarnation-qualified key for generated correlation
+    /// joins. Provider-local refs are never exposed as global identity.
     #[must_use]
     pub fn adapter_key(&self) -> &str {
-        &self.provider_adapter_key
+        self.provider_correlation_key.as_str()
     }
 
     #[doc(hidden)]
@@ -809,6 +844,9 @@ pub enum LiveSidebandObservationKind {
         delegation: LiveSidebandDelegationRef,
         actionable_input: String,
     },
+    /// A client-context delegation whose provider payload cannot establish a
+    /// normalized prose handoff. This is not a Responses function call and
+    /// must never be converted into one by the provider-neutral layer.
     DelegationActionableInputUnsupported {
         delegation: LiveSidebandDelegationRef,
     },
@@ -972,6 +1010,28 @@ mod tests {
             LiveRuntimeBindingGeneration::new(3),
             LiveRuntimeBindingFence::new(5),
         )
+    }
+
+    #[test]
+    fn provider_turn_correlation_key_is_namespaced_by_channel_incarnation() {
+        let channel_a = LiveChannelId::new("channel-a");
+        let channel_b = LiveChannelId::new("channel-b");
+        let turn_a = LiveSidebandTurnRef::__from_provider_observation(
+            &channel_a,
+            "turn:1".to_string(),
+            "private-provider-turn-a".to_string(),
+        )
+        .expect("channel A turn ref");
+        let turn_b = LiveSidebandTurnRef::__from_provider_observation(
+            &channel_b,
+            "turn:1".to_string(),
+            "private-provider-turn-b".to_string(),
+        )
+        .expect("channel B turn ref");
+
+        assert_ne!(turn_a.adapter_key(), turn_b.adapter_key());
+        assert!(!format!("{turn_a:?}").contains("private-provider-turn-a"));
+        assert!(!format!("{turn_a:?}").contains(channel_a.as_str()));
     }
 
     #[test]

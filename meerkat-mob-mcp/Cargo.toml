@@ -36,6 +36,7 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+sha2 = { workspace = true }
 
 [features]
 default = []

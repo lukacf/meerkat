@@ -229,13 +229,31 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveAssistantPlaybackOnChannelClose`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveAssistantPlaybackComplete`
+- `ObserveLiveAssistantPlaybackFinalPendingTerminal`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveAssistantPlaybackReportedPrefix`
+- `RecoverLiveAssistantPlaybackFinal`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveAssistantPlaybackUnmeasured`
+- `ObserveLiveAssistantPlaybackTerminalPendingFinal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveAssistantPlaybackTerminal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackFinalJoinsComplete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackFinalJoinsPrefix`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackTerminalJoinsComplete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackTerminalJoinsPrefix`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackUnmeasured`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyLiveContextCommittedRow`
@@ -400,6 +418,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveAssistantPlaybackTargetRecovered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantPlaybackFinalObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantPlaybackFinalRecovered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantPlaybackTerminalObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantPlaybackTerminalRecovered`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveAssistantPlaybackTerminalResolved`

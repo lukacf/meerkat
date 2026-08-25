@@ -2,6 +2,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+#[cfg(feature = "live")]
+use meerkat_live::{LiveChannelId, LiveSidebandTurnRef};
 use meerkat_runtime::meerkat_machine::dsl as mm;
 
 const SESSION: &str = "session-live-authority";
@@ -83,6 +85,18 @@ fn bind_only(authority: &mut mm::MeerkatMachineAuthority) {
 fn stage_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_seed_cursor: u64) {
     apply(
         authority,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            profile_id: "test-function-bridge".to_string(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("function bridge mode is independently qualified");
+    apply(
+        authority,
         mm::MeerkatMachineInput::StageExperimentalLiveExecution {
             session_id: SESSION.to_string(),
             channel_id: CHANNEL.to_string(),
@@ -90,9 +104,24 @@ fn stage_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_see
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor,
+            pending_receipt: "pending-receipt".to_string(),
         },
     )
     .expect("strict experimental execution is staged before provider answer");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            owner_id: "playback-owner".to_string(),
+            readiness_id: "playback-readiness".to_string(),
+            pending_receipt: "pending-receipt".to_string(),
+        },
+    )
+    .expect("playback owner is ready while execution remains pending");
 }
 
 fn bind_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_seed_cursor: u64) {
@@ -107,6 +136,7 @@ fn bind_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_seed
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor,
+            activation_receipt: "activation-receipt".to_string(),
         },
     )
     .expect("provider answer and acknowledged seed bind experimental execution atomically");
@@ -115,6 +145,219 @@ fn bind_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_seed
 fn bind_and_admit(authority: &mut mm::MeerkatMachineAuthority) {
     bind_only(authority);
     admit_provider_turn_delegation(authority);
+}
+
+fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthority) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            worker_identity: WORKER.to_string(),
+        },
+    )
+    .expect("exact worker start is authorized");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+            started: true,
+        },
+    )
+    .expect("worker start is recorded");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+            terminal: mm::LiveDelegationWorkerTerminalKind::Completed,
+        },
+    )
+    .expect("completed worker terminal is recorded before transcript evidence");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerRetirement {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+        },
+    )
+    .expect("terminal worker retirement is authorized");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerRetirement {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+            retired: true,
+        },
+    )
+    .expect("worker retirement clears only channel serialization state");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        },
+    )
+    .expect("final transcript confirms the retired operation");
+}
+
+#[cfg(feature = "live")]
+#[test]
+fn replacement_channel_accepts_reset_provider_local_turn_ref_and_fences_stale_source() {
+    const REPLACEMENT: &str = "channel-live-authority-replacement";
+    const INTERACTION_A: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const INTERACTION_B: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    let channel_a = LiveChannelId::new(CHANNEL);
+    let turn_a = LiveSidebandTurnRef::__from_provider_observation(
+        &channel_a,
+        "turn:1".to_string(),
+        "private-provider-turn-a".to_string(),
+    )
+    .expect("channel A provider turn");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION_A.to_string(),
+            provider_turn_ref: turn_a.adapter_key().to_string(),
+        },
+    )
+    .expect("channel A first provider turn is admitted");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: turn_a.adapter_key().to_string(),
+        },
+    )
+    .expect("channel A provider turn completes");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("channel A closes before replacement admission");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: REPLACEMENT.to_string(),
+            llm_identity: identity(),
+        },
+    )
+    .expect("channel B open admission");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::BindLiveExecutionChannel {
+            session_id: SESSION.to_string(),
+            channel_id: REPLACEMENT.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+        },
+    )
+    .expect("channel B binds the same runtime incarnation");
+
+    let channel_b = LiveChannelId::new(REPLACEMENT);
+    let turn_b = LiveSidebandTurnRef::__from_provider_observation(
+        &channel_b,
+        "turn:1".to_string(),
+        "private-provider-turn-b".to_string(),
+    )
+    .expect("channel B provider turn");
+    assert_ne!(
+        turn_a.adapter_key(),
+        turn_b.adapter_key(),
+        "the authoritative channel incarnation namespaces a reset provider-local ref"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: REPLACEMENT.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION_B.to_string(),
+            provider_turn_ref: turn_b.adapter_key().to_string(),
+        },
+    )
+    .expect("channel B first provider turn is admitted despite its reset local ref");
+
+    let stale_a_turn = LiveSidebandTurnRef::__from_provider_observation(
+        &channel_a,
+        "turn:2".to_string(),
+        "private-stale-provider-turn-a".to_string(),
+    )
+    .expect("stale channel A provider turn");
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".to_string(),
+                provider_turn_ref: stale_a_turn.adapter_key().to_string(),
+            },
+        )
+        .is_err(),
+        "closed channel A cannot publish after B becomes active"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_active_interaction_by_channel
+            .get(REPLACEMENT)
+            .map(String::as_str),
+        Some(INTERACTION_B),
+        "stale A rejection cannot mutate B's admitted interaction"
+    );
 }
 
 #[test]
@@ -321,6 +564,7 @@ fn atomic_webrtc_answer_binding_preserves_running_phase() {
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor: 4,
+            activation_receipt: "activation-receipt-running".to_string(),
         },
     )
     .expect("answered WebRTC transport and acknowledged seed bind atomically");
@@ -361,6 +605,7 @@ fn pre_bind_committed_row_remains_queued_until_acknowledged_seed_installs_cursor
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor: 3,
+            activation_receipt: "activation-receipt-context".to_string(),
         },
     )
     .expect("acknowledged seed K binds after pre-bind K+1 entered generated custody");
@@ -457,96 +702,103 @@ fn live_reconciliation_is_derived_from_canonical_evidence_facts() {
 }
 
 #[test]
+fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
+    for observation in [
+        mm::LiveDelegationResultDeliveryObservation::Delivered,
+        mm::LiveDelegationResultDeliveryObservation::Rejected,
+    ] {
+        let mut authority = opened_authority();
+        bind_experimental(&mut authority, 0);
+        admit_provider_turn_delegation(&mut authority);
+        prepare_confirmed_completed_worker(&mut authority);
+
+        let release = apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: operation_id(),
+                provider_turn_correlation: PROVIDER_TURN.to_string(),
+            },
+        )
+        .expect("an active provider turn admits immediate result context");
+        assert!(release.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveDelegationResultReleaseAuthorized {
+                disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+                ..
+            }
+        )));
+
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: operation_id(),
+                provider_turn_correlation: PROVIDER_TURN.to_string(),
+                result_digest: "open-turn-result-digest".to_string(),
+                disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+            },
+        )
+        .expect("open-turn result receives distinct provider delivery authority");
+        let resolved = apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: operation_id(),
+                result_digest: "open-turn-result-digest".to_string(),
+                replacement_channel_id: String::new(),
+                observation,
+            },
+        )
+        .expect("delivered and provider-rejected observations are generated terminals");
+        assert!(resolved.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
+                disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+                observation: resolved_observation,
+                retry_allowed: false,
+                recovery_required: false,
+                ..
+            } if resolved_observation == &observation
+        )));
+        assert!(
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+                    channel_id: CHANNEL.to_string(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    interaction_id: INTERACTION.to_string(),
+                    operation_id: operation_id(),
+                    provider_turn_correlation: PROVIDER_TURN.to_string(),
+                    result_digest: "open-turn-result-digest".to_string(),
+                    disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+                },
+            )
+            .is_err(),
+            "terminal provider evidence cannot be replayed"
+        );
+    }
+}
+
+#[test]
 fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() {
     let mut authority = opened_authority();
     bind_experimental(&mut authority, 0);
     admit_provider_turn_delegation(&mut authority);
-
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            provider_turn_correlation: PROVIDER_TURN.to_string(),
-            worker_identity: WORKER.to_string(),
-        },
-    )
-    .expect("exact worker start is authorized");
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            worker_identity: WORKER.to_string(),
-            started: true,
-        },
-    )
-    .expect("worker start is recorded");
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            worker_identity: WORKER.to_string(),
-            terminal: mm::LiveDelegationWorkerTerminalKind::Completed,
-        },
-    )
-    .expect("completed worker terminal is recorded before transcript evidence");
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerRetirement {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            worker_identity: WORKER.to_string(),
-        },
-    )
-    .expect("terminal worker retirement is authorized");
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerRetirement {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            worker_identity: WORKER.to_string(),
-            retired: true,
-        },
-    )
-    .expect("worker retirement clears only channel serialization state");
-
-    apply(
-        &mut authority,
-        mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            provider_turn_correlation: PROVIDER_TURN.to_string(),
-            final_transcript_committed: true,
-            normalized_digest_matches: true,
-        },
-    )
-    .expect("delayed final transcript confirms the retired operation");
+    prepare_confirmed_completed_worker(&mut authority);
 
     let effect_transition = apply(
         &mut authority,
@@ -684,6 +936,18 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
     .expect("fresh result-recovery channel passes ordinary open admission");
     apply(
         &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: "channel-result-recovery".to_string(),
+            profile_id: "test-function-bridge".to_string(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("result recovery mode is independently qualified");
+    apply(
+        &mut authority,
         mm::MeerkatMachineInput::StageExperimentalLiveExecution {
             session_id: SESSION.to_string(),
             channel_id: "channel-result-recovery".to_string(),
@@ -691,6 +955,7 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor: 0,
+            pending_receipt: "result-recovery-pending".to_string(),
         },
     )
     .expect("result-recovery replacement stages the exact carried seed");
@@ -1388,6 +1653,18 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
     .expect("exact replacement receives ordinary open admission");
     apply(
         &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: REPLACEMENT.to_string(),
+            profile_id: "test-function-bridge".to_string(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("context recovery mode is independently qualified");
+    apply(
+        &mut authority,
         mm::MeerkatMachineInput::StageExperimentalLiveExecution {
             session_id: SESSION.to_string(),
             channel_id: REPLACEMENT.to_string(),
@@ -1395,6 +1672,7 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             fence_token: fence(),
             generation: generation(),
             canonical_seed_cursor: 1,
+            pending_receipt: "context-recovery-pending".to_string(),
         },
     )
     .expect("exact recovery replacement is staged before provider answer");
@@ -1655,4 +1933,937 @@ fn active_turn_defers_context_without_loss_and_rows_send_in_canonical_order() {
         },
     )
     .expect("second row authorizes only after first acknowledgement");
+}
+
+fn bridge_operation_id() -> mm::OperationId {
+    mm::OperationId("bridge-operation-live-authority".to_string())
+}
+
+fn activate_experimental_channel(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel_id: &str,
+    pending_receipt: &str,
+    owner_id: &str,
+    readiness_id: &str,
+    activation_receipt: &str,
+    answer_observation_sequence: u64,
+) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: channel_id.to_string(),
+            profile_id: "test-function-bridge".to_string(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("function bridge mode is qualified for the exact channel");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: SESSION.to_string(),
+            channel_id: channel_id.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+            pending_receipt: pending_receipt.to_string(),
+        },
+    )
+    .expect("exact channel execution is staged");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+            session_id: SESSION.to_string(),
+            channel_id: channel_id.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            owner_id: owner_id.to_string(),
+            readiness_id: readiness_id.to_string(),
+            pending_receipt: pending_receipt.to_string(),
+        },
+    )
+    .expect("exact channel playback owner is ready");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveWebrtcAnswerAcceptedAndBindExecution {
+            session_id: SESSION.to_string(),
+            channel_id: channel_id.to_string(),
+            answer_observation_sequence,
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+            activation_receipt: activation_receipt.to_string(),
+        },
+    )
+    .expect("exact channel execution becomes active");
+}
+
+fn observe_live_bridge_lineage(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel_id: &str,
+    interaction_id: &str,
+    provider_turn_ref: &str,
+) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: channel_id.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: interaction_id.to_string(),
+            provider_turn_ref: provider_turn_ref.to_string(),
+        },
+    )
+    .expect("exact channel provider turn establishes structural lineage");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_live_bridge_on_channel(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel_id: &str,
+    interaction_id: &str,
+    operation_id: mm::OperationId,
+    provider_turn_ref: &str,
+    provider_delegation_ref: &str,
+    provider_call_ref: &str,
+    request_digest: &str,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AdmitLiveBridgeOperation {
+            session_id: SESSION.to_string(),
+            channel_id: channel_id.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: interaction_id.to_string(),
+            operation_id,
+            provider_turn_ref: provider_turn_ref.to_string(),
+            provider_delegation_ref: provider_delegation_ref.to_string(),
+            provider_call_ref: provider_call_ref.to_string(),
+            agent_identity: mm::AgentIdentity("durable-agent".to_string()),
+            canonical_context_revision: "canonical-revision".to_string(),
+            request_digest: request_digest.to_string(),
+            structural_lineage_proven: true,
+        },
+    )
+}
+
+fn prepare_live_bridge_lineage(authority: &mut mm::MeerkatMachineAuthority) {
+    bind_experimental(authority, 0);
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("provider turn establishes structural lineage");
+}
+
+fn admit_live_bridge(authority: &mut mm::MeerkatMachineAuthority) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AdmitLiveBridgeOperation {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+            provider_delegation_ref: "opaque-delegation".to_string(),
+            provider_call_ref: "opaque-call".to_string(),
+            agent_identity: mm::AgentIdentity("durable-agent".to_string()),
+            canonical_context_revision: "canonical-revision".to_string(),
+            request_digest: "request-digest-without-text-equivalence".to_string(),
+            structural_lineage_proven: true,
+        },
+    )
+    .expect("structurally correlated durable-member bridge is admitted");
+}
+
+fn issue_and_consume_live_bridge_effect(
+    authority: &mut mm::MeerkatMachineAuthority,
+    authority_id: &str,
+    kind: mm::LiveBridgeEffectKind,
+) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeEffect {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: authority_id.to_string(),
+            kind,
+        },
+    )
+    .expect("effect authority is issued");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ConsumeLiveBridgeEffectAuthority {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: bridge_operation_id(),
+            authority_id: authority_id.to_string(),
+            kind,
+        },
+    )
+    .expect("effect authority is consumed into in-flight custody");
+}
+
+#[test]
+fn live_bridge_provider_refs_are_channel_scoped_and_stale_callbacks_are_fenced() {
+    const CHANNEL_B: &str = "channel-live-authority-b";
+    const INTERACTION_A: &str = "interaction-live-authority-a";
+    const INTERACTION_B: &str = "interaction-live-authority-b";
+    const PROVIDER_TURN_A: &str = "opaque-provider-turn-a";
+    const PROVIDER_TURN_B: &str = "opaque-provider-turn-b";
+    const SHARED_DELEGATION_REF: &str = "provider-local-delegation-1";
+    const SHARED_CALL_REF: &str = "provider-local-call-1";
+
+    let operation_a = mm::OperationId("bridge-operation-channel-a".to_string());
+    let operation_b = mm::OperationId("bridge-operation-channel-b".to_string());
+    let mut authority = opened_authority();
+
+    activate_experimental_channel(
+        &mut authority,
+        CHANNEL,
+        "pending-a",
+        "owner-a",
+        "readiness-a",
+        "activation-a",
+        1,
+    );
+    observe_live_bridge_lineage(&mut authority, CHANNEL, INTERACTION_A, PROVIDER_TURN_A);
+    admit_live_bridge_on_channel(
+        &mut authority,
+        CHANNEL,
+        INTERACTION_A,
+        operation_a.clone(),
+        PROVIDER_TURN_A,
+        SHARED_DELEGATION_REF,
+        SHARED_CALL_REF,
+        "request-a",
+    )
+    .expect("channel A accepts its provider-local refs");
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("channel A is revoked before replacement");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL_B.to_string(),
+            llm_identity: identity(),
+        },
+    )
+    .expect("channel B becomes the current fenced channel");
+    activate_experimental_channel(
+        &mut authority,
+        CHANNEL_B,
+        "pending-b",
+        "owner-b",
+        "readiness-b",
+        "activation-b",
+        1,
+    );
+    observe_live_bridge_lineage(&mut authority, CHANNEL_B, INTERACTION_B, PROVIDER_TURN_B);
+    admit_live_bridge_on_channel(
+        &mut authority,
+        CHANNEL_B,
+        INTERACTION_B,
+        operation_b.clone(),
+        PROVIDER_TURN_B,
+        SHARED_DELEGATION_REF,
+        SHARED_CALL_REF,
+        "request-b",
+    )
+    .expect("channel B may reuse opaque provider-local refs from revoked channel A");
+
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_operation_by_channel
+            .get(CHANNEL_B),
+        Some(&operation_b),
+        "current bridge custody is keyed by the fenced channel"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_provider_delegation_by_operation
+            .get(&operation_b)
+            .map(String::as_str),
+        Some(SHARED_DELEGATION_REF)
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_provider_call_by_operation
+            .get(&operation_b)
+            .map(String::as_str),
+        Some(SHARED_CALL_REF)
+    );
+
+    assert!(
+        admit_live_bridge_on_channel(
+            &mut authority,
+            CHANNEL,
+            INTERACTION_A,
+            operation_a,
+            PROVIDER_TURN_A,
+            SHARED_DELEGATION_REF,
+            SHARED_CALL_REF,
+            "request-a",
+        )
+        .is_err(),
+        "a stale channel A callback is rejected after channel B takes custody"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_operation_by_channel
+            .get(CHANNEL_B),
+        Some(&operation_b),
+        "stale channel A input cannot alter channel B custody"
+    );
+}
+
+#[test]
+fn live_bridge_effect_outcomes_are_terminal_exact_and_cancellation_stable() {
+    let mut authority = opened_authority();
+    prepare_live_bridge_lineage(&mut authority);
+    admit_live_bridge(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("final input unlocks consequential effect classes");
+
+    for authority_id in [
+        "effect-committed",
+        "effect-failed",
+        "effect-unknown",
+        "effect-cancelled-in-flight",
+    ] {
+        issue_and_consume_live_bridge_effect(
+            &mut authority,
+            authority_id,
+            mm::LiveBridgeEffectKind::ToolDispatch,
+        );
+        assert!(
+            authority
+                .state()
+                .live_bridge_in_flight_effect_authorities
+                .contains(authority_id),
+            "every consumed authority is explicitly in flight"
+        );
+    }
+
+    let committed = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "effect-committed".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Committed,
+        },
+    )
+    .expect("successful dispatch records committed exactly once");
+    assert!(committed.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeEffectOutcomeRecorded {
+            outcome: mm::LiveBridgeEffectOutcome::Committed,
+            replay: false,
+            ..
+        }
+    )));
+    let replay = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "effect-committed".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Committed,
+        },
+    )
+    .expect("exact same-outcome replay is idempotent");
+    assert!(replay.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeEffectOutcomeRecorded {
+            outcome: mm::LiveBridgeEffectOutcome::Committed,
+            replay: true,
+            ..
+        }
+    )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+                channel_id: CHANNEL.to_string(),
+                operation_id: bridge_operation_id(),
+                authority_id: "effect-committed".to_string(),
+                kind: mm::LiveBridgeEffectKind::ToolDispatch,
+                outcome: mm::LiveBridgeEffectOutcome::Failed,
+            },
+        )
+        .is_err(),
+        "a terminal outcome cannot be relabeled"
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "effect-failed".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Failed,
+        },
+    )
+    .expect("definite dispatch failure is terminally recorded");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "effect-unknown".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Unknown,
+        },
+    )
+    .expect("dropped or unprovable dispatch records terminal unknown");
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CancelLiveBridgeOperation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            reason: mm::LiveBridgeCancellationReason::BargeIn,
+        },
+    )
+    .expect("operation cancellation is independent of effect settlement");
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_effect_outcome_by_authority
+            .get("effect-committed"),
+        Some(&mm::LiveBridgeEffectOutcome::Committed),
+        "cancellation does not rewrite a recorded outcome"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeEffectOutcome {
+            channel_id: CHANNEL.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "effect-cancelled-in-flight".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            outcome: mm::LiveBridgeEffectOutcome::Unknown,
+        },
+    )
+    .expect("an effect already dispatched before cancellation still settles exactly");
+}
+
+#[test]
+fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
+    let mut authority = opened_authority();
+    prepare_live_bridge_lineage(&mut authority);
+
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AdmitLiveBridgeOperation {
+                session_id: SESSION.to_string(),
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: bridge_operation_id(),
+                provider_turn_ref: PROVIDER_TURN.to_string(),
+                provider_delegation_ref: "opaque-delegation".to_string(),
+                provider_call_ref: "opaque-call".to_string(),
+                agent_identity: mm::AgentIdentity("durable-agent".to_string()),
+                canonical_context_revision: "canonical-revision".to_string(),
+                request_digest: "request-digest-without-text-equivalence".to_string(),
+                structural_lineage_proven: false,
+            },
+        )
+        .is_err(),
+        "caller assertion cannot substitute for structural lineage"
+    );
+    admit_live_bridge(&mut authority);
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_agent_identity_by_operation
+            .get(&bridge_operation_id()),
+        Some(&mm::AgentIdentity("durable-agent".to_string()))
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_context_revision_by_operation
+            .get(&bridge_operation_id())
+            .map(String::as_str),
+        Some("canonical-revision")
+    );
+
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveBridgeEffect {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: bridge_operation_id(),
+                authority_id: "prefinal-tool".to_string(),
+                kind: mm::LiveBridgeEffectKind::ToolDispatch,
+            },
+        )
+        .is_err(),
+        "pre-final inference denies consequential effects"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeEffect {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "prefinal-model".to_string(),
+            kind: mm::LiveBridgeEffectKind::ModelComputation,
+        },
+    )
+    .expect("one restricted model computation is allowed pre-final");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ConsumeLiveBridgeEffectAuthority {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: bridge_operation_id(),
+            authority_id: "prefinal-model".to_string(),
+            kind: mm::LiveBridgeEffectKind::ModelComputation,
+        },
+    )
+    .expect("effect authority is consumed exactly once");
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ConsumeLiveBridgeEffectAuthority {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: bridge_operation_id(),
+                authority_id: "prefinal-model".to_string(),
+                kind: mm::LiveBridgeEffectKind::ModelComputation,
+            },
+        )
+        .is_err(),
+        "consumed effect authority cannot be replayed"
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("canonical evidence authorizes final input structurally");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeEffect {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            authority_id: "final-tool".to_string(),
+            kind: mm::LiveBridgeEffectKind::ToolDispatch,
+        },
+    )
+    .expect("final-input authority unlocks consequential effect selection");
+
+    let terminal = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            terminal: mm::MeerkatExecutionTerminal::Completed,
+            result_digest: Some("result-digest".to_string()),
+        },
+    )
+    .expect("Meerkat execution terminal settles independently");
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded { replay: false, .. }
+    )));
+    let terminal_replay = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            terminal: mm::MeerkatExecutionTerminal::Completed,
+            result_digest: Some("result-digest".to_string()),
+        },
+    )
+    .expect("exact terminal replay reconciles without mutation");
+    assert!(terminal_replay.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded { replay: true, .. }
+    )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: bridge_operation_id(),
+                terminal: mm::MeerkatExecutionTerminal::Completed,
+                result_digest: Some("different-result-digest".to_string()),
+            },
+        )
+        .is_err(),
+        "terminal replay with a different digest is rejected"
+    );
+    assert!(
+        !authority
+            .state()
+            .live_bridge_submission_state_by_operation
+            .contains_key(&bridge_operation_id()),
+        "execution terminal does not pretend provider output settled"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeSubmission {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            provider_call_ref: "opaque-call".to_string(),
+            output_kind: mm::LiveBridgeOutputKind::Success,
+            output_digest: "result-digest".to_string(),
+        },
+    )
+    .expect("exact terminal result authorizes one provider submission");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ClaimLiveBridgeSubmissionAttempt {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: bridge_operation_id(),
+            provider_call_ref: "opaque-call".to_string(),
+            output_digest: "result-digest".to_string(),
+        },
+    )
+    .expect("durable send claim commits before transport IO");
+    let recovered = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecoverLiveBridgeSubmission {
+            operation_id: bridge_operation_id(),
+        },
+    )
+    .expect("claimed submission recovers as ambiguous");
+    assert!(recovered.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeSubmissionRecoveredAmbiguous {
+            state: mm::LiveBridgeSubmissionState::SubmissionAmbiguous,
+            retry_allowed: false,
+            ..
+        }
+    )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ClaimLiveBridgeSubmissionAttempt {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: bridge_operation_id(),
+                provider_call_ref: "opaque-call".to_string(),
+                output_digest: "result-digest".to_string(),
+            },
+        )
+        .is_err(),
+        "recovery never reissues transport authority"
+    );
+}
+
+#[test]
+fn bridge_cancellation_and_owner_revocation_never_retire_the_durable_member() {
+    let mut authority = opened_authority();
+    prepare_live_bridge_lineage(&mut authority);
+    admit_live_bridge(&mut authority);
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CancelLiveBridgeOperation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            reason: mm::LiveBridgeCancellationReason::BargeIn,
+        },
+    )
+    .expect("bridge cancellation addresses only the exact operation");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm::MeerkatPhase::Idle,
+        "bridge cancellation cannot retire the durable member runtime"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_channel_identity_by_channel
+            .get(CHANNEL),
+        Some(&identity())
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RevokeLivePlaybackOwner {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            owner_id: "playback-owner".to_string(),
+            readiness_id: "playback-readiness".to_string(),
+        },
+    )
+    .expect("owner loss revokes channel authority");
+    assert_eq!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some("pending-receipt"),
+        "opaque pending custody survives revocation for stateless status"
+    );
+    assert_eq!(authority.state().lifecycle_phase, mm::MeerkatPhase::Idle);
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveCloseClosed {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            close_observation_sequence: 1,
+        },
+    )
+    .expect("closed status settles channel custody without member retirement");
+    assert_eq!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some("pending-receipt"),
+        "opaque pending custody survives close for stateless status"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_activation_receipt_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some("activation-receipt"),
+        "inactive activation custody survives close for stateless status"
+    );
+    let replay = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            pending_receipt: None,
+            activation_receipt: Some("activation-receipt".to_string()),
+        },
+    )
+    .expect("lost close response replays from exact closed tombstone");
+    assert!(replay.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveChannelCloseCustodyRevoked {
+            already_closed: true,
+            ..
+        }
+    )));
+    assert_eq!(
+        replay.effects().len(),
+        1,
+        "closed replay mints no new provider effect"
+    );
+    assert_eq!(authority.state().lifecycle_phase, mm::MeerkatPhase::Idle);
+}
+
+#[test]
+fn close_custody_accepts_pending_or_activation_receipt_without_owner_echo() {
+    let mut pending = opened_authority();
+    apply(
+        &mut pending,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            profile_id: "test-function-bridge".to_string(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("mode resolves before pending close");
+    apply(
+        &mut pending,
+        mm::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+            pending_receipt: "pending-receipt".to_string(),
+        },
+    )
+    .expect("pending close can occur before owner registration");
+    apply(
+        &mut pending,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            pending_receipt: Some("pending-receipt".to_string()),
+            activation_receipt: None,
+        },
+    )
+    .expect("exact pending receipt revokes close custody without owner echo");
+    assert_eq!(
+        pending.state().live_execution_phase_by_channel.get(CHANNEL),
+        Some(&mm::LiveExecutionChannelPhase::Revoked)
+    );
+    assert_eq!(
+        pending
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some("pending-receipt")
+    );
+
+    let mut active = opened_authority();
+    prepare_live_bridge_lineage(&mut active);
+    admit_live_bridge(&mut active);
+    apply(
+        &mut active,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            pending_receipt: None,
+            activation_receipt: Some("activation-receipt".to_string()),
+        },
+    )
+    .expect("exact activation receipt revokes active close custody");
+    assert!(
+        !active
+            .state()
+            .live_playback_owner_by_channel
+            .contains_key(CHANNEL)
+    );
+    assert!(
+        !active
+            .state()
+            .live_playback_readiness_by_channel
+            .contains_key(CHANNEL)
+    );
+    assert_eq!(
+        active
+            .state()
+            .live_activation_receipt_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some("activation-receipt"),
+        "inactive activation tombstone remains valid for close and status"
+    );
+    assert_eq!(
+        active
+            .state()
+            .live_bridge_execution_terminal_by_operation
+            .get(&bridge_operation_id()),
+        Some(&mm::MeerkatExecutionTerminal::Cancelled)
+    );
+    assert_eq!(
+        active
+            .state()
+            .live_bridge_cancellation_reason_by_operation
+            .get(&bridge_operation_id()),
+        Some(&mm::LiveBridgeCancellationReason::ChannelClose)
+    );
+    assert_eq!(active.state().lifecycle_phase, mm::MeerkatPhase::Idle);
+    assert_eq!(
+        active.state().live_channel_identity_by_channel.get(CHANNEL),
+        Some(&identity()),
+        "channel close custody never retires the durable member"
+    );
 }

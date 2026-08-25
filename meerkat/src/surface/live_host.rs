@@ -27,6 +27,8 @@ use meerkat_contracts::{
     WireLiveIdentityOverride,
 };
 use meerkat_core::connection::RealmId;
+#[cfg(feature = "experimental-gpt-live")]
+use meerkat_core::live_adapter::LiveInputChunk;
 use meerkat_core::types::SessionId;
 use meerkat_live::{LiveAdapterHost, LiveChannelId, LiveWsState};
 #[cfg(feature = "live-webrtc")]
@@ -48,6 +50,8 @@ use crate::session_runtime::admission::StagedCapacityAdmissions;
 use crate::session_runtime::errors::{LiveChannelVerbError, LiveIngressError, LiveOpenError};
 #[cfg(feature = "experimental-gpt-live")]
 use crate::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
+#[cfg(feature = "experimental-gpt-live")]
+use crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel;
 use crate::session_runtime::live_orchestration::{
     LiveOrchestrator, LiveSeedWindow, LiveSessionIngressReconciler, LiveTransportContext,
     RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError,
@@ -70,6 +74,108 @@ pub enum ExperimentalLiveReplacementRequired {
         open: LiveOpenResult,
         canonical_seed_cursor: u64,
     },
+}
+
+/// Public-safe projection of one machine-minted playback owner readiness.
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[derive(Clone)]
+pub struct ExperimentalLivePlaybackOwnerReadiness {
+    channel_id: LiveChannelId,
+    readiness_receipt: String,
+}
+
+/// Machine-projected strict phase. Active is the only variant carrying the
+/// opaque receipt accepted by provider-affecting facade operations.
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExperimentalLiveChannelPhaseStatus {
+    Pending,
+    Active { activation_receipt: String },
+    Revoked,
+    Closed,
+}
+
+/// Complete stateless custody projection sourced from one machine receipt.
+/// Durable target identity remains resolved from `session_id` by the owning
+/// Mob host; no caller-supplied identity or mode is trusted here.
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExperimentalLiveChannelCustodyStatus {
+    session_id: SessionId,
+    channel_id: LiveChannelId,
+    execution_mode: meerkat_core::LiveExecutionMode,
+    phase: ExperimentalLiveChannelPhaseStatus,
+}
+
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+impl std::fmt::Debug for ExperimentalLiveChannelCustodyStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLiveChannelCustodyStatus")
+            .field("session_id", &"[REDACTED]")
+            .field("channel_id", &"[REDACTED]")
+            .field("execution_mode", &self.execution_mode)
+            .field("phase", &self.phase)
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+impl ExperimentalLiveChannelCustodyStatus {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub const fn execution_mode(&self) -> meerkat_core::LiveExecutionMode {
+        self.execution_mode
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> &ExperimentalLiveChannelPhaseStatus {
+        &self.phase
+    }
+}
+
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+impl ExperimentalLiveChannelPhaseStatus {
+    #[must_use]
+    pub fn activation_receipt(&self) -> Option<&str> {
+        match self {
+            Self::Active { activation_receipt } => Some(activation_receipt),
+            Self::Pending | Self::Revoked | Self::Closed => None,
+        }
+    }
+}
+
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+impl std::fmt::Debug for ExperimentalLivePlaybackOwnerReadiness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLivePlaybackOwnerReadiness")
+            .field("channel_id", &"[REDACTED]")
+            .field("readiness_receipt", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+impl ExperimentalLivePlaybackOwnerReadiness {
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn readiness_receipt(&self) -> &str {
+        &self.readiness_receipt
+    }
 }
 
 #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
@@ -211,6 +317,8 @@ pub enum LiveWebrtcAnswerCoordinatorError {
     MissingTransportSeal { session_id: SessionId },
     #[error("WebRTC runtime binding authority failed: {0}")]
     RuntimeBindingAuthority(String),
+    #[error("WebRTC pending-phase authority failed: {0}")]
+    PendingPhaseAuthority(String),
     #[error("WebRTC provider answer failed")]
     TransportRejected {
         session_id: SessionId,
@@ -1063,6 +1171,236 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         .await
     }
 
+    /// Register the sole playback owner against the exact current pending
+    /// receipt. The returned receipt is an opaque projection; the sealed
+    /// authority is reacquired from the machine before answer IO.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn register_experimental_live_playback_owner(
+        &self,
+        channel_id: &LiveChannelId,
+        pending_receipt: &str,
+    ) -> Result<ExperimentalLivePlaybackOwnerReadiness, meerkat_runtime::RuntimeDriverError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        let stage = self
+            .runtime_adapter
+            .validate_live_pending_channel_receipt(&session_id, channel_id, pending_receipt)
+            .await?;
+        let readiness = self
+            .runtime_adapter
+            .register_live_playback_owner(&stage, &uuid::Uuid::new_v4().to_string())
+            .await?;
+        Ok(ExperimentalLivePlaybackOwnerReadiness {
+            channel_id: channel_id.clone(),
+            readiness_receipt: readiness.readiness_id().to_string(),
+        })
+    }
+
+    /// Answer a strict pending channel only after reacquiring exact pending
+    /// and playback-owner authority. No provider IO begins on a caller-only
+    /// channel or receipt assertion.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn answer_experimental_live_webrtc_offer(
+        &self,
+        answer_transport: Arc<dyn LiveWebrtcAnswerTransport>,
+        bound_ready_binder: Arc<dyn LiveWebrtcBoundReadyBinder>,
+        channel_id: LiveChannelId,
+        pending_receipt: &str,
+        readiness_receipt: &str,
+        token: String,
+        offer_sdp: String,
+    ) -> Result<CoordinatedLiveWebrtcAnswer, LiveWebrtcAnswerCoordinatorError> {
+        let session_id = self
+            .experimental_live_session_for_channel(&channel_id)
+            .await
+            .map_err(|error| {
+                LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(error.to_string())
+            })?;
+        self.runtime_adapter
+            .validate_live_playback_owner_readiness(
+                &session_id,
+                &channel_id,
+                pending_receipt,
+                readiness_receipt,
+            )
+            .await
+            .map_err(|error| {
+                LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(error.to_string())
+            })?;
+        self.answer_webrtc_offer(
+            answer_transport,
+            Some(bound_ready_binder),
+            channel_id,
+            token,
+            offer_sdp,
+        )
+        .await
+    }
+
+    /// Read the machine-owned strict phase without maintaining a facade
+    /// mirror.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn experimental_live_channel_phase(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<Option<meerkat_core::LiveExecutionChannelPhase>, meerkat_runtime::RuntimeDriverError>
+    {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        self.runtime_adapter
+            .live_execution_channel_phase(&session_id, channel_id)
+            .await
+    }
+
+    /// Reacquire strict channel custody from the original opaque pending
+    /// receipt. Active custody carries the exact machine activation receipt.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn validate_experimental_live_channel_custody(
+        &self,
+        channel_id: &LiveChannelId,
+        pending_receipt: &str,
+    ) -> Result<ExperimentalLiveChannelCustodyStatus, meerkat_runtime::RuntimeDriverError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        let projection = self
+            .runtime_adapter
+            .validate_live_channel_custody_by_pending_receipt(
+                &session_id,
+                channel_id,
+                pending_receipt,
+            )
+            .await?;
+        Ok(Self::project_experimental_live_custody(projection))
+    }
+
+    /// Reacquire strict channel custody from an exact active receipt.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn validate_experimental_live_channel_custody_by_activation(
+        &self,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+    ) -> Result<ExperimentalLiveChannelCustodyStatus, meerkat_runtime::RuntimeDriverError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        let projection = self
+            .runtime_adapter
+            .validate_live_channel_custody_by_activation_receipt(
+                &session_id,
+                channel_id,
+                activation_receipt,
+            )
+            .await?;
+        Ok(Self::project_experimental_live_custody(projection))
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    fn project_experimental_live_custody(
+        projection: meerkat_runtime::meerkat_machine::LiveChannelCustodyProjection,
+    ) -> ExperimentalLiveChannelCustodyStatus {
+        let phase = match projection.state() {
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Pending(_) => {
+                ExperimentalLiveChannelPhaseStatus::Pending
+            }
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Active(activation) => {
+                ExperimentalLiveChannelPhaseStatus::Active {
+                    activation_receipt: activation.activation_receipt().to_string(),
+                }
+            }
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Revoked => {
+                ExperimentalLiveChannelPhaseStatus::Revoked
+            }
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed => {
+                ExperimentalLiveChannelPhaseStatus::Closed
+            }
+        };
+        ExperimentalLiveChannelCustodyStatus {
+            session_id: projection.session_id().clone(),
+            channel_id: projection.channel_id().clone(),
+            execution_mode: projection.mode(),
+            phase,
+        }
+    }
+
+    /// Reacquire the exact active receipt. Callers receive no authority they
+    /// can use for provider IO; provider-affecting facade methods authorize
+    /// and consume their own one-use control immediately before dispatch.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn validate_experimental_live_activation(
+        &self,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        self.runtime_adapter
+            .validate_live_channel_activation_receipt(&session_id, channel_id, activation_receipt)
+            .await
+            .map(|_| ())
+    }
+
+    /// Revoke the exact playback owner on local owner loss. The machine owns
+    /// the phase transition; this never retires the durable Mob member.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn revoke_experimental_live_playback_owner(
+        &self,
+        channel_id: &LiveChannelId,
+        pending_receipt: &str,
+        readiness_receipt: &str,
+        activation_receipt: Option<&str>,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await?;
+        let readiness = match activation_receipt {
+            Some(activation_receipt) => {
+                self.runtime_adapter
+                    .validate_live_active_playback_owner_readiness(
+                        &session_id,
+                        channel_id,
+                        activation_receipt,
+                        pending_receipt,
+                        readiness_receipt,
+                    )
+                    .await?
+            }
+            None => {
+                self.runtime_adapter
+                    .validate_live_playback_owner_readiness(
+                        &session_id,
+                        channel_id,
+                        pending_receipt,
+                        readiness_receipt,
+                    )
+                    .await?
+            }
+        };
+        self.runtime_adapter
+            .revoke_live_playback_owner(&readiness)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    async fn experimental_live_session_for_channel(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<SessionId, meerkat_runtime::RuntimeDriverError> {
+        self.runtime_adapter
+            .live_session_for_status_channel(channel_id)
+            .await
+            .ok_or_else(|| meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                reason: "experimental live channel has no current machine-owned session"
+                    .to_string(),
+            })
+    }
+
     fn transport_context(&self) -> LiveTransportContext<'_> {
         let context = LiveTransportContext::new(self.ws_state.as_deref(), self.base_url.as_deref());
         #[cfg(feature = "live-webrtc")]
@@ -1077,10 +1415,17 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     pub async fn truncate_live_output(
         &self,
         channel_id: &LiveChannelId,
+        activation_receipt: &str,
         output_id: &str,
         audio_played_ms: u64,
         reported_playback_prefix: Option<String>,
     ) -> Result<meerkat_contracts::LiveTruncateResult, LiveChannelVerbError> {
+        self.consume_experimental_live_active_control(
+            channel_id,
+            activation_receipt,
+            "truncate_live_output",
+        )
+        .await?;
         self.orchestrator()
             .truncate_live_output(
                 &self.host,
@@ -1104,10 +1449,95 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     pub async fn complete_live_playback(
         &self,
         channel_id: &LiveChannelId,
+        activation_receipt: &str,
         output_id: &str,
     ) -> Result<meerkat_contracts::LivePlaybackCompleteResult, LiveChannelVerbError> {
+        self.consume_experimental_live_active_control(
+            channel_id,
+            activation_receipt,
+            "complete_live_playback",
+        )
+        .await?;
         self.orchestrator()
             .complete_live_playback(&self.host, channel_id, None, output_id)
+            .await
+    }
+
+    /// Send one full-duplex input chunk only after exact active receipt
+    /// validation and one-use control consumption immediately before the
+    /// shared provider IO path.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub async fn send_experimental_live_input(
+        &self,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+        chunk: LiveInputChunk,
+    ) -> Result<meerkat_contracts::LiveSendInputResult, LiveChannelVerbError> {
+        self.consume_experimental_live_active_control(
+            channel_id,
+            activation_receipt,
+            "send_live_input",
+        )
+        .await?;
+        self.orchestrator()
+            .send_live_input(&self.host, channel_id, None, chunk)
+            .await
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    async fn consume_experimental_live_active_control(
+        &self,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+        operation: &str,
+    ) -> Result<(), LiveChannelVerbError> {
+        let session_id = self
+            .runtime_adapter
+            .live_session_for_active_channel(channel_id)
+            .await
+            .ok_or_else(|| LiveChannelVerbError::HostCommit {
+                message: "experimental live channel is not active".to_string(),
+            })?;
+        let activation = self
+            .runtime_adapter
+            .validate_live_channel_activation_receipt(&session_id, channel_id, activation_receipt)
+            .await
+            .map_err(|error| LiveChannelVerbError::HostCommit {
+                message: format!("active live receipt rejected: {error}"),
+            })?;
+        let authority = self
+            .runtime_adapter
+            .authorize_live_active_channel_control(&activation, operation)
+            .await
+            .map_err(|error| LiveChannelVerbError::HostCommit {
+                message: format!("active live control rejected: {error}"),
+            })?;
+        self.runtime_adapter
+            .consume_live_active_channel_control(authority)
+            .await
+            .map_err(|error| LiveChannelVerbError::HostCommit {
+                message: format!("active live control dispatch rejected: {error}"),
+            })?;
+        Ok(())
+    }
+
+    /// Execute one provider-affecting control only after consuming exact
+    /// active-channel authority immediately before the shared IO path.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn control_experimental_live_channel(
+        &self,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+        verb: BridgeLiveControlVerb,
+    ) -> Result<BridgeLiveControlOutcome, LiveChannelVerbError> {
+        self.consume_experimental_live_active_control(
+            channel_id,
+            activation_receipt,
+            "control_live_channel",
+        )
+        .await?;
+        self.orchestrator()
+            .control_live_channel(&self.host, self.transport_context(), channel_id, None, verb)
             .await
     }
 
@@ -1157,7 +1587,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         turning_mode: Option<RealtimeTurningMode>,
         seed_window: Option<LiveSeedWindow>,
         transport: Option<LiveOpenTransport>,
-    ) -> Result<LiveOpenResult, ExperimentalLiveChannelOpenError> {
+    ) -> Result<ExperimentalLivePendingChannel, ExperimentalLiveChannelOpenError> {
         self.orchestrator()
             .open_live_channel_with_execution_identity(
                 &self.host,
@@ -1512,6 +1942,102 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             Ok(result.status)
         }
     }
+
+    /// Strict close from an exact pending handle.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn close_experimental_live_pending_channel(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &LiveChannelId,
+        pending_receipt: &str,
+    ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        self.close_experimental_live_channel_with_receipt(
+            authority,
+            channel_id,
+            &meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Pending(
+                pending_receipt.to_string(),
+            ),
+        )
+        .await
+    }
+
+    /// Strict close from an exact active handle.
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    pub async fn close_experimental_live_active_channel(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &LiveChannelId,
+        activation_receipt: &str,
+    ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        self.close_experimental_live_channel_with_receipt(
+            authority,
+            channel_id,
+            &meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Activation(
+                activation_receipt.to_string(),
+            ),
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    async fn close_experimental_live_channel_with_receipt(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &LiveChannelId,
+        receipt: &meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt,
+    ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        let session_id = self
+            .experimental_live_session_for_channel(channel_id)
+            .await
+            .map_err(|error| {
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+            })?;
+        let current = match receipt {
+            meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Pending(value) => {
+                self.runtime_adapter
+                    .validate_live_channel_custody_by_pending_receipt(
+                        &session_id,
+                        channel_id,
+                        value,
+                    )
+                    .await
+            }
+            meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Activation(value) => {
+                self.runtime_adapter
+                    .validate_live_channel_custody_by_activation_receipt(
+                        &session_id,
+                        channel_id,
+                        value,
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| {
+            ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+        })?;
+        if matches!(
+            current.state(),
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
+        ) {
+            return Ok(LiveCloseStatus::Closed);
+        }
+        let close_custody = self
+            .runtime_adapter
+            .revoke_live_channel_close_custody(&session_id, channel_id, receipt)
+            .await
+            .map_err(|error| {
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+            })?;
+        if close_custody.session_id() != &session_id || close_custody.channel_id() != channel_id {
+            return Err(ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                "generated close custody did not match the exact channel binding".to_string(),
+            ));
+        }
+        if close_custody.already_closed() {
+            return Ok(LiveCloseStatus::Closed);
+        }
+        self.close_live_channel(Some(authority), channel_id).await
+    }
 }
 
 #[async_trait]
@@ -1685,6 +2211,7 @@ pub fn member_live_error_from_open(error: LiveOpenError) -> MemberLiveError {
         | LiveOpenError::OpenConfig(_)
         | LiveOpenError::AdmissionAuthority(_)
         | LiveOpenError::AdmissionRejectedChannelCollision { .. }
+        | LiveOpenError::AdmissionRejectedRevokedChannel { .. }
         | LiveOpenError::AdmissionRejectedNoReason
         | LiveOpenError::MissingHostHandoff
         | LiveOpenError::HostOpenSessionAlreadyBound { .. }

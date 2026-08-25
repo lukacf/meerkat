@@ -81,7 +81,7 @@ futures = { workspace = true }
 async-stream = { workspace = true }
 reqwest = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-meerkat-core = { workspace = true }
+meerkat-core = { workspace = true, features = ["test-support"] }
 meerkat-runtime = { workspace = true, features = ["test-support", "sqlite-store"] }
 meerkat-store = { workspace = true, features = ["jsonl", "sqlite"] }
 meerkat-machine-schema.workspace = true

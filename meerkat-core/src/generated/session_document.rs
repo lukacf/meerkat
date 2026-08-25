@@ -481,7 +481,7 @@ pub enum SessionDocumentInput {
         item_id: String,
         content_index: u64,
     },
-    ResolveLiveAssistantPlaybackTerminal {
+    ObserveLiveAssistantPlaybackFinal {
         session_id: SessionDocumentKey,
         channel_id: String,
         interaction_id: String,
@@ -490,11 +490,46 @@ pub enum SessionDocumentInput {
         content_index: u64,
         authoritative_assistant_chars: u64,
         authoritative_text_digest: String,
-        authoritative_assistant_final: bool,
+        pending_terminal_observation: LiveAssistantPlaybackTerminalObservation,
+        pending_reported_prefix_chars: u64,
+        pending_reported_prefix_digest: String,
+        reported_prefix_matches_authoritative: bool,
+    },
+    RecoverLiveAssistantPlaybackFinal {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+    },
+    ObserveLiveAssistantPlaybackTerminal {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
         observation: LiveAssistantPlaybackTerminalObservation,
         reported_prefix_chars: u64,
         reported_prefix_digest: String,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+        authoritative_assistant_final: bool,
         reported_prefix_matches_authoritative: bool,
+    },
+    RecoverLiveAssistantPlaybackTerminal {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        observation: LiveAssistantPlaybackTerminalObservation,
+        reported_prefix_chars: u64,
+        reported_prefix_digest: String,
     },
     ClassifyLiveContextCommittedRow {
         session_id: SessionDocumentKey,
@@ -667,6 +702,48 @@ pub enum SessionDocumentEffect {
         item_id: String,
         content_index: u64,
     },
+    LiveAssistantPlaybackFinalObserved {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+    },
+    LiveAssistantPlaybackFinalRecovered {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+    },
+    LiveAssistantPlaybackTerminalObserved {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        observation: LiveAssistantPlaybackTerminalObservation,
+        reported_prefix_chars: u64,
+        reported_prefix_digest: String,
+    },
+    LiveAssistantPlaybackTerminalRecovered {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        observation: LiveAssistantPlaybackTerminalObservation,
+        reported_prefix_chars: u64,
+        reported_prefix_digest: String,
+    },
     LiveAssistantPlaybackTerminalResolved {
         session_id: SessionDocumentKey,
         channel_id: String,
@@ -784,6 +861,12 @@ pub struct SessionDocumentMachineState {
     session_live_assistant_playback_response_id: BTreeMap<SessionDocumentKey, String>,
     session_live_assistant_playback_item_id: BTreeMap<SessionDocumentKey, String>,
     session_live_assistant_playback_content_index: BTreeMap<SessionDocumentKey, u64>,
+    session_live_assistant_final_chars: BTreeMap<SessionDocumentKey, u64>,
+    session_live_assistant_final_digest: BTreeMap<SessionDocumentKey, String>,
+    session_live_assistant_terminal_observation:
+        BTreeMap<SessionDocumentKey, LiveAssistantPlaybackTerminalObservation>,
+    session_live_assistant_terminal_prefix_chars: BTreeMap<SessionDocumentKey, u64>,
+    session_live_assistant_terminal_prefix_digest: BTreeMap<SessionDocumentKey, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -858,9 +941,15 @@ enum SessionDocumentTransition {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
-    ResolveLiveAssistantPlaybackComplete,
-    ResolveLiveAssistantPlaybackReportedPrefix,
-    ResolveLiveAssistantPlaybackUnmeasured,
+    ObserveLiveAssistantPlaybackFinalPendingTerminal,
+    RecoverLiveAssistantPlaybackFinal,
+    ObserveLiveAssistantPlaybackTerminalPendingFinal,
+    RecoverLiveAssistantPlaybackTerminal,
+    ObserveLiveAssistantPlaybackFinalJoinsComplete,
+    ObserveLiveAssistantPlaybackFinalJoinsPrefix,
+    ObserveLiveAssistantPlaybackTerminalJoinsComplete,
+    ObserveLiveAssistantPlaybackTerminalJoinsPrefix,
+    ObserveLiveAssistantPlaybackUnmeasured,
     ClassifyLiveContextCommittedRow,
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
@@ -919,6 +1008,11 @@ impl SessionDocumentMachineAuthority {
         state.session_live_assistant_playback_response_id = BTreeMap::new();
         state.session_live_assistant_playback_item_id = BTreeMap::new();
         state.session_live_assistant_playback_content_index = BTreeMap::new();
+        state.session_live_assistant_final_chars = BTreeMap::new();
+        state.session_live_assistant_final_digest = BTreeMap::new();
+        state.session_live_assistant_terminal_observation = BTreeMap::new();
+        state.session_live_assistant_terminal_prefix_chars = BTreeMap::new();
+        state.session_live_assistant_terminal_prefix_digest = BTreeMap::new();
         Self { state }
     }
 
@@ -1167,6 +1261,123 @@ impl SessionDocumentMachineAuthority {
             .copied()
             .ok_or(SessionDocumentError {
                 op: "session_live_assistant_playback_content_index",
+            })
+    }
+
+    #[must_use]
+    pub fn session_live_assistant_final_chars_for(&self, key: &SessionDocumentKey) -> Option<u64> {
+        self.state
+            .session_live_assistant_final_chars
+            .get(key)
+            .copied()
+    }
+
+    fn session_live_assistant_final_chars_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_live_assistant_final_chars
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_live_assistant_final_chars",
+            })
+    }
+
+    #[must_use]
+    pub fn session_live_assistant_final_digest_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<String> {
+        self.state
+            .session_live_assistant_final_digest
+            .get(key)
+            .cloned()
+    }
+
+    fn session_live_assistant_final_digest_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<String, SessionDocumentError> {
+        self.state
+            .session_live_assistant_final_digest
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_live_assistant_final_digest",
+            })
+    }
+
+    #[must_use]
+    pub fn session_live_assistant_terminal_observation_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<LiveAssistantPlaybackTerminalObservation> {
+        self.state
+            .session_live_assistant_terminal_observation
+            .get(key)
+            .copied()
+    }
+
+    fn session_live_assistant_terminal_observation_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<LiveAssistantPlaybackTerminalObservation, SessionDocumentError> {
+        self.state
+            .session_live_assistant_terminal_observation
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_live_assistant_terminal_observation",
+            })
+    }
+
+    #[must_use]
+    pub fn session_live_assistant_terminal_prefix_chars_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<u64> {
+        self.state
+            .session_live_assistant_terminal_prefix_chars
+            .get(key)
+            .copied()
+    }
+
+    fn session_live_assistant_terminal_prefix_chars_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<u64, SessionDocumentError> {
+        self.state
+            .session_live_assistant_terminal_prefix_chars
+            .get(key)
+            .copied()
+            .ok_or(SessionDocumentError {
+                op: "session_live_assistant_terminal_prefix_chars",
+            })
+    }
+
+    #[must_use]
+    pub fn session_live_assistant_terminal_prefix_digest_for(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Option<String> {
+        self.state
+            .session_live_assistant_terminal_prefix_digest
+            .get(key)
+            .cloned()
+    }
+
+    fn session_live_assistant_terminal_prefix_digest_value(
+        &self,
+        key: &SessionDocumentKey,
+    ) -> Result<String, SessionDocumentError> {
+        self.state
+            .session_live_assistant_terminal_prefix_digest
+            .get(key)
+            .cloned()
+            .ok_or(SessionDocumentError {
+                op: "session_live_assistant_terminal_prefix_digest",
             })
     }
 
@@ -3258,6 +3469,21 @@ impl SessionDocumentMachineAuthority {
                         self.state
                             .session_live_assistant_playback_content_index
                             .remove(&session_id);
+                        self.state
+                            .session_live_assistant_final_chars
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_final_digest
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_observation
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_chars
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_digest
+                            .remove(&session_id);
                         self.state.session_live_channel_id.remove(&session_id);
                         self.state.session_live_interaction_id.remove(&session_id);
                         self.state
@@ -3288,7 +3514,7 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::ResolveLiveAssistantPlaybackTerminal {
+            SessionDocumentInput::ObserveLiveAssistantPlaybackFinal {
                 session_id,
                 channel_id,
                 interaction_id,
@@ -3297,20 +3523,19 @@ impl SessionDocumentMachineAuthority {
                 content_index,
                 authoritative_assistant_chars,
                 authoritative_text_digest,
-                authoritative_assistant_final,
-                observation,
-                reported_prefix_chars,
-                reported_prefix_digest,
+                pending_terminal_observation,
+                pending_reported_prefix_chars,
+                pending_reported_prefix_digest,
                 reported_prefix_matches_authoritative,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
-                        && (authoritative_assistant_final == true)
-                        && (authoritative_assistant_chars > 0)
+                    && ((authoritative_assistant_chars > 0)
                         && (authoritative_text_digest.clone() != "".to_string())
-                        && (reported_prefix_chars == 0)
-                        && (reported_prefix_digest.clone() == "".to_string())
+                        && (pending_terminal_observation
+                            == LiveAssistantPlaybackTerminalObservation::Unmeasured)
+                        && (pending_reported_prefix_chars == 0)
+                        && (pending_reported_prefix_digest.clone() == "".to_string())
                         && (reported_prefix_matches_authoritative == false)
                         && (if self.state.session_live_channel_id.contains_key(&session_id) {
                             Some(self.session_live_channel_id_value(&session_id)?)
@@ -3360,75 +3585,41 @@ impl SessionDocumentMachineAuthority {
                             )
                         } else {
                             None
-                        } == Some(content_index)))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLiveAssistantPlaybackComplete);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
-                        && (authoritative_text_digest.clone() != "".to_string())
-                        && (reported_prefix_digest.clone() != "".to_string())
-                        && (reported_prefix_matches_authoritative == true)
-                        && (reported_prefix_chars <= authoritative_assistant_chars)
-                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
-                            Some(self.session_live_channel_id_value(&session_id)?)
-                        } else {
-                            None
-                        } == Some(channel_id.clone()))
-                        && (if self
+                        } == Some(content_index))
+                        && (!(self
                             .state
-                            .session_live_interaction_id
-                            .contains_key(&session_id)
-                        {
-                            Some(self.session_live_interaction_id_value(&session_id)?)
-                        } else {
-                            None
-                        } == Some(interaction_id.clone()))
-                        && (if self
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id)))
+                        && (!(self
                             .state
-                            .session_live_assistant_playback_response_id
-                            .contains_key(&session_id)
-                        {
-                            Some(
-                                self.session_live_assistant_playback_response_id_value(
-                                    &session_id,
-                                )?,
-                            )
-                        } else {
-                            None
-                        } == Some(response_id.clone()))
-                        && (if self
-                            .state
-                            .session_live_assistant_playback_item_id
-                            .contains_key(&session_id)
-                        {
-                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
-                        } else {
-                            None
-                        } == Some(item_id.clone()))
-                        && (if self
-                            .state
-                            .session_live_assistant_playback_content_index
-                            .contains_key(&session_id)
-                        {
-                            Some(
-                                self.session_live_assistant_playback_content_index_value(
-                                    &session_id,
-                                )?,
-                            )
-                        } else {
-                            None
-                        } == Some(content_index)))
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
                 {
                     matches.push(
-                        SessionDocumentTransition::ResolveLiveAssistantPlaybackReportedPrefix,
+                        SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalPendingTerminal,
                     );
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((observation == LiveAssistantPlaybackTerminalObservation::Unmeasured)
-                        && (reported_prefix_chars == 0)
-                        && (reported_prefix_digest.clone() == "".to_string())
+                    && ((authoritative_assistant_chars > 0)
+                        && (authoritative_text_digest.clone() != "".to_string())
                         && (reported_prefix_matches_authoritative == false)
+                        && (pending_terminal_observation
+                            == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                        && (pending_reported_prefix_chars == 0)
+                        && (pending_reported_prefix_digest.clone() == "".to_string())
+                        && (if self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_terminal_observation_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(LiveAssistantPlaybackTerminalObservation::PlaybackComplete))
                         && (if self.state.session_live_channel_id.contains_key(&session_id) {
                             Some(self.session_live_channel_id_value(&session_id)?)
                         } else {
@@ -3477,14 +3668,146 @@ impl SessionDocumentMachineAuthority {
                             )
                         } else {
                             None
-                        } == Some(content_index)))
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id))))
                 {
-                    matches.push(SessionDocumentTransition::ResolveLiveAssistantPlaybackUnmeasured);
+                    matches.push(
+                        SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalJoinsComplete,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((authoritative_assistant_chars > 0)
+                        && (authoritative_text_digest.clone() != "".to_string())
+                        && (reported_prefix_matches_authoritative == true)
+                        && (pending_terminal_observation
+                            == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                        && (pending_reported_prefix_digest.clone() != "".to_string())
+                        && (pending_reported_prefix_chars <= authoritative_assistant_chars)
+                        && (if self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_terminal_observation_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(LiveAssistantPlaybackTerminalObservation::ReportedPrefix))
+                        && (if self
+                            .state
+                            .session_live_assistant_terminal_prefix_digest
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_terminal_prefix_digest_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(pending_reported_prefix_digest.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_terminal_prefix_chars
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_terminal_prefix_chars_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(pending_reported_prefix_chars))
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id))))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalJoinsPrefix,
+                    );
                 }
                 let transition =
-                    Self::single_transition(matches, "ResolveLiveAssistantPlaybackTerminal")?;
+                    Self::single_transition(matches, "ObserveLiveAssistantPlaybackFinal")?;
                 match transition {
-                    SessionDocumentTransition::ResolveLiveAssistantPlaybackComplete => {
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalPendingTerminal => {
+                        self.state
+                            .session_live_assistant_final_chars
+                            .insert(session_id.clone(), authoritative_assistant_chars);
+                        self.state
+                            .session_live_assistant_final_digest
+                            .insert(session_id.clone(), authoritative_text_digest.clone());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackFinalObserved {
+                                session_id: session_id.clone(),
+                                channel_id: channel_id.clone(),
+                                interaction_id: interaction_id.clone(),
+                                response_id: response_id.clone(),
+                                item_id: item_id.clone(),
+                                content_index: content_index,
+                                authoritative_assistant_chars: authoritative_assistant_chars,
+                                authoritative_text_digest: authoritative_text_digest.clone(),
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalJoinsComplete => {
                         self.state
                             .session_live_assistant_playback_response_id
                             .remove(&session_id);
@@ -3493,6 +3816,15 @@ impl SessionDocumentMachineAuthority {
                             .remove(&session_id);
                         self.state
                             .session_live_assistant_playback_content_index
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_observation
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_chars
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_digest
                             .remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
@@ -3511,7 +3843,7 @@ impl SessionDocumentMachineAuthority {
                             },
                         ])
                     }
-                    SessionDocumentTransition::ResolveLiveAssistantPlaybackReportedPrefix => {
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackFinalJoinsPrefix => {
                         self.state
                             .session_live_assistant_playback_response_id
                             .remove(&session_id);
@@ -3521,40 +3853,639 @@ impl SessionDocumentMachineAuthority {
                         self.state
                             .session_live_assistant_playback_content_index
                             .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_observation
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_chars
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_terminal_prefix_digest
+                            .remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(reported_prefix_chars),  canonical_text_digest: Some(reported_prefix_digest.clone()),  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(pending_reported_prefix_chars),  canonical_text_digest: Some(pending_reported_prefix_digest.clone()),  biological_hearing_claimed: false, },
                         ])
                     }
-                    SessionDocumentTransition::ResolveLiveAssistantPlaybackUnmeasured => {
-                        self.state
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ObserveLiveAssistantPlaybackFinal_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::RecoverLiveAssistantPlaybackFinal {
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                authoritative_assistant_chars,
+                authoritative_text_digest,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((authoritative_assistant_chars > 0)
+                        && (authoritative_text_digest.clone() != "".to_string())
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
                             .session_live_assistant_playback_response_id
-                            .remove(&session_id);
-                        self.state
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
                             .session_live_assistant_playback_item_id
-                            .remove(&session_id);
-                        self.state
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
                             .session_live_assistant_playback_content_index
-                            .remove(&session_id);
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id))))
+                {
+                    matches.push(SessionDocumentTransition::RecoverLiveAssistantPlaybackFinal);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverLiveAssistantPlaybackFinal")?;
+                match transition {
+                    SessionDocumentTransition::RecoverLiveAssistantPlaybackFinal => {
+                        self.state
+                            .session_live_assistant_final_chars
+                            .insert(session_id.clone(), authoritative_assistant_chars);
+                        self.state
+                            .session_live_assistant_final_digest
+                            .insert(session_id.clone(), authoritative_text_digest.clone());
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
+                            SessionDocumentEffect::LiveAssistantPlaybackFinalRecovered {
                                 session_id: session_id.clone(),
                                 channel_id: channel_id.clone(),
                                 interaction_id: interaction_id.clone(),
                                 response_id: response_id.clone(),
                                 item_id: item_id.clone(),
                                 content_index: content_index,
-                                disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
-                                canonical_chars: None,
-                                canonical_text_digest: None,
-                                biological_hearing_claimed: false,
+                                authoritative_assistant_chars: authoritative_assistant_chars,
+                                authoritative_text_digest: authoritative_text_digest.clone(),
                             },
                         ])
                     }
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
-                        op: "ResolveLiveAssistantPlaybackTerminal_transition",
+                        op: "RecoverLiveAssistantPlaybackFinal_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ObserveLiveAssistantPlaybackTerminal {
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                observation,
+                reported_prefix_chars,
+                reported_prefix_digest,
+                authoritative_assistant_chars,
+                authoritative_text_digest,
+                authoritative_assistant_final,
+                reported_prefix_matches_authoritative,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((observation
+                        == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                        || (observation
+                            == LiveAssistantPlaybackTerminalObservation::ReportedPrefix))
+                        && (((observation
+                            == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                            && (reported_prefix_chars == 0)
+                            && (reported_prefix_digest.clone() == "".to_string()))
+                            || ((observation
+                                == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                                && (reported_prefix_digest.clone() != "".to_string())))
+                        && (reported_prefix_matches_authoritative == false)
+                        && (authoritative_assistant_chars == 0)
+                        && (authoritative_text_digest.clone() == "".to_string())
+                        && (authoritative_assistant_final == false)
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id)))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalPendingFinal,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                        && (reported_prefix_chars == 0)
+                        && (reported_prefix_digest.clone() == "".to_string())
+                        && (reported_prefix_matches_authoritative == false)
+                        && (authoritative_assistant_final == true)
+                        && (authoritative_assistant_chars > 0)
+                        && (authoritative_text_digest.clone() != "".to_string())
+                        && (if self
+                            .state
+                            .session_live_assistant_final_chars
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_final_chars_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(authoritative_assistant_chars))
+                        && (if self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_final_digest_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(authoritative_text_digest.clone()))
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalJoinsComplete);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                        && (reported_prefix_digest.clone() != "".to_string())
+                        && (reported_prefix_matches_authoritative == true)
+                        && (authoritative_assistant_final == true)
+                        && (authoritative_text_digest.clone() != "".to_string())
+                        && (reported_prefix_chars <= authoritative_assistant_chars)
+                        && (if self
+                            .state
+                            .session_live_assistant_final_chars
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_final_chars_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(authoritative_assistant_chars))
+                        && (if self
+                            .state
+                            .session_live_assistant_final_digest
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_final_digest_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(authoritative_text_digest.clone()))
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalJoinsPrefix,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((observation == LiveAssistantPlaybackTerminalObservation::Unmeasured)
+                        && (reported_prefix_chars == 0)
+                        && (reported_prefix_digest.clone() == "".to_string())
+                        && (reported_prefix_matches_authoritative == false)
+                        && (((authoritative_assistant_final == false)
+                            && (authoritative_assistant_chars == 0)
+                            && (authoritative_text_digest.clone() == "".to_string())
+                            && (!(self
+                                .state
+                                .session_live_assistant_final_digest
+                                .contains_key(&session_id))))
+                            || ((authoritative_assistant_final == true)
+                                && (authoritative_assistant_chars > 0)
+                                && (authoritative_text_digest.clone() != "".to_string())
+                                && (if self
+                                    .state
+                                    .session_live_assistant_final_chars
+                                    .contains_key(&session_id)
+                                {
+                                    Some(
+                                        self.session_live_assistant_final_chars_value(&session_id)?,
+                                    )
+                                } else {
+                                    None
+                                } == Some(authoritative_assistant_chars))
+                                && (if self
+                                    .state
+                                    .session_live_assistant_final_digest
+                                    .contains_key(&session_id)
+                                {
+                                    Some(
+                                        self.session_live_assistant_final_digest_value(
+                                            &session_id,
+                                        )?,
+                                    )
+                                } else {
+                                    None
+                                } == Some(authoritative_text_digest.clone()))))
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(SessionDocumentTransition::ObserveLiveAssistantPlaybackUnmeasured);
+                }
+                let transition =
+                    Self::single_transition(matches, "ObserveLiveAssistantPlaybackTerminal")?;
+                match transition {
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalPendingFinal => {
+                        self.state.session_live_assistant_terminal_observation.insert(session_id.clone(), observation);
+                        self.state.session_live_assistant_terminal_prefix_chars.insert(session_id.clone(), reported_prefix_chars);
+                        self.state.session_live_assistant_terminal_prefix_digest.insert(session_id.clone(), reported_prefix_digest.clone());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalObserved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  observation: observation,  reported_prefix_chars: reported_prefix_chars,  reported_prefix_digest: reported_prefix_digest.clone(), },
+                        ])
+                    }
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalJoinsComplete => {
+                        self.state.session_live_assistant_playback_response_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_item_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_content_index.remove(&session_id);
+                        self.state.session_live_assistant_final_chars.remove(&session_id);
+                        self.state.session_live_assistant_final_digest.remove(&session_id);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,  canonical_chars: Some(authoritative_assistant_chars),  canonical_text_digest: Some(authoritative_text_digest.clone()),  biological_hearing_claimed: false, },
+                        ])
+                    }
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalJoinsPrefix => {
+                        self.state.session_live_assistant_playback_response_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_item_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_content_index.remove(&session_id);
+                        self.state.session_live_assistant_final_chars.remove(&session_id);
+                        self.state.session_live_assistant_final_digest.remove(&session_id);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(reported_prefix_chars),  canonical_text_digest: Some(reported_prefix_digest.clone()),  biological_hearing_claimed: false, },
+                        ])
+                    }
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackUnmeasured => {
+                        self.state.session_live_assistant_playback_response_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_item_id.remove(&session_id);
+                        self.state.session_live_assistant_playback_content_index.remove(&session_id);
+                        self.state.session_live_assistant_final_chars.remove(&session_id);
+                        self.state.session_live_assistant_final_digest.remove(&session_id);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,  canonical_chars: None,  canonical_text_digest: None,  biological_hearing_claimed: false, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ObserveLiveAssistantPlaybackTerminal_transition" }),
+                }
+            }
+            SessionDocumentInput::RecoverLiveAssistantPlaybackTerminal {
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                observation,
+                reported_prefix_chars,
+                reported_prefix_digest,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((observation
+                        == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                        || (observation
+                            == LiveAssistantPlaybackTerminalObservation::ReportedPrefix))
+                        && (((observation
+                            == LiveAssistantPlaybackTerminalObservation::PlaybackComplete)
+                            && (reported_prefix_chars == 0)
+                            && (reported_prefix_digest.clone() == "".to_string()))
+                            || ((observation
+                                == LiveAssistantPlaybackTerminalObservation::ReportedPrefix)
+                                && (reported_prefix_digest.clone() != "".to_string())))
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(SessionDocumentTransition::RecoverLiveAssistantPlaybackTerminal);
+                }
+                let transition =
+                    Self::single_transition(matches, "RecoverLiveAssistantPlaybackTerminal")?;
+                match transition {
+                    SessionDocumentTransition::RecoverLiveAssistantPlaybackTerminal => {
+                        self.state
+                            .session_live_assistant_terminal_observation
+                            .insert(session_id.clone(), observation);
+                        self.state
+                            .session_live_assistant_terminal_prefix_chars
+                            .insert(session_id.clone(), reported_prefix_chars);
+                        self.state
+                            .session_live_assistant_terminal_prefix_digest
+                            .insert(session_id.clone(), reported_prefix_digest.clone());
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalRecovered {
+                                session_id: session_id.clone(),
+                                channel_id: channel_id.clone(),
+                                interaction_id: interaction_id.clone(),
+                                response_id: response_id.clone(),
+                                item_id: item_id.clone(),
+                                content_index: content_index,
+                                observation: observation,
+                                reported_prefix_chars: reported_prefix_chars,
+                                reported_prefix_digest: reported_prefix_digest.clone(),
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "RecoverLiveAssistantPlaybackTerminal_transition",
                     }),
                 }
             }
@@ -4809,7 +5740,7 @@ impl SessionDocumentMachineAuthority {
         )
     }
 
-    pub fn resolve_live_assistant_playback_terminal(
+    pub fn observe_live_assistant_playback_final(
         &mut self,
         session_id: SessionDocumentKey,
         channel_id: String,
@@ -4819,13 +5750,12 @@ impl SessionDocumentMachineAuthority {
         content_index: u64,
         authoritative_assistant_chars: u64,
         authoritative_text_digest: String,
-        authoritative_assistant_final: bool,
-        observation: LiveAssistantPlaybackTerminalObservation,
-        reported_prefix_chars: u64,
-        reported_prefix_digest: String,
+        pending_terminal_observation: LiveAssistantPlaybackTerminalObservation,
+        pending_reported_prefix_chars: u64,
+        pending_reported_prefix_digest: String,
         reported_prefix_matches_authoritative: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveLiveAssistantPlaybackTerminal {
+        self.apply_input(SessionDocumentInput::ObserveLiveAssistantPlaybackFinal {
             session_id,
             channel_id,
             interaction_id,
@@ -4834,11 +5764,91 @@ impl SessionDocumentMachineAuthority {
             content_index,
             authoritative_assistant_chars,
             authoritative_text_digest,
-            authoritative_assistant_final,
+            pending_terminal_observation,
+            pending_reported_prefix_chars,
+            pending_reported_prefix_digest,
+            reported_prefix_matches_authoritative,
+        })
+    }
+
+    pub fn recover_live_assistant_playback_final(
+        &mut self,
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverLiveAssistantPlaybackFinal {
+            session_id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            authoritative_assistant_chars,
+            authoritative_text_digest,
+        })
+    }
+
+    pub fn observe_live_assistant_playback_terminal(
+        &mut self,
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        observation: LiveAssistantPlaybackTerminalObservation,
+        reported_prefix_chars: u64,
+        reported_prefix_digest: String,
+        authoritative_assistant_chars: u64,
+        authoritative_text_digest: String,
+        authoritative_assistant_final: bool,
+        reported_prefix_matches_authoritative: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ObserveLiveAssistantPlaybackTerminal {
+            session_id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
             observation,
             reported_prefix_chars,
             reported_prefix_digest,
+            authoritative_assistant_chars,
+            authoritative_text_digest,
+            authoritative_assistant_final,
             reported_prefix_matches_authoritative,
+        })
+    }
+
+    pub fn recover_live_assistant_playback_terminal(
+        &mut self,
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        observation: LiveAssistantPlaybackTerminalObservation,
+        reported_prefix_chars: u64,
+        reported_prefix_digest: String,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::RecoverLiveAssistantPlaybackTerminal {
+            session_id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            observation,
+            reported_prefix_chars,
+            reported_prefix_digest,
         })
     }
 

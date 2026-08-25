@@ -32,6 +32,15 @@ impl<T: Into<String>> From<T> for AgentRuntimeId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct AgentIdentity(pub String);
+
+impl<T: Into<String>> From<T> for AgentIdentity {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
 impl AgentRuntimeId {
     pub fn from_domain(id: &crate::identifiers::LogicalRuntimeId) -> Self {
         Self(id.to_string())
@@ -2346,6 +2355,7 @@ pub enum LiveOpenAdmissionRejection {
     AlreadyBound,
     ChannelAlreadyBound,
     LifecycleClosed,
+    RevokedChannelId,
 }
 
 /// Typed public result class for `live/refresh` after the adapter command
@@ -2606,6 +2616,101 @@ pub enum LiveDelegationWorkerTerminalKind {
     Completed,
     Cancelled,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveExecutionChannelPhase {
+    #[default]
+    Pending,
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveExecutionMode {
+    #[default]
+    FunctionBridge,
+    ClientContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeOperationPhase {
+    #[default]
+    PreFinalInference,
+    FinalInputAuthorized,
+    CancellationAuthorized,
+    ExecutionTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeEffectKind {
+    #[default]
+    ModelComputation,
+    ReadOnlyMemorySnapshot,
+    ToolDispatch,
+    DurableMemoryMutation,
+    Comms,
+    HelperSpawn,
+    ExternalIo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeEffectOutcome {
+    #[default]
+    Committed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MeerkatExecutionTerminal {
+    #[default]
+    Completed,
+    Rejected,
+    Failed,
+    TimedOut,
+    Unrecoverable,
+    Cancelled,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeCancellationReason {
+    #[default]
+    BargeIn,
+    ChannelClose,
+    Restart,
+    ProtocolDrift,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeOutputKind {
+    #[default]
+    Success,
+    FailureProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeSubmissionState {
+    #[default]
+    SubmissionAuthorized,
+    SubmissionAttemptClaimed,
+    LocalWriteCompletedAwaitingProof,
+    ProviderProcessed,
+    ProviderRejected,
+    SubmissionAmbiguous,
+    CallExpired,
+    CallAbandonedByClose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBridgeSubmissionObservation {
+    #[default]
+    ProviderProcessed,
+    ProviderRejected,
+    SubmissionAmbiguous,
+    CallExpired,
+    CallAbandonedByClose,
 }
 
 /// Bridging copy of the catalog-owned context append observation.

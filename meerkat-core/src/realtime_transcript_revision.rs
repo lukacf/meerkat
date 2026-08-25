@@ -794,6 +794,26 @@ pub fn apply_realtime_transcript_event(
             item_id,
             content_index,
         )?,
+        RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            evidence,
+            stop_reason,
+            usage,
+        } => apply_assistant_playback_terminal_observed(
+            state,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            evidence,
+            stop_reason,
+            usage,
+        )?,
         RealtimeTranscriptEvent::AssistantPlaybackTargetResolved {
             channel_id,
             interaction_id,
@@ -876,6 +896,44 @@ fn apply_assistant_playback_target_resolved(
         });
     }
     state.assistant_playback_target = None;
+    Ok(RealtimeTranscriptApplyCommit::default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_assistant_playback_terminal_observed(
+    state: &mut SessionRealtimeTranscriptState,
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+    evidence: crate::LiveAssistantPlaybackEvidence,
+    stop_reason: StopReason,
+    usage: crate::types::TurnUsage,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    let Some(active) = state.assistant_playback_target.as_mut() else {
+        return Err(RealtimeTranscriptShellError {
+            op: "assistant_playback_target_not_active",
+        });
+    };
+    if active.channel_id() != channel_id
+        || active.interaction_id() != interaction_id
+        || active.response_id() != response_id
+        || active.item_id() != item_id
+        || active.content_index() != content_index
+        || active.pending_terminal().is_some()
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "assistant_playback_terminal_observation_mismatch",
+        });
+    }
+    active.pending_terminal = Some(
+        crate::realtime_transcript::LiveAssistantPlaybackPendingTerminal {
+            evidence,
+            stop_reason,
+            usage,
+        },
+    );
     Ok(RealtimeTranscriptApplyCommit::default())
 }
 

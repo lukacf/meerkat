@@ -107,6 +107,14 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        if tool_name == TOOL_NAME {
+            meerkat_core::LiveBridgeEffectKind::ReadOnlyMemorySnapshot
+        } else {
+            meerkat_core::LiveBridgeEffectKind::ExternalIo
+        }
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,

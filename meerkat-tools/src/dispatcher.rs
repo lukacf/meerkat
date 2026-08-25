@@ -270,6 +270,10 @@ impl AgentToolDispatcher for ToolDispatcher {
         self.router.tool_mutation_class(tool_name)
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        self.router.live_bridge_effect_kind(tool_name)
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         self.dispatch_with_context(call, &ToolDispatchContext::default())
             .await

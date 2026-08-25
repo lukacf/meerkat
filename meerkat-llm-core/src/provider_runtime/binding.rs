@@ -279,10 +279,6 @@ fn valid_experimental_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn valid_experimental_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 #[derive(Debug)]
 struct ExperimentalRealtimeAdmissionAuthorityInner;
 
@@ -310,34 +306,15 @@ impl ExperimentalRealtimeAdmissionAuthority {
     /// Construct only when operator policy exactly matches this compiled
     /// artifact's Gate0 witness.
     pub fn from_compiled_gate0_policy(
-        policy: ExperimentalRealtimeQualificationPolicy,
+        _policy: ExperimentalRealtimeQualificationPolicy,
     ) -> Result<Self, ExperimentalRealtimeAdmissionError> {
         if !cfg!(feature = "experimental-gpt-live") {
             return Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled);
         }
-        if option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_STATUS") != Some("qualified") {
-            return Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable);
-        }
-        if option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_KIND")
-            != Some(policy.factory_kind.as_str())
-            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_VERSION")
-                != Some(policy.factory_version.as_str())
-            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_QUALIFICATION_VERSION")
-                != Some(policy.required_gate0_version.as_str())
-            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_BUILD_VERSION")
-                != Some(env!("CARGO_PKG_VERSION"))
-        {
-            return Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch);
-        }
-        let protocol_digest = option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_PROTOCOL_DIGEST")
-            .filter(|digest| valid_experimental_digest(digest))
-            .ok_or(ExperimentalRealtimeAdmissionError::Gate0Unavailable)?
-            .to_ascii_lowercase();
-        Ok(Self {
-            inner: Arc::new(ExperimentalRealtimeAdmissionAuthorityInner),
-            policy,
-            protocol_digest,
-        })
+        // No source-bound verifier exists for the still-unknown direct
+        // Responses function event. Build environment strings cannot mint an
+        // authority; the unqualified tree is structurally closed.
+        Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable)
     }
 
     pub fn qualify(
@@ -588,6 +565,22 @@ mod experimental_realtime_admission_tests {
         assert!(matches!(
             authority.qualify(&realm("voice"), FACTORY_KIND, "v2"),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+    }
+
+    #[test]
+    fn compiled_gate0_policy_cannot_be_qualified_by_build_strings() {
+        let policy = ExperimentalRealtimeQualificationPolicy::new(
+            realm("voice"),
+            FACTORY_KIND,
+            FACTORY_VERSION,
+            "gate0-v1",
+        )
+        .expect("valid policy");
+        assert!(matches!(
+            ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(policy),
+            Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable)
+                | Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
         ));
     }
 

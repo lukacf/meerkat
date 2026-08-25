@@ -354,6 +354,18 @@ pub enum LiveAdapterObservation {
         stop_reason: StopReason,
         usage: crate::types::TurnUsage,
     },
+    /// Independent playback-terminal fact for a target whose provider final
+    /// may arrive before or after this observation. SessionDocument owns the
+    /// order-independent join; adapters only transport the measured fact.
+    AssistantPlaybackTerminalObserved {
+        interaction_id: crate::InteractionId,
+        provider_item_id: String,
+        content_index: u32,
+        response_id: String,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+        stop_reason: StopReason,
+        usage: crate::types::TurnUsage,
+    },
     /// Pass-through of a structured `RealtimeTranscriptEvent` from the provider.
     ///
     /// The adapter forwards these as-is so the runtime's projection layer can

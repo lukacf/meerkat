@@ -6975,6 +6975,7 @@ pub struct LiveProviderTurnFinishedAuthority {
 pub struct ExperimentalLiveExecutionStageAuthority {
     binding: crate::live_execution::LiveDelegationRuntimeBinding,
     canonical_seed_cursor: u64,
+    pending_receipt: String,
 }
 
 #[cfg(feature = "live")]
@@ -6987,6 +6988,234 @@ impl ExperimentalLiveExecutionStageAuthority {
     #[must_use]
     pub const fn canonical_seed_cursor(&self) -> u64 {
         self.canonical_seed_cursor
+    }
+
+    #[must_use]
+    pub fn pending_receipt(&self) -> &str {
+        &self.pending_receipt
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> meerkat_core::LiveExecutionChannelPhase {
+        meerkat_core::LiveExecutionChannelPhase::Pending
+    }
+}
+
+/// Sealed proof that the sole playback owner is ready while the channel is
+/// still pending. Answer acceptance cannot activate without this machine fact.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LivePlaybackOwnerReadinessAuthority {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    pending_receipt: String,
+    owner_id: String,
+    readiness_id: String,
+}
+
+#[cfg(feature = "live")]
+impl LivePlaybackOwnerReadinessAuthority {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn pending_receipt(&self) -> &str {
+        &self.pending_receipt
+    }
+
+    #[must_use]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    #[must_use]
+    pub fn readiness_id(&self) -> &str {
+        &self.readiness_id
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveChannelActivationReceipt {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    activation_receipt: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelActivationReceipt {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn activation_receipt(&self) -> &str {
+        &self.activation_receipt
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> meerkat_core::LiveExecutionChannelPhase {
+        meerkat_core::LiveExecutionChannelPhase::Active
+    }
+}
+
+/// Sealed read-only projection for one opaque pending receipt. Active custody
+/// carries the exact machine-minted activation receipt; callers never infer or
+/// manufacture phase transitions.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub enum LiveChannelCustodyState {
+    Pending(ExperimentalLiveExecutionStageAuthority),
+    Active(LiveChannelActivationReceipt),
+    Revoked,
+    Closed,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveChannelCustodyProjection {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    mode: meerkat_core::LiveExecutionMode,
+    state: LiveChannelCustodyState,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelCustodyProjection {
+    #[must_use]
+    pub const fn phase(&self) -> Option<meerkat_core::LiveExecutionChannelPhase> {
+        match &self.state {
+            LiveChannelCustodyState::Pending(_) => {
+                Some(meerkat_core::LiveExecutionChannelPhase::Pending)
+            }
+            LiveChannelCustodyState::Active(_) => {
+                Some(meerkat_core::LiveExecutionChannelPhase::Active)
+            }
+            LiveChannelCustodyState::Revoked => {
+                Some(meerkat_core::LiveExecutionChannelPhase::Revoked)
+            }
+            LiveChannelCustodyState::Closed => None,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> meerkat_core::LiveExecutionMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> &LiveChannelCustodyState {
+        &self.state
+    }
+}
+
+/// Caller-held machine receipt accepted for strict close. The enum provides
+/// no authority by itself; the generated state validates the exact value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "live")]
+pub enum LiveChannelCloseReceipt {
+    Pending(String),
+    Activation(String),
+}
+
+#[derive(Debug)]
+#[cfg(feature = "live")]
+pub struct LiveChannelCloseCustodyAuthority {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    already_closed: bool,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelCloseCustodyAuthority {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub const fn already_closed(&self) -> bool {
+        self.already_closed
+    }
+}
+
+#[derive(Debug)]
+#[cfg(feature = "live")]
+pub struct LiveActiveChannelControlAuthority {
+    activation: LiveChannelActivationReceipt,
+    control_authority_id: String,
+    operation: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveActiveChannelControlAuthority {
+    #[must_use]
+    pub fn activation(&self) -> &LiveChannelActivationReceipt {
+        &self.activation
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+}
+
+#[derive(Debug)]
+#[cfg(feature = "live")]
+pub struct LiveActiveChannelControlDispatchAuthority(LiveActiveChannelControlAuthority);
+
+#[cfg(feature = "live")]
+impl LiveActiveChannelControlDispatchAuthority {
+    #[must_use]
+    pub fn control(&self) -> &LiveActiveChannelControlAuthority {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveChannelRevocationReceipt {
+    session_id: SessionId,
+    channel_id: meerkat_core::LiveChannelId,
+    owner_id: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveChannelRevocationReceipt {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_core::LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> meerkat_core::LiveExecutionChannelPhase {
+        meerkat_core::LiveExecutionChannelPhase::Revoked
     }
 }
 
@@ -7016,6 +7245,7 @@ pub struct LiveWebrtcAnswerExecutionBindingAuthority {
     answer: LiveWebrtcAnswerResultAuthority,
     binding: crate::live_execution::LiveDelegationRuntimeBinding,
     rollback: LiveWebrtcAnswerExecutionRollbackAuthority,
+    activation: Option<LiveChannelActivationReceipt>,
 }
 
 #[cfg(feature = "live")]
@@ -7042,6 +7272,26 @@ impl LiveWebrtcAnswerExecutionBindingAuthority {
             },
             answer,
             binding,
+            activation: None,
+        }
+    }
+
+    pub(crate) fn new_active(
+        answer: LiveWebrtcAnswerResultAuthority,
+        binding: crate::live_execution::LiveDelegationRuntimeBinding,
+        activation_receipt: String,
+    ) -> Self {
+        let activation = LiveChannelActivationReceipt {
+            binding: binding.clone(),
+            activation_receipt,
+        };
+        Self {
+            rollback: LiveWebrtcAnswerExecutionRollbackAuthority {
+                binding: binding.clone(),
+            },
+            answer,
+            binding,
+            activation: Some(activation),
         }
     }
 
@@ -7053,6 +7303,11 @@ impl LiveWebrtcAnswerExecutionBindingAuthority {
     #[must_use]
     pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
         &self.binding
+    }
+
+    #[must_use]
+    pub fn activation_receipt(&self) -> Option<&LiveChannelActivationReceipt> {
+        self.activation.as_ref()
     }
 
     /// Commit publication custody and relinquish the rollback capability.
@@ -7337,6 +7592,11 @@ pub struct MeerkatMachineShared {
     /// of retaining or fabricating that consumed guard.
     #[cfg(test)]
     test_fail_post_stop_unregister_after_fence: StdMutex<Option<SessionId>>,
+    /// One-shot fault at the typed DSL apply boundary after generated state
+    /// commits but before routed effects settle. This proves callers can
+    /// reconcile a committed transition after a recoverable dispatch error.
+    #[cfg(test)]
+    test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool,
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
@@ -8673,6 +8933,10 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
+                #[cfg(test)]
+                test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool::new(
+                    false,
+                ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -8746,6 +9010,10 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
+                #[cfg(test)]
+                test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool::new(
+                    false,
+                ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -8819,6 +9087,10 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
+                #[cfg(test)]
+                test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool::new(
+                    false,
+                ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]

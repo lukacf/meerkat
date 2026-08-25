@@ -14,18 +14,9 @@ use meerkat_core::{ModelProfileWitness, ModelReleaseStage, Provider, RealmId, Se
 use meerkat_providers::ResolvedConnection;
 use thiserror::Error;
 
+pub const GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID: &str = "openai.gpt-live-1-codex.function-bridge.v1";
+
 const CURRENT_BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BUILD_GATE0_STATUS: Option<&str> = option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_STATUS");
-const BUILD_GATE0_FACTORY_KIND: Option<&str> =
-    option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_KIND");
-const BUILD_GATE0_FACTORY_VERSION: Option<&str> =
-    option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_VERSION");
-const BUILD_GATE0_QUALIFICATION_VERSION: Option<&str> =
-    option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_QUALIFICATION_VERSION");
-const BUILD_GATE0_BUILD_VERSION: Option<&str> =
-    option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_BUILD_VERSION");
-const BUILD_GATE0_PROTOCOL_DIGEST: Option<&str> =
-    option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_PROTOCOL_DIGEST");
 
 fn valid_component(value: &str) -> bool {
     !value.is_empty()
@@ -33,10 +24,6 @@ fn valid_component(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn valid_protocol_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Exact implementation identity selected by operator configuration.
@@ -114,6 +101,13 @@ impl fmt::Debug for ExperimentalLiveGate0QualificationVersion {
 pub struct ExperimentalLiveOperatorConfig {
     factory: ExperimentalLiveFactoryIdentity,
     required_gate0: ExperimentalLiveGate0QualificationVersion,
+    execution_profiles: BTreeMap<
+        String,
+        (
+            meerkat_core::LiveExecutionMode,
+            meerkat_core::LiveExecutionCapabilities,
+        ),
+    >,
 }
 
 impl ExperimentalLiveOperatorConfig {
@@ -124,7 +118,48 @@ impl ExperimentalLiveOperatorConfig {
         Self {
             factory,
             required_gate0,
+            execution_profiles: BTreeMap::new(),
         }
+    }
+
+    /// Add one provider-neutral execution profile to this application-host
+    /// composition. Surfaces may later name only `profile_id`; the selected
+    /// mode and independently qualified capability atoms remain owned here.
+    pub fn with_execution_profile(
+        mut self,
+        profile_id: impl Into<String>,
+        mode: meerkat_core::LiveExecutionMode,
+        capabilities: meerkat_core::LiveExecutionCapabilities,
+    ) -> Result<Self, ExperimentalLiveAdmissionError> {
+        let profile_id = profile_id.into();
+        let selected_available = match mode {
+            meerkat_core::LiveExecutionMode::FunctionBridge => capabilities.function_bridge,
+            meerkat_core::LiveExecutionMode::ClientContext => capabilities.client_context,
+        };
+        if !valid_component(&profile_id) || !selected_available {
+            return Err(ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+        }
+        self.execution_profiles
+            .insert(profile_id, (mode, capabilities));
+        Ok(self)
+    }
+
+    /// Register Meerkat's canonical GPT Live Responses profile without
+    /// requiring a surface or MobKit host to duplicate the provider profile
+    /// identifier or reconstruct its provider-neutral capability atoms.
+    /// Composition must call this only when the durable-member bridge host is
+    /// installed; otherwise admission correctly remains unadvertised.
+    pub fn with_gpt_live_function_bridge_profile(
+        self,
+    ) -> Result<Self, ExperimentalLiveAdmissionError> {
+        self.with_execution_profile(
+            GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
+            meerkat_core::LiveExecutionMode::FunctionBridge,
+            meerkat_core::LiveExecutionCapabilities {
+                function_bridge: true,
+                client_context: false,
+            },
+        )
     }
 
     pub fn factory(&self) -> &ExperimentalLiveFactoryIdentity {
@@ -146,23 +181,11 @@ struct QualifiedGate0BuildWitness {
 
 impl QualifiedGate0BuildWitness {
     fn current_build() -> Option<Self> {
-        if BUILD_GATE0_STATUS != Some("qualified") {
-            return None;
-        }
-        let witness = Self {
-            factory: ExperimentalLiveFactoryIdentity::parse(
-                BUILD_GATE0_FACTORY_KIND?,
-                BUILD_GATE0_FACTORY_VERSION?,
-            )
-            .ok()?,
-            qualification: ExperimentalLiveGate0QualificationVersion::parse(
-                BUILD_GATE0_QUALIFICATION_VERSION?,
-            )
-            .ok()?,
-            build_version: BUILD_GATE0_BUILD_VERSION?.to_string(),
-            protocol_digest: BUILD_GATE0_PROTOCOL_DIGEST?.to_ascii_lowercase(),
-        };
-        valid_protocol_digest(&witness.protocol_digest).then_some(witness)
+        // The direct Responses function event has not been captured and typed.
+        // This source tree therefore contains no production witness minting
+        // path. In particular, build environment strings are not evidence and
+        // cannot qualify or advertise the FunctionBridge profile.
+        None
     }
 }
 
@@ -242,6 +265,46 @@ impl Default for ExperimentalLiveAdmissionOwner {
 }
 
 impl ExperimentalLiveAdmissionOwner {
+    /// Resolve a provider-neutral execution mode from this owner's configured
+    /// profile catalog. The caller names only a catalog profile id and cannot
+    /// supply or downgrade the selected mode or capability atoms.
+    pub fn qualify_execution_profile(
+        &self,
+        qualification: &ExperimentalLiveCapabilityQualification,
+        profile_id: &str,
+    ) -> Result<
+        meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+        ExperimentalLiveAdmissionError,
+    > {
+        self.validate_qualification(qualification)?;
+        let (mode, capabilities) = self
+            .operator
+            .as_ref()
+            .and_then(|operator| operator.execution_profiles.get(profile_id))
+            .copied()
+            .ok_or(ExperimentalLiveAdmissionError::ExecutionModeUnavailable)?;
+        if let Some(lower_qualification) = qualification.lower_qualification.as_ref() {
+            return meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_experimental_qualification(
+                lower_qualification,
+                profile_id,
+                mode,
+                capabilities,
+            )
+            .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+        }
+        #[cfg(test)]
+        {
+            return meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                profile_id,
+                mode,
+                capabilities,
+            )
+            .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+        }
+        #[cfg(not(test))]
+        Err(ExperimentalLiveAdmissionError::LowerAuthorityUnavailable)
+    }
+
     #[cfg(test)]
     pub(crate) fn qualified_without_lower_authority_for_test(
         realm: RealmId,
@@ -251,10 +314,11 @@ impl ExperimentalLiveAdmissionOwner {
         Self {
             authority: Arc::new(AdmissionAuthority),
             feature_compiled: true,
-            operator: Some(ExperimentalLiveOperatorConfig::new(
-                factory.clone(),
-                qualification.clone(),
-            )),
+            operator: Some(
+                ExperimentalLiveOperatorConfig::new(factory.clone(), qualification.clone())
+                    .with_gpt_live_function_bridge_profile()
+                    .expect("valid test execution profile"),
+            ),
             admitted_realms: BTreeSet::from([realm]),
             gate0_build: Some(QualifiedGate0BuildWitness {
                 factory,
@@ -354,6 +418,12 @@ impl ExperimentalLiveAdmissionOwner {
         if !profile.profile().realtime {
             return Err(ExperimentalLiveAdmissionError::TargetNotRealtime);
         }
+        let execution_profile = match identity.provider {
+            Provider::OpenAI if identity.model == "gpt-live-1-codex" => {
+                self.qualify_execution_profile(&qualification, GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID)?
+            }
+            _ => return Err(ExperimentalLiveAdmissionError::ExecutionModeUnavailable),
+        };
         Ok(ExperimentalLiveAdmissionPreflight {
             authority: qualification.authority,
             realm: qualification.realm,
@@ -364,6 +434,7 @@ impl ExperimentalLiveAdmissionOwner {
             lower_qualification: qualification.lower_qualification,
             identity,
             profile,
+            execution_profile,
         })
     }
 
@@ -405,6 +476,7 @@ impl ExperimentalLiveAdmissionOwner {
             gate0_build_version: preflight.gate0_build_version,
             protocol_digest: preflight.protocol_digest,
             target,
+            execution_profile: preflight.execution_profile,
         })
     }
 
@@ -412,9 +484,21 @@ impl ExperimentalLiveAdmissionOwner {
     pub fn advertised_feature_capabilities(
         &self,
         qualification: &ExperimentalLiveCapabilityQualification,
-    ) -> Result<&'static [&'static str], ExperimentalLiveAdmissionError> {
+        execution_profile_id: Option<&str>,
+    ) -> Result<Vec<&'static str>, ExperimentalLiveAdmissionError> {
         self.validate_qualification(qualification)?;
-        Ok(&[meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY])
+        let mut capabilities = vec![meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY];
+        if let Some(profile_id) = execution_profile_id {
+            let selection = self.qualify_execution_profile(qualification, profile_id)?;
+            let atoms = selection.capabilities();
+            if atoms.function_bridge {
+                capabilities.push(meerkat_contracts::LIVE_FUNCTION_BRIDGE_V1_CAPABILITY);
+            }
+            if atoms.client_context {
+                capabilities.push(meerkat_contracts::LIVE_CLIENT_CONTEXT_V1_CAPABILITY);
+            }
+        }
+        Ok(capabilities)
     }
 
     fn validate_qualification(
@@ -528,6 +612,7 @@ pub(crate) struct ExperimentalLiveAdmissionPreflight {
     protocol_digest: String,
     identity: SessionLlmIdentity,
     profile: ModelProfileWitness,
+    execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
     lower_qualification:
         Option<meerkat_llm_core::provider_runtime::ExperimentalRealtimeQualificationWitness>,
 }
@@ -544,6 +629,7 @@ pub struct ExperimentalLiveAdmissionWitness {
     gate0_build_version: String,
     protocol_digest: String,
     target: meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget,
+    execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
 }
 
 impl fmt::Debug for ExperimentalLiveAdmissionWitness {
@@ -576,6 +662,12 @@ impl ExperimentalLiveAdmissionWitness {
 
     pub fn provider(&self) -> Provider {
         self.target.identity().provider
+    }
+
+    pub fn execution_profile(
+        &self,
+    ) -> &meerkat_runtime::live_execution::LiveExecutionProfileSelection {
+        &self.execution_profile
     }
 
     /// Consume the proof into the only lower-layer input accepted by the
@@ -629,6 +721,8 @@ pub enum ExperimentalLiveAdmissionError {
     BindingUseWitnessMismatch,
     #[error("the lower experimental realtime admission authority is unavailable")]
     LowerAuthorityUnavailable,
+    #[error("the selected live execution mode is unavailable in this composition")]
+    ExecutionModeUnavailable,
     #[error(transparent)]
     LowerAdmission(#[from] meerkat_llm_core::provider_runtime::ExperimentalRealtimeAdmissionError),
     #[error("the admission witness is bound to a different realm")]
@@ -694,6 +788,8 @@ mod tests {
 
     fn operator(factory: ExperimentalLiveFactoryIdentity) -> ExperimentalLiveOperatorConfig {
         ExperimentalLiveOperatorConfig::new(factory, qualification("gate0-v1"))
+            .with_gpt_live_function_bridge_profile()
+            .expect("valid test execution profile")
     }
 
     fn gate0(factory: ExperimentalLiveFactoryIdentity) -> QualifiedGate0BuildWitness {
@@ -790,6 +886,38 @@ mod tests {
                 "only the full conjunction may mint a witness, mask={mask:04b}"
             );
         }
+    }
+
+    #[test]
+    fn fake_build_environment_strings_cannot_qualify_function_bridge() {
+        let fake_build_environment = [
+            ("status", "qualified"),
+            ("factory_kind", "private-live"),
+            ("factory_version", "v1"),
+            ("qualification_version", "gate0-v1"),
+            ("build_version", CURRENT_BUILD_VERSION),
+            (
+                "protocol_digest",
+                "abababababababababababababababababababababababababababababababab",
+            ),
+        ];
+        assert_eq!(fake_build_environment.len(), 6);
+
+        let admitted_realm = realm("voice-env-claim");
+        let selected_factory = factory("v1");
+        let owner = ExperimentalLiveAdmissionOwner::configured_for_current_build(
+            operator(selected_factory.clone()),
+            [admitted_realm.clone()],
+        );
+
+        assert!(owner.gate0_build.is_none());
+        assert!(owner.lower_authorities.is_empty());
+        assert_eq!(
+            owner
+                .qualify_capability(&admitted_realm, &selected_factory)
+                .expect_err("untrusted strings cannot mint qualification"),
+            ExperimentalLiveAdmissionError::Gate0BuildNotQualified
+        );
     }
 
     #[test]
@@ -918,7 +1046,7 @@ mod tests {
             .expect("qualified");
         assert_eq!(
             owner
-                .advertised_feature_capabilities(&qualification)
+                .advertised_feature_capabilities(&qualification, None)
                 .expect("current witness advertises"),
             &[meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY]
         );
@@ -931,7 +1059,7 @@ mod tests {
         );
         assert_eq!(
             replacement_owner
-                .advertised_feature_capabilities(&qualification)
+                .advertised_feature_capabilities(&qualification, None)
                 .expect_err("a reconfigured owner invalidates old qualification"),
             ExperimentalLiveAdmissionError::StaleCapabilityQualification
         );
@@ -942,9 +1070,66 @@ mod tests {
         stale_protocol.protocol_digest = "cd".repeat(32);
         assert_eq!(
             owner
-                .advertised_feature_capabilities(&stale_protocol)
+                .advertised_feature_capabilities(&stale_protocol, None)
                 .expect_err("same-semver protocol drift invalidates qualification"),
             ExperimentalLiveAdmissionError::StaleCapabilityQualification
+        );
+    }
+
+    #[test]
+    fn execution_capability_atoms_are_independent_and_fail_closed() {
+        let admitted_realm = realm("voice-atoms");
+        let selected_factory = factory("v1");
+        let configured_operator = operator(selected_factory.clone())
+            .with_execution_profile(
+                "both-modes",
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: true,
+                    client_context: true,
+                },
+            )
+            .expect("valid catalog profile");
+        let owner = ExperimentalLiveAdmissionOwner::for_test(
+            true,
+            Some(configured_operator),
+            BTreeSet::from([admitted_realm.clone()]),
+            Some(gate0(selected_factory.clone())),
+        );
+        let qualification = owner
+            .qualify_capability(&admitted_realm, &selected_factory)
+            .expect("Gate0 qualification is present");
+        assert_eq!(
+            owner
+                .advertised_feature_capabilities(&qualification, Some("both-modes"))
+                .expect("qualified atoms advertise"),
+            vec![
+                meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
+                meerkat_contracts::LIVE_FUNCTION_BRIDGE_V1_CAPABILITY,
+                meerkat_contracts::LIVE_CLIENT_CONTEXT_V1_CAPABILITY,
+            ]
+        );
+
+        assert!(
+            operator(selected_factory.clone())
+                .with_execution_profile(
+                    "unavailable-client-context",
+                    meerkat_core::LiveExecutionMode::ClientContext,
+                    meerkat_core::LiveExecutionCapabilities {
+                        function_bridge: true,
+                        client_context: false,
+                    }
+                )
+                .is_err(),
+            "a selected mode without its independent atom must fail closed"
+        );
+
+        let closed = ExperimentalLiveAdmissionOwner::default();
+        assert_eq!(
+            closed
+                .qualify_capability(&admitted_realm, &selected_factory)
+                .expect_err("no Gate0 means no capability advertisement"),
+            ExperimentalLiveAdmissionError::OperatorNotConfigured
         );
     }
 

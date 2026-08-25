@@ -9,6 +9,7 @@ None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
 MapSessionIdBoolValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in BOOLEAN }
+MapSessionIdLiveAssistantPlaybackTerminalObservationValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in LiveAssistantPlaybackTerminalObservationValues }
 MapSessionIdLiveTranscriptReconciliationValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in LiveTranscriptReconciliationValues }
 MapSessionIdSessionDocumentLifecycleValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in SessionDocumentLifecycleValues }
 MapSessionIdSessionFirstTurnPhaseValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in SessionFirstTurnPhaseValues }
@@ -30,9 +31,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index
+VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest
 
-vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
+vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
 
 archive_should_retire_runtime(runtime_backed, durable_document_present, runtime_observation) == (runtime_backed /\ (runtime_observation # "QuiescentTerminal") /\ (IF durable_document_present THEN TRUE ELSE (runtime_observation = "RetirementRequired")))
 store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined) == (IF has_metadata THEN TRUE ELSE (IF has_build_state THEN TRUE ELSE runtime_projection_quarantined))
@@ -65,21 +66,31 @@ Init ==
     /\ session_live_assistant_playback_response_id = [x \in {} |-> None]
     /\ session_live_assistant_playback_item_id = [x \in {} |-> None]
     /\ session_live_assistant_playback_content_index = [x \in {} |-> None]
+    /\ session_live_assistant_final_chars = [x \in {} |-> None]
+    /\ session_live_assistant_final_digest = [x \in {} |-> None]
+    /\ session_live_assistant_terminal_observation = [x \in {} |-> None]
+    /\ session_live_assistant_terminal_prefix_chars = [x \in {} |-> None]
+    /\ session_live_assistant_terminal_prefix_digest = [x \in {} |-> None]
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_1f5251ef33787a22 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_2807f6cd7f1c9b0f == UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_53eaf7d3d2b1af45 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present >>
-UnchangedFrame_69253ab4c627acc7 == UNCHANGED << session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_71b61a788173b96a == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_9c9fa0dde5fc7140 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_a13d89f5f70b64b4 == UNCHANGED << session_first_turn_phase, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_a2f4711ff975b9d6 == UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
+UnchangedFrame_0c740a3ca21dadad == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_13eecd3226459b74 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_158bc13938453480 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_22a0d6a576c45277 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_329dc4123f4d6232 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest >>
+UnchangedFrame_5577ab234d3d2728 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_66771eead7845d33 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_8147ad07d4d6a8fe == UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_8b6e09273b1cdc9d == UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_ad9aa712aea68a25 == UNCHANGED << session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_afcdf325669eb17c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
 UnchangedFrame_b4248dd3143f6dbd == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-UnchangedFrame_ddf7dba6ec14e2c9 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_e42f554887323f9c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
-UnchangedFrame_f9cb9fecd7ccb9c4 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index >>
+UnchangedFrame_c3aa8285afee8e01 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest >>
+UnchangedFrame_dfe3f0011ce31edb == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_e075185252f74524 == UNCHANGED << session_first_turn_phase, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_ea07600faa0ad362 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
+UnchangedFrame_ebde6f1647672faa == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
 
 MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase = "Ready"
@@ -87,7 +98,7 @@ MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
-    /\ UnchangedFrame_2807f6cd7f1c9b0f
+    /\ UnchangedFrame_8b6e09273b1cdc9d
 
 
 MarkSessionInitialTurnPendingConsumed(session_id) ==
@@ -95,7 +106,7 @@ MarkSessionInitialTurnPendingConsumed(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 StartSessionInitialTurnPending(session_id) ==
@@ -104,7 +115,7 @@ StartSessionInitialTurnPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
-    /\ UnchangedFrame_2807f6cd7f1c9b0f
+    /\ UnchangedFrame_8b6e09273b1cdc9d
 
 
 StartSessionInitialTurnInactive(session_id) ==
@@ -112,7 +123,7 @@ StartSessionInitialTurnInactive(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Inactive")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 StartSessionInitialTurnConsumed(session_id) ==
@@ -120,7 +131,7 @@ StartSessionInitialTurnConsumed(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Consumed")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveSessionFirstTurnOverridesAllowed(session_id) ==
@@ -128,7 +139,7 @@ ResolveSessionFirstTurnOverridesAllowed(session_id) ==
     /\ phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveSessionFirstTurnOverridesDenied(session_id) ==
@@ -136,7 +147,7 @@ ResolveSessionFirstTurnOverridesDenied(session_id) ==
     /\ (phase_allows_initial_turn_overrides((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_first_turn_phase) THEN Some((IF session_id \in DOMAIN session_first_turn_phase THEN session_first_turn_phase[session_id] ELSE "None")) ELSE None)["value"] ELSE None)) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 StageSessionInitialPromptStore(session_id, prompt_has_content) ==
@@ -145,7 +156,7 @@ StageSessionInitialPromptStore(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, TRUE)
-    /\ UnchangedFrame_a2f4711ff975b9d6
+    /\ UnchangedFrame_8147ad07d4d6a8fe
 
 
 StageSessionInitialPromptClear(session_id, prompt_has_content) ==
@@ -154,7 +165,7 @@ StageSessionInitialPromptClear(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
-    /\ UnchangedFrame_a2f4711ff975b9d6
+    /\ UnchangedFrame_8147ad07d4d6a8fe
 
 
 StageSessionToolResults(session_id, result_count) ==
@@ -163,7 +174,7 @@ StageSessionToolResults(session_id, result_count) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, result_count)
-    /\ UnchangedFrame_71b61a788173b96a
+    /\ UnchangedFrame_ea07600faa0ad362
 
 
 ConsumeSessionDeferredInputsPending(session_id) ==
@@ -174,7 +185,7 @@ ConsumeSessionDeferredInputsPending(session_id) ==
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_69253ab4c627acc7
+    /\ UnchangedFrame_ad9aa712aea68a25
 
 
 ConsumeSessionDeferredInputsInactive(session_id) ==
@@ -184,7 +195,7 @@ ConsumeSessionDeferredInputsInactive(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_a13d89f5f70b64b4
+    /\ UnchangedFrame_e075185252f74524
 
 
 ConsumeSessionDeferredInputsConsumed(session_id) ==
@@ -194,7 +205,7 @@ ConsumeSessionDeferredInputsConsumed(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_a13d89f5f70b64b4
+    /\ UnchangedFrame_e075185252f74524
 
 
 RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -205,7 +216,7 @@ RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_ini
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_69253ab4c627acc7
+    /\ UnchangedFrame_ad9aa712aea68a25
 
 
 RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -215,7 +226,7 @@ RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pendi
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_a13d89f5f70b64b4
+    /\ UnchangedFrame_e075185252f74524
 
 
 RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -226,7 +237,7 @@ RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_prese
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, arg_phase)
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_69253ab4c627acc7
+    /\ UnchangedFrame_ad9aa712aea68a25
 
 
 ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
@@ -234,7 +245,7 @@ ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
     /\ ((role = "Assistant") /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeItemObservedPresent(role, response_discarded) ==
@@ -242,14 +253,14 @@ ResolveRealtimeItemObservedPresent(role, response_discarded) ==
     /\ (IF (role # "Assistant") THEN TRUE ELSE (response_discarded = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeItemSkipped ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_matches) ==
@@ -257,7 +268,7 @@ ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_mat
     /\ (text_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_matches) ==
@@ -265,7 +276,7 @@ ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_mat
     /\ (text_present /\ segment_empty)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, segment_matches) ==
@@ -273,7 +284,7 @@ ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, 
     /\ (text_present /\ (segment_empty = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentIdentityInvalid(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -281,7 +292,7 @@ ResolveRealtimeUserContentIdentityInvalid(identity_fields_valid, key_tombstoned,
     /\ (IF (identity_fields_valid = FALSE) THEN TRUE ELSE ((key_tombstoned = FALSE) /\ predecessor_materialized /\ (existing_identity_present = FALSE) /\ target_item_id_available /\ reducer_commit_proof_required /\ (reducer_commit_proof_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentIdentityUnmaterializedPredecessor(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -289,7 +300,7 @@ ResolveRealtimeUserContentIdentityUnmaterializedPredecessor(identity_fields_vali
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ (predecessor_materialized = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentIdentityConflict(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -297,7 +308,7 @@ ResolveRealtimeUserContentIdentityConflict(identity_fields_valid, key_tombstoned
     /\ (identity_fields_valid /\ (IF key_tombstoned THEN TRUE ELSE (predecessor_materialized /\ (IF (existing_identity_present /\ (existing_payload_matches = FALSE)) THEN TRUE ELSE ((existing_identity_present = FALSE) /\ (target_item_id_available = FALSE))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentIdentityReplay(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -305,7 +316,7 @@ ResolveRealtimeUserContentIdentityReplay(identity_fields_valid, key_tombstoned, 
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ predecessor_materialized /\ existing_identity_present /\ existing_payload_matches)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentIdentityCommitNew(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -313,7 +324,7 @@ ResolveRealtimeUserContentIdentityCommitNew(identity_fields_valid, key_tombstone
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ predecessor_materialized /\ (existing_identity_present = FALSE) /\ target_item_id_available /\ (IF (reducer_commit_proof_required = FALSE) THEN TRUE ELSE reducer_commit_proof_present))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobStageNew(pending_present, pending_matches_request) ==
@@ -321,7 +332,7 @@ ResolveRealtimeUserContentBlobStageNew(pending_present, pending_matches_request)
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobStageReuseExact(pending_present, pending_matches_request) ==
@@ -329,7 +340,7 @@ ResolveRealtimeUserContentBlobStageReuseExact(pending_present, pending_matches_r
     /\ (pending_present /\ pending_matches_request)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobStageRejectOccupied(pending_present, pending_matches_request) ==
@@ -337,7 +348,7 @@ ResolveRealtimeUserContentBlobStageRejectOccupied(pending_present, pending_match
     /\ (pending_present /\ (pending_matches_request = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobRecoveryNone(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -345,7 +356,7 @@ ResolveRealtimeUserContentBlobRecoveryNone(pending_present, request_matches_pend
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobRecoveryExact(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -353,7 +364,7 @@ ResolveRealtimeUserContentBlobRecoveryExact(pending_present, request_matches_pen
     /\ (pending_present /\ request_matches_pending)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobRecoveryCommitVerified(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -361,7 +372,7 @@ ResolveRealtimeUserContentBlobRecoveryCommitVerified(pending_present, request_ma
     /\ (pending_present /\ (request_matches_pending = FALSE) /\ pending_blob_valid)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobRecoveryClearInvalid(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -369,7 +380,7 @@ ResolveRealtimeUserContentBlobRecoveryClearInvalid(pending_present, request_matc
     /\ (pending_present /\ (request_matches_pending = FALSE) /\ (pending_blob_valid = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobFinalizeNone(pending_present, pending_matches_committed) ==
@@ -377,7 +388,7 @@ ResolveRealtimeUserContentBlobFinalizeNone(pending_present, pending_matches_comm
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobFinalizeClearCommitted(pending_present, pending_matches_committed) ==
@@ -385,7 +396,7 @@ ResolveRealtimeUserContentBlobFinalizeClearCommitted(pending_present, pending_ma
     /\ (pending_present /\ pending_matches_committed)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentBlobFinalizeRejectMismatch(pending_present, pending_matches_committed) ==
@@ -393,7 +404,7 @@ ResolveRealtimeUserContentBlobFinalizeRejectMismatch(pending_present, pending_ma
     /\ (pending_present /\ (pending_matches_committed = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentFinalEmpty(content_present, segment_empty, segment_matches) ==
@@ -401,7 +412,7 @@ ResolveRealtimeUserContentFinalEmpty(content_present, segment_empty, segment_mat
     /\ (content_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentFinalStore(content_present, segment_empty, segment_matches) ==
@@ -409,7 +420,7 @@ ResolveRealtimeUserContentFinalStore(content_present, segment_empty, segment_mat
     /\ (content_present /\ segment_empty)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeUserContentFinalReplayOrConflict(content_present, segment_empty, segment_matches) ==
@@ -417,7 +428,7 @@ ResolveRealtimeUserContentFinalReplayOrConflict(content_present, segment_empty, 
     /\ (content_present /\ (segment_empty = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -425,7 +436,7 @@ ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_disc
     /\ (IF (response_id_valid = FALSE) THEN TRUE ELSE realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -433,7 +444,7 @@ ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, de
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -441,7 +452,7 @@ ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -449,7 +460,7 @@ ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, del
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -457,7 +468,7 @@ ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -465,7 +476,7 @@ ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discard
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -473,7 +484,7 @@ ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ item_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -481,7 +492,7 @@ ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_disc
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -489,7 +500,7 @@ ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discarded, stop_reason) ==
@@ -497,7 +508,7 @@ ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discard
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason) ==
@@ -505,7 +516,7 @@ ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discard
     /\ (response_id_valid /\ (IF response_discarded THEN TRUE ELSE realtime_stop_reason_discards(stop_reason)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discarded, stop_reason) ==
@@ -513,7 +524,7 @@ ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discard
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_removes_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarded, stop_reason) ==
@@ -521,7 +532,7 @@ ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_records_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
@@ -529,7 +540,7 @@ ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
@@ -537,7 +548,7 @@ ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
     /\ response_id_valid
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -545,7 +556,7 @@ ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialize
     /\ item_materialized
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -553,7 +564,7 @@ ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_mate
     /\ ((item_materialized = FALSE) /\ (predecessor_materialized = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -561,7 +572,7 @@ ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, i
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ item_skipped)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -569,7 +580,7 @@ ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materi
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ (IF (item_ready = FALSE) THEN TRUE ELSE (item_text_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -577,7 +588,7 @@ ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "User"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -585,7 +596,7 @@ ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized,
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ response_id_present /\ completion_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -593,7 +604,7 @@ ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predeces
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ (IF (response_id_present = FALSE) THEN TRUE ELSE (completion_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_materialized_predecessor_references_exist, no_self_predecessor_references, causal_graph_acyclic, all_materialized_items_have_materialized_ancestry, all_identity_fields_valid, all_user_content_identity_keys_match, all_user_content_identity_fields_valid, all_user_content_identity_item_ids_unique, all_user_content_identities_reference_materialized_user_items, all_user_content_tombstones_valid, user_content_identities_and_tombstones_disjoint, pending_user_content_blob_fields_valid, pending_user_content_blob_uncommitted, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized) ==
@@ -601,7 +612,7 @@ AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen
     /\ ((item_count = first_seen_count) /\ (first_seen_count = first_seen_unique_count) /\ every_item_has_order_entry /\ every_order_entry_has_item /\ all_materialized_predecessor_references_exist /\ no_self_predecessor_references /\ causal_graph_acyclic /\ all_materialized_items_have_materialized_ancestry /\ all_identity_fields_valid /\ all_user_content_identity_keys_match /\ all_user_content_identity_fields_valid /\ all_user_content_identity_item_ids_unique /\ all_user_content_identities_reference_materialized_user_items /\ all_user_content_tombstones_valid /\ user_content_identities_and_tombstones_disjoint /\ pending_user_content_blob_fields_valid /\ pending_user_content_blob_uncommitted /\ all_delta_ids_valid /\ all_completion_response_ids_valid /\ all_discarded_response_ids_valid /\ all_materialized_items_were_ready_or_skipped /\ all_assistant_items_have_response_unless_skipped /\ all_ready_assistant_items_have_completion_or_are_skipped /\ all_materialized_assistant_completions_consumed /\ all_completed_assistant_text_items_are_ready_or_materialized_or_skipped /\ all_discarded_assistant_items_are_skipped_or_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AdmitLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
@@ -613,7 +624,7 @@ AdmitLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
     /\ session_live_interaction_id' = MapSet(session_live_interaction_id, session_id, interaction_id)
     /\ session_live_transcript_reconciliation' = MapSet(session_live_transcript_reconciliation, session_id, "Provisional")
     /\ session_live_provisional_transcript_present' = MapSet(session_live_provisional_transcript_present, session_id, FALSE)
-    /\ UnchangedFrame_f9cb9fecd7ccb9c4
+    /\ UnchangedFrame_13eecd3226459b74
 
 
 StageLiveProvisionalUserTranscript(session_id, channel_id, interaction_id, provisional_has_content) ==
@@ -622,7 +633,7 @@ StageLiveProvisionalUserTranscript(session_id, channel_id, interaction_id, provi
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_provisional_transcript_present' = MapSet(session_live_provisional_transcript_present, session_id, TRUE)
-    /\ UnchangedFrame_ddf7dba6ec14e2c9
+    /\ UnchangedFrame_22a0d6a576c45277
 
 
 ReconcileLiveFinalUserTranscript(session_id, channel_id, interaction_id, reconciliation) ==
@@ -631,7 +642,7 @@ ReconcileLiveFinalUserTranscript(session_id, channel_id, interaction_id, reconci
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_transcript_reconciliation' = MapSet(session_live_transcript_reconciliation, session_id, reconciliation)
-    /\ UnchangedFrame_1f5251ef33787a22
+    /\ UnchangedFrame_ebde6f1647672faa
 
 
 CompleteLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
@@ -643,7 +654,7 @@ CompleteLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
     /\ session_live_interaction_id' = MapRemove(session_live_interaction_id, session_id)
     /\ session_live_transcript_reconciliation' = MapRemove(session_live_transcript_reconciliation, session_id)
     /\ session_live_provisional_transcript_present' = MapRemove(session_live_provisional_transcript_present, session_id)
-    /\ UnchangedFrame_f9cb9fecd7ccb9c4
+    /\ UnchangedFrame_13eecd3226459b74
 
 
 AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -654,7 +665,7 @@ AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, respons
     /\ session_live_assistant_playback_response_id' = MapSet(session_live_assistant_playback_response_id, session_id, response_id)
     /\ session_live_assistant_playback_item_id' = MapSet(session_live_assistant_playback_item_id, session_id, item_id)
     /\ session_live_assistant_playback_content_index' = MapSet(session_live_assistant_playback_content_index, session_id, content_index)
-    /\ UnchangedFrame_53eaf7d3d2b1af45
+    /\ UnchangedFrame_66771eead7845d33
 
 
 RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -669,7 +680,7 @@ RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, respo
     /\ session_live_assistant_playback_response_id' = MapSet(session_live_assistant_playback_response_id, session_id, response_id)
     /\ session_live_assistant_playback_item_id' = MapSet(session_live_assistant_playback_item_id, session_id, item_id)
     /\ session_live_assistant_playback_content_index' = MapSet(session_live_assistant_playback_content_index, session_id, content_index)
-    /\ UnchangedFrame_b4248dd3143f6dbd
+    /\ UnchangedFrame_dfe3f0011ce31edb
 
 
 ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -684,40 +695,121 @@ ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_i
     /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
     /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
+    /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
+    /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
+    /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
+    /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
+    /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
     /\ UnchangedFrame_b4248dd3143f6dbd
 
 
-ResolveLiveAssistantPlaybackComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative) ==
+ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
     /\ phase = "Ready"
-    /\ ((observation = "PlaybackComplete") /\ (authoritative_assistant_final = TRUE) /\ (authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "") /\ (reported_prefix_matches_authoritative = FALSE) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)))
+    /\ ((authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ (pending_terminal_observation = "Unmeasured") /\ (pending_reported_prefix_chars = 0) /\ (pending_reported_prefix_digest = "") /\ (reported_prefix_matches_authoritative = FALSE) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_final_digest)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_final_chars' = MapSet(session_live_assistant_final_chars, session_id, authoritative_assistant_chars)
+    /\ session_live_assistant_final_digest' = MapSet(session_live_assistant_final_digest, session_id, authoritative_text_digest)
+    /\ UnchangedFrame_0c740a3ca21dadad
+
+
+RecoverLiveAssistantPlaybackFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest) ==
+    /\ phase = "Ready"
+    /\ ((authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_final_digest)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_final_chars' = MapSet(session_live_assistant_final_chars, session_id, authoritative_assistant_chars)
+    /\ session_live_assistant_final_digest' = MapSet(session_live_assistant_final_digest, session_id, authoritative_text_digest)
+    /\ UnchangedFrame_0c740a3ca21dadad
+
+
+ObserveLiveAssistantPlaybackTerminalPendingFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
+    /\ phase = "Ready"
+    /\ ((IF (observation = "PlaybackComplete") THEN TRUE ELSE (observation = "ReportedPrefix")) /\ (IF ((observation = "PlaybackComplete") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "")) THEN TRUE ELSE ((observation = "ReportedPrefix") /\ (reported_prefix_digest # ""))) /\ (reported_prefix_matches_authoritative = FALSE) /\ (authoritative_assistant_chars = 0) /\ (authoritative_text_digest = "") /\ (authoritative_assistant_final = FALSE) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_final_digest)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_terminal_observation' = MapSet(session_live_assistant_terminal_observation, session_id, observation)
+    /\ session_live_assistant_terminal_prefix_chars' = MapSet(session_live_assistant_terminal_prefix_chars, session_id, reported_prefix_chars)
+    /\ session_live_assistant_terminal_prefix_digest' = MapSet(session_live_assistant_terminal_prefix_digest, session_id, reported_prefix_digest)
+    /\ UnchangedFrame_c3aa8285afee8e01
+
+
+RecoverLiveAssistantPlaybackTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest) ==
+    /\ phase = "Ready"
+    /\ ((IF (observation = "PlaybackComplete") THEN TRUE ELSE (observation = "ReportedPrefix")) /\ (IF ((observation = "PlaybackComplete") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "")) THEN TRUE ELSE ((observation = "ReportedPrefix") /\ (reported_prefix_digest # ""))) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_terminal_observation' = MapSet(session_live_assistant_terminal_observation, session_id, observation)
+    /\ session_live_assistant_terminal_prefix_chars' = MapSet(session_live_assistant_terminal_prefix_chars, session_id, reported_prefix_chars)
+    /\ session_live_assistant_terminal_prefix_digest' = MapSet(session_live_assistant_terminal_prefix_digest, session_id, reported_prefix_digest)
+    /\ UnchangedFrame_c3aa8285afee8e01
+
+
+ObserveLiveAssistantPlaybackFinalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
+    /\ phase = "Ready"
+    /\ ((authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ (reported_prefix_matches_authoritative = FALSE) /\ (pending_terminal_observation = "PlaybackComplete") /\ (pending_reported_prefix_chars = 0) /\ (pending_reported_prefix_digest = "") /\ ((IF (session_id \in DOMAIN session_live_assistant_terminal_observation) THEN Some((IF session_id \in DOMAIN session_live_assistant_terminal_observation THEN session_live_assistant_terminal_observation[session_id] ELSE "None")) ELSE None) = Some("PlaybackComplete")) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_final_digest)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
     /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
-    /\ UnchangedFrame_53eaf7d3d2b1af45
+    /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
+    /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
+    /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
+    /\ UnchangedFrame_329dc4123f4d6232
 
 
-ResolveLiveAssistantPlaybackReportedPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative) ==
+ObserveLiveAssistantPlaybackFinalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
     /\ phase = "Ready"
-    /\ ((observation = "ReportedPrefix") /\ (authoritative_text_digest # "") /\ (reported_prefix_digest # "") /\ (reported_prefix_matches_authoritative = TRUE) /\ (reported_prefix_chars <= authoritative_assistant_chars) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)))
+    /\ ((authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ (reported_prefix_matches_authoritative = TRUE) /\ (pending_terminal_observation = "ReportedPrefix") /\ (pending_reported_prefix_digest # "") /\ (pending_reported_prefix_chars <= authoritative_assistant_chars) /\ ((IF (session_id \in DOMAIN session_live_assistant_terminal_observation) THEN Some((IF session_id \in DOMAIN session_live_assistant_terminal_observation THEN session_live_assistant_terminal_observation[session_id] ELSE "None")) ELSE None) = Some("ReportedPrefix")) /\ ((IF (session_id \in DOMAIN session_live_assistant_terminal_prefix_digest) THEN Some((IF session_id \in DOMAIN session_live_assistant_terminal_prefix_digest THEN session_live_assistant_terminal_prefix_digest[session_id] ELSE "None")) ELSE None) = Some(pending_reported_prefix_digest)) /\ ((IF (session_id \in DOMAIN session_live_assistant_terminal_prefix_chars) THEN Some((IF session_id \in DOMAIN session_live_assistant_terminal_prefix_chars THEN session_live_assistant_terminal_prefix_chars[session_id] ELSE 0)) ELSE None) = Some(pending_reported_prefix_chars)) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_final_digest)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
     /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
-    /\ UnchangedFrame_53eaf7d3d2b1af45
+    /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
+    /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
+    /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
+    /\ UnchangedFrame_329dc4123f4d6232
 
 
-ResolveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative) ==
+ObserveLiveAssistantPlaybackTerminalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
     /\ phase = "Ready"
-    /\ ((observation = "Unmeasured") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "") /\ (reported_prefix_matches_authoritative = FALSE) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)))
+    /\ ((observation = "PlaybackComplete") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "") /\ (reported_prefix_matches_authoritative = FALSE) /\ (authoritative_assistant_final = TRUE) /\ (authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ ((IF (session_id \in DOMAIN session_live_assistant_final_chars) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_chars THEN session_live_assistant_final_chars[session_id] ELSE 0)) ELSE None) = Some(authoritative_assistant_chars)) /\ ((IF (session_id \in DOMAIN session_live_assistant_final_digest) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_digest THEN session_live_assistant_final_digest[session_id] ELSE "None")) ELSE None) = Some(authoritative_text_digest)) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
     /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
-    /\ UnchangedFrame_53eaf7d3d2b1af45
+    /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
+    /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
+    /\ UnchangedFrame_5577ab234d3d2728
+
+
+ObserveLiveAssistantPlaybackTerminalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
+    /\ phase = "Ready"
+    /\ ((observation = "ReportedPrefix") /\ (reported_prefix_digest # "") /\ (reported_prefix_matches_authoritative = TRUE) /\ (authoritative_assistant_final = TRUE) /\ (authoritative_text_digest # "") /\ (reported_prefix_chars <= authoritative_assistant_chars) /\ ((IF (session_id \in DOMAIN session_live_assistant_final_chars) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_chars THEN session_live_assistant_final_chars[session_id] ELSE 0)) ELSE None) = Some(authoritative_assistant_chars)) /\ ((IF (session_id \in DOMAIN session_live_assistant_final_digest) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_digest THEN session_live_assistant_final_digest[session_id] ELSE "None")) ELSE None) = Some(authoritative_text_digest)) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
+    /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
+    /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
+    /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
+    /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
+    /\ UnchangedFrame_5577ab234d3d2728
+
+
+ObserveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
+    /\ phase = "Ready"
+    /\ ((observation = "Unmeasured") /\ (reported_prefix_chars = 0) /\ (reported_prefix_digest = "") /\ (reported_prefix_matches_authoritative = FALSE) /\ (IF ((authoritative_assistant_final = FALSE) /\ (authoritative_assistant_chars = 0) /\ (authoritative_text_digest = "") /\ ~((session_id \in DOMAIN session_live_assistant_final_digest))) THEN TRUE ELSE ((authoritative_assistant_final = TRUE) /\ (authoritative_assistant_chars > 0) /\ (authoritative_text_digest # "") /\ ((IF (session_id \in DOMAIN session_live_assistant_final_chars) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_chars THEN session_live_assistant_final_chars[session_id] ELSE 0)) ELSE None) = Some(authoritative_assistant_chars)) /\ ((IF (session_id \in DOMAIN session_live_assistant_final_digest) THEN Some((IF session_id \in DOMAIN session_live_assistant_final_digest THEN session_live_assistant_final_digest[session_id] ELSE "None")) ELSE None) = Some(authoritative_text_digest)))) /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
+    /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
+    /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
+    /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
+    /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
+    /\ UnchangedFrame_5577ab234d3d2728
 
 
 ClassifyLiveContextCommittedRow(session_id, canonical_row_sequence, row_kind, provenance, content_digest, store_commit_authority) ==
@@ -725,7 +817,7 @@ ClassifyLiveContextCommittedRow(session_id, canonical_row_sequence, row_kind, pr
     /\ ((canonical_row_sequence > 0) /\ (content_digest # "") /\ (store_commit_authority # ""))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionMetadataPersist(schema_version, model_present) ==
@@ -733,7 +825,7 @@ AuthorizeSessionMetadataPersist(schema_version, model_present) ==
     /\ ((schema_version > 0) /\ (model_present = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated) ==
@@ -741,14 +833,14 @@ AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_a
     /\ (IF (mob_tool_authority_context_present = FALSE) THEN TRUE ELSE (mob_tool_authority_context_generated = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 RestoreSessionBuildState ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) ==
@@ -756,7 +848,7 @@ ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) =
     /\ has_effective_pending_boundary(session_tail, staged_tool_result_count)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count) ==
@@ -764,7 +856,7 @@ ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count
     /\ (has_effective_pending_boundary(session_tail, staged_tool_result_count) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -772,7 +864,7 @@ AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_pre
     /\ resume_reject_provider_requires_model(provider_override_present, model_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -780,7 +872,7 @@ AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_p
     /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -788,7 +880,7 @@ AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -796,7 +888,7 @@ AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(pro
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -804,7 +896,7 @@ AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, mode
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -812,7 +904,7 @@ AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(provider_
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -820,7 +912,7 @@ AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, mod
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -828,7 +920,7 @@ AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -836,7 +928,7 @@ ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitte
     /\ ((stored_transcript_diverged = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_is_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -844,7 +936,7 @@ ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has
     /\ (stored_is_archived = TRUE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -852,7 +944,7 @@ ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -860,7 +952,7 @@ ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_transcript_diverged = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined) ==
@@ -868,7 +960,7 @@ RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, run
     /\ store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined) ==
@@ -876,7 +968,7 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ (store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
@@ -884,7 +976,7 @@ ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinal
     /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (terminal_stop_reason = "EndTurn") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
@@ -892,7 +984,7 @@ ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardina
     /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
@@ -900,7 +992,7 @@ ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinal
     /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "SingleRunId") THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE (dangling_tool_use_count # 0))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRuntimeCheckpointProjectionActive(session_id) ==
@@ -908,7 +1000,7 @@ ResolveRuntimeCheckpointProjectionActive(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Active")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveRuntimeCheckpointProjectionArchived(session_id) ==
@@ -916,7 +1008,7 @@ ResolveRuntimeCheckpointProjectionArchived(session_id) ==
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_archived, candidate_archived) ==
@@ -924,7 +1016,7 @@ ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_arch
     /\ (IF (authority_archived = TRUE) THEN TRUE ELSE (candidate_archived = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ResolveSessionDocumentLifecycleMergeAuthority(session_id, authority_archived, candidate_archived) ==
@@ -932,14 +1024,14 @@ ResolveSessionDocumentLifecycleMergeAuthority(session_id, authority_archived, ca
     /\ ((authority_archived = FALSE) /\ (candidate_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ApplyPendingToolResults(session_id, result_count) ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
@@ -947,7 +1039,7 @@ TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Fork")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
@@ -955,7 +1047,7 @@ TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Rewrite")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 RecoverSessionLifecycleTerminal(session_id, terminal) ==
@@ -964,7 +1056,7 @@ RecoverSessionLifecycleTerminal(session_id, terminal) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, terminal)
-    /\ UnchangedFrame_9c9fa0dde5fc7140
+    /\ UnchangedFrame_158bc13938453480
 
 
 ReviveArchivedSessionDocument(session_id) ==
@@ -973,7 +1065,7 @@ ReviveArchivedSessionDocument(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Active")
-    /\ UnchangedFrame_9c9fa0dde5fc7140
+    /\ UnchangedFrame_158bc13938453480
 
 
 ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -982,7 +1074,7 @@ ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_presen
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Archived")
-    /\ UnchangedFrame_9c9fa0dde5fc7140
+    /\ UnchangedFrame_158bc13938453480
 
 
 ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -991,7 +1083,7 @@ ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_docume
     /\ (runtime_observation # "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -1000,7 +1092,7 @@ ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_documen
     /\ (runtime_observation = "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_e42f554887323f9c
+    /\ UnchangedFrame_afcdf325669eb17c
 
 
 Next ==
@@ -1074,9 +1166,15 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_id, response_id, item_id, content_index)
-    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : ResolveLiveAssistantPlaybackComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, TRUE, observation, reported_prefix_chars, reported_prefix_digest, FALSE)
-    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E authoritative_assistant_final \in BOOLEAN : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : ResolveLiveAssistantPlaybackReportedPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, TRUE)
-    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E authoritative_assistant_final \in BOOLEAN : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : ResolveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, FALSE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E pending_terminal_observation \in LiveAssistantPlaybackTerminalObservationValues : \E pending_reported_prefix_chars \in 0..2 : \E pending_reported_prefix_digest \in StringValues : ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, FALSE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : RecoverLiveAssistantPlaybackFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : ObserveLiveAssistantPlaybackTerminalPendingFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, FALSE, FALSE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : RecoverLiveAssistantPlaybackTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E pending_terminal_observation \in LiveAssistantPlaybackTerminalObservationValues : \E pending_reported_prefix_chars \in 0..2 : \E pending_reported_prefix_digest \in StringValues : ObserveLiveAssistantPlaybackFinalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, FALSE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E pending_terminal_observation \in LiveAssistantPlaybackTerminalObservationValues : \E pending_reported_prefix_chars \in 0..2 : \E pending_reported_prefix_digest \in StringValues : ObserveLiveAssistantPlaybackFinalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, TRUE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : ObserveLiveAssistantPlaybackTerminalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, TRUE, FALSE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : ObserveLiveAssistantPlaybackTerminalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, TRUE, TRUE)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E authoritative_assistant_final \in BOOLEAN : ObserveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, FALSE)
     \/ \E session_id \in SessionIdValues : \E canonical_row_sequence \in 0..2 : \E row_kind \in LiveContextCommittedRowKindValues : \E provenance \in LiveContextCommittedTextProvenanceValues : \E content_digest \in StringValues : \E store_commit_authority \in StringValues : ClassifyLiveContextCommittedRow(session_id, canonical_row_sequence, row_kind, provenance, content_digest, store_commit_authority)
     \/ \E schema_version \in 0..2 : AuthorizeSessionMetadataPersist(schema_version, TRUE)
     \/ \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated)
@@ -1115,10 +1213,10 @@ Next ==
 
 live_interaction_transcript_binding_is_complete == ((DOMAIN session_live_channel_id = DOMAIN session_live_interaction_id) /\ (DOMAIN session_live_channel_id = DOMAIN session_live_transcript_reconciliation) /\ (DOMAIN session_live_channel_id = DOMAIN session_live_provisional_transcript_present))
 committed_live_transcript_had_provisional_admission == (\A session_id \in DOMAIN session_live_transcript_reconciliation : (IF ((IF (session_id \in DOMAIN session_live_transcript_reconciliation) THEN Some((IF session_id \in DOMAIN session_live_transcript_reconciliation THEN session_live_transcript_reconciliation[session_id] ELSE "None")) ELSE None) # Some("Committed")) THEN TRUE ELSE ((IF (session_id \in DOMAIN session_live_provisional_transcript_present) THEN Some((IF session_id \in DOMAIN session_live_provisional_transcript_present THEN session_live_provisional_transcript_present[session_id] ELSE FALSE)) ELSE None) = Some(TRUE))))
-live_assistant_playback_target_is_complete_and_interaction_bound == ((DOMAIN session_live_assistant_playback_response_id = DOMAIN session_live_assistant_playback_item_id) /\ (DOMAIN session_live_assistant_playback_response_id = DOMAIN session_live_assistant_playback_content_index) /\ (\A session_id \in DOMAIN session_live_assistant_playback_response_id : ((session_id \in DOMAIN session_live_channel_id) /\ (session_id \in DOMAIN session_live_interaction_id))))
+live_assistant_playback_target_is_complete_and_interaction_bound == ((DOMAIN session_live_assistant_playback_response_id = DOMAIN session_live_assistant_playback_item_id) /\ (DOMAIN session_live_assistant_playback_response_id = DOMAIN session_live_assistant_playback_content_index) /\ (DOMAIN session_live_assistant_final_chars = DOMAIN session_live_assistant_final_digest) /\ (DOMAIN session_live_assistant_terminal_observation = DOMAIN session_live_assistant_terminal_prefix_chars) /\ (DOMAIN session_live_assistant_terminal_observation = DOMAIN session_live_assistant_terminal_prefix_digest) /\ (\A session_id \in DOMAIN session_live_assistant_final_digest : (session_id \in DOMAIN session_live_assistant_playback_response_id)) /\ (\A session_id \in DOMAIN session_live_assistant_terminal_observation : (session_id \in DOMAIN session_live_assistant_playback_response_id)) /\ (\A session_id \in DOMAIN session_live_assistant_playback_response_id : ((session_id \in DOMAIN session_live_channel_id) /\ (session_id \in DOMAIN session_live_interaction_id))))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 1 /\ Cardinality(DOMAIN session_live_channel_id) <= 1 /\ Cardinality(DOMAIN session_live_interaction_id) <= 1 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 1 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 2 /\ Cardinality(DOMAIN session_live_channel_id) <= 2 /\ Cardinality(DOMAIN session_live_interaction_id) <= 2 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 2 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 1 /\ Cardinality(DOMAIN session_live_channel_id) <= 1 /\ Cardinality(DOMAIN session_live_interaction_id) <= 1 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 1 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 2 /\ Cardinality(DOMAIN session_live_channel_id) <= 2 /\ Cardinality(DOMAIN session_live_interaction_id) <= 2 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 2 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 2
 
 Spec == Init /\ [][Next]_vars
 

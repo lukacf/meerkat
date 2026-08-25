@@ -406,6 +406,16 @@ pub enum ObservationOutcome {
     TranscriptAppended,
     /// Assistant transcript was truncated (barge-in projection).
     TranscriptTruncated,
+    /// One independent playback terminal fact is durably retained until the
+    /// matching provider final arrives.
+    PlaybackTerminalPending,
+    /// Generated SessionDocument authority joined final text and playback
+    /// terminality and committed the exact one-use target.
+    PlaybackTerminalSettled {
+        interaction_id: meerkat_core::InteractionId,
+        item_id: String,
+        content_index: u32,
+    },
     /// Sanitized address for one generated assistant output. Provider turn,
     /// response, item, and interaction identities remain server-internal.
     AssistantOutputAvailable(LiveAssistantOutputAddress),
@@ -726,6 +736,19 @@ pub trait LiveProjectionSink: Send + Sync {
         response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
+    /// Join a newly staged provider final with any independently retained
+    /// playback terminal. `None` means terminal evidence has not arrived.
+    async fn resolve_assistant_playback_after_final(
+        &self,
+        _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _response_id: &str,
+        _provider_item_id: &str,
+        _content_index: u32,
+    ) -> Result<Option<meerkat_core::InteractionId>, LiveProjectionError> {
+        Ok(None)
+    }
+
     /// Admit the exact foreground assistant response/item as a one-use
     /// playback target. The sink must use the interaction already sealed at
     /// Assistant TurnStarted and return only a public-safe opaque address.
@@ -751,6 +774,26 @@ pub trait LiveProjectionSink: Send + Sync {
         stop_reason: StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<(), LiveProjectionError>;
+
+    /// Observe terminal evidence independently of provider final arrival.
+    /// Returns true only when this observation completed the generated join.
+    #[allow(clippy::too_many_arguments)]
+    async fn observe_assistant_playback_terminal(
+        &self,
+        _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _interaction_id: meerkat_core::InteractionId,
+        _response_id: &str,
+        _provider_item_id: &str,
+        _content_index: u32,
+        _evidence: &meerkat_core::LiveAssistantPlaybackEvidence,
+        _stop_reason: StopReason,
+        _usage: meerkat_core::TurnUsage,
+    ) -> Result<bool, LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "order-independent playback authority is unavailable".to_string(),
+        ))
+    }
 
     /// Revoke an admitted output after sanitized handle publication failed.
     /// The sink resolves `Unmeasured`, discards staged assistant content, and
@@ -2460,7 +2503,26 @@ impl LiveAdapterHost {
                         response_id.as_deref(),
                     )
                     .await?;
-                Ok(ObservationOutcome::TranscriptAppended)
+                if let Some(response_id) = response_id.as_deref()
+                    && let Some(interaction_id) = self
+                        .projection_sink
+                        .resolve_assistant_playback_after_final(
+                            &session_id,
+                            channel_id,
+                            response_id,
+                            provider_item_id,
+                            content_index.unwrap_or(0),
+                        )
+                        .await?
+                {
+                    Ok(ObservationOutcome::PlaybackTerminalSettled {
+                        interaction_id,
+                        item_id: provider_item_id.clone(),
+                        content_index: content_index.unwrap_or(0),
+                    })
+                } else {
+                    Ok(ObservationOutcome::TranscriptAppended)
+                }
             }
 
             (
@@ -2513,6 +2575,44 @@ impl LiveAdapterHost {
                 )
                 .await
                 .map(|()| ObservationOutcome::TranscriptAppended)
+                .map_err(Into::into),
+
+            (
+                ObservationRouting::AppendTranscript,
+                LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                    interaction_id,
+                    provider_item_id,
+                    content_index,
+                    response_id,
+                    evidence,
+                    stop_reason,
+                    usage,
+                },
+            ) => self
+                .projection_sink
+                .observe_assistant_playback_terminal(
+                    &session_id,
+                    channel_id,
+                    *interaction_id,
+                    response_id,
+                    provider_item_id,
+                    *content_index,
+                    evidence,
+                    *stop_reason,
+                    usage.clone(),
+                )
+                .await
+                .map(|settled| {
+                    if settled {
+                        ObservationOutcome::PlaybackTerminalSettled {
+                            interaction_id: *interaction_id,
+                            item_id: provider_item_id.clone(),
+                            content_index: *content_index,
+                        }
+                    } else {
+                        ObservationOutcome::PlaybackTerminalPending
+                    }
+                })
                 .map_err(Into::into),
 
             (
@@ -2693,6 +2793,19 @@ impl LiveAdapterHost {
             let Some(channel) = inner.channels.get_mut(channel_id) else {
                 return;
             };
+            if let Ok(ObservationOutcome::PlaybackTerminalSettled {
+                interaction_id,
+                item_id,
+                content_index,
+            }) = result
+            {
+                let key = LivePlaybackTerminalKey {
+                    interaction_id: *interaction_id,
+                    item_id: item_id.clone(),
+                    content_index: *content_index,
+                };
+                settled = channel.playback_terminal_waiters.remove(&key);
+            }
             match observation {
                 LiveAdapterObservation::AssistantPlaybackCompleted {
                     interaction_id,
@@ -2725,6 +2838,7 @@ impl LiveAdapterHost {
                         waiter.response_id = Some(response_id.clone());
                     }
                 }
+                LiveAdapterObservation::AssistantPlaybackTerminalObserved { .. } => {}
                 LiveAdapterObservation::TurnCompleted {
                     response_id: Some(response_id),
                     ..
@@ -3386,6 +3500,9 @@ impl LiveAdapterHost {
                 ObservationRouting::AppendTranscript
             }
             LiveAdapterObservation::AssistantPlaybackCompleted { .. } => {
+                ObservationRouting::AppendTranscript
+            }
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved { .. } => {
                 ObservationRouting::AppendTranscript
             }
             // P1#2: structured realtime events flow through the typed

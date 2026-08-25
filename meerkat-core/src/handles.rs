@@ -1204,6 +1204,16 @@ pub struct TurnStateSnapshot {
 
 /// Turn-execution DSL handle.
 pub trait TurnStateHandle: Send + Sync {
+    /// Mint a fresh process-local authority for one noncommitting live bridge
+    /// execution. The default fails closed because an ordinary turn handle
+    /// must never be reused as bridge authority.
+    fn isolated_live_bridge_child(&self) -> Result<Arc<dyn TurnStateHandle>, DslTransitionError> {
+        Err(DslTransitionError::guard_rejected(
+            "TurnStateHandle::isolated_live_bridge_child",
+            "this turn-state authority cannot mint an isolated live bridge child",
+        ))
+    }
+
     /// Apply one typed turn-execution input and return the generated
     /// turn-authority effects emitted by that transition.
     fn apply_turn_input(

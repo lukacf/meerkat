@@ -188,10 +188,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_execution_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
 - `live_execution_fence_by_channel`: `Map<String, FenceToken>`
 - `live_execution_generation_by_channel`: `Map<String, Generation>`
+- `live_execution_phase_by_channel`: `Map<String, LiveExecutionChannelPhase>`
+- `live_revoked_execution_channels`: `Set<String>`
+- `live_execution_profile_by_channel`: `Map<String, String>`
+- `live_execution_mode_by_channel`: `Map<String, LiveExecutionMode>`
+- `live_function_bridge_capable_channels`: `Set<String>`
+- `live_client_context_capable_channels`: `Set<String>`
+- `live_playback_owner_by_channel`: `Map<String, String>`
+- `live_playback_readiness_by_channel`: `Map<String, String>`
+- `live_activation_receipt_by_channel`: `Map<String, String>`
+- `live_active_control_operation_by_authority`: `Map<String, String>`
+- `live_consumed_active_control_authorities`: `Set<String>`
 - `live_experimental_staged_runtime_by_channel`: `Map<String, AgentRuntimeId>`
 - `live_experimental_staged_fence_by_channel`: `Map<String, FenceToken>`
 - `live_experimental_staged_generation_by_channel`: `Map<String, Generation>`
 - `live_experimental_staged_seed_cursor_by_channel`: `Map<String, u64>`
+- `live_experimental_pending_receipt_by_channel`: `Map<String, String>`
 - `live_experimental_execution_channels`: `Set<String>`
 - `live_interaction_channel_by_id`: `Map<String, String>`
 - `live_active_interaction_by_channel`: `Map<String, String>`
@@ -230,6 +242,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_result_recovery_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
 - `live_result_recovery_fence_by_channel`: `Map<String, FenceToken>`
 - `live_result_recovery_generation_by_channel`: `Map<String, Generation>`
+- `live_bridge_operation_by_channel`: `Map<String, OperationId>`
+- `live_bridge_channel_by_operation`: `Map<OperationId, String>`
+- `live_bridge_interaction_by_operation`: `Map<OperationId, String>`
+- `live_bridge_provider_turn_by_operation`: `Map<OperationId, String>`
+- `live_bridge_provider_delegation_by_operation`: `Map<OperationId, String>`
+- `live_bridge_provider_call_by_operation`: `Map<OperationId, String>`
+- `live_bridge_agent_identity_by_operation`: `Map<OperationId, AgentIdentity>`
+- `live_bridge_context_revision_by_operation`: `Map<OperationId, String>`
+- `live_bridge_request_digest_by_operation`: `Map<OperationId, String>`
+- `live_bridge_phase_by_operation`: `Map<OperationId, LiveBridgeOperationPhase>`
+- `live_bridge_effect_operation_by_authority`: `Map<String, OperationId>`
+- `live_bridge_effect_kind_by_authority`: `Map<String, LiveBridgeEffectKind>`
+- `live_bridge_consumed_effect_authorities`: `Set<String>`
+- `live_bridge_in_flight_effect_authorities`: `Set<String>`
+- `live_bridge_effect_outcome_by_authority`: `Map<String, LiveBridgeEffectOutcome>`
+- `live_bridge_model_computation_authorized_operations`: `Set<OperationId>`
+- `live_bridge_read_snapshot_authorized_operations`: `Set<OperationId>`
+- `live_bridge_execution_terminal_by_operation`: `Map<OperationId, MeerkatExecutionTerminal>`
+- `live_bridge_execution_result_digest_by_operation`: `Map<OperationId, String>`
+- `live_bridge_cancellation_reason_by_operation`: `Map<OperationId, LiveBridgeCancellationReason>`
+- `live_bridge_submission_output_kind_by_operation`: `Map<OperationId, LiveBridgeOutputKind>`
+- `live_bridge_submission_digest_by_operation`: `Map<OperationId, String>`
+- `live_bridge_submission_state_by_operation`: `Map<OperationId, LiveBridgeSubmissionState>`
 - `live_context_cursor_by_channel`: `Map<String, u64>`
 - `live_context_queued_session_by_append`: `Map<String, String>`
 - `live_context_queued_cursor_by_append`: `Map<String, u64>`
@@ -418,7 +453,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
 - `BindLiveExecutionChannel`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
-- `StageExperimentalLiveExecution`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `StageExperimentalLiveExecution`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, pending_receipt: String)
+- `ResolveLiveExecutionModeAdmission`(session_id: String, channel_id: String, profile_id: String, requested_mode: LiveExecutionMode, function_bridge_available: Bool, client_context_available: Bool)
+- `RegisterLivePlaybackOwner`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, owner_id: String, readiness_id: String, pending_receipt: String)
+- `AuthorizeLiveActiveChannelControl`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, activation_receipt: String, control_authority_id: String, operation: String)
+- `ConsumeLiveActiveChannelControl`(channel_id: String, activation_receipt: String, control_authority_id: String, operation: String)
+- `RevokeLivePlaybackOwner`(session_id: String, channel_id: String, owner_id: String, readiness_id: String)
+- `RevokeLiveChannelCloseCustody`(session_id: String, channel_id: String, pending_receipt: Option<String>, activation_receipt: Option<String>)
 - `ObserveLiveProviderTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, provider_turn_ref: String)
 - `ObserveLiveAssistantTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String)
 - `AdmitLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
@@ -440,12 +481,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
 - `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, observation: LiveDelegationResultDeliveryObservation)
 - `BindLiveDelegationResultRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
+- `AdmitLiveBridgeOperation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, structural_lineage_proven: Bool)
+- `ConfirmLiveBridgeFinalInput`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String)
+- `AuthorizeLiveBridgeEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
+- `ConsumeLiveBridgeEffectAuthority`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
+- `RecordLiveBridgeEffectOutcome`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind, outcome: LiveBridgeEffectOutcome)
+- `CancelLiveBridgeOperation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, reason: LiveBridgeCancellationReason)
+- `RecordLiveBridgeExecutionTerminal`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, terminal: MeerkatExecutionTerminal, result_digest: Option<String>)
+- `AuthorizeLiveBridgeSubmission`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_call_ref: String, output_kind: LiveBridgeOutputKind, output_digest: String)
+- `ClaimLiveBridgeSubmissionAttempt`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, provider_call_ref: String, output_digest: String)
+- `RecordLiveBridgeSubmissionLocalWrite`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, provider_call_ref: String, output_digest: String)
+- `ResolveLiveBridgeSubmission`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, provider_call_ref: String, output_digest: String, observation: LiveBridgeSubmissionObservation)
+- `RecoverLiveBridgeSubmission`(operation_id: OperationId)
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, observation: LiveContextAppendObservation)
 - `BindLiveContextRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
-- `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id: String, channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id: String, channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, activation_receipt: String)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
@@ -856,13 +909,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveWebrtcTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
 - `LiveWebrtcAnswerAdmissionResolved`(session_id: String, channel_id: String, token: String, admitted: Bool, rejection: Option<LiveWebrtcAnswerAdmissionRejection>, public_error_class: Option<LiveChannelRequestRejectionPublicErrorClass>, sequence: u64)
 - `LiveWebrtcAnswerResultResolved`(channel_id: String, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64)
-- `LiveWebrtcAnswerAcceptedAndExecutionBound`(session_id: String, channel_id: String, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `LiveWebrtcAnswerAcceptedAndExecutionBound`(session_id: String, channel_id: String, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, activation_receipt: String)
 - `LiveWebsocketTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
 - `LiveWebsocketTokenAdmissionResolved`(session_id: String, channel_id: String, token: String, admitted: Bool, rejection: Option<LiveWebsocketTokenAdmissionRejection>, public_error_class: Option<LiveWebsocketTokenAdmissionPublicErrorClass>, sequence: u64)
 - `LiveOpenAdmissionResolved`(session_id: String, channel_id: String, bound_llm_identity: Option<SessionLlmIdentity>, admitted: Bool, rejection: Option<LiveOpenAdmissionRejection>, sequence: u64)
 - `LiveOpenAdmissionAbandoned`(session_id: String, channel_id: String, sequence: u64)
 - `LiveExecutionChannelBound`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
-- `ExperimentalLiveExecutionStaged`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `ExperimentalLiveExecutionStaged`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64, pending_receipt: String)
+- `LiveExecutionModeAdmissionResolved`(session_id: String, channel_id: String, profile_id: String, resolved_mode: LiveExecutionMode, function_bridge_available: Bool, client_context_available: Bool)
+- `LivePlaybackOwnerReady`(session_id: String, channel_id: String, owner_id: String, readiness_id: String, phase: LiveExecutionChannelPhase)
+- `LiveActiveChannelControlAuthorityIssued`(channel_id: String, activation_receipt: String, control_authority_id: String, operation: String)
+- `LiveActiveChannelControlDispatchAuthorized`(channel_id: String, control_authority_id: String, operation: String)
+- `LivePlaybackOwnerRevoked`(session_id: String, channel_id: String, owner_id: String, phase: LiveExecutionChannelPhase)
+- `LiveChannelCloseCustodyRevoked`(session_id: String, channel_id: String, phase: LiveExecutionChannelPhase, already_closed: Bool)
 - `LiveInteractionAdmitted`(session_id: String, channel_id: String, interaction_id: String)
 - `LiveDelegationAdmitted`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `LiveInteractionDelegationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
@@ -886,6 +945,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, retry_allowed: Bool, recovery_required: Bool)
 - `LiveDelegationResultAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `LiveDelegationResultRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveBridgeOperationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, phase: LiveBridgeOperationPhase)
+- `LiveBridgeOperationReplayObserved`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_delegation_ref: String, provider_call_ref: String)
+- `LiveBridgeProtocolDriftCloseAuthorized`(channel_id: String, operation_id: OperationId, provider_delegation_ref: String, provider_call_ref: String)
+- `LiveBridgeFinalInputAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, phase: LiveBridgeOperationPhase)
+- `LiveBridgeEffectAuthorityIssued`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
+- `LiveBridgeEffectDispatchAuthorized`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
+- `LiveBridgeEffectOutcomeRecorded`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind, outcome: LiveBridgeEffectOutcome, replay: Bool)
+- `LiveBridgeOperationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, agent_identity: AgentIdentity, reason: LiveBridgeCancellationReason)
+- `LiveBridgeExecutionTerminalRecorded`(channel_id: String, interaction_id: String, operation_id: OperationId, terminal: MeerkatExecutionTerminal, result_digest: Option<String>, replay: Bool)
+- `LiveBridgeSubmissionAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_call_ref: String, output_kind: LiveBridgeOutputKind, output_digest: String, state: LiveBridgeSubmissionState)
+- `LiveBridgeSubmissionAttemptClaimed`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState)
+- `LiveBridgeSubmissionLocalWriteRecorded`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState)
+- `LiveBridgeSubmissionResolved`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
+- `LiveBridgeSubmissionRecoveredAmbiguous`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
 - `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextRowQueued`(session_id: String, channel_id: String, append_id: String, canonical_cursor: u64, disposition: LiveContextRowDisposition)
 - `LiveContextCanonicalCoverageAdvanced`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
@@ -1169,6 +1242,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `fence_requires_bound_runtime`
 - `runtime_generation_requires_bound_runtime`
 - `live_execution_binding_is_complete_and_channel_scoped`
+- `live_execution_phase_is_explicit_and_revocation_is_terminal`
+- `live_bridge_operation_identity_is_complete_and_direct`
+- `live_bridge_effect_authority_is_one_use_and_exact`
+- `live_bridge_execution_and_provider_settlement_are_independent`
+- `live_bridge_completed_terminal_has_exact_result_digest`
 - `live_experimental_execution_custody_is_exact`
 - `live_active_interaction_is_exactly_channel_bound`
 - `live_provider_turn_occupancy_has_exact_interaction`
@@ -13249,6 +13327,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
+  - `channel_id_not_revoked`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Idle`
 
@@ -13264,6 +13343,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
+  - `channel_id_not_revoked`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Attached`
 
@@ -13279,6 +13359,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
+  - `channel_id_not_revoked`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Running`
 
@@ -13366,6 +13447,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_not_stopping`
   - `session_not_active`
   - `channel_bound`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Running`
+
+### `ResolveLiveOpenAdmissionRevokedChannelIdIdle`
+- From: `Idle`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
+  - `session_not_active`
+  - `channel_not_bound`
+  - `channel_id_revoked`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Idle`
+
+### `ResolveLiveOpenAdmissionRevokedChannelIdAttached`
+- From: `Attached`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
+  - `session_not_active`
+  - `channel_not_bound`
+  - `channel_id_revoked`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Attached`
+
+### `ResolveLiveOpenAdmissionRevokedChannelIdRunning`
+- From: `Running`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
+  - `session_not_active`
+  - `channel_not_bound`
+  - `channel_id_revoked`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Running`
 
@@ -13504,11 +13633,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveOpenAdmissionAbandoned`
 - To: `Stopped`
 
+### `ResolveLiveExecutionModeAdmissionIdle`
+- From: `Idle`
+- On: `ResolveLiveExecutionModeAdmission`(session_id, channel_id, profile_id, requested_mode, function_bridge_available, client_context_available)
+- Guards:
+  - `profile_present`
+  - `channel_binding_matches`
+  - `requested_mode_is_genuinely_available`
+  - `mode_resolution_is_fresh`
+- Emits: `LiveExecutionModeAdmissionResolved`
+- To: `Idle`
+
+### `ResolveLiveExecutionModeAdmissionAttached`
+- From: `Attached`
+- On: `ResolveLiveExecutionModeAdmission`(session_id, channel_id, profile_id, requested_mode, function_bridge_available, client_context_available)
+- Guards:
+  - `profile_present`
+  - `channel_binding_matches`
+  - `requested_mode_is_genuinely_available`
+  - `mode_resolution_is_fresh`
+- Emits: `LiveExecutionModeAdmissionResolved`
+- To: `Attached`
+
+### `ResolveLiveExecutionModeAdmissionRunning`
+- From: `Running`
+- On: `ResolveLiveExecutionModeAdmission`(session_id, channel_id, profile_id, requested_mode, function_bridge_available, client_context_available)
+- Guards:
+  - `profile_present`
+  - `channel_binding_matches`
+  - `requested_mode_is_genuinely_available`
+  - `mode_resolution_is_fresh`
+- Emits: `LiveExecutionModeAdmissionResolved`
+- To: `Running`
+
 ### `StageExperimentalLiveExecutionIdle`
 - From: `Idle`
-- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor, pending_receipt)
 - Guards:
+  - `pending_receipt_present`
   - `channel_binding_matches`
+  - `execution_mode_is_resolved`
   - `runtime_incarnation_matches`
   - `fence_incarnation_matches`
   - `generation_incarnation_matches`
@@ -13519,9 +13683,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StageExperimentalLiveExecutionAttached`
 - From: `Attached`
-- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor, pending_receipt)
 - Guards:
+  - `pending_receipt_present`
   - `channel_binding_matches`
+  - `execution_mode_is_resolved`
   - `runtime_incarnation_matches`
   - `fence_incarnation_matches`
   - `generation_incarnation_matches`
@@ -13532,9 +13698,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StageExperimentalLiveExecutionRunning`
 - From: `Running`
-- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor, pending_receipt)
 - Guards:
+  - `pending_receipt_present`
   - `channel_binding_matches`
+  - `execution_mode_is_resolved`
   - `runtime_incarnation_matches`
   - `fence_incarnation_matches`
   - `generation_incarnation_matches`
@@ -13542,6 +13710,189 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `experimental_stage_absent`
 - Emits: `ExperimentalLiveExecutionStaged`
 - To: `Running`
+
+### `RegisterLivePlaybackOwnerIdle`
+- From: `Idle`
+- On: `RegisterLivePlaybackOwner`(session_id, channel_id, runtime_id, fence_token, generation, owner_id, readiness_id, pending_receipt)
+- Guards:
+  - `identities_present`
+  - `pending_stage_matches`
+  - `owner_readiness_is_fresh`
+- Emits: `LivePlaybackOwnerReady`
+- To: `Idle`
+
+### `RegisterLivePlaybackOwnerAttached`
+- From: `Attached`
+- On: `RegisterLivePlaybackOwner`(session_id, channel_id, runtime_id, fence_token, generation, owner_id, readiness_id, pending_receipt)
+- Guards:
+  - `identities_present`
+  - `pending_stage_matches`
+  - `owner_readiness_is_fresh`
+- Emits: `LivePlaybackOwnerReady`
+- To: `Attached`
+
+### `RegisterLivePlaybackOwnerRunning`
+- From: `Running`
+- On: `RegisterLivePlaybackOwner`(session_id, channel_id, runtime_id, fence_token, generation, owner_id, readiness_id, pending_receipt)
+- Guards:
+  - `identities_present`
+  - `pending_stage_matches`
+  - `owner_readiness_is_fresh`
+- Emits: `LivePlaybackOwnerReady`
+- To: `Running`
+
+### `AuthorizeLiveActiveChannelControlIdle`
+- From: `Idle`
+- On: `AuthorizeLiveActiveChannelControl`(channel_id, runtime_id, fence_token, generation, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `identities_present`
+  - `active_receipt_and_binding_match`
+  - `control_authority_is_fresh`
+- Emits: `LiveActiveChannelControlAuthorityIssued`
+- To: `Idle`
+
+### `AuthorizeLiveActiveChannelControlAttached`
+- From: `Attached`
+- On: `AuthorizeLiveActiveChannelControl`(channel_id, runtime_id, fence_token, generation, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `identities_present`
+  - `active_receipt_and_binding_match`
+  - `control_authority_is_fresh`
+- Emits: `LiveActiveChannelControlAuthorityIssued`
+- To: `Attached`
+
+### `AuthorizeLiveActiveChannelControlRunning`
+- From: `Running`
+- On: `AuthorizeLiveActiveChannelControl`(channel_id, runtime_id, fence_token, generation, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `identities_present`
+  - `active_receipt_and_binding_match`
+  - `control_authority_is_fresh`
+- Emits: `LiveActiveChannelControlAuthorityIssued`
+- To: `Running`
+
+### `ConsumeLiveActiveChannelControlIdle`
+- From: `Idle`
+- On: `ConsumeLiveActiveChannelControl`(channel_id, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `channel_is_still_active`
+  - `one_use_control_matches`
+- Emits: `LiveActiveChannelControlDispatchAuthorized`
+- To: `Idle`
+
+### `ConsumeLiveActiveChannelControlAttached`
+- From: `Attached`
+- On: `ConsumeLiveActiveChannelControl`(channel_id, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `channel_is_still_active`
+  - `one_use_control_matches`
+- Emits: `LiveActiveChannelControlDispatchAuthorized`
+- To: `Attached`
+
+### `ConsumeLiveActiveChannelControlRunning`
+- From: `Running`
+- On: `ConsumeLiveActiveChannelControl`(channel_id, activation_receipt, control_authority_id, operation)
+- Guards:
+  - `channel_is_still_active`
+  - `one_use_control_matches`
+- Emits: `LiveActiveChannelControlDispatchAuthorized`
+- To: `Running`
+
+### `RevokeLivePlaybackOwnerIdle`
+- From: `Idle`
+- On: `RevokeLivePlaybackOwner`(session_id, channel_id, owner_id, readiness_id)
+- Guards:
+  - `owner_readiness_matches`
+- Emits: `LivePlaybackOwnerRevoked`
+- To: `Idle`
+
+### `RevokeLivePlaybackOwnerAttached`
+- From: `Attached`
+- On: `RevokeLivePlaybackOwner`(session_id, channel_id, owner_id, readiness_id)
+- Guards:
+  - `owner_readiness_matches`
+- Emits: `LivePlaybackOwnerRevoked`
+- To: `Attached`
+
+### `RevokeLivePlaybackOwnerRunning`
+- From: `Running`
+- On: `RevokeLivePlaybackOwner`(session_id, channel_id, owner_id, readiness_id)
+- Guards:
+  - `owner_readiness_matches`
+- Emits: `LivePlaybackOwnerRevoked`
+- To: `Running`
+
+### `RevokeLiveChannelCloseCustodyIdle`
+- From: `Idle`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `session_and_receipt_match_machine_custody`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Idle`
+
+### `RevokeLiveChannelCloseCustodyAttached`
+- From: `Attached`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `session_and_receipt_match_machine_custody`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Attached`
+
+### `RevokeLiveChannelCloseCustodyRunning`
+- From: `Running`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `session_and_receipt_match_machine_custody`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Running`
+
+### `RevokeLiveChannelCloseCustodyClosedReplayIdle`
+- From: `Idle`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `closed_tombstone_matches`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Idle`
+
+### `RevokeLiveChannelCloseCustodyClosedReplayAttached`
+- From: `Attached`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `closed_tombstone_matches`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Attached`
+
+### `RevokeLiveChannelCloseCustodyClosedReplayRunning`
+- From: `Running`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `closed_tombstone_matches`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Running`
+
+### `RevokeLiveChannelCloseCustodyClosedReplayRetired`
+- From: `Retired`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `closed_tombstone_matches`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Retired`
+
+### `RevokeLiveChannelCloseCustodyClosedReplayStopped`
+- From: `Stopped`
+- On: `RevokeLiveChannelCloseCustody`(session_id, channel_id, pending_receipt, activation_receipt)
+- Guards:
+  - `exactly_one_close_receipt_is_present`
+  - `closed_tombstone_matches`
+- Emits: `LiveChannelCloseCustodyRevoked`
+- To: `Stopped`
 
 ### `BindLiveExecutionChannelIdle`
 - From: `Idle`
@@ -14880,6 +15231,513 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveDelegationResultRecoveryChannelBound`
 - To: `Running`
 
+### `AdmitLiveBridgeOperationFreshIdle`
+- From: `Idle`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `identities_present`
+  - `active_channel_binding_matches`
+  - `structural_lineage_is_exact`
+  - `fresh_call_and_operation`
+- Emits: `LiveBridgeOperationAdmitted`
+- To: `Idle`
+
+### `AdmitLiveBridgeOperationFreshAttached`
+- From: `Attached`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `identities_present`
+  - `active_channel_binding_matches`
+  - `structural_lineage_is_exact`
+  - `fresh_call_and_operation`
+- Emits: `LiveBridgeOperationAdmitted`
+- To: `Attached`
+
+### `AdmitLiveBridgeOperationFreshRunning`
+- From: `Running`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `identities_present`
+  - `active_channel_binding_matches`
+  - `structural_lineage_is_exact`
+  - `fresh_call_and_operation`
+- Emits: `LiveBridgeOperationAdmitted`
+- To: `Running`
+
+### `AdmitLiveBridgeOperationExactReplayIdle`
+- From: `Idle`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_replay_matches_existing_operation`
+- Emits: `LiveBridgeOperationReplayObserved`
+- To: `Idle`
+
+### `AdmitLiveBridgeOperationExactReplayAttached`
+- From: `Attached`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_replay_matches_existing_operation`
+- Emits: `LiveBridgeOperationReplayObserved`
+- To: `Attached`
+
+### `AdmitLiveBridgeOperationExactReplayRunning`
+- From: `Running`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_replay_matches_existing_operation`
+- Emits: `LiveBridgeOperationReplayObserved`
+- To: `Running`
+
+### `AdmitLiveBridgeOperationProtocolDriftIdle`
+- From: `Idle`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `different_call_while_delegation_is_occupied`
+- Emits: `LiveBridgeProtocolDriftCloseAuthorized`
+- To: `Idle`
+
+### `AdmitLiveBridgeOperationProtocolDriftAttached`
+- From: `Attached`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `different_call_while_delegation_is_occupied`
+- Emits: `LiveBridgeProtocolDriftCloseAuthorized`
+- To: `Attached`
+
+### `AdmitLiveBridgeOperationProtocolDriftRunning`
+- From: `Running`
+- On: `AdmitLiveBridgeOperation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref, provider_delegation_ref, provider_call_ref, agent_identity, canonical_context_revision, request_digest, structural_lineage_proven)
+- Guards:
+  - `active_channel_binding_matches`
+  - `different_call_while_delegation_is_occupied`
+- Emits: `LiveBridgeProtocolDriftCloseAuthorized`
+- To: `Running`
+
+### `ConfirmLiveBridgeFinalInputIdle`
+- From: `Idle`
+- On: `ConfirmLiveBridgeFinalInput`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_operation_lineage_matches`
+- Emits: `LiveBridgeFinalInputAuthorized`
+- To: `Idle`
+
+### `ConfirmLiveBridgeFinalInputAttached`
+- From: `Attached`
+- On: `ConfirmLiveBridgeFinalInput`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_operation_lineage_matches`
+- Emits: `LiveBridgeFinalInputAuthorized`
+- To: `Attached`
+
+### `ConfirmLiveBridgeFinalInputRunning`
+- From: `Running`
+- On: `ConfirmLiveBridgeFinalInput`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_ref)
+- Guards:
+  - `active_channel_binding_matches`
+  - `exact_operation_lineage_matches`
+- Emits: `LiveBridgeFinalInputAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveBridgeEffectIdle`
+- From: `Idle`
+- On: `AuthorizeLiveBridgeEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id, kind)
+- Guards:
+  - `authority_present`
+  - `active_channel_binding_matches`
+  - `operation_is_current_and_nonterminal`
+  - `phase_allows_effect`
+  - `one_read_and_one_model_computation`
+  - `authority_is_fresh`
+- Emits: `LiveBridgeEffectAuthorityIssued`
+- To: `Idle`
+
+### `AuthorizeLiveBridgeEffectAttached`
+- From: `Attached`
+- On: `AuthorizeLiveBridgeEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id, kind)
+- Guards:
+  - `authority_present`
+  - `active_channel_binding_matches`
+  - `operation_is_current_and_nonterminal`
+  - `phase_allows_effect`
+  - `one_read_and_one_model_computation`
+  - `authority_is_fresh`
+- Emits: `LiveBridgeEffectAuthorityIssued`
+- To: `Attached`
+
+### `AuthorizeLiveBridgeEffectRunning`
+- From: `Running`
+- On: `AuthorizeLiveBridgeEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id, kind)
+- Guards:
+  - `authority_present`
+  - `active_channel_binding_matches`
+  - `operation_is_current_and_nonterminal`
+  - `phase_allows_effect`
+  - `one_read_and_one_model_computation`
+  - `authority_is_fresh`
+- Emits: `LiveBridgeEffectAuthorityIssued`
+- To: `Running`
+
+### `ConsumeLiveBridgeEffectAuthorityIdle`
+- From: `Idle`
+- On: `ConsumeLiveBridgeEffectAuthority`(channel_id, runtime_id, fence_token, generation, operation_id, authority_id, kind)
+- Guards:
+  - `active_channel_binding_matches`
+  - `one_use_authority_matches`
+  - `operation_still_dispatchable`
+- Emits: `LiveBridgeEffectDispatchAuthorized`
+- To: `Idle`
+
+### `ConsumeLiveBridgeEffectAuthorityAttached`
+- From: `Attached`
+- On: `ConsumeLiveBridgeEffectAuthority`(channel_id, runtime_id, fence_token, generation, operation_id, authority_id, kind)
+- Guards:
+  - `active_channel_binding_matches`
+  - `one_use_authority_matches`
+  - `operation_still_dispatchable`
+- Emits: `LiveBridgeEffectDispatchAuthorized`
+- To: `Attached`
+
+### `ConsumeLiveBridgeEffectAuthorityRunning`
+- From: `Running`
+- On: `ConsumeLiveBridgeEffectAuthority`(channel_id, runtime_id, fence_token, generation, operation_id, authority_id, kind)
+- Guards:
+  - `active_channel_binding_matches`
+  - `one_use_authority_matches`
+  - `operation_still_dispatchable`
+- Emits: `LiveBridgeEffectDispatchAuthorized`
+- To: `Running`
+
+### `RecordLiveBridgeEffectOutcomeFreshIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_consumed_authority_is_in_flight`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeEffectOutcomeFreshAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_consumed_authority_is_in_flight`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeEffectOutcomeFreshRunning`
+- From: `Running`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_consumed_authority_is_in_flight`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Running`
+
+### `RecordLiveBridgeEffectOutcomeFreshRetired`
+- From: `Retired`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_consumed_authority_is_in_flight`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Retired`
+
+### `RecordLiveBridgeEffectOutcomeFreshStopped`
+- From: `Stopped`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_consumed_authority_is_in_flight`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Stopped`
+
+### `RecordLiveBridgeEffectOutcomeExactReplayIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_terminal_outcome_already_recorded`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeEffectOutcomeExactReplayAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_terminal_outcome_already_recorded`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeEffectOutcomeExactReplayRunning`
+- From: `Running`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_terminal_outcome_already_recorded`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Running`
+
+### `RecordLiveBridgeEffectOutcomeExactReplayRetired`
+- From: `Retired`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_terminal_outcome_already_recorded`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Retired`
+
+### `RecordLiveBridgeEffectOutcomeExactReplayStopped`
+- From: `Stopped`
+- On: `RecordLiveBridgeEffectOutcome`(channel_id, operation_id, authority_id, kind, outcome)
+- Guards:
+  - `exact_terminal_outcome_already_recorded`
+- Emits: `LiveBridgeEffectOutcomeRecorded`
+- To: `Stopped`
+
+### `CancelLiveBridgeOperationIdle`
+- From: `Idle`
+- On: `CancelLiveBridgeOperation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, reason)
+- Guards:
+  - `binding_matches_or_is_currently_revoked`
+  - `exact_nonterminal_operation`
+- Emits: `LiveBridgeOperationCancellationAuthorized`
+- To: `Idle`
+
+### `CancelLiveBridgeOperationAttached`
+- From: `Attached`
+- On: `CancelLiveBridgeOperation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, reason)
+- Guards:
+  - `binding_matches_or_is_currently_revoked`
+  - `exact_nonterminal_operation`
+- Emits: `LiveBridgeOperationCancellationAuthorized`
+- To: `Attached`
+
+### `CancelLiveBridgeOperationRunning`
+- From: `Running`
+- On: `CancelLiveBridgeOperation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, reason)
+- Guards:
+  - `binding_matches_or_is_currently_revoked`
+  - `exact_nonterminal_operation`
+- Emits: `LiveBridgeOperationCancellationAuthorized`
+- To: `Running`
+
+### `RecordLiveBridgeExecutionTerminalFreshIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_is_nonterminal`
+  - `terminal_result_shape_is_exact`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeExecutionTerminalFreshAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_is_nonterminal`
+  - `terminal_result_shape_is_exact`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeExecutionTerminalFreshRunning`
+- From: `Running`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_is_nonterminal`
+  - `terminal_result_shape_is_exact`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Running`
+
+### `RecordLiveBridgeExecutionTerminalExactReplayIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_and_terminal_match`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeExecutionTerminalExactReplayAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_and_terminal_match`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeExecutionTerminalExactReplayRunning`
+- From: `Running`
+- On: `RecordLiveBridgeExecutionTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, terminal, result_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `exact_operation_and_terminal_match`
+- Emits: `LiveBridgeExecutionTerminalRecorded`
+- To: `Running`
+
+### `AuthorizeLiveBridgeSubmissionIdle`
+- From: `Idle`
+- On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
+- Guards:
+  - `output_digest_present`
+  - `active_binding_matches`
+  - `exact_terminal_call_matches`
+  - `terminal_authorizes_projection`
+  - `submission_not_previously_authorized`
+- Emits: `LiveBridgeSubmissionAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveBridgeSubmissionAttached`
+- From: `Attached`
+- On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
+- Guards:
+  - `output_digest_present`
+  - `active_binding_matches`
+  - `exact_terminal_call_matches`
+  - `terminal_authorizes_projection`
+  - `submission_not_previously_authorized`
+- Emits: `LiveBridgeSubmissionAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveBridgeSubmissionRunning`
+- From: `Running`
+- On: `AuthorizeLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_call_ref, output_kind, output_digest)
+- Guards:
+  - `output_digest_present`
+  - `active_binding_matches`
+  - `exact_terminal_call_matches`
+  - `terminal_authorizes_projection`
+  - `submission_not_previously_authorized`
+- Emits: `LiveBridgeSubmissionAuthorized`
+- To: `Running`
+
+### `ClaimLiveBridgeSubmissionAttemptIdle`
+- From: `Idle`
+- On: `ClaimLiveBridgeSubmissionAttempt`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `active_binding_matches`
+  - `authorized_submission_matches`
+- Emits: `LiveBridgeSubmissionAttemptClaimed`
+- To: `Idle`
+
+### `ClaimLiveBridgeSubmissionAttemptAttached`
+- From: `Attached`
+- On: `ClaimLiveBridgeSubmissionAttempt`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `active_binding_matches`
+  - `authorized_submission_matches`
+- Emits: `LiveBridgeSubmissionAttemptClaimed`
+- To: `Attached`
+
+### `ClaimLiveBridgeSubmissionAttemptRunning`
+- From: `Running`
+- On: `ClaimLiveBridgeSubmissionAttempt`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `active_binding_matches`
+  - `authorized_submission_matches`
+- Emits: `LiveBridgeSubmissionAttemptClaimed`
+- To: `Running`
+
+### `RecordLiveBridgeSubmissionLocalWriteIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeSubmissionLocalWrite`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `claimed_submission_matches`
+- Emits: `LiveBridgeSubmissionLocalWriteRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeSubmissionLocalWriteAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeSubmissionLocalWrite`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `claimed_submission_matches`
+- Emits: `LiveBridgeSubmissionLocalWriteRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeSubmissionLocalWriteRunning`
+- From: `Running`
+- On: `RecordLiveBridgeSubmissionLocalWrite`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest)
+- Guards:
+  - `binding_atoms_match`
+  - `claimed_submission_matches`
+- Emits: `LiveBridgeSubmissionLocalWriteRecorded`
+- To: `Running`
+
+### `ResolveLiveBridgeSubmissionIdle`
+- From: `Idle`
+- On: `ResolveLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest, observation)
+- Guards:
+  - `binding_atoms_match`
+  - `submission_identity_matches`
+  - `observation_matches_current_send_phase`
+- Emits: `LiveBridgeSubmissionResolved`
+- To: `Idle`
+
+### `ResolveLiveBridgeSubmissionAttached`
+- From: `Attached`
+- On: `ResolveLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest, observation)
+- Guards:
+  - `binding_atoms_match`
+  - `submission_identity_matches`
+  - `observation_matches_current_send_phase`
+- Emits: `LiveBridgeSubmissionResolved`
+- To: `Attached`
+
+### `ResolveLiveBridgeSubmissionRunning`
+- From: `Running`
+- On: `ResolveLiveBridgeSubmission`(channel_id, runtime_id, fence_token, generation, operation_id, provider_call_ref, output_digest, observation)
+- Guards:
+  - `binding_atoms_match`
+  - `submission_identity_matches`
+  - `observation_matches_current_send_phase`
+- Emits: `LiveBridgeSubmissionResolved`
+- To: `Running`
+
+### `RecoverLiveBridgeSubmissionIdle`
+- From: `Idle`
+- On: `RecoverLiveBridgeSubmission`(operation_id)
+- Guards:
+  - `claimed_or_locally_written_submission`
+- Emits: `LiveBridgeSubmissionRecoveredAmbiguous`
+- To: `Idle`
+
+### `RecoverLiveBridgeSubmissionAttached`
+- From: `Attached`
+- On: `RecoverLiveBridgeSubmission`(operation_id)
+- Guards:
+  - `claimed_or_locally_written_submission`
+- Emits: `LiveBridgeSubmissionRecoveredAmbiguous`
+- To: `Attached`
+
+### `RecoverLiveBridgeSubmissionRunning`
+- From: `Running`
+- On: `RecoverLiveBridgeSubmission`(operation_id)
+- Guards:
+  - `claimed_or_locally_written_submission`
+- Emits: `LiveBridgeSubmissionRecoveredAmbiguous`
+- To: `Running`
+
+### `RecoverLiveBridgeSubmissionRetired`
+- From: `Retired`
+- On: `RecoverLiveBridgeSubmission`(operation_id)
+- Guards:
+  - `claimed_or_locally_written_submission`
+- Emits: `LiveBridgeSubmissionRecoveredAmbiguous`
+- To: `Retired`
+
+### `RecoverLiveBridgeSubmissionStopped`
+- From: `Stopped`
+- On: `RecoverLiveBridgeSubmission`(operation_id)
+- Guards:
+  - `claimed_or_locally_written_submission`
+- Emits: `LiveBridgeSubmissionRecoveredAmbiguous`
+- To: `Stopped`
+
 ### `EnqueueLiveContextRowIdle`
 - From: `Idle`
 - On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition)
@@ -16015,7 +16873,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionIdle`
 - From: `Idle`
-- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `identities_present`
   - `answer_observation_sequence_present`
@@ -16027,12 +16885,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `answer_observation_sequence_advances`
   - `execution_binding_absent`
   - `experimental_stage_matches`
+  - `playback_owner_is_ready`
 - Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
 - To: `Idle`
 
 ### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionAttached`
 - From: `Attached`
-- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `identities_present`
   - `answer_observation_sequence_present`
@@ -16044,12 +16903,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `answer_observation_sequence_advances`
   - `execution_binding_absent`
   - `experimental_stage_matches`
+  - `playback_owner_is_ready`
 - Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
 - To: `Attached`
 
 ### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionRunning`
 - From: `Running`
-- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `identities_present`
   - `answer_observation_sequence_present`
@@ -16061,6 +16921,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `answer_observation_sequence_advances`
   - `execution_binding_absent`
   - `experimental_stage_matches`
+  - `playback_owner_is_ready`
 - Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
 - To: `Running`
 

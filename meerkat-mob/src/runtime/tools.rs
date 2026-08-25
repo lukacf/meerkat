@@ -77,6 +77,10 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
             .into()
     }
 
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        self.inner.live_bridge_effect_kind(tool_name)
+    }
+
     fn execution_binding_fingerprint(
         &self,
         tool_name: &str,
@@ -263,6 +267,10 @@ impl AgentToolDispatcher for McpProvenanceFilter {
             .cloned()
             .collect::<Vec<_>>()
             .into()
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        self.inner.live_bridge_effect_kind(tool_name)
     }
 
     fn execution_binding_fingerprint(
@@ -1085,6 +1093,15 @@ struct FlowStatusArgs {
 impl AgentToolDispatcher for MobOperatorToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tools)
+    }
+
+    fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+        match tool_name {
+            TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS => {
+                meerkat_core::LiveBridgeEffectKind::HelperSpawn
+            }
+            _ => meerkat_core::LiveBridgeEffectKind::ExternalIo,
+        }
     }
 
     async fn dispatch(

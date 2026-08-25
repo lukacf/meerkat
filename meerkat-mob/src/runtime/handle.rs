@@ -12679,6 +12679,53 @@ impl MemberHandle {
         AgentIdentity::from(self.agent_identity.as_str())
     }
 
+    /// Preflight the exact current durable member for experimental live bridge
+    /// eligibility without opening a channel or consuming operation authority.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub async fn validate_live_bridge_eligibility(
+        &self,
+    ) -> Result<(), super::LiveBridgeOperationStartError> {
+        self.mob
+            .send_actor_command(|reply_tx| MobCommand::ValidateLiveBridgeMemberEligibility {
+                agent_identity: self.agent_identity.clone(),
+                reply_tx,
+            })
+            .await
+            .map_err(|error| match error {
+                MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
+                    super::LiveBridgeOperationStartError::Unavailable
+                }
+                _ => super::LiveBridgeOperationStartError::Rejected,
+            })?
+    }
+
+    /// Start one machine-authorized, noncommitting bridge operation as this
+    /// exact durable member. The Mob actor revalidates current incarnation,
+    /// fence, session binding, and canonical revision before transferring
+    /// custody to the session actor.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub async fn start_live_bridge_operation(
+        &self,
+        request: super::LiveBridgeOperationRequest,
+        cancellation: super::LiveBridgeOperationCancellationSignal,
+    ) -> Result<super::LiveBridgeOperationTerminalFuture, super::LiveBridgeOperationStartError>
+    {
+        self.mob
+            .send_actor_command(|reply_tx| MobCommand::StartLiveBridgeOperation {
+                agent_identity: self.agent_identity.clone(),
+                request,
+                cancellation,
+                reply_tx,
+            })
+            .await
+            .map_err(|error| match error {
+                MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
+                    super::LiveBridgeOperationStartError::Unavailable
+                }
+                _ => super::LiveBridgeOperationStartError::Rejected,
+            })?
+    }
+
     /// Install (or clear) the host-owned outbound content-taint declaration
     /// for this member. See [`MobHandle::declare_member_outbound_taint`].
     pub async fn declare_outbound_taint(

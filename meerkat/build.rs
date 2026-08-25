@@ -1,15 +1,5 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    for variable in [
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_STATUS",
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_KIND",
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_VERSION",
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_QUALIFICATION_VERSION",
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_BUILD_VERSION",
-        "MEERKAT_EXPERIMENTAL_LIVE_GATE0_PROTOCOL_DIGEST",
-    ] {
-        println!("cargo:rerun-if-env-changed={variable}");
-    }
     let Some(suffix) = agent_factory_policy_bridge_symbol_suffix() else {
         eprintln!("meerkat build could not locate the AgentFactory bridge symbol suffix");
         std::process::exit(1);

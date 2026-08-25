@@ -212,6 +212,11 @@ fn session_document_error(
     ))
 }
 
+pub enum LiveAssistantPlaybackObservationResult {
+    Pending,
+    Resolved(LiveAssistantPlaybackTruncationEvidence),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_live_assistant_playback_target(
     agent: &mut dyn SessionAgent,
@@ -337,7 +342,7 @@ pub(crate) fn commit_live_assistant_playback_truncation(
     content_index: u32,
     evidence: LiveAssistantPlaybackEvidence,
 ) -> Result<LiveAssistantPlaybackTruncationEvidence, meerkat_core::error::AgentError> {
-    resolve_live_assistant_playback_terminal(
+    match observe_live_assistant_playback_terminal(
         agent,
         session_id,
         channel_id.clone(),
@@ -347,7 +352,14 @@ pub(crate) fn commit_live_assistant_playback_truncation(
         content_index,
         evidence,
         None,
-    )
+    )? {
+        LiveAssistantPlaybackObservationResult::Resolved(receipt) => Ok(receipt),
+        LiveAssistantPlaybackObservationResult::Pending => {
+            Err(meerkat_core::error::AgentError::ConfigError(
+                "playback truncation arrived before final without completion custody".to_string(),
+            ))
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -362,7 +374,7 @@ pub(crate) fn commit_live_assistant_playback_complete(
     stop_reason: meerkat_core::StopReason,
     usage: meerkat_core::TurnUsage,
 ) -> Result<LiveAssistantPlaybackTruncationEvidence, meerkat_core::error::AgentError> {
-    resolve_live_assistant_playback_terminal(
+    match observe_live_assistant_playback_terminal(
         agent,
         session_id,
         channel_id,
@@ -371,6 +383,39 @@ pub(crate) fn commit_live_assistant_playback_complete(
         item_id,
         content_index,
         LiveAssistantPlaybackEvidence::PlaybackComplete,
+        Some((stop_reason, usage)),
+    )? {
+        LiveAssistantPlaybackObservationResult::Resolved(receipt) => Ok(receipt),
+        LiveAssistantPlaybackObservationResult::Pending => {
+            Err(meerkat_core::error::AgentError::ConfigError(
+                "legacy playback completion cannot retain a pre-final terminal".to_string(),
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn observe_live_assistant_playback_terminal_with_completion(
+    agent: &mut dyn SessionAgent,
+    session_id: &SessionId,
+    channel_id: LiveChannelId,
+    interaction_id: InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+    evidence: LiveAssistantPlaybackEvidence,
+    stop_reason: meerkat_core::StopReason,
+    usage: meerkat_core::TurnUsage,
+) -> Result<LiveAssistantPlaybackObservationResult, meerkat_core::error::AgentError> {
+    observe_live_assistant_playback_terminal(
+        agent,
+        session_id,
+        channel_id,
+        interaction_id,
+        response_id,
+        item_id,
+        content_index,
+        evidence,
         Some((stop_reason, usage)),
     )
 }
@@ -467,7 +512,7 @@ pub(crate) fn resolve_live_assistant_playback_on_channel_close(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_live_assistant_playback_terminal(
+fn observe_live_assistant_playback_terminal(
     agent: &mut dyn SessionAgent,
     session_id: &SessionId,
     channel_id: LiveChannelId,
@@ -477,7 +522,7 @@ fn resolve_live_assistant_playback_terminal(
     content_index: u32,
     evidence: LiveAssistantPlaybackEvidence,
     completion: Option<(meerkat_core::StopReason, meerkat_core::TurnUsage)>,
-) -> Result<LiveAssistantPlaybackTruncationEvidence, meerkat_core::error::AgentError> {
+) -> Result<LiveAssistantPlaybackObservationResult, meerkat_core::error::AgentError> {
     if response_id.trim().is_empty() || item_id.trim().is_empty() {
         return Err(meerkat_core::error::AgentError::ConfigError(
             "live playback truncation requires non-empty response and item identity".to_string(),
@@ -496,6 +541,11 @@ fn resolve_live_assistant_playback_terminal(
             "live playback terminal target identity mismatch".to_string(),
         ));
     }
+    if target.pending_terminal().is_some() {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "live playback terminal is already retained for this target".to_string(),
+        ));
+    }
 
     let authoritative_text = agent
         .staged_realtime_assistant_segment_text(&response_id, &item_id, content_index)
@@ -503,7 +553,11 @@ fn resolve_live_assistant_playback_terminal(
     let authoritative_final =
         agent.staged_realtime_assistant_segment_is_final(&response_id, &item_id, content_index);
     let authoritative_chars = authoritative_text.chars().count() as u64;
-    let authoritative_digest = text_digest(&authoritative_text);
+    let authoritative_digest = if authoritative_final {
+        text_digest(&authoritative_text)
+    } else {
+        String::new()
+    };
     let (observation, reported_prefix_chars, reported_prefix_digest, prefix_matches) = match &evidence {
         LiveAssistantPlaybackEvidence::PlaybackComplete => (
             meerkat_core::generated::session_document::LiveAssistantPlaybackTerminalObservation::PlaybackComplete,
@@ -512,12 +566,6 @@ fn resolve_live_assistant_playback_terminal(
             false,
         ),
         LiveAssistantPlaybackEvidence::ReportedPrefix(prefix) => {
-            if authoritative_text.is_empty() {
-                return Err(
-                meerkat_core::error::AgentError::ConfigError(
-                    "live playback prefix has no exact staged spoken assistant segment".to_string(),
-                ));
-            }
             (
                 meerkat_core::generated::session_document::LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
                 prefix.chars().count() as u64,
@@ -545,23 +593,60 @@ fn resolve_live_assistant_playback_terminal(
             u64::from(content_index),
         )
         .map_err(session_document_error)?;
+    if authoritative_final {
+        authority
+            .recover_live_assistant_playback_final(
+                session_key.clone(),
+                channel_id.to_string(),
+                interaction_id.to_string(),
+                response_id.clone(),
+                item_id.clone(),
+                u64::from(content_index),
+                authoritative_chars,
+                authoritative_digest.clone(),
+            )
+            .map_err(session_document_error)?;
+    }
     let effects = authority
-        .resolve_live_assistant_playback_terminal(
+        .observe_live_assistant_playback_terminal(
             session_key,
             channel_id.to_string(),
             interaction_id.to_string(),
             response_id.clone(),
             item_id.clone(),
             u64::from(content_index),
-            authoritative_chars,
-            authoritative_digest,
-            authoritative_final,
             observation,
             reported_prefix_chars,
             reported_prefix_digest,
+            authoritative_chars,
+            authoritative_digest,
+            authoritative_final,
             prefix_matches,
         )
         .map_err(session_document_error)?;
+    if effects.iter().any(|effect| {
+        matches!(
+            effect,
+            SessionDocumentEffect::LiveAssistantPlaybackTerminalObserved { .. }
+        )
+    }) {
+        let (stop_reason, usage) = completion.ok_or_else(|| {
+            meerkat_core::error::AgentError::ConfigError(
+                "pre-final playback terminal requires retained completion facts".to_string(),
+            )
+        })?;
+        agent.observe_live_assistant_playback_terminal(
+            &channel_id,
+            interaction_id,
+            &response_id,
+            &item_id,
+            content_index,
+            evidence,
+            stop_reason,
+            usage,
+        )?;
+        return Ok(LiveAssistantPlaybackObservationResult::Pending);
+    }
     let effect = effects
         .iter()
         .find(|effect| {
@@ -592,7 +677,7 @@ fn resolve_live_assistant_playback_terminal(
             LiveAssistantPlaybackEvidence::PlaybackComplete,
             LiveAssistantPlaybackTruncationDisposition::PlaybackComplete,
         ) => {
-            let (stop_reason, usage) = completion.ok_or_else(|| {
+            let (stop_reason, usage) = completion.clone().ok_or_else(|| {
                 meerkat_core::error::AgentError::InternalError(
                     "playback-complete terminal omitted completion facts".to_string(),
                 )
@@ -626,6 +711,15 @@ fn resolve_live_assistant_playback_terminal(
                         .to_string(),
                 ));
             }
+            if let Some((stop_reason, usage)) = completion.clone() {
+                let _ = agent.append_realtime_transcript_event(
+                    RealtimeTranscriptEvent::AssistantTurnCompleted {
+                        response_id: response_id.clone(),
+                        stop_reason,
+                        usage,
+                    },
+                )?;
+            }
         }
         (
             LiveAssistantPlaybackEvidence::Unmeasured,
@@ -646,7 +740,163 @@ fn resolve_live_assistant_playback_terminal(
         content_index,
     )?;
 
-    Ok(receipt)
+    Ok(LiveAssistantPlaybackObservationResult::Resolved(receipt))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn observe_live_assistant_playback_final(
+    agent: &mut dyn SessionAgent,
+    session_id: &SessionId,
+    channel_id: LiveChannelId,
+    interaction_id: InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+) -> Result<Option<LiveAssistantPlaybackTruncationEvidence>, meerkat_core::error::AgentError> {
+    let Some(target) = agent.live_assistant_playback_target(&channel_id, &item_id, content_index)
+    else {
+        return Ok(None);
+    };
+    if target.interaction_id() != interaction_id || target.response_id() != response_id {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "live assistant final target identity mismatch".to_string(),
+        ));
+    }
+    let Some(pending) = target.pending_terminal().cloned() else {
+        return Ok(None);
+    };
+    let authoritative_text = agent
+        .staged_realtime_assistant_segment_text(&response_id, &item_id, content_index)
+        .unwrap_or_default();
+    if !agent.staged_realtime_assistant_segment_is_final(&response_id, &item_id, content_index) {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "live assistant final observation did not stage an exact final segment".to_string(),
+        ));
+    }
+    let authoritative_chars = authoritative_text.chars().count() as u64;
+    let authoritative_digest = text_digest(&authoritative_text);
+    let (observation, prefix_chars, prefix_digest, prefix_matches) = match pending.evidence() {
+        LiveAssistantPlaybackEvidence::PlaybackComplete => (
+            meerkat_core::generated::session_document::LiveAssistantPlaybackTerminalObservation::PlaybackComplete,
+            0,
+            String::new(),
+            false,
+        ),
+        LiveAssistantPlaybackEvidence::ReportedPrefix(prefix) => (
+            meerkat_core::generated::session_document::LiveAssistantPlaybackTerminalObservation::ReportedPrefix,
+            prefix.chars().count() as u64,
+            text_digest(prefix),
+            authoritative_text.starts_with(prefix),
+        ),
+        LiveAssistantPlaybackEvidence::Unmeasured => {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "Unmeasured terminal must resolve immediately".to_string(),
+            ));
+        }
+    };
+    let session_key = SessionDocumentKey::new(session_id.to_string());
+    let mut authority = SessionDocumentMachineAuthority::new();
+    authority
+        .recover_live_assistant_playback_target(
+            session_key.clone(),
+            channel_id.to_string(),
+            interaction_id.to_string(),
+            response_id.clone(),
+            item_id.clone(),
+            u64::from(content_index),
+        )
+        .map_err(session_document_error)?;
+    authority
+        .recover_live_assistant_playback_terminal(
+            session_key.clone(),
+            channel_id.to_string(),
+            interaction_id.to_string(),
+            response_id.clone(),
+            item_id.clone(),
+            u64::from(content_index),
+            observation,
+            prefix_chars,
+            prefix_digest.clone(),
+        )
+        .map_err(session_document_error)?;
+    let effects = authority
+        .observe_live_assistant_playback_final(
+            session_key,
+            channel_id.to_string(),
+            interaction_id.to_string(),
+            response_id.clone(),
+            item_id.clone(),
+            u64::from(content_index),
+            authoritative_chars,
+            authoritative_digest,
+            observation,
+            prefix_chars,
+            prefix_digest,
+            prefix_matches,
+        )
+        .map_err(session_document_error)?;
+    let effect = effects
+        .iter()
+        .find(|effect| {
+            matches!(
+                effect,
+                SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { .. }
+            )
+        })
+        .ok_or_else(|| {
+            meerkat_core::error::AgentError::InternalError(
+                "late final did not resolve retained playback terminal".to_string(),
+            )
+        })?;
+    let evidence = pending.evidence().clone();
+    let receipt = seal_live_assistant_playback_truncation(
+        session_id.clone(),
+        channel_id.clone(),
+        interaction_id,
+        &response_id,
+        &item_id,
+        content_index,
+        &evidence,
+        effect,
+    )
+    .map_err(|error| meerkat_core::error::AgentError::InternalError(error.to_string()))?;
+    match &evidence {
+        LiveAssistantPlaybackEvidence::PlaybackComplete => {
+            let _ = agent.append_realtime_transcript_event(
+                RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: response_id.clone(),
+                    stop_reason: pending.stop_reason(),
+                    usage: pending.usage().clone(),
+                },
+            )?;
+        }
+        LiveAssistantPlaybackEvidence::ReportedPrefix(prefix) => {
+            let _ = agent.append_realtime_transcript_event(
+                RealtimeTranscriptEvent::AssistantTranscriptTruncated {
+                    response_id: response_id.clone(),
+                    item_id: item_id.clone(),
+                    content_index,
+                    text: prefix.clone(),
+                },
+            )?;
+            let _ = agent.append_realtime_transcript_event(
+                RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: response_id.clone(),
+                    stop_reason: pending.stop_reason(),
+                    usage: pending.usage().clone(),
+                },
+            )?;
+        }
+        LiveAssistantPlaybackEvidence::Unmeasured => unreachable!(),
+    }
+    agent.resolve_live_assistant_playback_target(
+        &channel_id,
+        interaction_id,
+        &response_id,
+        &item_id,
+        content_index,
+    )?;
+    Ok(Some(receipt))
 }
 
 fn text_digest(text: &str) -> String {
@@ -1050,6 +1300,94 @@ mod tests {
             Some(full_provider_output)
         );
         assert!(unmeasured_agent.session.messages().is_empty());
+    }
+
+    #[test]
+    fn terminal_before_final_survives_session_recovery_and_commits_only_prefix() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel_id = LiveChannelId::new("channel-early-terminal-recovery");
+        let interaction_id = InteractionId::new();
+        let response_id = "response-early-terminal";
+        let item_id = "item-early-terminal";
+        let prefix = "played prefix";
+        let full = "played prefix followed by provider-only suffix";
+        admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel_id.clone(),
+            interaction_id,
+            response_id.to_string(),
+            item_id.to_string(),
+            0,
+        )
+        .expect("exact target is admitted before either independent fact");
+        let outcome = observe_live_assistant_playback_terminal_with_completion(
+            &mut agent,
+            &session_id,
+            channel_id.clone(),
+            interaction_id,
+            response_id.to_string(),
+            item_id.to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::ReportedPrefix(prefix.to_string()),
+            meerkat_core::StopReason::EndTurn,
+            meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::Other,
+                "playback-test",
+                meerkat_core::Usage::default(),
+            ),
+        )
+        .expect("generated authority retains terminal while final is absent");
+        assert!(matches!(
+            outcome,
+            LiveAssistantPlaybackObservationResult::Pending
+        ));
+        assert!(agent.session.messages().is_empty());
+
+        let encoded = serde_json::to_vec(&agent.session).expect("serialize durable session");
+        let restored_session: Session =
+            serde_json::from_slice(&encoded).expect("restore durable session");
+        let mut restored = PlaybackTestAgent {
+            session: restored_session,
+            transient: meerkat_core::TransientTurnContextStateHandle::new(),
+        };
+        restored
+            .append_realtime_transcript_event(
+                RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                    response_id: response_id.to_string(),
+                    item_id: item_id.to_string(),
+                    content_index: 0,
+                    text: full.to_string(),
+                },
+            )
+            .expect("late provider final stages after recovery");
+        let receipt = observe_live_assistant_playback_final(
+            &mut restored,
+            &session_id,
+            channel_id.clone(),
+            interaction_id,
+            response_id.to_string(),
+            item_id.to_string(),
+            0,
+        )
+        .expect("late final joins recovered terminal")
+        .expect("join emits a terminal receipt");
+        assert_eq!(
+            receipt.disposition(),
+            LiveAssistantPlaybackTruncationDisposition::CommittedReportedPrefix
+        );
+        assert!(!receipt.biological_hearing_claimed());
+        let canonical = serde_json::to_string(restored.session.messages())
+            .expect("encode canonical transcript");
+        assert!(canonical.contains(prefix));
+        assert!(!canonical.contains(full));
+        assert!(
+            restored
+                .live_assistant_playback_target(&channel_id, item_id, 0)
+                .is_none(),
+            "generated join consumes the target exactly once"
+        );
     }
 
     #[test]

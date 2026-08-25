@@ -164,6 +164,7 @@ pub use experimental_live_admission::{
     ExperimentalLiveAdmissionWitness, ExperimentalLiveCapabilityQualification,
     ExperimentalLiveFactoryIdentity, ExperimentalLiveFactoryResolutionError,
     ExperimentalLiveGate0QualificationVersion, ExperimentalLiveOperatorConfig,
+    GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
 #[doc(hidden)]

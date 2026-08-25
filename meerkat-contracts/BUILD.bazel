@@ -523,7 +523,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.27",
+        "CARGO_PKG_VERSION": "0.8.28",
         "CARGO_BIN_NAME": "live_execution_identity_wire",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },

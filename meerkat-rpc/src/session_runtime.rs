@@ -1152,6 +1152,20 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn capture_live_bridge_execution_snapshot(
+        &self,
+        session_id: &SessionId,
+        agent_identity: &str,
+    ) -> Result<meerkat_mob::LiveBridgeExecutionSnapshot, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::capture_live_bridge_execution_snapshot(
+            &self.service,
+            session_id,
+            agent_identity,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -4315,7 +4329,7 @@ impl SessionRuntime {
         seed_window: Option<meerkat::session_runtime::live_orchestration::LiveSeedWindow>,
         requested_transport: Option<meerkat_contracts::LiveOpenTransport>,
     ) -> Result<
-        meerkat_contracts::LiveOpenResult,
+        meerkat::surface::ExperimentalLivePendingChannel,
         meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError,
     > {
         let snapshot = self.realm_context_snapshot();

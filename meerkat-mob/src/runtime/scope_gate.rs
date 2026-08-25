@@ -76,6 +76,10 @@ impl MobCommand {
             | Self::ConcludeObjective { .. }
             | Self::BindObjectiveOwner { .. } => Some(ControlScope::SendCommand),
 
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::StartLiveBridgeOperation { .. }
+            | Self::ValidateLiveBridgeMemberEligibility { .. } => Some(ControlScope::Live),
+
             // ── Cancel ──
             Self::CancelAllWork { .. }
             | Self::CancelFlow { .. }
@@ -252,6 +256,18 @@ impl MobCommand {
             }
             Self::SubmitWork { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::StartLiveBridgeOperation { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(
+                    super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
+                ));
+            }
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::ValidateLiveBridgeMemberEligibility { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(
+                    super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
+                ));
             }
             Self::SendPeerMessage { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));

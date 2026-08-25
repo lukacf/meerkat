@@ -128,6 +128,16 @@ impl AgentLlmClient for ModelFallbackClient {
         &self.candidates[self.active_index()].identity.model
     }
 
+    fn fork_noncommitting_live_bridge(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError> {
+        // The bridge is bound to the member's exact currently active model.
+        // It receives no model-routing authority, so carrying inactive
+        // fallback candidates would only create a second mutable selection
+        // plane beside the ordinary member.
+        self.candidates[self.active_index()]
+            .client
+            .fork_noncommitting_live_bridge()
+    }
+
     fn prepare_model_fallback(&self, failure: &AgentError) -> Option<AgentLlmFallbackSwitch> {
         let current_idx = self.active_index();
         let current = &self.candidates[current_idx];

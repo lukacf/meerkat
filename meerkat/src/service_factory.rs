@@ -140,6 +140,64 @@ impl FactoryAgent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
+    fn validate_live_bridge_member_eligibility(
+        &self,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.validate_noncommitting_live_bridge_eligibility()
+    }
+
+    fn validate_live_bridge_operation(
+        &self,
+        request: &meerkat_session::LiveBridgeSessionOperationRequest,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.validate_noncommitting_live_bridge_policy()?;
+        if request.operation_id.as_ref() != request.dispatch_admission.operation_id() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "live bridge operation id does not match its sealed dispatch admission".to_string(),
+            ));
+        }
+        if request.snapshot.id() != self.agent.session().id() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "live bridge snapshot does not belong to this durable member session".to_string(),
+            ));
+        }
+        let admitted_revision = request
+            .snapshot
+            .canonical_context_revision()
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))?;
+        request.run_permit.validate_binding(
+            request.operation_id.as_ref(),
+            request.snapshot.id(),
+            &admitted_revision,
+        )?;
+        let current_revision = self
+            .agent
+            .session()
+            .canonical_context_revision()
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))?;
+        if admitted_revision != current_revision {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "live bridge snapshot revision is no longer the durable member head".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_live_bridge_operation(
+        &self,
+        request: meerkat_session::LiveBridgeSessionOperationRequest,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<meerkat_session::LiveBridgePreparedSessionOperation, meerkat_core::error::AgentError>
+    {
+        self.agent.prepare_live_bridge_noncommitting(
+            request.snapshot,
+            request.semantic_request,
+            request.dispatch_admission,
+            request.run_permit,
+            cancellation,
+        )
+    }
+
     async fn run_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
@@ -915,6 +973,7 @@ impl RealmInheritance {
     }
 }
 
+#[derive(Clone)]
 pub struct FactoryAgentBuilder {
     factory: AgentFactory,
     config_snapshot: Config,
@@ -1509,6 +1568,22 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    #[cfg(feature = "experimental-gpt-live")]
+    struct AllowLiveBridgeModelOnly;
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::ToolDispatchAdmission for AllowLiveBridgeModelOnly {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&meerkat_core::ToolDispatchContext>,
+            _effect_kind: meerkat_core::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn llm_client_build_failure_keeps_typed_session_cause() {
         let error = build_agent_error_to_session_error(
@@ -1585,6 +1660,43 @@ mod tests {
         delta: &'static str,
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
+    struct MidRunCancellationClient {
+        calls: AtomicUsize,
+        saw_member_tool: AtomicBool,
+        seen_tools: Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct BlockingMemberToolDispatcher {
+        started: Arc<tokio::sync::Notify>,
+        dispatches: AtomicUsize,
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct CountingAgentSessionStore {
+        saves: AtomicUsize,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct CountingSessionCheckpointer {
+        checkpoints: AtomicUsize,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct CountingHookEngine {
+        calls: AtomicUsize,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct PolicyProbeDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+        exact_catalog: bool,
+        dispatches: AtomicUsize,
+    }
+
     fn provider_for_successful_test_model(model: &str) -> Provider {
         if model.starts_with("claude-") {
             Provider::Anthropic
@@ -1600,6 +1712,184 @@ mod tests {
     impl Default for MockLlmClient {
         fn default() -> Self {
             Self { delta: "ok" }
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl LlmClient for MidRunCancellationClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+        > {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                *self.seen_tools.lock().expect("seen tools lock") = request
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect();
+                self.saw_member_tool.store(
+                    request
+                        .tools
+                        .iter()
+                        .any(|tool| tool.name == "member_lookup"),
+                    Ordering::SeqCst,
+                );
+                return Box::pin(stream::iter(vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "live-bridge-member-call".to_string(),
+                        name: "member_lookup".to_string(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            provider_for_successful_test_model(&request.model),
+                            &request.model,
+                            meerkat_core::Usage {
+                                input_tokens: 7,
+                                ..meerkat_core::Usage::default()
+                            },
+                        ),
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    }),
+                ]));
+            }
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::AgentToolDispatcher for BlockingMemberToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.dispatches.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            futures::future::pending().await
+        }
+
+        fn live_bridge_effect_kind(&self, _tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
+            meerkat_core::LiveBridgeEffectKind::ToolDispatch
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::HookEngine for CountingHookEngine {
+        async fn execute(
+            &self,
+            _invocation: meerkat_core::HookInvocation,
+            _overrides: Option<&meerkat_core::config::HookRunOverrides>,
+        ) -> Result<meerkat_core::HookExecutionReport, meerkat_core::HookEngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(meerkat_core::HookExecutionReport::empty())
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::AgentToolDispatcher for PolicyProbeDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: self.exact_catalog,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.dispatches.fetch_add(1, Ordering::SeqCst);
+            Err(ToolError::execution_failed(
+                "policy probe dispatcher must never run",
+            ))
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::AgentSessionStore for CountingAgentSessionStore {
+        async fn save(
+            &self,
+            _session: &meerkat_core::Session,
+        ) -> Result<(), meerkat_core::AgentError> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            _id: &str,
+        ) -> Result<Option<meerkat_core::Session>, meerkat_core::AgentError> {
+            Ok(None)
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::SessionCheckpointer for CountingSessionCheckpointer {
+        async fn checkpoint_run(
+            &self,
+            _session: &mut meerkat_core::Session,
+            _run_id: &meerkat_core::RunId,
+            _previous: Option<&meerkat_core::RunCheckpointReceipt>,
+        ) -> Result<Option<meerkat_core::RunCheckpointReceipt>, meerkat_core::AgentError> {
+            self.checkpoints.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
         }
     }
 
@@ -2000,6 +2290,972 @@ mod tests {
             pending_head_canonical_boundary: None,
             acknowledged_head_canonical_boundary: None,
         })
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn build_policy_probe_factory_agent(
+        temp: &TempDir,
+        client: Arc<MidRunCancellationClient>,
+        dispatcher: Arc<PolicyProbeDispatcher>,
+        store: Arc<CountingAgentSessionStore>,
+        checkpointer: Arc<CountingSessionCheckpointer>,
+        hook_engine: Option<Arc<dyn meerkat_core::HookEngine>>,
+    ) -> Result<FactoryAgent, String> {
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let runtime = MeerkatMachine::ephemeral();
+        let durable_session = Session::new();
+        let bindings = runtime
+            .prepare_bindings(durable_session.id().clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let agent = factory
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(client),
+                    tool_dispatcher_override: Some(dispatcher),
+                    session_store_override: Some(store),
+                    checkpointer: Some(checkpointer),
+                    hook_engine_override: hook_engine,
+                    resume_session: Some(durable_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(FactoryAgent {
+            agent,
+            session_context: None,
+            pending_head_canonical_boundary: None,
+            acknowledged_head_canonical_boundary: None,
+        })
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn warm_policy_probe_member(agent: &mut FactoryAgent) -> Result<(), String> {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        SessionAgent::run_turn_with_events(
+            agent,
+            meerkat_session::ephemeral::SessionAgentTurnInput {
+                prompt: "initialize policy probe tool visibility".to_string().into(),
+                injected_context: Vec::new(),
+                handling_mode: meerkat_core::HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            },
+            event_tx,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn policy_probe_bridge_request(
+        agent: &FactoryAgent,
+        operation_id: &str,
+    ) -> Result<meerkat_session::LiveBridgeSessionOperationRequest, String> {
+        let snapshot = agent.session().clone();
+        let revision = snapshot
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        Ok(meerkat_session::LiveBridgeSessionOperationRequest {
+            operation_id: Arc::from(operation_id),
+            snapshot: snapshot.clone(),
+            semantic_request: "policy probe live request".to_string().into(),
+            dispatch_admission: meerkat_core::LiveBridgeToolDispatchAdmission::__test_new(
+                operation_id,
+                Arc::new(AllowLiveBridgeModelOnly),
+            ),
+            run_permit: meerkat_core::LiveBridgeNoncommittingRunPermit::__test_new(
+                operation_id,
+                snapshot.id().clone(),
+                revision,
+            ),
+        })
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn assert_live_bridge_policy_rejected_without_effects(
+        agent: FactoryAgent,
+        request: meerkat_session::LiveBridgeSessionOperationRequest,
+        expected_reason: &str,
+        client: &MidRunCancellationClient,
+        dispatcher: &PolicyProbeDispatcher,
+        store: &CountingAgentSessionStore,
+        checkpointer: &CountingSessionCheckpointer,
+        hook_engine: Option<&CountingHookEngine>,
+    ) -> Result<(), String> {
+        let canonical = serde_json::to_value(agent.session()).map_err(|error| error.to_string())?;
+        let revision = agent
+            .session()
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        let client_calls = client.calls.load(Ordering::SeqCst);
+        let dispatches = dispatcher.dispatches.load(Ordering::SeqCst);
+        let saves = store.saves.load(Ordering::SeqCst);
+        let checkpoints = checkpointer.checkpoints.load(Ordering::SeqCst);
+        let hook_calls = hook_engine.map_or(0, |engine| engine.calls.load(Ordering::SeqCst));
+
+        let eligibility = SessionAgent::validate_live_bridge_member_eligibility(&agent)
+            .expect_err("unsupported member policy must fail bridge eligibility preflight");
+        assert!(eligibility.to_string().contains(expected_reason));
+        let validation = SessionAgent::validate_live_bridge_operation(&agent, &request)
+            .expect_err("unsupported member policy must fail before actor acceptance");
+        assert!(validation.to_string().contains(expected_reason));
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let execution =
+            match SessionAgent::prepare_live_bridge_operation(&agent, request, cancel_rx) {
+                Ok(_) => panic!("unsupported member policy must fail before provider execution"),
+                Err(error) => error,
+            };
+        assert!(execution.to_string().contains(expected_reason));
+
+        assert_eq!(client.calls.load(Ordering::SeqCst), client_calls);
+        assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), dispatches);
+        assert_eq!(store.saves.load(Ordering::SeqCst), saves);
+        assert_eq!(checkpointer.checkpoints.load(Ordering::SeqCst), checkpoints);
+        if let Some(engine) = hook_engine {
+            assert_eq!(engine.calls.load(Ordering::SeqCst), hook_calls);
+        }
+        assert_eq!(
+            serde_json::to_value(agent.session()).map_err(|error| error.to_string())?,
+            canonical,
+            "policy rejection must preserve the exact durable Session"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .canonical_context_revision()
+                .map_err(|error| error.to_string())?,
+            revision,
+            "policy rejection must preserve the exact canonical revision"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn factory_agent_live_bridge_restores_canonical_session_after_cancellation()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let client = Arc::new(MidRunCancellationClient {
+            calls: AtomicUsize::new(0),
+            saw_member_tool: AtomicBool::new(false),
+            seen_tools: Mutex::new(Vec::new()),
+        });
+        let dispatcher = Arc::new(BlockingMemberToolDispatcher {
+            started: Arc::clone(&started),
+            dispatches: AtomicUsize::new(0),
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "member_lookup",
+                "member-local read-only tool",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+        });
+        let store = Arc::new(CountingAgentSessionStore {
+            saves: AtomicUsize::new(0),
+        });
+        let checkpointer = Arc::new(CountingSessionCheckpointer {
+            checkpoints: AtomicUsize::new(0),
+        });
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let runtime = MeerkatMachine::ephemeral();
+        let durable_session = Session::new();
+        let bindings = runtime
+            .prepare_bindings(durable_session.id().clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let agent = factory
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(client.clone()),
+                    tool_dispatcher_override: Some(dispatcher.clone()),
+                    session_store_override: Some(store.clone()),
+                    checkpointer: Some(checkpointer.clone()),
+                    resume_session: Some(durable_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    budget_limits: Some(
+                        meerkat_core::BudgetLimits::unlimited()
+                            .with_max_tokens(1_000)
+                            .with_max_tool_calls(1_000),
+                    ),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut agent = FactoryAgent {
+            agent,
+            session_context: None,
+            pending_head_canonical_boundary: None,
+            acknowledged_head_canonical_boundary: None,
+        };
+        let (warmup_tx, _warmup_rx) = mpsc::channel(8);
+        SessionAgent::run_turn_with_events(
+            &mut agent,
+            meerkat_session::ephemeral::SessionAgentTurnInput {
+                prompt: "initialize durable member tool visibility"
+                    .to_string()
+                    .into(),
+                injected_context: Vec::new(),
+                handling_mode: meerkat_core::HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            },
+            warmup_tx,
+        )
+        .await
+        .map_err(|error| format!("durable member warmup turn: {error}"))?;
+        let (tap_tx, mut tap_rx) = mpsc::channel(32);
+        *agent.agent().event_tap().lock() = Some(meerkat_core::EventTapState {
+            tx: tap_tx,
+            truncated: AtomicBool::new(false),
+        });
+        let tool_scope = SessionAgent::tool_scope_snapshot(&agent)
+            .ok_or_else(|| "factory agent exposes no tool scope".to_string())?;
+        assert!(
+            tool_scope
+                .visible_names
+                .iter()
+                .any(|name| name.as_str() == "member_lookup"),
+            "member-local tool must be visible on the durable FactoryAgent"
+        );
+        let visible_defs = SessionAgent::visible_tool_defs(&agent);
+        assert!(
+            visible_defs.iter().any(|tool| tool.name == "member_lookup"),
+            "member-local tool definition must be available before bridge execution: {:?}",
+            visible_defs
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>()
+        );
+        let canonical = agent.session().clone();
+        let ordinary_turn_state = agent
+            .agent()
+            .turn_state_handle()
+            .ok_or_else(|| "SessionOwned agent has no ordinary turn-state authority".to_string())?;
+        let ordinary_turn_state_before_bridge = ordinary_turn_state.snapshot();
+        let ordinary_transient_context_before_bridge =
+            format!("{:?}", agent.agent().transient_turn_context_state());
+        let ordinary_boundary_cancel_before_bridge = agent.agent().cancel_after_boundary_handle();
+        ordinary_boundary_cancel_before_bridge
+            .send(meerkat_core::agent::CancelAfterBoundaryCommand::for_run(
+                meerkat_core::RunId::new(),
+            ))
+            .map_err(|error| format!("queue ordinary boundary-cancel command: {error}"))?;
+        assert_eq!(agent.agent().pending_cancel_after_boundary_commands(), 1);
+        let budget_tokens_before_bridge = agent
+            .agent()
+            .budget()
+            .token_usage()
+            .ok_or_else(|| "test member has no token budget".to_string())?
+            .0;
+        let canonical_revision = canonical
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        let request = meerkat_session::LiveBridgeSessionOperationRequest {
+            operation_id: Arc::from("test-live-bridge-operation"),
+            snapshot: canonical.clone(),
+            semantic_request: "temporary live request".to_string().into(),
+            dispatch_admission: meerkat_core::LiveBridgeToolDispatchAdmission::__test_new(
+                "test-live-bridge-operation",
+                Arc::new(AllowLiveBridgeModelOnly),
+            ),
+            run_permit: meerkat_core::LiveBridgeNoncommittingRunPermit::__test_new(
+                "test-live-bridge-operation",
+                canonical.id().clone(),
+                canonical_revision.clone(),
+            ),
+        };
+        SessionAgent::validate_live_bridge_operation(&agent, &request)
+            .map_err(|error| error.to_string())?;
+        let saves_before_bridge = store.saves.load(Ordering::SeqCst);
+        let checkpoints_before_bridge = checkpointer.checkpoints.load(Ordering::SeqCst);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let execution = SessionAgent::prepare_live_bridge_operation(&agent, request, cancel_rx)
+            .map_err(|error| error.to_string())?;
+        let operation = tokio::spawn(execution);
+        if tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+            .await
+            .is_err()
+        {
+            let terminal = if operation.is_finished() {
+                let result = operation.await.map_err(|error| error.to_string())?;
+                format!("{result:?}")
+            } else {
+                "still running".to_string()
+            };
+            return Err(format!(
+                "member tool dispatch did not start: visible={}, dispatches={}, client_calls={}, request_tools={:?}, terminal={terminal}",
+                client.saw_member_tool.load(Ordering::SeqCst),
+                dispatcher.dispatches.load(Ordering::SeqCst),
+                client.calls.load(Ordering::SeqCst),
+                client.seen_tools.lock().expect("seen tools lock").clone(),
+            ));
+        }
+        assert_eq!(
+            agent.agent().pending_cancel_after_boundary_commands(),
+            1,
+            "in-flight bridge execution must not consume ordinary boundary commands"
+        );
+        assert_eq!(
+            ordinary_turn_state.snapshot(),
+            ordinary_turn_state_before_bridge,
+            "in-flight bridge execution must not mutate the ordinary member machine"
+        );
+        assert_eq!(store.saves.load(Ordering::SeqCst), saves_before_bridge);
+        assert_eq!(
+            checkpointer.checkpoints.load(Ordering::SeqCst),
+            checkpoints_before_bridge
+        );
+
+        let (overlap_event_tx, _overlap_event_rx) = mpsc::channel(8);
+        let overlap_result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            SessionAgent::run_turn_with_events(
+                &mut agent,
+                meerkat_session::ephemeral::SessionAgentTurnInput {
+                    prompt: "ordinary turn overlapping live bridge".to_string().into(),
+                    injected_context: Vec::new(),
+                    handling_mode: meerkat_core::HandlingMode::Queue,
+                    render_metadata: None,
+                    typed_turn_appends: Vec::new(),
+                    transcript_identity: None,
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                },
+                overlap_event_tx,
+            ),
+        )
+        .await
+        .map_err(|_| "ordinary member turn was serialized behind live bridge".to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(overlap_result.text, "ok");
+        assert_eq!(overlap_result.session_id, canonical.id().clone());
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            3,
+            "warmup, bridge, and overlapping ordinary turn must use the same raw member client"
+        );
+        assert!(
+            !operation.is_finished(),
+            "bridge tool execution must remain in flight when ordinary turn completes"
+        );
+        assert_eq!(
+            agent.agent().pending_cancel_after_boundary_commands(),
+            0,
+            "overlapping ordinary turn must drain its own queued boundary command"
+        );
+        let canonical_after_overlap = agent.session().clone();
+        let canonical_revision_after_overlap = canonical_after_overlap
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        let ordinary_turn_state_after_overlap = ordinary_turn_state.snapshot();
+        let saves_after_overlap = store.saves.load(Ordering::SeqCst);
+        let checkpoints_after_overlap = checkpointer.checkpoints.load(Ordering::SeqCst);
+        while tap_rx.try_recv().is_ok() {}
+
+        cancel_tx
+            .send(true)
+            .map_err(|error| format!("cancel signal: {error}"))?;
+        let cancelled = operation.await.map_err(|error| error.to_string())?;
+        let cancelled = cancelled.expect_err("in-flight bridge operation must cancel locally");
+        assert!(matches!(cancelled, meerkat_core::AgentError::Cancelled));
+        assert!(client.saw_member_tool.load(Ordering::SeqCst));
+        assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ordinary_turn_state.snapshot(),
+            ordinary_turn_state_after_overlap,
+            "bridge cancellation must not mutate the ordinary member machine after the overlapping turn"
+        );
+        assert_eq!(
+            format!("{:?}", agent.agent().transient_turn_context_state()),
+            ordinary_transient_context_before_bridge,
+            "bridge cancellation must restore the exact ordinary transient-context coordinator"
+        );
+        assert!(
+            ordinary_boundary_cancel_before_bridge
+                .same_channel(&agent.agent().cancel_after_boundary_handle()),
+            "bridge cancellation must restore the exact ordinary boundary-cancel channel"
+        );
+        assert_eq!(
+            agent.agent().pending_cancel_after_boundary_commands(),
+            0,
+            "bridge cancellation must not recreate or consume ordinary boundary commands"
+        );
+        assert_eq!(
+            agent
+                .agent()
+                .budget()
+                .token_usage()
+                .ok_or_else(|| "test member lost its token budget".to_string())?
+                .0,
+            budget_tokens_before_bridge + 7,
+            "bridge provider usage must count against the durable member budget"
+        );
+        assert_eq!(
+            store.saves.load(Ordering::SeqCst),
+            saves_after_overlap,
+            "noncommitting bridge execution must not write the member session store"
+        );
+        assert_eq!(
+            checkpointer.checkpoints.load(Ordering::SeqCst),
+            checkpoints_after_overlap,
+            "noncommitting bridge execution must not checkpoint the member session"
+        );
+        assert!(
+            matches!(
+                tap_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "bridge execution must not leak events to the ordinary member tap"
+        );
+        assert_eq!(
+            serde_json::to_value(agent.session()).map_err(|error| error.to_string())?,
+            serde_json::to_value(&canonical_after_overlap).map_err(|error| error.to_string())?,
+            "bridge cancellation must preserve the overlapping ordinary turn's canonical document"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .canonical_context_revision()
+                .map_err(|error| error.to_string())?,
+            canonical_revision_after_overlap
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let result = SessionAgent::run_turn_with_events(
+            &mut agent,
+            meerkat_session::ephemeral::SessionAgentTurnInput {
+                prompt: "ordinary durable turn".to_string().into(),
+                injected_context: Vec::new(),
+                handling_mode: meerkat_core::HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            },
+            event_tx,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert_eq!(result.text, "ok");
+        assert_eq!(
+            agent.agent().pending_cancel_after_boundary_commands(),
+            0,
+            "the successor ordinary turn must drain the stale exact-run command without cancelling itself"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), tap_rx.recv())
+            .await
+            .map_err(|_| "ordinary member tap received no event after restoration".to_string())?
+            .ok_or_else(|| "ordinary member tap closed after bridge restoration".to_string())?;
+        assert_ne!(
+            agent
+                .session()
+                .canonical_context_revision()
+                .map_err(|error| error.to_string())?,
+            canonical_revision,
+            "ordinary member work continues from the restored canonical head"
+        );
+        assert!(
+            checkpointer.checkpoints.load(Ordering::SeqCst) > checkpoints_before_bridge,
+            "the ordinary durable turn still uses the restored checkpointer"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn session_actor_runs_ordinary_turn_while_live_bridge_tool_is_in_flight()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let client = Arc::new(MidRunCancellationClient {
+            calls: AtomicUsize::new(0),
+            saw_member_tool: AtomicBool::new(false),
+            seen_tools: Mutex::new(Vec::new()),
+        });
+        let dispatcher = Arc::new(BlockingMemberToolDispatcher {
+            started: Arc::clone(&started),
+            dispatches: AtomicUsize::new(0),
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "member_lookup",
+                "member-local read-only tool",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+        });
+        let runtime = MeerkatMachine::ephemeral();
+        let durable_session = Session::new();
+        let session_id = durable_session.id().clone();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut builder = FactoryAgentBuilder::new(
+            AgentFactory::new(temp.path().join("sessions")),
+            Config::default(),
+        );
+        builder.default_llm_client = Some(client.clone());
+        builder.default_tool_dispatcher = Some(dispatcher.clone());
+        let service = EphemeralSessionService::new(builder, 1);
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "initialize durable member".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(durable_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    initial_turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(created.session_id, session_id);
+        let actor_before = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .ok_or_else(|| "missing live actor witness".to_string())?;
+        let snapshot = service
+            .export_session(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let revision = snapshot
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        let operation_id = "actor-overlap-live-bridge";
+        let request = meerkat_session::LiveBridgeSessionOperationRequest {
+            operation_id: Arc::from(operation_id),
+            snapshot: snapshot.clone(),
+            semantic_request: "temporary live request".to_string().into(),
+            dispatch_admission: meerkat_core::LiveBridgeToolDispatchAdmission::__test_new(
+                operation_id,
+                Arc::new(AllowLiveBridgeModelOnly),
+            ),
+            run_permit: meerkat_core::LiveBridgeNoncommittingRunPermit::__test_new(
+                operation_id,
+                session_id.clone(),
+                revision,
+            ),
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let terminal = service
+            .start_live_bridge_operation(&session_id, request, cancel_rx)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+            .await
+            .map_err(|_| "bridge tool dispatch did not enter".to_string())?;
+
+        let ordinary = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.start_turn(
+                &session_id,
+                meerkat_core::service::StartTurnRequest {
+                    prompt: "ordinary actor turn during bridge".to_string().into(),
+                    injected_context: Vec::new(),
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics {
+                        turn_metadata: Some(
+                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                execution_kind: Some(
+                                    meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                                ),
+                                ..Default::default()
+                            },
+                        ),
+                        ..Default::default()
+                    },
+                },
+            ),
+        )
+        .await
+        .map_err(|_| "ordinary actor turn was serialized behind bridge execution".to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(ordinary.text, "ok");
+        assert_eq!(ordinary.session_id, session_id);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service
+                .live_session_actor_witness(&session_id)
+                .await
+                .ok_or_else(|| "actor disappeared during overlap".to_string())?,
+            actor_before,
+            "ordinary and bridge execution must use one exact actor incarnation"
+        );
+
+        cancel_tx.send(true).map_err(|error| error.to_string())?;
+        let terminal = terminal.await.map_err(|error| error.to_string())?;
+        assert!(matches!(terminal, Err(meerkat_core::AgentError::Cancelled)));
+        let after = service
+            .export_session(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(after.messages().iter().any(|message| matches!(
+            message,
+            Message::User(user)
+                if user.text_content() == "ordinary actor turn during bridge"
+        )));
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn unsupported_llm_decorator_rejects_bridge_before_acceptance_without_effects()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = Arc::new(PolicyProbeDispatcher {
+            tools: Arc::from([]),
+            catalog: Arc::from([]),
+            exact_catalog: true,
+            dispatches: AtomicUsize::new(0),
+        });
+        let store = Arc::new(CountingAgentSessionStore {
+            saves: AtomicUsize::new(0),
+        });
+        let runtime = MeerkatMachine::ephemeral();
+        let durable_session = Session::new();
+        let session_id = durable_session.id().clone();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut builder = FactoryAgentBuilder::new(
+            AgentFactory::new(temp.path().join("sessions")),
+            Config::default(),
+        );
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        *builder
+            .default_agent_llm_client_decorator
+            .write()
+            .map_err(|_| "decorator lock poisoned".to_string())? =
+            Some(counting_agent_llm_client_decorator(
+                Arc::clone(&constructions),
+                Arc::clone(&stream_calls),
+            ));
+        builder.default_tool_dispatcher = Some(dispatcher.clone());
+        builder.default_session_store = Some(store.clone());
+        let service = EphemeralSessionService::new(builder, 1);
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "initialize decorated member".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(durable_session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    initial_turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(constructions.load(Ordering::SeqCst) > 0);
+        let snapshot = service
+            .export_session(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let transcript_authority_before = service
+            .observe_session_transcript_authority(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut canonical_before =
+            serde_json::to_value(&snapshot).map_err(|error| error.to_string())?;
+        canonical_before
+            .as_object_mut()
+            .expect("serialized Session must be an object")
+            .remove("updated_at");
+        let revision = snapshot
+            .canonical_context_revision()
+            .map_err(|error| error.to_string())?;
+        let operation_id = "unsupported-decorator-live-bridge";
+        let request = meerkat_session::LiveBridgeSessionOperationRequest {
+            operation_id: Arc::from(operation_id),
+            snapshot,
+            semantic_request: "must not execute".to_string().into(),
+            dispatch_admission: meerkat_core::LiveBridgeToolDispatchAdmission::__test_new(
+                operation_id,
+                Arc::new(AllowLiveBridgeModelOnly),
+            ),
+            run_permit: meerkat_core::LiveBridgeNoncommittingRunPermit::__test_new(
+                operation_id,
+                session_id.clone(),
+                revision,
+            ),
+        };
+        let stream_calls_before = stream_calls.load(Ordering::SeqCst);
+        let dispatches_before = dispatcher.dispatches.load(Ordering::SeqCst);
+        let saves_before = store.saves.load(Ordering::SeqCst);
+        let preflight_error = service
+            .validate_live_bridge_member_eligibility(&session_id)
+            .await
+            .expect_err("unsupported decorator must fail before live open");
+        assert!(preflight_error.to_string().contains("event-isolated"));
+        assert_eq!(stream_calls.load(Ordering::SeqCst), stream_calls_before);
+        assert_eq!(
+            dispatcher.dispatches.load(Ordering::SeqCst),
+            dispatches_before
+        );
+        assert_eq!(store.saves.load(Ordering::SeqCst), saves_before);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let error = match service
+            .start_live_bridge_operation(&session_id, request, cancel_rx)
+            .await
+        {
+            Ok(_) => return Err("unsupported decorator bridge was accepted".to_string()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("event-isolated"));
+        assert_eq!(stream_calls.load(Ordering::SeqCst), stream_calls_before);
+        assert_eq!(
+            dispatcher.dispatches.load(Ordering::SeqCst),
+            dispatches_before
+        );
+        assert_eq!(store.saves.load(Ordering::SeqCst), saves_before);
+        let transcript_authority_after = service
+            .observe_session_transcript_authority(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            transcript_authority_after == transcript_authority_before,
+            "pre-acceptance rejection must preserve exact actor transcript authority"
+        );
+        let mut canonical_after = serde_json::to_value(
+            service
+                .export_session(&session_id)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        canonical_after
+            .as_object_mut()
+            .expect("serialized Session must be an object")
+            .remove("updated_at");
+        assert_eq!(
+            canonical_after, canonical_before,
+            "pre-acceptance rejection must preserve the full Session document; updated_at is excluded because export_session stamps only its returned deferred-state projection clone"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn hooked_session_owned_member_rejects_live_bridge_before_all_effects()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let client = Arc::new(MidRunCancellationClient {
+            calls: AtomicUsize::new(0),
+            saw_member_tool: AtomicBool::new(false),
+            seen_tools: Mutex::new(Vec::new()),
+        });
+        let dispatcher = Arc::new(PolicyProbeDispatcher {
+            tools: Arc::from(Vec::<Arc<ToolDef>>::new()),
+            catalog: Arc::from(Vec::<meerkat_core::ToolCatalogEntry>::new()),
+            exact_catalog: false,
+            dispatches: AtomicUsize::new(0),
+        });
+        let store = Arc::new(CountingAgentSessionStore {
+            saves: AtomicUsize::new(0),
+        });
+        let checkpointer = Arc::new(CountingSessionCheckpointer {
+            checkpoints: AtomicUsize::new(0),
+        });
+        let hooks = Arc::new(CountingHookEngine {
+            calls: AtomicUsize::new(0),
+        });
+        let agent = build_policy_probe_factory_agent(
+            &temp,
+            Arc::clone(&client),
+            Arc::clone(&dispatcher),
+            Arc::clone(&store),
+            Arc::clone(&checkpointer),
+            Some(Arc::clone(&hooks) as Arc<dyn meerkat_core::HookEngine>),
+        )
+        .await?;
+        let request = policy_probe_bridge_request(&agent, "hooked-live-bridge")?;
+        assert_live_bridge_policy_rejected_without_effects(
+            agent,
+            request,
+            "ordinary-turn hooks",
+            client.as_ref(),
+            dispatcher.as_ref(),
+            store.as_ref(),
+            checkpointer.as_ref(),
+            Some(hooks.as_ref()),
+        )
+        .await
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn callback_provenance_member_rejects_live_bridge_before_provider_or_dispatch()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let client = Arc::new(MidRunCancellationClient {
+            calls: AtomicUsize::new(0),
+            saw_member_tool: AtomicBool::new(false),
+            seen_tools: Mutex::new(Vec::new()),
+        });
+        let tool = Arc::new(
+            ToolDef::new(
+                "callback_tool",
+                "callback-only member tool",
+                serde_json::json!({ "type": "object" }),
+            )
+            .with_provenance(meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: "callback-owner".into(),
+            }),
+        );
+        let dispatcher = Arc::new(PolicyProbeDispatcher {
+            tools: Arc::from([Arc::clone(&tool)]),
+            catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(tool, true)]),
+            exact_catalog: false,
+            dispatches: AtomicUsize::new(0),
+        });
+        let store = Arc::new(CountingAgentSessionStore {
+            saves: AtomicUsize::new(0),
+        });
+        let checkpointer = Arc::new(CountingSessionCheckpointer {
+            checkpoints: AtomicUsize::new(0),
+        });
+        let mut agent = build_policy_probe_factory_agent(
+            &temp,
+            Arc::clone(&client),
+            Arc::clone(&dispatcher),
+            Arc::clone(&store),
+            Arc::clone(&checkpointer),
+            None,
+        )
+        .await?;
+        warm_policy_probe_member(&mut agent).await?;
+        assert!(
+            SessionAgent::visible_tool_defs(&agent)
+                .iter()
+                .any(|tool| tool.name == "callback_tool")
+        );
+        let request = policy_probe_bridge_request(&agent, "callback-live-bridge")?;
+        assert_live_bridge_policy_rejected_without_effects(
+            agent,
+            request,
+            "callback-provenance",
+            client.as_ref(),
+            dispatcher.as_ref(),
+            store.as_ref(),
+            checkpointer.as_ref(),
+            None,
+        )
+        .await
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn exact_non_fast_catalog_member_rejects_live_bridge_before_provider_or_dispatch()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let client = Arc::new(MidRunCancellationClient {
+            calls: AtomicUsize::new(0),
+            saw_member_tool: AtomicBool::new(false),
+            seen_tools: Mutex::new(Vec::new()),
+        });
+        let tool = Arc::new(ToolDef::new(
+            "streaming_tool",
+            "streaming-only member tool",
+            serde_json::json!({ "type": "object" }),
+        ));
+        let streaming = meerkat_core::StreamingToolExecutionPolicy::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(|error| error.to_string())?;
+        let contract = meerkat_core::ToolExecutionContract::new(
+            std::collections::BTreeSet::from([meerkat_core::ToolExecutionMode::Streaming]),
+            meerkat_core::ToolExecutionMode::Streaming,
+            Some(streaming),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let dispatcher = Arc::new(PolicyProbeDispatcher {
+            tools: Arc::from([Arc::clone(&tool)]),
+            catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(tool, true)
+                .with_execution_contract(contract)]),
+            exact_catalog: true,
+            dispatches: AtomicUsize::new(0),
+        });
+        let store = Arc::new(CountingAgentSessionStore {
+            saves: AtomicUsize::new(0),
+        });
+        let checkpointer = Arc::new(CountingSessionCheckpointer {
+            checkpoints: AtomicUsize::new(0),
+        });
+        let mut agent = build_policy_probe_factory_agent(
+            &temp,
+            Arc::clone(&client),
+            Arc::clone(&dispatcher),
+            Arc::clone(&store),
+            Arc::clone(&checkpointer),
+            None,
+        )
+        .await?;
+        warm_policy_probe_member(&mut agent).await?;
+        assert!(
+            SessionAgent::visible_tool_defs(&agent)
+                .iter()
+                .any(|tool| tool.name == "streaming_tool")
+        );
+        let request = policy_probe_bridge_request(&agent, "streaming-live-bridge")?;
+        assert_live_bridge_policy_rejected_without_effects(
+            agent,
+            request,
+            "Fast-only",
+            client.as_ref(),
+            dispatcher.as_ref(),
+            store.as_ref(),
+            checkpointer.as_ref(),
+            None,
+        )
+        .await
     }
 
     fn session_with_raw_metadata(

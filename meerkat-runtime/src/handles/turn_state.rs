@@ -53,6 +53,16 @@ impl RuntimeTurnStateHandle {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 
+    /// Construct the generated process-local turn authority used by one
+    /// noncommitting live bridge execution.
+    ///
+    /// This owns a fresh DSL authority with no session runtime entry,
+    /// durability-health gate, RuntimeStore coordinator, or shared ordinary
+    /// member-machine handle. Dropping it discards the complete turn state.
+    pub(crate) fn isolated_live_bridge() -> Self {
+        Self::ephemeral()
+    }
+
     fn prepare_standalone_run(&self, run_id: &RunId) -> Result<(), DslTransitionError> {
         let Some(session_id) = self.standalone_session_id.as_ref() else {
             return Ok(());
@@ -168,6 +178,10 @@ fn map_generated_turn_effect(
 }
 
 impl TurnStateHandle for RuntimeTurnStateHandle {
+    fn isolated_live_bridge_child(&self) -> Result<Arc<dyn TurnStateHandle>, DslTransitionError> {
+        Ok(Arc::new(Self::isolated_live_bridge()))
+    }
+
     fn apply_turn_input(
         &self,
         input: TurnExecutionInput,
@@ -848,7 +862,7 @@ mod tests {
         }
     }
 
-    fn start_running_conversation_turn(handle: &RuntimeTurnStateHandle, run_id: &RunId) {
+    fn start_running_conversation_turn(handle: &dyn TurnStateHandle, run_id: &RunId) {
         handle
             .start_conversation_run(
                 run_id.clone(),
@@ -860,6 +874,60 @@ mod tests {
             )
             .unwrap();
         handle.primitive_applied(run_id.clone()).unwrap();
+    }
+
+    #[test]
+    fn isolated_live_bridge_turn_authority_cannot_mutate_ordinary_member_machine() {
+        let ordinary = RuntimeTurnStateHandle::ephemeral();
+        let before = ordinary.snapshot();
+        let isolated = ordinary
+            .isolated_live_bridge_child()
+            .expect("runtime authority mints isolated bridge child");
+        let run_id = RunId(Uuid::from_u128(0x1b1d_6e));
+
+        start_running_conversation_turn(isolated.as_ref(), &run_id);
+        isolated
+            .llm_returned_terminal(run_id.clone())
+            .expect("isolated LLM terminal");
+        isolated
+            .boundary_complete(run_id)
+            .expect("isolated turn terminal");
+
+        assert_eq!(
+            ordinary.snapshot(),
+            before,
+            "isolated bridge authority must not publish into the ordinary member machine"
+        );
+        assert_eq!(isolated.snapshot().turn_phase, TurnPhase::Completed);
+    }
+
+    #[tokio::test]
+    async fn isolated_live_bridge_turn_authority_has_no_runtime_store_publication_path() {
+        use crate::store::{InMemoryRuntimeStore, RuntimeStore};
+
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = crate::LogicalRuntimeId::new("isolated-live-bridge-store-probe");
+        let isolated = RuntimeTurnStateHandle::ephemeral()
+            .isolated_live_bridge_child()
+            .expect("runtime authority mints isolated bridge child");
+        let run_id = RunId(Uuid::from_u128(0x570e_1e55));
+
+        start_running_conversation_turn(isolated.as_ref(), &run_id);
+        isolated
+            .llm_returned_terminal(run_id.clone())
+            .expect("isolated LLM terminal");
+        isolated
+            .boundary_complete(run_id)
+            .expect("isolated turn terminal");
+
+        assert!(
+            store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("read untouched runtime store")
+                .is_none(),
+            "process-local bridge turn authority must have no RuntimeStore publication path"
+        );
     }
 
     fn unknown_failure_source(message: &'static str) -> TurnFailureSource {

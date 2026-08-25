@@ -24,6 +24,13 @@ mod schedule_host;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    feature = "experimental-gpt-live",
+    not(target_arch = "wasm32")
+))]
+pub use crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel;
 pub use embedded::{
     build_embedded_service, build_embedded_service_from_builder, set_default_schedule_tools,
     set_default_workgraph_namespace_grant, set_default_workgraph_tools,
@@ -47,7 +54,9 @@ pub use live_host::{
 ))]
 pub use live_host::{
     ExperimentalGptLiveContextMirrorHost, ExperimentalLiveChannelCloseError,
-    ExperimentalLiveContextRecoveryError, ExperimentalLiveReplacementRequired,
+    ExperimentalLiveChannelCustodyStatus, ExperimentalLiveChannelPhaseStatus,
+    ExperimentalLiveContextRecoveryError, ExperimentalLivePlaybackOwnerReadiness,
+    ExperimentalLiveReplacementRequired,
 };
 #[cfg(all(
     feature = "session-store",

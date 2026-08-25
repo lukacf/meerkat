@@ -194,11 +194,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic only (smallest binary)
-meerkat = { version = "=0.8.28", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.8.29", features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.8.28", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.8.29", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -316,7 +316,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.8.28", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.8.29", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

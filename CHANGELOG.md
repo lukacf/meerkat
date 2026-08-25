@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.29] - 2026-08-25
+
 ### Added
 
 - `MobStorage::created_definition` reads the latest durable `MobCreated`
@@ -7131,7 +7133,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.28...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.29...HEAD
+[0.8.29]: https://github.com/lukacf/meerkat/compare/v0.8.28...v0.8.29
 [0.8.28]: https://github.com/lukacf/meerkat/compare/v0.8.27...v0.8.28
 [0.8.27]: https://github.com/lukacf/meerkat/compare/v0.8.26...v0.8.27
 [0.8.26]: https://github.com/lukacf/meerkat/compare/v0.8.25...v0.8.26

@@ -599,6 +599,7 @@ impl ExperimentalLiveAdmissionOwner {
         }
         let execution_profile =
             self.qualify_execution_profile(&qualification, execution_profile_id)?;
+        #[cfg(feature = "experimental-gpt-live")]
         let gpt_live_session_instructions = self
             .operator
             .as_ref()
@@ -615,6 +616,7 @@ impl ExperimentalLiveAdmissionOwner {
             identity,
             profile,
             execution_profile,
+            #[cfg(feature = "experimental-gpt-live")]
             gpt_live_session_instructions,
         })
     }
@@ -658,6 +660,7 @@ impl ExperimentalLiveAdmissionOwner {
             protocol_digest: preflight.protocol_digest,
             target,
             execution_profile: preflight.execution_profile,
+            #[cfg(feature = "experimental-gpt-live")]
             gpt_live_session_instructions: preflight.gpt_live_session_instructions,
         })
     }
@@ -795,6 +798,7 @@ pub(crate) struct ExperimentalLiveAdmissionPreflight {
     identity: SessionLlmIdentity,
     profile: ModelProfileWitness,
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+    #[cfg(feature = "experimental-gpt-live")]
     gpt_live_session_instructions: Option<String>,
     lower_qualification:
         Option<meerkat_llm_core::provider_runtime::ExperimentalRealtimeQualificationWitness>,
@@ -813,6 +817,7 @@ pub struct ExperimentalLiveAdmissionWitness {
     protocol_digest: String,
     target: meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget,
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+    #[cfg(feature = "experimental-gpt-live")]
     gpt_live_session_instructions: Option<String>,
 }
 
@@ -857,6 +862,7 @@ impl ExperimentalLiveAdmissionWitness {
     /// Approved host-catalog text for the top-level GPT Live call session.
     /// Provider-specific lowering consumes it only after this admission
     /// witness is minted; raw live/open parameters never enter this field.
+    #[cfg(feature = "experimental-gpt-live")]
     pub(crate) fn gpt_live_session_instructions(&self) -> Option<&str> {
         self.gpt_live_session_instructions.as_deref()
     }
@@ -1428,6 +1434,7 @@ mod tests {
             )
             .expect("registered profile selected");
         assert_eq!(preflight.execution_profile.profile_id(), "voice-room-v1");
+        #[cfg(feature = "experimental-gpt-live")]
         assert_eq!(
             preflight.gpt_live_session_instructions.as_deref(),
             Some(catalog_instructions)

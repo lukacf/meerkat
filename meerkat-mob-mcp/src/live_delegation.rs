@@ -1007,13 +1007,13 @@ async fn run_client_context_restart_reconciler<R>(
                 }
                 let in_flight_operations = reports
                     .iter()
-                    .filter_map(|report| {
+                    .filter(|report| {
                         matches!(
                             report.disposition(),
                             ExperimentalClientContextRestartDisposition::InFlight
                         )
-                        .then(|| report.operation_id().clone())
                     })
+                    .map(|report| report.operation_id().clone())
                     .collect::<Vec<_>>();
                 if in_flight_operations.is_empty() {
                     return;
@@ -1655,7 +1655,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     .map_err(|error| error.to_string())?;
                 for snapshot in snapshots {
                     let Some(pending_index) = pending.iter().position(|entry| {
-                        &entry.session_id == &session_id
+                        entry.session_id == session_id
                             && &entry.operation_id == snapshot.operation_id()
                     }) else {
                         continue;
@@ -4228,7 +4228,7 @@ mod tests {
                             .entries
                             .first()
                             .map(|entry| entry.operation_id.clone())
-                            .unwrap_or_else(OperationId::new);
+                            .unwrap_or_default();
                         Ok(vec![Self::report_for(
                             &operation_id,
                             ExperimentalClientContextRestartDisposition::InFlight,
@@ -5074,7 +5074,8 @@ mod tests {
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
     #[tokio::test]
-    async fn retained_terminal_result_runs_control_ack_and_runtime_resolution_chain() {
+    async fn retained_terminal_result_runs_control_ack_and_runtime_resolution_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_core::service::{
             CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
         };
@@ -5384,7 +5385,7 @@ mod tests {
             .await
             .expect("recover terminal provider-delivery resolution with the same authority");
         let LiveDelegationResultDeliveryResolution::Resolved(settled) = settled else {
-            panic!("delivered terminal authority cannot become ambiguity recovery")
+            return Err("delivered terminal authority cannot become ambiguity recovery".into());
         };
         assert_eq!(
             settled.observation(),
@@ -5399,6 +5400,7 @@ mod tests {
                 .contains_key(operation.operation_id()),
             "terminal provider acknowledgement retires exact retained custody"
         );
+        Ok(())
     }
 
     #[test]

@@ -781,6 +781,10 @@ fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
         meerkat_core::SessionError::Unsupported(message) => {
             serde_json::json!({ "code": "SESSION_UNSUPPORTED", "message": message })
         }
+        meerkat_core::SessionError::ExternalWriteFenceConflict { .. }
+        | meerkat_core::SessionError::ExternalWriteFenceBackoff { .. } => {
+            serde_json::json!({ "code": e.code(), "message": e.to_string() })
+        }
         meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
         | meerkat_core::SessionError::DurableTailRecoveryRefused { .. }
         | meerkat_core::SessionError::DurableEvidenceQuarantined { .. } => {
@@ -4567,6 +4571,35 @@ capabilities = [{capability_values}]
             envelope.get("status").is_none(),
             "agent fault must not be laundered into an in-band status string"
         );
+    }
+
+    #[test]
+    fn external_write_fence_errors_keep_their_typed_codes_on_the_err_channel() {
+        let cases = [
+            (
+                meerkat_core::SessionError::ExternalWriteFenceConflict {
+                    reason: "superseded authority".to_string(),
+                },
+                "SESSION_EXTERNAL_WRITE_FENCE_CONFLICT",
+            ),
+            (
+                meerkat_core::SessionError::ExternalWriteFenceBackoff {
+                    reason: "non-waiting check unavailable".to_string(),
+                },
+                "SESSION_EXTERNAL_WRITE_FENCE_BACKOFF",
+            ),
+        ];
+
+        for (error, expected_code) in cases {
+            let expected_message = error.to_string();
+            let envelope = session_error_envelope(error);
+            assert_eq!(envelope["code"], expected_code);
+            assert_eq!(envelope["message"], expected_message);
+            assert!(
+                envelope.get("status").is_none(),
+                "write-fence refusal must remain on the Err channel"
+            );
+        }
     }
 
     // ── ROW #83: success path returns the canonical WireRunResult — exposing

@@ -133,7 +133,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 rmcp = "1.4"
 
 # Crypto
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2.6"
 
 # Testing

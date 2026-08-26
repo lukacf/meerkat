@@ -79,6 +79,12 @@ pub(super) const EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from
 #[cfg(test)]
 pub(super) const EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(not(test))]
+pub(super) const EXPLICIT_RESUME_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+pub(super) const EXPLICIT_RESUME_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[cfg(all(feature = "runtime-adapter", not(test)))]
 const MEMBER_RETIRE_COOPERATIVE_GRACE: Duration = Duration::from_secs(2);
 

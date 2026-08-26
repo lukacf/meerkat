@@ -45835,6 +45835,109 @@ async fn test_explicit_resume_terminal_survives_observer_drop_and_is_shared() {
 }
 
 #[tokio::test]
+async fn test_explicit_resume_member_progress_resets_patience_after_admission() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let shared_handle = MobHandle {
+        command_tx,
+        explicit_resume_operations: Arc::new(super::handle::ResumeOperationRegistry::default()),
+        ..handle
+    };
+    let responder = tokio::spawn(async move {
+        let routed = command_rx.recv().await.expect("one Resume command");
+        let super::state::MobCommand::ResumeLifecycle {
+            admission,
+            progress,
+            reply_tx,
+            ..
+        } = routed.cmd
+        else {
+            panic!("expected ResumeLifecycle command");
+        };
+        admission.admit();
+        for member_id in [AgentIdentity::from("slow-a"), AgentIdentity::from("slow-b")] {
+            progress.awaiting_member(&member_id, "member_live_materialization");
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            progress.member_progress(&member_id, "member_live_materialization");
+        }
+        let _ = reply_tx.send(Ok(()));
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(4),
+        shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
+    )
+    .await
+    .expect("progressing Resume remains bounded by per-progress patience")
+    .expect("two slow host-owned member builds may exceed the original total deadline");
+    responder.await.expect("Resume responder task");
+}
+
+#[tokio::test]
+async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let shared_handle = MobHandle {
+        command_tx,
+        explicit_resume_operations: Arc::new(super::handle::ResumeOperationRegistry::default()),
+        ..handle
+    };
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let responder = tokio::spawn(async move {
+        let routed = command_rx.recv().await.expect("one Resume command");
+        let super::state::MobCommand::ResumeLifecycle {
+            admission,
+            progress,
+            reply_tx,
+            ..
+        } = routed.cmd
+        else {
+            panic!("expected ResumeLifecycle command");
+        };
+        admission.admit();
+        progress.awaiting_member(
+            &AgentIdentity::from("wedged-host-build"),
+            "member_live_materialization",
+        );
+        let _ = release_rx.await;
+        let _ = reply_tx.send(Ok(()));
+    });
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
+    )
+    .await
+    .expect("stalled Resume returns after one progress-patience window")
+    .expect_err("a host build with no progress must fail closed");
+    assert!(matches!(
+        &error,
+        MobError::LifecycleOperationProgressStalled {
+            intent,
+            member_id: Some(member_id),
+            stage,
+        } if intent == "explicit_resume"
+            && member_id.as_str() == "wedged-host-build"
+            && *stage == "member_live_materialization"
+    ));
+    let structured = error
+        .structured_data()
+        .expect("progress stall has stable structured diagnostics");
+    assert_eq!(structured["member_id"], "wedged-host-build");
+    assert_eq!(structured["stage"], "member_live_materialization");
+    assert_eq!(structured["authority_retained"], true);
+
+    let _ = release_tx.send(());
+    shared_handle
+        .resume_until_for_test(Instant::now() + Duration::from_secs(3))
+        .await
+        .expect("retry joins the retained exact Resume operation");
+    responder.await.expect("Resume responder task");
+}
+
+#[tokio::test]
 async fn test_actor_admitted_stop_invalidates_retained_resume_terminal() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle
@@ -65033,6 +65136,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "autonomous_stop_interrupts_pending".to_string()
         }
         MobError::LifecycleOperationPending { .. } => "lifecycle_operation_pending".to_string(),
+        MobError::LifecycleOperationProgressStalled { .. } => {
+            "lifecycle_operation_progress_stalled".to_string()
+        }
         MobError::LifecycleOperationAdmissionPending { .. } => {
             "lifecycle_operation_admission_pending".to_string()
         }

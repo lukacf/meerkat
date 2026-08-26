@@ -143,6 +143,8 @@ pub(super) struct PendingResumeOperation {
     deadline: Instant,
     command_authority: crate::control_policy::CommandAuthority,
     state_tx: tokio::sync::watch::Sender<ResumeOperationState>,
+    progress: super::state::LifecycleProgressSignal,
+    progress_rx: tokio::sync::watch::Receiver<super::state::LifecycleProgressObservation>,
 }
 
 #[derive(Default)]
@@ -181,11 +183,14 @@ impl ResumeOperationRegistry {
         }
         let (state_tx, _) =
             tokio::sync::watch::channel(ResumeOperationState::AwaitingLifecycleAdmission);
+        let (progress, progress_rx) = super::state::LifecycleProgressSignal::new();
         let pending = Arc::new(PendingResumeOperation {
             generation: state.generation,
             deadline,
             command_authority: command_authority.clone(),
             state_tx,
+            progress,
+            progress_rx,
         });
         state.current.push(Arc::clone(&pending));
         (pending, true)
@@ -2012,6 +2017,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::PlacedKickoffCleanupPending { .. }
         | MobError::AutonomousStopInterruptsPending { .. }
         | MobError::LifecycleOperationPending { .. }
+        | MobError::LifecycleOperationProgressStalled { .. }
         | MobError::LifecycleOperationAdmissionPending { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -5071,6 +5077,7 @@ impl MobHandle {
                             cmd: MobCommand::ResumeLifecycle {
                                 deadline: operation.deadline,
                                 admission,
+                                progress: operation.progress.clone(),
                                 reply_tx,
                             },
                         });
@@ -5107,6 +5114,15 @@ impl MobHandle {
             MobError::LifecycleOperationPending { intent } => MobError::LifecycleOperationPending {
                 intent: intent.clone(),
             },
+            MobError::LifecycleOperationProgressStalled {
+                intent,
+                member_id,
+                stage,
+            } => MobError::LifecycleOperationProgressStalled {
+                intent: intent.clone(),
+                member_id: member_id.clone(),
+                stage,
+            },
             MobError::LifecycleOperationAdmissionPending { intent, stage } => {
                 MobError::LifecycleOperationAdmissionPending {
                     intent: intent.clone(),
@@ -5123,6 +5139,9 @@ impl MobHandle {
         caller_deadline: Instant,
     ) -> Result<(), MobError> {
         let mut state_rx = operation.state_tx.subscribe();
+        let mut progress_rx = operation.progress_rx.clone();
+        let mut observed_progress_epoch = progress_rx.borrow().epoch;
+        let mut progress_deadline = None;
         loop {
             let state = state_rx.borrow().clone();
             match state {
@@ -5153,27 +5172,57 @@ impl MobHandle {
                 | ResumeOperationState::LifecycleAuthorityAdmitted => {}
             }
 
-            let Some(remaining) = caller_deadline.checked_duration_since(Instant::now()) else {
-                return match state {
-                    ResumeOperationState::AwaitingLifecycleAdmission => {
-                        Err(MobError::LifecycleOperationAdmissionPending {
+            match state {
+                ResumeOperationState::AwaitingLifecycleAdmission => {
+                    let Some(remaining) = caller_deadline.checked_duration_since(Instant::now())
+                    else {
+                        return Err(MobError::LifecycleOperationAdmissionPending {
                             intent: "explicit_resume".to_string(),
                             stage: "lifecycle_authority_admission",
-                        })
+                        });
+                    };
+                    match tokio::time::timeout(remaining, state_rx.changed()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return Err(MobError::ActorReplyChannelClosed),
+                        Err(_) => {}
                     }
-                    ResumeOperationState::LifecycleAuthorityAdmitted => {
-                        Err(MobError::LifecycleOperationPending {
+                }
+                ResumeOperationState::LifecycleAuthorityAdmitted => {
+                    let deadline = progress_deadline.get_or_insert_with(|| {
+                        Instant::now() + super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT
+                    });
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        let stalled = progress_rx.borrow().clone();
+                        return Err(MobError::LifecycleOperationProgressStalled {
                             intent: "explicit_resume".to_string(),
-                        })
+                            member_id: stalled.member_id,
+                            stage: stalled.stage,
+                        });
+                    };
+                    tokio::select! {
+                        changed = state_rx.changed() => {
+                            if changed.is_err() {
+                                return Err(MobError::ActorReplyChannelClosed);
+                            }
+                        }
+                        changed = progress_rx.changed() => {
+                            if changed.is_err() {
+                                return Err(MobError::ActorReplyChannelClosed);
+                            }
+                            let epoch = progress_rx.borrow().epoch;
+                            if epoch != observed_progress_epoch {
+                                observed_progress_epoch = epoch;
+                                progress_deadline = Some(
+                                    Instant::now()
+                                        + super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT,
+                                );
+                            }
+                        }
+                        () = tokio::time::sleep(remaining) => {}
                     }
-                    ResumeOperationState::Terminal(_)
-                    | ResumeOperationState::InvalidatedByLifecycleAuthority => unreachable!(),
-                };
-            };
-            match tokio::time::timeout(remaining, state_rx.changed()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err(MobError::ActorReplyChannelClosed),
-                Err(_) => {}
+                }
+                ResumeOperationState::Terminal(_)
+                | ResumeOperationState::InvalidatedByLifecycleAuthority => unreachable!(),
             }
         }
     }

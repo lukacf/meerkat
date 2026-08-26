@@ -549,6 +549,16 @@ pub enum MobError {
     #[error("mob lifecycle operation is still in progress: {intent}")]
     LifecycleOperationPending { intent: String },
 
+    /// A process-owned lifecycle operation retained authority after durable
+    /// admission, but its host-owned work made no observable member progress
+    /// for one patience window. The exact operation remains joinable on retry.
+    #[error("mob lifecycle operation made no progress at {stage}: {intent} (member={member_id:?})")]
+    LifecycleOperationProgressStalled {
+        intent: String,
+        member_id: Option<AgentIdentity>,
+        stage: &'static str,
+    },
+
     /// A lifecycle command could not enter the actor mailbox before its
     /// absolute deadline. No lifecycle authority was admitted or retained.
     #[error("mob lifecycle operation admission is still pending at {stage}: {intent}")]
@@ -989,6 +999,18 @@ impl MobError {
                 "retryable": true,
                 "authority_retained": true,
             })),
+            Self::LifecycleOperationProgressStalled {
+                intent,
+                member_id,
+                stage,
+            } => Some(serde_json::json!({
+                "kind": "mob_lifecycle_operation_progress_stalled",
+                "intent": intent,
+                "member_id": member_id.as_ref().map(AgentIdentity::as_str),
+                "stage": stage,
+                "retryable": true,
+                "authority_retained": true,
+            })),
             Self::LifecycleOperationAdmissionPending { intent, stage } => Some(serde_json::json!({
                 "kind": "mob_lifecycle_operation_admission_pending",
                 "intent": intent,
@@ -1051,6 +1073,7 @@ impl MobError {
                 | Self::MemberRetirementInProgress { .. }
                 | Self::MemberRetirementAdmissionPending { .. }
                 | Self::LifecycleOperationPending { .. }
+                | Self::LifecycleOperationProgressStalled { .. }
                 | Self::LifecycleOperationAdmissionPending { .. }
                 | Self::DirectMemberAdoptionPending { .. } => {
                     Some(meerkat_contracts::ErrorCode::SessionBusy)
@@ -1163,6 +1186,7 @@ impl MobError {
             | Self::RetirementInProgress { .. }
             | Self::MemberRetirementInProgress { .. }
             | Self::MemberRetirementAdmissionPending { .. }
+            | Self::LifecycleOperationProgressStalled { .. }
             | Self::LifecycleOperationAdmissionPending { .. }
             | Self::SupervisorProtocolUpgradeRequired { .. }
             | Self::DirectMemberAdoptionPending { .. }

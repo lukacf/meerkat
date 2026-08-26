@@ -485,6 +485,54 @@ impl LifecycleAdmissionSignal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LifecycleProgressObservation {
+    pub(super) epoch: u64,
+    pub(super) member_id: Option<AgentIdentity>,
+    pub(super) stage: &'static str,
+}
+
+#[derive(Clone)]
+pub(super) struct LifecycleProgressSignal {
+    sender: tokio::sync::watch::Sender<LifecycleProgressObservation>,
+}
+
+impl LifecycleProgressSignal {
+    pub(super) fn new() -> (
+        Self,
+        tokio::sync::watch::Receiver<LifecycleProgressObservation>,
+    ) {
+        let (sender, receiver) = tokio::sync::watch::channel(LifecycleProgressObservation {
+            epoch: 0,
+            member_id: None,
+            stage: "lifecycle_authority_admission",
+        });
+        (Self { sender }, receiver)
+    }
+
+    pub(super) fn awaiting_member(&self, member_id: &AgentIdentity, stage: &'static str) {
+        self.sender.send_modify(|observation| {
+            observation.member_id = Some(member_id.clone());
+            observation.stage = stage;
+        });
+    }
+
+    pub(super) fn member_progress(&self, member_id: &AgentIdentity, stage: &'static str) {
+        self.sender.send_modify(|observation| {
+            observation.epoch = observation.epoch.wrapping_add(1);
+            observation.member_id = Some(member_id.clone());
+            observation.stage = stage;
+        });
+    }
+
+    pub(super) fn awaiting_stage(&self, stage: &'static str) {
+        self.sender.send_modify(|observation| {
+            observation.member_id = None;
+            observation.stage = stage;
+        });
+    }
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -1027,6 +1075,7 @@ pub(super) enum MobCommand {
     ResumeLifecycle {
         deadline: meerkat_core::time_compat::Instant,
         admission: LifecycleAdmissionSignal,
+        progress: LifecycleProgressSignal,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Complete {

@@ -15410,6 +15410,7 @@ impl MobActor {
     async fn rebuild_explicit_resume_member_sessions(
         &mut self,
         rebuild: Vec<ExplicitResumeMemberRebuild>,
+        progress: &super::state::LifecycleProgressSignal,
     ) -> Result<(), MobError> {
         let mut first_infrastructure_error = None;
         for rebuild in rebuild {
@@ -15485,6 +15486,7 @@ impl MobActor {
                 .labels
                 .clone()
                 .unwrap_or_else(|| entry.labels.clone());
+            progress.awaiting_member(&entry.agent_identity, "member_live_materialization");
             {
                 let mut retained = self.per_spawn_external_tools.write().await;
                 if let Some(tools) = restore_spec.external_tools {
@@ -15532,6 +15534,7 @@ impl MobActor {
                     }
                 }
             }
+            progress.member_progress(&entry.agent_identity, "member_live_materialization");
         }
         if let Some(error) = first_infrastructure_error {
             return Err(error);
@@ -15550,6 +15553,7 @@ impl MobActor {
     async fn ensure_autonomous_runtimes_from_roster(
         &mut self,
         allow_stopped_resume_reopen: bool,
+        progress: Option<&super::state::LifecycleProgressSignal>,
     ) -> Result<(), MobError> {
         let lifecycle = self.dsl_authority.state();
         if lifecycle_origin_fenced(lifecycle) {
@@ -15615,6 +15619,9 @@ impl MobActor {
                 .collect::<Vec<_>>()
         };
         for entry in &all_entries {
+            if let Some(progress) = progress {
+                progress.awaiting_member(&entry.agent_identity, "member_comms_readiness");
+            }
             let ensure_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 self.provisioner
                     .ensure_runtime_session_state(&entry.member_ref)
@@ -15640,6 +15647,9 @@ impl MobActor {
                             )],
                         });
                     }
+                    if let Some(progress) = progress {
+                        progress.member_progress(&entry.agent_identity, "member_comms_readiness");
+                    }
                     continue;
                 }
             };
@@ -15653,8 +15663,14 @@ impl MobActor {
                     first_error = Some(error);
                 }
             }
+            if let Some(progress) = progress {
+                progress.member_progress(&entry.agent_identity, "member_comms_readiness");
+            }
         }
         for entry in &entries {
+            if let Some(progress) = progress {
+                progress.awaiting_member(&entry.agent_identity, "autonomous_runtime_readiness");
+            }
             let ensure_result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref),
@@ -15678,6 +15694,10 @@ impl MobActor {
                             )],
                         });
                     }
+                    if let Some(progress) = progress {
+                        progress
+                            .member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
+                    }
                     continue;
                 }
             };
@@ -15689,6 +15709,9 @@ impl MobActor {
                 );
                 if first_error.is_none() {
                     first_error = Some(error);
+                }
+                if let Some(progress) = progress {
+                    progress.member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
                 }
                 continue;
             }
@@ -15725,6 +15748,9 @@ impl MobActor {
                         first_error = Some(error);
                     }
                 }
+            }
+            if let Some(progress) = progress {
+                progress.member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
             }
         }
 
@@ -22493,6 +22519,7 @@ impl MobActor {
                 MobCommand::ResumeLifecycle {
                     deadline,
                     admission,
+                    progress,
                     reply_tx,
                 } => {
                     let result = if Instant::now() >= deadline {
@@ -22535,7 +22562,7 @@ impl MobActor {
                             // machine-owned revival seam.
                             if !rebuilt_attachment
                                 && let Err(error) =
-                                    self.ensure_autonomous_runtimes_from_roster(true).await
+                                    self.ensure_autonomous_runtimes_from_roster(true, None).await
                             {
                                 if let Err(stop_error) = self.stop_all_autonomous_members().await {
                                     tracing::warn!(
@@ -22577,6 +22604,7 @@ impl MobActor {
                                 return Err(timeout_error);
                             }
                             admission.admit();
+                            progress.awaiting_stage("durable_resume_transition");
                             if let Err(error) = self.resume_lifecycle_after_quiesce().await {
                                 if !rebuilt_attachment
                                     && let Err(stop_error) =
@@ -22595,10 +22623,15 @@ impl MobActor {
                             let mut post_commit_error = None;
                             if rebuilt_attachment {
                                 let rebuild_result = self
-                                    .rebuild_explicit_resume_member_sessions(rebuild)
+                                    .rebuild_explicit_resume_member_sessions(rebuild, &progress)
                                     .await;
+                                progress.awaiting_stage("post_rebuild_readiness");
                                 let readiness_result =
-                                    self.ensure_autonomous_runtimes_from_roster(false).await;
+                                    self.ensure_autonomous_runtimes_from_roster(
+                                        false,
+                                        Some(&progress),
+                                    )
+                                    .await;
                                 if let Err(error) = rebuild_result {
                                     post_commit_error = Some(error);
                                 }
@@ -22611,6 +22644,7 @@ impl MobActor {
 
                             #[cfg(feature = "runtime-adapter")]
                             {
+                                progress.awaiting_stage("resume_topology_reconciliation");
                                 // All exact session attachments are settled before
                                 // topology repair. The shared reconciler consumes its
                                 // generated trust handoffs directly; routing the same
@@ -23327,7 +23361,10 @@ impl MobActor {
                 .await;
         }
         if matches!(self.state(), MobState::Running) {
-            if let Err(error) = self.ensure_autonomous_runtimes_from_roster(false).await {
+            if let Err(error) = self
+                .ensure_autonomous_runtimes_from_roster(false, None)
+                .await
+            {
                 tracing::error!(
                     mob_id = %self.definition.id,
                     error = %error,

@@ -116,11 +116,11 @@ pub use live::{
     LiveSendInputErrorData, LiveSendInputParams, LiveSendInputResult, LiveSendInputStatus,
     LiveStatusResult, LiveTruncateParams, LiveTruncateResult, LiveTruncateStatus,
     LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
-    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveAuthBindingRef,
-    WireLiveChannelCapabilities, WireLiveConfigRejectionReason, WireLiveContinuityMode,
-    WireLiveDegradationReason, WireLiveExecutionIdentityOverrideV1,
-    WireLiveExecutionIdentityVersion, WireLiveIdentityOverride, WireLiveResponseModality,
-    WireLiveTransportBootstrap, WireProvider, WireRealtimeTranscriptEvent,
+    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
+    WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
+    WireLiveExecutionIdentityOverrideV1, WireLiveExecutionIdentityVersion,
+    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
+    WireRealtimeTranscriptEvent,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,

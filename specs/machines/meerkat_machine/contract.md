@@ -230,8 +230,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_result_released_operations`: `Set<OperationId>`
 - `live_result_release_disposition_by_operation`: `Map<OperationId, LiveDelegationResultDisposition>`
 - `live_result_delivery_channel_by_operation`: `Map<OperationId, String>`
+- `live_result_delivery_operation_by_channel`: `Map<String, OperationId>`
 - `live_result_delivery_digest_by_operation`: `Map<OperationId, String>`
 - `live_result_delivery_observation_by_operation`: `Map<OperationId, LiveDelegationResultDeliveryObservation>`
+- `live_result_speech_suppressed_operations`: `Set<OperationId>`
 - `live_result_recovery_replacement_by_channel`: `Map<String, String>`
 - `live_result_recovery_source_by_replacement`: `Map<String, String>`
 - `live_result_recovery_session_by_channel`: `Map<String, String>`
@@ -475,6 +477,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SupersedeLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, superseding_interaction_id: String, operation_id: OperationId, worker_identity: String)
 - `ResolveLiveDelegationCancellation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
 - `RecordLiveDelegationWorkerTerminal`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind)
 - `AuthorizeLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String)
 - `ResolveLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, retired: Bool)
 - `AbandonLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
@@ -939,6 +942,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, reason: LiveDelegationCancellationReason, superseding_interaction_id: Option<String>)
 - `LiveDelegationCancellationResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
 - `LiveDelegationWorkerTerminalRecorded`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind, late: Bool, result_eligible: Bool)
+- `LiveDelegationWorkerRestartReconciled`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind, replay: Bool)
 - `LiveDelegationWorkerRetirementAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String)
 - `LiveDelegationWorkerRetirementResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, retired: Bool)
 - `LiveInteractionAbandoned`(channel_id: String, interaction_id: String)
@@ -950,7 +954,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
 - `LiveDelegationResultReleaseAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, disposition: LiveDelegationResultDisposition)
 - `LiveDelegationResultDeliveryAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
-- `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, retry_allowed: Bool, recovery_required: Bool)
+- `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, speech_disposition: LiveDelegationResultSpeechDisposition, retry_allowed: Bool, recovery_required: Bool)
 - `LiveDelegationResultAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `LiveDelegationResultRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `LiveBridgeOperationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, phase: LiveBridgeOperationPhase)
@@ -1272,6 +1276,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_late_terminal_never_eligible`
 - `live_released_result_requires_confirmed_transcript`
 - `live_result_delivery_is_exact_and_terminal_once`
+- `live_result_speech_suppression_is_exact_and_non_cancelling`
 - `live_result_recovery_is_exact_and_channel_scoped`
 - `live_consequential_authority_requires_confirmed_transcript`
 - `live_pending_context_append_is_exact_and_channel_scoped`
@@ -14885,6 +14890,146 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveDelegationWorkerTerminalRecorded`
 - To: `Stopped`
 
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshIdle`
+- From: `Idle`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_worker_binding`
+  - `durable_terminal_was_not_yet_recorded`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Idle`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshAttached`
+- From: `Attached`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_worker_binding`
+  - `durable_terminal_was_not_yet_recorded`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Attached`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRunning`
+- From: `Running`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_worker_binding`
+  - `durable_terminal_was_not_yet_recorded`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Running`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRetired`
+- From: `Retired`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_worker_binding`
+  - `durable_terminal_was_not_yet_recorded`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Retired`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshStopped`
+- From: `Stopped`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_worker_binding`
+  - `durable_terminal_was_not_yet_recorded`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Stopped`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyIdle`
+- From: `Idle`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_terminal_worker_binding`
+  - `restart_fence_is_not_already_complete`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Idle`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyAttached`
+- From: `Attached`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_terminal_worker_binding`
+  - `restart_fence_is_not_already_complete`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Attached`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRunning`
+- From: `Running`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_terminal_worker_binding`
+  - `restart_fence_is_not_already_complete`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Running`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRetired`
+- From: `Retired`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_terminal_worker_binding`
+  - `restart_fence_is_not_already_complete`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Retired`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyStopped`
+- From: `Stopped`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `original_channel_is_revoked_and_noncurrent`
+  - `exact_persisted_terminal_worker_binding`
+  - `restart_fence_is_not_already_complete`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Stopped`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayIdle`
+- From: `Idle`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `exact_restart_reconciliation_is_committed`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Idle`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayAttached`
+- From: `Attached`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `exact_restart_reconciliation_is_committed`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Attached`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRunning`
+- From: `Running`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `exact_restart_reconciliation_is_committed`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Running`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRetired`
+- From: `Retired`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `exact_restart_reconciliation_is_committed`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Retired`
+
+### `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayStopped`
+- From: `Stopped`
+- On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `exact_restart_reconciliation_is_committed`
+- Emits: `LiveDelegationWorkerRestartReconciled`
+- To: `Stopped`
+
 ### `AuthorizeLiveDelegationWorkerRetirementIdle`
 - From: `Idle`
 - On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
@@ -15052,6 +15197,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_confirmed`
   - `worker_result_is_eligible`
   - `result_not_released`
+  - `channel_result_delivery_slot_available`
 - Emits: `LiveDelegationResultReleaseAuthorized`
 - To: `Idle`
 
@@ -15067,6 +15213,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_confirmed`
   - `worker_result_is_eligible`
   - `result_not_released`
+  - `channel_result_delivery_slot_available`
 - Emits: `LiveDelegationResultReleaseAuthorized`
 - To: `Attached`
 
@@ -15082,6 +15229,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_confirmed`
   - `worker_result_is_eligible`
   - `result_not_released`
+  - `channel_result_delivery_slot_available`
 - Emits: `LiveDelegationResultReleaseAuthorized`
 - To: `Running`
 

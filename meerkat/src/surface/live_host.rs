@@ -22,10 +22,7 @@ use async_trait::async_trait;
 use meerkat_contracts::wire::supervisor_bridge::{BridgeLiveControlOutcome, BridgeLiveControlVerb};
 use meerkat_contracts::{LiveCloseStatus, LiveOpenResult, LiveOpenTransport, RealtimeTurningMode};
 #[cfg(feature = "experimental-gpt-live")]
-use meerkat_contracts::{
-    WireLiveAuthBindingRef, WireLiveExecutionIdentityOverrideV1, WireLiveExecutionIdentityVersion,
-    WireLiveIdentityOverride,
-};
+use meerkat_contracts::{WireLiveExecutionIdentityOverrideV1, WireLiveExecutionIdentityVersion};
 use meerkat_core::connection::RealmId;
 #[cfg(feature = "experimental-gpt-live")]
 use meerkat_core::live_adapter::LiveInputChunk;
@@ -1684,20 +1681,9 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         self.close_live_channel(Some(authority), recovery.closing_channel_id())
             .await?;
 
-        let identity = recovery.llm_identity();
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
-            model: Some(identity.model.clone()),
-            provider: Some(identity.provider.into()),
-            self_hosted_server_id: identity.self_hosted_server_id.clone(),
-            auth_binding: identity.auth_binding.as_ref().map(|binding| {
-                WireLiveIdentityOverride::Set(WireLiveAuthBindingRef {
-                    realm: binding.realm.clone(),
-                    binding: binding.binding.clone(),
-                    profile: binding.profile.clone(),
-                })
-            }),
         };
         let pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
@@ -1822,20 +1808,9 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         self.close_live_channel(Some(authority), recovery.closing_channel_id())
             .await?;
 
-        let identity = recovery.llm_identity();
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
-            model: Some(identity.model.clone()),
-            provider: Some(identity.provider.into()),
-            self_hosted_server_id: identity.self_hosted_server_id.clone(),
-            auth_binding: identity.auth_binding.as_ref().map(|binding| {
-                WireLiveIdentityOverride::Set(WireLiveAuthBindingRef {
-                    realm: binding.realm.clone(),
-                    binding: binding.binding.clone(),
-                    profile: binding.profile.clone(),
-                })
-            }),
         };
         let pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)

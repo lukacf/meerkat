@@ -2400,8 +2400,7 @@ mod tests {
                 "transport": "webrtc",
                 "execution_identity": {
                     "version": "v1",
-                    "model": "gpt-live-1-codex",
-                    "provider": "openai"
+                    "profile_id": meerkat::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID
                 }
             }))),
         }

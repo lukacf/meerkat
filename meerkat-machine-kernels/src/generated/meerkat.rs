@@ -4143,6 +4143,62 @@ impl std::fmt::Display for LiveDelegationResultDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveDelegationResultSpeechDisposition {
+    #[default]
+    #[serde(rename = "Eligible")]
+    Eligible,
+    #[serde(rename = "SuppressedByNewerUserTurn")]
+    SuppressedByNewerUserTurn,
+    #[serde(rename = "NotDelivered")]
+    NotDelivered,
+}
+impl LiveDelegationResultSpeechDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Eligible => "Eligible",
+            Self::SuppressedByNewerUserTurn => "SuppressedByNewerUserTurn",
+            Self::NotDelivered => "NotDelivered",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveDelegationResultSpeechDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Eligible" => Ok(Self::Eligible),
+            "SuppressedByNewerUserTurn" => Ok(Self::SuppressedByNewerUserTurn),
+            "NotDelivered" => Ok(Self::NotDelivered),
+            other => Err(format!(
+                "invalid LiveDelegationResultSpeechDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveDelegationResultSpeechDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveDelegationResultSpeechDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerPhase {
     #[default]
     #[serde(rename = "StartAuthorized")]
@@ -12691,9 +12747,11 @@ pub struct State {
     pub live_result_release_disposition_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationResultDisposition>,
     pub live_result_delivery_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_result_delivery_operation_by_channel: std::collections::BTreeMap<String, OperationId>,
     pub live_result_delivery_digest_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_result_delivery_observation_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationResultDeliveryObservation>,
+    pub live_result_speech_suppressed_operations: std::collections::BTreeSet<OperationId>,
     pub live_result_recovery_replacement_by_channel: std::collections::BTreeMap<String, String>,
     pub live_result_recovery_source_by_replacement: std::collections::BTreeMap<String, String>,
     pub live_result_recovery_session_by_channel: std::collections::BTreeMap<String, String>,
@@ -14327,6 +14385,15 @@ pub mod inputs {
         pub terminal: LiveDelegationWorkerTerminalKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReconcileRevokedLiveDelegationWorkerAfterRestart {
+        pub session_id: String,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub worker_identity: String,
+        pub terminal: LiveDelegationWorkerTerminalKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeLiveDelegationWorkerRetirement {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -15400,6 +15467,9 @@ pub enum Input {
     SupersedeLiveInteraction(inputs::SupersedeLiveInteraction),
     ResolveLiveDelegationCancellation(inputs::ResolveLiveDelegationCancellation),
     RecordLiveDelegationWorkerTerminal(inputs::RecordLiveDelegationWorkerTerminal),
+    ReconcileRevokedLiveDelegationWorkerAfterRestart(
+        inputs::ReconcileRevokedLiveDelegationWorkerAfterRestart,
+    ),
     AuthorizeLiveDelegationWorkerRetirement(inputs::AuthorizeLiveDelegationWorkerRetirement),
     ResolveLiveDelegationWorkerRetirement(inputs::ResolveLiveDelegationWorkerRetirement),
     AbandonLiveInteraction(inputs::AbandonLiveInteraction),
@@ -15842,6 +15912,9 @@ impl Input {
             Self::RecordLiveDelegationWorkerTerminal(_) => {
                 InputKind::RecordLiveDelegationWorkerTerminal
             }
+            Self::ReconcileRevokedLiveDelegationWorkerAfterRestart(_) => {
+                InputKind::ReconcileRevokedLiveDelegationWorkerAfterRestart
+            }
             Self::AuthorizeLiveDelegationWorkerRetirement(_) => {
                 InputKind::AuthorizeLiveDelegationWorkerRetirement
             }
@@ -16271,6 +16344,7 @@ pub enum InputKind {
     SupersedeLiveInteraction,
     ResolveLiveDelegationCancellation,
     RecordLiveDelegationWorkerTerminal,
+    ReconcileRevokedLiveDelegationWorkerAfterRestart,
     AuthorizeLiveDelegationWorkerRetirement,
     ResolveLiveDelegationWorkerRetirement,
     AbandonLiveInteraction,
@@ -17255,6 +17329,15 @@ pub mod effects {
         pub result_eligible: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationWorkerRestartReconciled {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub worker_identity: String,
+        pub terminal: LiveDelegationWorkerTerminalKind,
+        pub replay: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationWorkerRetirementAuthorized {
         pub channel_id: String,
         pub interaction_id: String,
@@ -17335,6 +17418,7 @@ pub mod effects {
         pub result_digest: String,
         pub disposition: LiveDelegationResultDisposition,
         pub observation: LiveDelegationResultDeliveryObservation,
+        pub speech_disposition: LiveDelegationResultSpeechDisposition,
         pub retry_allowed: bool,
         pub recovery_required: bool,
     }
@@ -18001,6 +18085,7 @@ pub enum Effect {
     LiveDelegationCancellationAuthorized(effects::LiveDelegationCancellationAuthorized),
     LiveDelegationCancellationResolved(effects::LiveDelegationCancellationResolved),
     LiveDelegationWorkerTerminalRecorded(effects::LiveDelegationWorkerTerminalRecorded),
+    LiveDelegationWorkerRestartReconciled(effects::LiveDelegationWorkerRestartReconciled),
     LiveDelegationWorkerRetirementAuthorized(effects::LiveDelegationWorkerRetirementAuthorized),
     LiveDelegationWorkerRetirementResolved(effects::LiveDelegationWorkerRetirementResolved),
     LiveInteractionAbandoned(effects::LiveInteractionAbandoned),
@@ -18237,6 +18322,7 @@ pub enum EffectKind {
     LiveDelegationCancellationAuthorized,
     LiveDelegationCancellationResolved,
     LiveDelegationWorkerTerminalRecorded,
+    LiveDelegationWorkerRestartReconciled,
     LiveDelegationWorkerRetirementAuthorized,
     LiveDelegationWorkerRetirementResolved,
     LiveInteractionAbandoned,
@@ -20083,6 +20169,21 @@ pub enum TransitionId {
     RecordLiveDelegationWorkerTerminalRunning,
     RecordLiveDelegationWorkerTerminalRetired,
     RecordLiveDelegationWorkerTerminalStopped,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartFreshIdle,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartFreshAttached,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRunning,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRetired,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartFreshStopped,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyIdle,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyAttached,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRunning,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRetired,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyStopped,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayIdle,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayAttached,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRunning,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRetired,
+    ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayStopped,
     AuthorizeLiveDelegationWorkerRetirementIdle,
     AuthorizeLiveDelegationWorkerRetirementAttached,
     AuthorizeLiveDelegationWorkerRetirementRunning,
@@ -21307,8 +21408,10 @@ pub fn initial_state() -> State {
         live_result_released_operations: Default::default(),
         live_result_release_disposition_by_operation: Default::default(),
         live_result_delivery_channel_by_operation: Default::default(),
+        live_result_delivery_operation_by_channel: Default::default(),
         live_result_delivery_digest_by_operation: Default::default(),
         live_result_delivery_observation_by_operation: Default::default(),
+        live_result_speech_suppressed_operations: Default::default(),
         live_result_recovery_replacement_by_channel: Default::default(),
         live_result_recovery_source_by_replacement: Default::default(),
         live_result_recovery_session_by_channel: Default::default(),

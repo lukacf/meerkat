@@ -4029,9 +4029,10 @@ mod tests {
     #[test]
     fn test_all_tool_definitions_present() {
         let defs = build_tool_defs();
-        assert_eq!(defs.len(), 11);
+        assert_eq!(defs.len(), 12);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"delegate"));
+        assert!(names.contains(&"fork_off"));
         assert!(names.contains(&"conclude_objective"));
         assert!(names.contains(&"mob_create"));
         assert!(names.contains(&"mob_destroy"));
@@ -5272,17 +5273,16 @@ mod tests {
             parent_peer_id,
             parent_comms.clone() as Arc<dyn CoreCommsRuntime>,
         ));
-        let execution = DelegationExecutionService::new(handle.clone())
-            .execute(request)
+        let delegation_service = DelegationExecutionService::new(handle.clone());
+        let execution = delegation_service
+            .start(request)
             .await
-            .expect("execute delegated helper for wiring test");
+            .expect("start delegated helper for wiring test")
+            .await_terminal()
+            .await;
         assert!(
             execution.wired(),
             "delegate wiring should succeed when creator comms are present"
-        );
-        assert!(
-            execution.retirement_error().is_some(),
-            "this fixture keeps the helper inspectable through explicit cleanup debt"
         );
 
         let helper_bridge_session_id = handle
@@ -5364,6 +5364,13 @@ mod tests {
                 )
             }),
             "delegate wiring must emit mob.peer_added to the helper"
+        );
+        assert!(
+            delegation_service
+                .retire_terminalized(&execution)
+                .await
+                .is_err(),
+            "this fixture retains explicit cleanup debt after the wiring evidence is inspected"
         );
     }
 

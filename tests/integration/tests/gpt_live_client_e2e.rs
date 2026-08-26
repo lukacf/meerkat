@@ -30,6 +30,7 @@ use meerkat_rpc::router::NotificationSink;
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{Duration, Instant, sleep, timeout};
@@ -504,24 +505,73 @@ where
             return Ok(events);
         }
         if Instant::now() >= deadline {
-            let mut type_counts = std::collections::BTreeMap::<&str, usize>::new();
-            for event in &events {
-                let event_type = event
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<unknown>");
-                *type_counts.entry(event_type).or_default() += 1;
-            }
+            let event_summary = browser_event_summary(&events);
             return Err(format!(
-                "timed out waiting for provider events; raw_messages={}, parse_failures={}, observed {} events across {} types: {type_counts:?}",
+                "timed out waiting for provider events; raw_messages={}, parse_failures={}, {event_summary}",
                 peer.last_raw_messages,
-                peer.last_parse_failures,
-                events.len(),
-                type_counts.len()
+                peer.last_parse_failures
             )
             .into());
         }
         sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn browser_event_kind_class(event: &Value) -> &'static str {
+    match event.get("type").and_then(Value::as_str) {
+        Some("session.started") => "session.started",
+        Some("session.context.appended") => "session.context.appended",
+        Some("input_transcript.added") => "input_transcript.added",
+        Some("output_transcript.added") => "output_transcript.added",
+        Some("turn.created") => "turn.created",
+        Some("turn.delta") => "turn.delta",
+        Some("turn.done") => "turn.done",
+        Some("delegation.created") => "delegation.created",
+        Some("delegation.context.appended") => "delegation.context.appended",
+        _ => "unknown",
+    }
+}
+
+fn browser_event_summary(events: &[Value]) -> String {
+    let mut kind_counts = std::collections::BTreeMap::<&'static str, usize>::new();
+    let mut normalized_json_bytes = 0usize;
+    for event in events {
+        *kind_counts
+            .entry(browser_event_kind_class(event))
+            .or_default() += 1;
+        normalized_json_bytes = normalized_json_bytes
+            .saturating_add(serde_json::to_vec(event).map_or(0, |encoded| encoded.len()));
+    }
+    format!(
+        "observed {} events across {} safe classes with normalized_json_bytes={normalized_json_bytes}: {kind_counts:?}",
+        events.len(),
+        kind_counts.len()
+    )
+}
+
+#[cfg(test)]
+mod browser_event_summary_tests {
+    use super::browser_event_summary;
+
+    #[test]
+    fn unknown_event_kinds_and_payloads_are_not_rendered() {
+        let events = vec![
+            serde_json::json!({
+                "type": "FIXTURE_PRIVATE_UNKNOWN_KIND",
+                "secret": "FIXTURE_PRIVATE_BROWSER_PAYLOAD"
+            }),
+            serde_json::json!({
+                "type": "turn.done",
+                "turn": { "transcript": "FIXTURE_PRIVATE_TRANSCRIPT" }
+            }),
+        ];
+
+        let summary = browser_event_summary(&events);
+        assert!(summary.contains("unknown"));
+        assert!(summary.contains("turn.done"));
+        assert!(!summary.contains("FIXTURE_PRIVATE_UNKNOWN_KIND"));
+        assert!(!summary.contains("FIXTURE_PRIVATE_BROWSER_PAYLOAD"));
+        assert!(!summary.contains("FIXTURE_PRIVATE_TRANSCRIPT"));
     }
 }
 
@@ -596,9 +646,7 @@ async fn delegated_executor_diagnostic(rpc: &mut JsonlRpcClient, mob_id: &str) -
 fn execution_identity(profile_id: &str) -> Value {
     json!({
         "version":"v1",
-        "profile_id":profile_id,
-        "model":"gpt-live-1-codex",
-        "provider":"openai"
+        "profile_id":profile_id
     })
 }
 
@@ -608,7 +656,7 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
 {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::experimental::gpt_live=debug,meerkat_openai::gpt_live=warn,meerkat::experimental_gpt_live=warn,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
+            "oai_rt_rs::experimental::gpt_live=debug,meerkat_openai::gpt_live=debug,meerkat::experimental_gpt_live=warn,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -765,6 +813,13 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
                 auth_lease: runtime.generated_auth_lease_handle(),
                 mobs: Arc::clone(&mobs),
             }),
+            execution_identity: meerkat_core::SessionLlmIdentity {
+                model: "gpt-live-1-codex".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: Some(binding.clone()),
+            },
             realm: binding.realm.clone(),
             factory_identity,
             transport: Arc::clone(&experimental_transport),
@@ -853,18 +908,94 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
         .await?;
 
+    peer.call(json!({"type":"arm_barge_in","name":"greeting"}))
+        .await?;
     let greeting_audio_baseline = peer.audio_evidence().await?;
     let before = peer.events().await?.len();
     peer.call(json!({"type":"play","name":"greeting"})).await?;
+    let interrupted_output = rpc
+        .wait_for_notification("live/assistant_output_available", 30)
+        .await?;
+    assert_eq!(interrupted_output["channel_id"], open["channel_id"]);
+    let truncated = rpc
+        .call(
+            "live/truncate",
+            json!({
+                "channel_id": interrupted_output["channel_id"],
+                "output_id": interrupted_output["output_id"],
+                "audio_played_ms": 0,
+            }),
+            30,
+        )
+        .await?;
+    assert_eq!(
+        truncated["status"], "truncated",
+        "barge-in must retire the interrupted playback owner before another assistant output"
+    );
     let greeting = wait_for_events(&mut peer, 90, |events| {
         let turn = &events[before..];
         turn.iter()
-            .any(|event| event["type"] == "turn.done" && event["turn"]["role"] == "user")
+            .filter(|event| event["type"] == "turn.done" && event["turn"]["role"] == "user")
+            .count()
+            >= 2
             && turn
                 .iter()
-                .any(|event| event["type"] == "turn.done" && event["turn"]["role"] == "assistant")
+                .filter(|event| {
+                    event["type"] == "turn.done" && event["turn"]["role"] == "assistant"
+                })
+                .count()
+                >= 2
     })
     .await?;
+    let snapshot = peer.snapshot().await?;
+    assert_eq!(
+        snapshot["barge_in"]["failures"].as_u64(),
+        Some(0),
+        "browser failed to start the armed barge-in fixture"
+    );
+    let barge_start = snapshot["barge_in"]["starts"]
+        .as_array()
+        .and_then(|starts| starts.first())
+        .ok_or("browser did not start the armed barge-in fixture")?;
+    let interrupted_assistant = &barge_start["assistant_turn_id"];
+    let event_count_at_start: usize = barge_start["event_count_at_start"]
+        .as_u64()
+        .ok_or("browser barge-in evidence has no event count")?
+        .try_into()?;
+    let interrupted_start_index = greeting
+        .iter()
+        .position(|event| {
+            event["type"] == "turn.created"
+                && event["turn"]["role"] == "assistant"
+                && &event["turn"]["id"] == interrupted_assistant
+        })
+        .ok_or("armed barge-in has no exact assistant start")?;
+    let interrupted_done_index = greeting
+        .iter()
+        .position(|event| {
+            event["type"] == "turn.done"
+                && event["turn"]["role"] == "assistant"
+                && &event["turn"]["id"] == interrupted_assistant
+        })
+        .ok_or("armed barge-in has no exact assistant terminal")?;
+    assert_eq!(
+        event_count_at_start,
+        interrupted_start_index + 1,
+        "the browser must start barge-in audio synchronously at the exact assistant-start boundary"
+    );
+    assert!(
+        interrupted_done_index >= event_count_at_start,
+        "barge-in audio must start before the interrupted assistant terminalizes"
+    );
+    assert!(
+        greeting
+            .iter()
+            .enumerate()
+            .any(|(index, event)| index >= event_count_at_start
+                && event["type"] == "turn.created"
+                && event["turn"]["role"] == "user"),
+        "provider did not admit the user turn started by the armed barge-in audio"
+    );
     wait_for_spoken_output(&mut peer, greeting_audio_baseline, 30).await?;
     let greeting_output = rpc
         .wait_for_notification("live/assistant_output_available", 30)
@@ -883,8 +1014,8 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         !greeting[before..]
             .iter()
             .any(|event| event["type"] == "delegation.created"),
-        "simple greeting must remain in the same live conversation; observed events={}",
-        serde_json::to_string(&greeting[before..]).unwrap_or_else(|_| "<unavailable>".to_string())
+        "simple greeting must remain in the same live conversation; {}",
+        browser_event_summary(&greeting[before..])
     );
 
     let before = greeting.len();
@@ -912,6 +1043,14 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         .find(|event| event["type"] == "delegation.created")
         .expect("joined delegation");
     assert_eq!(delegation["item"]["target"], "client");
+    let provider_delegation_ref = delegation["item"]["id"]
+        .as_str()
+        .ok_or("joined delegation has no provider item id")?
+        .to_string();
+    let joined_user_turn_id = delegation["item"]["user_bidi_turn_id"]
+        .as_str()
+        .ok_or("joined delegation has no provider user turn id")?
+        .to_string();
     let acknowledgement_output = rpc
         .wait_for_notification("live/assistant_output_available", 30)
         .await?;
@@ -929,10 +1068,10 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     let append_deadline = Instant::now() + Duration::from_secs(240);
     let acked = loop {
         let events = peer.events().await?;
-        if events[before..]
-            .iter()
-            .any(|event| event["type"] == "delegation.context.appended")
-        {
+        if events[before..].iter().any(|event| {
+            event["type"] == "delegation.context.appended"
+                && event["delegation_item_id"].as_str() == Some(provider_delegation_ref.as_str())
+        }) {
             break events;
         }
         let now = Instant::now();
@@ -952,8 +1091,28 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     };
     let ack_index = acked
         .iter()
-        .position(|event| event["type"] == "delegation.context.appended")
-        .expect("context append ack");
+        .position(|event| {
+            event["type"] == "delegation.context.appended"
+                && event["delegation_item_id"].as_str() == Some(provider_delegation_ref.as_str())
+        })
+        .expect("exact context append ack");
+    let joined_turn_done_index = acked
+        .iter()
+        .position(|event| {
+            event["type"] == "turn.done"
+                && event["turn"]["role"] == "user"
+                && event["turn"]["id"].as_str() == Some(joined_user_turn_id.as_str())
+        })
+        .expect("exact joined user turn.done");
+    assert!(
+        joined_turn_done_index < ack_index,
+        "exact joined user turn.done at index {joined_turn_done_index} must precede the exact delegation.context.appended at index {ack_index}"
+    );
+    let provider_delegation_ref_digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(provider_delegation_ref.as_bytes())
+    );
+    assert_eq!(provider_delegation_ref_digest.len(), "sha256:".len() + 64);
     let post_append_audio_baseline = peer.audio_evidence().await?;
     wait_for_events(&mut peer, 90, |events| {
         events[ack_index + 1..]
@@ -1001,7 +1160,9 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     peer.close().await;
     drop(rpc);
     server_task.abort();
-    println!("GPT_LIVE_CLIENT_E2E_OK");
+    println!(
+        "GPT_LIVE_CLIENT_E2E_OK delegation_ref_digest={provider_delegation_ref_digest} joined_turn_done_index={joined_turn_done_index} context_appended_index={ack_index}"
+    );
     Ok(())
 }
 

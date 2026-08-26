@@ -1147,6 +1147,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Delivered", "Rejected", "Ambiguous"],
             ),
             NamedTypeBinding::string_enum(
+                "LiveDelegationResultSpeechDisposition",
+                &["Eligible", "SuppressedByNewerUserTurn", "NotDelivered"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveDelegationWorkerPhase",
                 &[
                     "StartAuthorized",

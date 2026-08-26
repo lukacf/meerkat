@@ -798,6 +798,303 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
 }
 
 #[test]
+fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
+    const NEW_INTERACTION: &str = "33333333-3333-4333-8333-333333333333";
+    const NEW_PROVIDER_TURN: &str = "opaque-provider-turn-newer-before-result";
+    const RESULT_DIGEST: &str = "worker-pending-old-result-digest";
+
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    admit_provider_turn_delegation(&mut authority);
+    confirm_delegation_transcript(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            worker_identity: WORKER.to_string(),
+        },
+    )
+    .expect("old worker start is authorized");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+            started: true,
+        },
+    )
+    .expect("old worker is still running when the user turn completes");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("old provider turn completes while its worker remains pending");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: NEW_INTERACTION.to_string(),
+            provider_turn_ref: NEW_PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("newer user turn suppresses speech for the still-running old operation");
+    assert!(
+        authority
+            .state()
+            .live_result_speech_suppressed_operations
+            .contains(&operation_id()),
+        "suppression is machine-owned before worker completion or result release"
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            worker_identity: WORKER.to_string(),
+            terminal: mm::LiveDelegationWorkerTerminalKind::Completed,
+        },
+    )
+    .expect("old worker completion remains durable after the newer user turn");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("old completed result is truthfully released as deferred context");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: RESULT_DIGEST.to_string(),
+            disposition: mm::LiveDelegationResultDisposition::DeferredContext,
+        },
+    )
+    .expect("old released result receives exact provider delivery authority");
+    let resolution = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: RESULT_DIGEST.to_string(),
+            replacement_channel_id: String::new(),
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+        },
+    )
+    .expect("old result acknowledgement remains a truthful delivered terminal");
+
+    assert!(resolution.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+            speech_disposition:
+                mm::LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn,
+            retry_allowed: false,
+            recovery_required: false,
+            ..
+        }
+    )));
+    assert_eq!(
+        authority
+            .state()
+            .live_delegation_worker_terminal_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationWorkerTerminalKind::Completed),
+        "speech suppression cannot rewrite durable executor completion"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_result_delivery_observation_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationResultDeliveryObservation::Delivered),
+        "suppressed speech still projects truthful provider delivery"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                assistant_turn_ref: "stale-worker-result-assistant".to_string(),
+            },
+        )
+        .is_err(),
+        "old delivered result cannot admit spoken output after the newer user turn"
+    );
+}
+
+#[test]
+fn newer_user_turn_suppresses_late_old_result_speech_without_cancelling_completion() {
+    const NEW_INTERACTION: &str = "22222222-2222-4222-8222-222222222222";
+    const NEW_PROVIDER_TURN: &str = "opaque-provider-turn-newer";
+    const RESULT_DIGEST: &str = "late-old-result-digest";
+
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("old result is released while its provider turn is still open");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: RESULT_DIGEST.to_string(),
+            disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+        },
+    )
+    .expect("old result delivery is authorized before the newer user turn");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("old provider turn completes");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: NEW_INTERACTION.to_string(),
+            provider_turn_ref: NEW_PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("newer user turn supersedes the old result speech window");
+
+    let resolution = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: RESULT_DIGEST.to_string(),
+            replacement_channel_id: String::new(),
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+        },
+    )
+    .expect("late old append acknowledgement remains a truthful delivered terminal");
+    assert!(resolution.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+            speech_disposition:
+                mm::LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn,
+            retry_allowed: false,
+            recovery_required: false,
+            ..
+        }
+    )));
+    assert_eq!(
+        authority
+            .state()
+            .live_delegation_worker_terminal_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationWorkerTerminalKind::Completed),
+        "speech suppression cannot rewrite durable executor completion"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_result_delivery_observation_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationResultDeliveryObservation::Delivered),
+        "result delivery remains projected as delivered"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_active_interaction_by_channel
+            .get(CHANNEL)
+            .map(String::as_str),
+        Some(NEW_INTERACTION),
+        "late acknowledgement cannot replace the newer foreground interaction"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                assistant_turn_ref: "stale-old-result-assistant".to_string(),
+            },
+        )
+        .is_err(),
+        "late old result acknowledgement cannot reopen spoken output"
+    );
+}
+
+#[test]
 fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
     let mut authority = opened_authority();
     bind_experimental(&mut authority, 0);

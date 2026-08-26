@@ -13,7 +13,7 @@
 //! the `LiveOpenResult` / `LiveStatusResult` titles so SDK codegen sees a
 //! single source of truth.
 
-use serde::de::{self, DeserializeOwned};
+use serde::de;
 use serde::{Deserialize, Serialize};
 
 use meerkat_core::Provider;
@@ -105,13 +105,12 @@ impl TryFrom<WireProvider> for Provider {
     }
 }
 
-/// Capability required before a client may send a live execution-identity
-/// override.
+/// Capability required before a client may select a live execution profile.
 ///
 /// The capability is versioned independently from the surrounding live RPC
-/// family so a client can refuse an older gateway before sending a
-/// credential-bearing override. The strict `LiveOpenParams` decoder provides
-/// the server-side half: an older contract cannot silently ignore the field.
+/// family so a client can refuse an older gateway before selecting a profile.
+/// The strict `LiveOpenParams` decoder provides the server-side half: an older
+/// contract cannot silently ignore the field.
 pub const LIVE_EXECUTION_IDENTITY_V1_CAPABILITY: &str = "live.execution_identity.v1";
 pub const LIVE_FUNCTION_BRIDGE_V1_CAPABILITY: &str = "live.execution.function_bridge.v1";
 pub const LIVE_CLIENT_CONTEXT_V1_CAPABILITY: &str = "live.execution.client_context.v1";
@@ -124,146 +123,7 @@ pub enum WireLiveExecutionIdentityVersion {
     V1,
 }
 
-/// Strict live-only projection of [`crate::wire::WireAuthBindingRef`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct WireLiveAuthBindingRef {
-    pub realm: meerkat_core::connection::RealmId,
-    pub binding: meerkat_core::connection::BindingId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<meerkat_core::connection::ProfileId>,
-}
-
-impl From<crate::wire::connection::WireAuthBindingRef> for WireLiveAuthBindingRef {
-    fn from(value: crate::wire::connection::WireAuthBindingRef) -> Self {
-        Self {
-            realm: value.realm,
-            binding: value.binding,
-            profile: value.profile,
-        }
-    }
-}
-
-impl From<WireLiveAuthBindingRef> for crate::wire::connection::WireAuthBindingRef {
-    fn from(value: WireLiveAuthBindingRef) -> Self {
-        Self {
-            realm: value.realm,
-            binding: value.binding,
-            profile: value.profile,
-        }
-    }
-}
-
-/// Strict tri-state override used inside live execution identity.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(
-    tag = "action",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum WireLiveIdentityOverride<T> {
-    Set(T),
-    Clear,
-}
-
-impl<'de, T> Deserialize<'de> for WireLiveIdentityOverride<T>
-where
-    T: DeserializeOwned,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = serde_json::Value::deserialize(deserializer)?;
-        let object = raw.as_object().ok_or_else(|| {
-            de::Error::custom("live identity override must be an action envelope")
-        })?;
-        let action = object
-            .get("action")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| de::Error::custom("live identity override action must be a string"))?;
-
-        match action {
-            "set" => {
-                if object.len() != 2 || !object.contains_key("value") {
-                    return Err(de::Error::custom(
-                        "live identity set override requires exactly action and value",
-                    ));
-                }
-                let value = object.get("value").ok_or_else(|| {
-                    de::Error::custom("live identity set override is missing value")
-                })?;
-                if value.is_null() {
-                    return Err(de::Error::custom(
-                        "live identity set override value must not be null",
-                    ));
-                }
-                serde_json::from_value(value.clone())
-                    .map(Self::Set)
-                    .map_err(de::Error::custom)
-            }
-            "clear" => {
-                if object.len() != 1 {
-                    return Err(de::Error::custom(
-                        "live identity clear override accepts only action",
-                    ));
-                }
-                Ok(Self::Clear)
-            }
-            other => Err(de::Error::custom(format!(
-                "unknown live identity override action `{other}`"
-            ))),
-        }
-    }
-}
-
-fn deserialize_present_live_identity_field<'de, D, T>(
-    deserializer: D,
-) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
-fn deserialize_present_non_empty_live_identity_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.trim().is_empty() {
-        return Err(de::Error::custom(
-            "live execution identity string must be non-empty",
-        ));
-    }
-    Ok(Some(value))
-}
-
-impl<T> From<super::runtime::WireTurnMetadataOverride<T>> for WireLiveIdentityOverride<T> {
-    fn from(value: super::runtime::WireTurnMetadataOverride<T>) -> Self {
-        match value {
-            super::runtime::WireTurnMetadataOverride::Set(value) => Self::Set(value),
-            super::runtime::WireTurnMetadataOverride::Clear => Self::Clear,
-        }
-    }
-}
-
-impl<T> From<WireLiveIdentityOverride<T>> for super::runtime::WireTurnMetadataOverride<T> {
-    fn from(value: WireLiveIdentityOverride<T>) -> Self {
-        match value {
-            WireLiveIdentityOverride::Set(value) => Self::Set(value),
-            WireLiveIdentityOverride::Clear => Self::Clear,
-        }
-    }
-}
-
-/// Strict, versioned channel-scoped LLM identity override for live execution.
+/// Strict, versioned channel-scoped profile selector for live execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -271,35 +131,11 @@ pub struct WireLiveExecutionIdentityOverrideV1 {
     pub version: WireLiveExecutionIdentityVersion,
     /// Stable host-registered execution profile selected for this channel.
     ///
-    /// The profile definition owns provider mode, capability atoms, and any
-    /// approved top-level GPT Live session instructions. Callers select only
-    /// this catalog identity; they cannot supply provider instruction prose.
+    /// The host-owned profile definition owns the full LLM identity, provider
+    /// mode, auth binding, capability atoms, and approved session instructions.
+    /// Callers select only this catalog identity.
     #[serde(deserialize_with = "deserialize_non_empty_live_identity_string")]
     pub profile_id: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_non_empty_live_identity_string"
-    )]
-    pub model: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_live_identity_field"
-    )]
-    pub provider: Option<WireProvider>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_non_empty_live_identity_string"
-    )]
-    pub self_hosted_server_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_live_identity_field"
-    )]
-    pub auth_binding: Option<WireLiveIdentityOverride<WireLiveAuthBindingRef>>,
 }
 
 fn deserialize_non_empty_live_identity_string<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -338,8 +174,9 @@ pub struct LiveOpenParams {
     pub turning_mode: Option<RealtimeTurningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<LiveOpenTransport>,
-    /// Channel-scoped execution identity. This never mutates the durable
-    /// session identity and requires negotiated
+    /// Channel-scoped execution profile selection. The host owns the full
+    /// execution identity. This never mutates the durable session identity and
+    /// requires negotiated
     /// [`LIVE_EXECUTION_IDENTITY_V1_CAPABILITY`] support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_identity: Option<WireLiveExecutionIdentityOverrideV1>,

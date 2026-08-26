@@ -331,6 +331,352 @@ mod live_context_mirror_tests {
         (machine, session_id, channel_id)
     }
 
+    async fn running_client_context_worker() -> (
+        crate::MeerkatMachine,
+        SessionId,
+        meerkat_live::LiveChannelId,
+        meerkat_core::OperationId,
+        meerkat_core::InteractionId,
+        String,
+    ) {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        machine
+            .resolve_live_execution_mode_admission(
+                &session_id,
+                &channel_id,
+                "test-client-context-restart",
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .await
+            .expect("admit ClientContext execution mode");
+        machine
+            .stage_experimental_live_execution(&session_id, &channel_id, 0)
+            .await
+            .expect("stage ClientContext execution");
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read ClientContext runtime binding");
+        let runtime_id = state.active_runtime_id.expect("active runtime id");
+        let fence_token = state.active_fence_token.expect("active runtime fence");
+        let generation = state
+            .active_runtime_generation
+            .expect("active runtime generation");
+        let interaction_id = meerkat_core::InteractionId::new();
+        let operation_id = meerkat_core::OperationId::new();
+        let dsl_operation_id = crate::meerkat_machine::dsl::OperationId::from_domain(&operation_id);
+        let provider_turn_ref = "provider-client-context-restart".to_string();
+        let worker_identity = format!("live-delegation-{operation_id}");
+
+        for (input, label) in [
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    provider_turn_ref: provider_turn_ref.clone(),
+                },
+                "test:ObserveClientContextTurnStarted",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AdmitLiveDelegation {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: dsl_operation_id.clone(),
+                    provider_turn_correlation: provider_turn_ref.clone(),
+                    delegation_identity_present: true,
+                    actionable_input_present: true,
+                    exact_join: true,
+                },
+                "test:AdmitClientContextDelegation",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: dsl_operation_id.clone(),
+                    provider_turn_correlation: provider_turn_ref,
+                    final_transcript_committed: true,
+                    normalized_digest_matches: true,
+                },
+                "test:ReconcileClientContextTranscript",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: dsl_operation_id.clone(),
+                    provider_turn_correlation: "provider-client-context-restart".to_string(),
+                    worker_identity: worker_identity.clone(),
+                },
+                "test:AuthorizeClientContextWorkerStart",
+            ),
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+                    channel_id: channel_id.to_string(),
+                    runtime_id,
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: dsl_operation_id,
+                    worker_identity: worker_identity.clone(),
+                    started: true,
+                },
+                "test:ResolveClientContextWorkerStart",
+            ),
+        ] {
+            machine
+                .apply_session_dsl_input(&session_id, input, label)
+                .await
+                .expect("prepare exact running ClientContext worker");
+        }
+
+        (
+            machine,
+            session_id,
+            channel_id,
+            operation_id,
+            interaction_id,
+            worker_identity,
+        )
+    }
+
+    async fn record_client_context_worker_terminal(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        operation_id: &meerkat_core::OperationId,
+        interaction_id: meerkat_core::InteractionId,
+        worker_identity: &str,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read current ClientContext worker binding");
+        machine
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: state.active_runtime_id.expect("active runtime id"),
+                    fence_token: state.active_fence_token.expect("active runtime fence"),
+                    generation: state
+                        .active_runtime_generation
+                        .expect("active runtime generation"),
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        operation_id,
+                    ),
+                    worker_identity: worker_identity.to_string(),
+                    terminal: crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Completed,
+                },
+                "test:RecordClientContextWorkerTerminal",
+            )
+            .await
+            .expect("record exact ClientContext worker terminal");
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_reconciles_fresh_terminal_only_after_exact_revocation() {
+        let (machine, session_id, channel_id, operation_id, interaction_id, worker_identity) =
+            running_client_context_worker().await;
+        let active = machine
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("project active ClientContext worker");
+        assert_eq!(active.len(), 1);
+        let active = active.into_iter().next().expect("one active worker");
+        assert_eq!(
+            active.phase(),
+            crate::live_execution::LiveDelegationRecoveryPhase::Running
+        );
+        assert!(
+            machine
+                .reconcile_revoked_live_delegation_worker_after_restart(
+                    &active,
+                    crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+                )
+                .await
+                .is_err(),
+            "an active/current provider channel must refuse restart reconciliation"
+        );
+
+        machine
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("revoke original ClientContext channel");
+        let revoked = machine
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("project revoked ClientContext worker")
+            .into_iter()
+            .next()
+            .expect("one revoked worker");
+        let mismatched_worker = crate::live_execution::LiveDelegationRecoverySnapshot::new(
+            session_id.clone(),
+            channel_id.clone(),
+            operation_id.clone(),
+            interaction_id,
+            format!("{worker_identity}-mismatch"),
+            revoked.phase(),
+            revoked.terminal(),
+            revoked.late(),
+            revoked.result_eligible(),
+        );
+        assert!(
+            machine
+                .reconcile_revoked_live_delegation_worker_after_restart(
+                    &mismatched_worker,
+                    crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+                )
+                .await
+                .is_err(),
+            "restart reconciliation must reject a caller-substituted worker identity"
+        );
+
+        let reconciled = machine
+            .reconcile_revoked_live_delegation_worker_after_restart(
+                &revoked,
+                crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("reconcile exact durable terminal after revocation");
+        assert_eq!(reconciled.operation_id(), &operation_id);
+        assert_eq!(reconciled.interaction_id(), interaction_id);
+        assert_eq!(reconciled.worker_identity(), worker_identity);
+        assert_eq!(
+            reconciled.phase(),
+            crate::live_execution::LiveDelegationRecoveryPhase::Retired
+        );
+        assert_eq!(
+            reconciled.terminal(),
+            Some(crate::live_execution::LiveDelegationWorkerTerminalKind::Completed)
+        );
+        assert!(reconciled.late());
+        assert!(!reconciled.result_eligible());
+
+        let replay = machine
+            .reconcile_revoked_live_delegation_worker_after_restart(
+                &revoked,
+                crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("exact restart reconciliation replay converges");
+        assert_eq!(replay, reconciled);
+
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read restart-fenced generated state");
+        let dsl_operation_id = crate::meerkat_machine::dsl::OperationId::from_domain(&operation_id);
+        assert!(
+            !state
+                .live_result_released_operations
+                .contains(&dsl_operation_id)
+        );
+        assert!(
+            !state
+                .live_result_delivery_channel_by_operation
+                .contains_key(&dsl_operation_id)
+        );
+        assert!(
+            !state
+                .live_result_delivery_digest_by_operation
+                .contains_key(&dsl_operation_id)
+        );
+        assert!(
+            !state
+                .live_result_delivery_observation_by_operation
+                .contains_key(&dsl_operation_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_retires_already_terminal_worker_idempotently() {
+        let (machine, session_id, channel_id, operation_id, interaction_id, worker_identity) =
+            running_client_context_worker().await;
+        record_client_context_worker_terminal(
+            &machine,
+            &session_id,
+            &channel_id,
+            &operation_id,
+            interaction_id,
+            &worker_identity,
+        )
+        .await;
+        machine
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("revoke terminal ClientContext channel");
+        let terminal = machine
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("project terminal ClientContext worker")
+            .into_iter()
+            .next()
+            .expect("one terminal worker");
+        assert_eq!(
+            terminal.phase(),
+            crate::live_execution::LiveDelegationRecoveryPhase::Terminal
+        );
+        assert!(terminal.result_eligible());
+
+        let first = machine
+            .reconcile_revoked_live_delegation_worker_after_restart(
+                &terminal,
+                crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("fence already-recorded terminal after restart");
+        let replay = machine
+            .reconcile_revoked_live_delegation_worker_after_restart(
+                &terminal,
+                crate::live_execution::LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("replay exact terminal restart reconciliation");
+        assert_eq!(first, replay);
+        assert_eq!(
+            replay.phase(),
+            crate::live_execution::LiveDelegationRecoveryPhase::Retired
+        );
+        assert!(replay.late());
+        assert!(!replay.result_eligible());
+
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read terminal replay state");
+        let dsl_operation_id = crate::meerkat_machine::dsl::OperationId::from_domain(&operation_id);
+        assert!(
+            !state
+                .live_result_released_operations
+                .contains(&dsl_operation_id)
+        );
+        assert!(
+            !state
+                .live_result_delivery_channel_by_operation
+                .contains_key(&dsl_operation_id)
+        );
+    }
+
     async fn admitted_live_bridge_operation_on(
         machine: crate::MeerkatMachine,
     ) -> (
@@ -3874,6 +4220,195 @@ impl MeerkatMachine {
         Ok(snapshots)
     }
 
+    /// Return every durable generated ClientContext worker operation for one
+    /// session.
+    ///
+    /// This is a read-only restart projection. It intentionally omits the
+    /// provider delegation reference and therefore cannot reconstruct an
+    /// execution admission or provider-result send authority.
+    #[cfg(feature = "live")]
+    pub async fn live_delegation_recovery_snapshots(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<crate::live_execution::LiveDelegationRecoverySnapshot>, RuntimeDriverError>
+    {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let mut snapshots =
+            Vec::with_capacity(state.live_delegation_worker_identity_by_operation.len());
+        for (dsl_operation_id, worker_identity) in
+            &state.live_delegation_worker_identity_by_operation
+        {
+            let operation_id: meerkat_core::OperationId = serde_json::from_str(&dsl_operation_id.0)
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: format!("durable ClientContext operation identity is corrupt: {error}"),
+                })?;
+            let interaction = state
+                .live_delegation_interaction_by_operation
+                .get(dsl_operation_id)
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "durable ClientContext operation is missing generated interaction correlation"
+                        .to_string(),
+                })?;
+            let interaction_id = uuid::Uuid::parse_str(interaction)
+                .map(meerkat_core::InteractionId)
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "durable ClientContext interaction identity is corrupt: {error}"
+                    ),
+                })?;
+            let channel_id = state
+                .live_interaction_channel_by_id
+                .get(interaction)
+                .cloned()
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason:
+                        "durable ClientContext interaction is missing generated channel correlation"
+                            .to_string(),
+                })?;
+            let phase = match state
+                .live_delegation_worker_phase_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "durable ClientContext worker is missing generated phase".to_string(),
+                })? {
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::StartAuthorized => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::StartAuthorized
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::Running => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::Running
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::CancelAuthorized => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::CancelAuthorized
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::Terminal => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::Terminal
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::RetirementAuthorized => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::RetirementAuthorized
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::Retired => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::Retired
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerPhase::Failed => {
+                    crate::live_execution::LiveDelegationRecoveryPhase::Failed
+                }
+            };
+            let terminal = state
+                .live_delegation_worker_terminal_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .map(|terminal| match terminal {
+                    crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Completed => {
+                        crate::live_execution::LiveDelegationWorkerTerminalKind::Completed
+                    }
+                    crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Cancelled => {
+                        crate::live_execution::LiveDelegationWorkerTerminalKind::Cancelled
+                    }
+                    crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Failed => {
+                        crate::live_execution::LiveDelegationWorkerTerminalKind::Failed
+                    }
+                });
+            snapshots.push(crate::live_execution::LiveDelegationRecoverySnapshot::new(
+                session_id.clone(),
+                meerkat_core::LiveChannelId::new(channel_id),
+                operation_id,
+                interaction_id,
+                worker_identity.clone(),
+                phase,
+                terminal,
+                state
+                    .live_delegation_late_terminal_operations
+                    .contains(dsl_operation_id),
+                state
+                    .live_delegation_result_eligible_operations
+                    .contains(dsl_operation_id),
+            ));
+        }
+        snapshots.sort_by(|left, right| {
+            left.operation_id()
+                .to_string()
+                .cmp(&right.operation_id().to_string())
+        });
+        Ok(snapshots)
+    }
+
+    /// Reconcile one physically retired ClientContext executor after its
+    /// original provider channel has been revoked or replaced.
+    ///
+    /// The generated transition records the durable terminal as late and
+    /// permanently result-ineligible. It cannot mint provider delivery or
+    /// work admission authority, and exact repeats emit only the generated
+    /// idempotent replay receipt without reapplying state.
+    #[cfg(feature = "live")]
+    pub async fn reconcile_revoked_live_delegation_worker_after_restart(
+        &self,
+        snapshot: &crate::live_execution::LiveDelegationRecoverySnapshot,
+        terminal: crate::live_execution::LiveDelegationWorkerTerminalKind,
+    ) -> Result<crate::live_execution::LiveDelegationRecoverySnapshot, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(snapshot.session_id())
+            .await?;
+        let operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(snapshot.operation_id());
+        let dsl_terminal = terminal.into();
+        let (_, effects) = self
+            .apply_session_dsl_input_typed(
+                snapshot.session_id(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReconcileRevokedLiveDelegationWorkerAfterRestart {
+                    session_id: snapshot.session_id().to_string(),
+                    channel_id: snapshot.channel_id().to_string(),
+                    interaction_id: snapshot.interaction_id().to_string(),
+                    operation_id: operation_id.clone(),
+                    worker_identity: snapshot.worker_identity().to_string(),
+                    terminal: dsl_terminal,
+                },
+                "ReconcileRevokedLiveDelegationWorkerAfterRestart",
+            )
+            .await?;
+        let replayed = effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationWorkerRestartReconciled {
+                    operation_id: effect_operation_id,
+                    worker_identity,
+                    terminal: effect_terminal,
+                    replay,
+                    ..
+                } if effect_operation_id == &operation_id
+                    && worker_identity == snapshot.worker_identity()
+                    && effect_terminal == &dsl_terminal => Some(*replay),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "generated ClientContext restart reconciliation emitted no exact effect"
+                        .to_string(),
+                )
+            })?;
+        if !replayed {
+            self.persist_live_bridge_recovery_state(
+                snapshot.session_id(),
+                "ReconcileRevokedLiveDelegationWorkerAfterRestart",
+            )
+            .await?;
+        }
+        self.live_delegation_recovery_snapshots(snapshot.session_id())
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.operation_id() == snapshot.operation_id())
+            .ok_or_else(|| RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason: "restart-reconciled ClientContext operation disappeared from durable generated truth"
+                    .to_string(),
+            })
+    }
+
     /// Record that the operation-derived append-only source receipt was
     /// durably applied or already present. The caller supplies no receipt
     /// prose or semantic digest: generated authority binds this mechanical
@@ -4886,6 +5421,28 @@ impl MeerkatMachine {
             });
         }
         let assistant_turn_ref = turn.adapter_key().to_string();
+        tracing::debug!(
+            runtime_binding_matches =
+                state.live_execution_runtime_id_by_channel.get(&channel) == Some(runtime_id),
+            fence_binding_matches = state
+                .live_execution_fence_by_channel
+                .get(&channel)
+                .is_some_and(|value| value.0 == provider_binding.runtime_fence().get()),
+            generation_binding_matches = state
+                .live_execution_generation_by_channel
+                .get(&channel)
+                .is_some_and(|value| value.0 == provider_binding.runtime_generation().get()),
+            foreground_interaction_exists = state
+                .live_awaiting_assistant_interaction_by_channel
+                .contains_key(&channel),
+            assistant_turn_is_new = !state
+                .live_assistant_interaction_by_turn
+                .contains_key(&assistant_turn_ref)
+                && !state
+                    .live_assistant_turn_channel_by_ref
+                    .contains_key(&assistant_turn_ref),
+            "evaluating redacted live assistant-turn start guards"
+        );
         let runtime_binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
             session_id.clone(),
             channel_id.clone(),
@@ -7537,11 +8094,24 @@ impl MeerkatMachine {
             if committed_observation
                 != crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous
             {
+                let speech_disposition = if committed_observation
+                    != crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered
+                {
+                    crate::live_execution::LiveDelegationResultSpeechDisposition::NotDelivered
+                } else if state
+                    .live_result_speech_suppressed_operations
+                    .contains(&operation_id)
+                {
+                    crate::live_execution::LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn
+                } else {
+                    crate::live_execution::LiveDelegationResultSpeechDisposition::Eligible
+                };
                 return Ok(
                     crate::live_execution::LiveDelegationResultDeliveryResolution::Resolved(
                         crate::live_execution::LiveDelegationResultDeliveryReceipt::from_recovered_generated_state(
                             authority,
                             committed_observation,
+                            speech_disposition,
                         ),
                     ),
                 );
@@ -7558,7 +8128,7 @@ impl MeerkatMachine {
             let replacement_channel_id = meerkat_core::LiveChannelId::new(replacement.clone());
             let seed_cursor = *state
                 .live_result_recovery_seed_cursor_by_channel
-                .get(&replacement)
+                .get(&channel)
                 .ok_or_else(|| {
                     RuntimeDriverError::Internal(
                         "committed ambiguous live result has no seed cursor".to_string(),
@@ -7566,7 +8136,7 @@ impl MeerkatMachine {
                 })?;
             let llm_identity = state
                 .live_result_recovery_identity_by_channel
-                .get(&replacement)
+                .get(&channel)
                 .cloned()
                 .ok_or_else(|| {
                     RuntimeDriverError::Internal(
@@ -7582,7 +8152,7 @@ impl MeerkatMachine {
                 })?;
             let recovery_runtime = state
                 .live_result_recovery_runtime_id_by_channel
-                .get(&replacement)
+                .get(&channel)
                 .cloned()
                 .ok_or_else(|| {
                     RuntimeDriverError::Internal(
@@ -7591,7 +8161,7 @@ impl MeerkatMachine {
                 })?;
             let recovery_fence = state
                 .live_result_recovery_fence_by_channel
-                .get(&replacement)
+                .get(&channel)
                 .copied()
                 .ok_or_else(|| {
                     RuntimeDriverError::Internal(
@@ -7600,7 +8170,7 @@ impl MeerkatMachine {
                 })?;
             let recovery_generation = state
                 .live_result_recovery_generation_by_channel
-                .get(&replacement)
+                .get(&channel)
                 .copied()
                 .ok_or_else(|| {
                     RuntimeDriverError::Internal(

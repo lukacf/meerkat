@@ -2758,6 +2758,112 @@ pub enum LiveDelegationWorkerTerminalKind {
     Failed,
 }
 
+/// Durable generated worker phase exposed only for restart observation.
+///
+/// This is a read-only projection. It carries no execution admission,
+/// provider-send authority, or permission to retry work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveDelegationRecoveryPhase {
+    StartAuthorized,
+    Running,
+    CancelAuthorized,
+    Terminal,
+    RetirementAuthorized,
+    Retired,
+    Failed,
+}
+
+/// Read-only durable projection of one ClientContext worker operation.
+///
+/// Provider delegation identity is deliberately absent. After restart the
+/// coordinator needs only the machine-owned operation and interaction ids to
+/// recover the exact Mob delivery fact. The projection cannot be converted
+/// into provider output authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDelegationRecoverySnapshot {
+    session_id: SessionId,
+    channel_id: LiveChannelId,
+    operation_id: meerkat_core::OperationId,
+    interaction_id: meerkat_core::InteractionId,
+    worker_identity: String,
+    phase: LiveDelegationRecoveryPhase,
+    terminal: Option<LiveDelegationWorkerTerminalKind>,
+    late: bool,
+    result_eligible: bool,
+}
+
+impl LiveDelegationRecoverySnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        session_id: SessionId,
+        channel_id: LiveChannelId,
+        operation_id: meerkat_core::OperationId,
+        interaction_id: meerkat_core::InteractionId,
+        worker_identity: String,
+        phase: LiveDelegationRecoveryPhase,
+        terminal: Option<LiveDelegationWorkerTerminalKind>,
+        late: bool,
+        result_eligible: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            channel_id,
+            operation_id,
+            interaction_id,
+            worker_identity,
+            phase,
+            terminal,
+            late,
+            result_eligible,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub fn operation_id(&self) -> &meerkat_core::OperationId {
+        &self.operation_id
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> meerkat_core::InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn worker_identity(&self) -> &str {
+        &self.worker_identity
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> LiveDelegationRecoveryPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn terminal(&self) -> Option<LiveDelegationWorkerTerminalKind> {
+        self.terminal
+    }
+
+    #[must_use]
+    pub const fn late(&self) -> bool {
+        self.late
+    }
+
+    #[must_use]
+    pub const fn result_eligible(&self) -> bool {
+        self.result_eligible
+    }
+}
+
 impl From<LiveDelegationWorkerTerminalKind> for DslLiveDelegationWorkerTerminalKind {
     fn from(terminal: LiveDelegationWorkerTerminalKind) -> Self {
         match terminal {
@@ -3907,10 +4013,21 @@ pub enum LiveDelegationResultDeliveryObservation {
     Ambiguous,
 }
 
+/// Generated disposition of any assistant speech that could follow a
+/// delegation-result delivery. Delivery truth is independent: a result can
+/// be delivered while speech for its older interaction is suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveDelegationResultSpeechDisposition {
+    Eligible,
+    SuppressedByNewerUserTurn,
+    NotDelivered,
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveDelegationResultDeliveryReceipt {
     authority: LiveDelegationResultDeliveryAuthority,
     observation: LiveDelegationResultDeliveryObservation,
+    speech_disposition: LiveDelegationResultSpeechDisposition,
     retry_allowed: bool,
     recovery_required: bool,
 }
@@ -4059,10 +4176,12 @@ impl LiveDelegationResultDeliveryReceipt {
     pub(crate) fn from_recovered_generated_state(
         authority: &LiveDelegationResultDeliveryAuthority,
         observation: LiveDelegationResultDeliveryObservation,
+        speech_disposition: LiveDelegationResultSpeechDisposition,
     ) -> Self {
         Self {
             authority: authority.clone(),
             observation,
+            speech_disposition,
             retry_allowed: false,
             recovery_required: matches!(
                 observation,
@@ -4082,6 +4201,7 @@ impl LiveDelegationResultDeliveryReceipt {
             result_digest,
             disposition,
             observation,
+            speech_disposition,
             retry_allowed,
             recovery_required,
         } = effect
@@ -4105,12 +4225,27 @@ impl LiveDelegationResultDeliveryReceipt {
                 LiveDelegationResultDeliveryObservation::Ambiguous
             }
         };
+        let effect_speech_disposition = match speech_disposition {
+            crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::Eligible => {
+                LiveDelegationResultSpeechDisposition::Eligible
+            }
+            crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn => {
+                LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn
+            }
+            crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::NotDelivered => {
+                LiveDelegationResultSpeechDisposition::NotDelivered
+            }
+        };
         let correlation = authority.operation().domain_correlation();
         if channel_id != correlation.channel_id().as_str()
             || operation_id != &DslOperationId::from_domain(authority.operation().operation_id())
             || result_digest != &authority.result_digest
             || effect_disposition != authority.disposition()
             || effect_observation != expected_observation
+            || (effect_observation == LiveDelegationResultDeliveryObservation::Delivered
+                && effect_speech_disposition == LiveDelegationResultSpeechDisposition::NotDelivered)
+            || (effect_observation != LiveDelegationResultDeliveryObservation::Delivered
+                && effect_speech_disposition != LiveDelegationResultSpeechDisposition::NotDelivered)
             || *retry_allowed
             || *recovery_required
                 != matches!(
@@ -4123,6 +4258,7 @@ impl LiveDelegationResultDeliveryReceipt {
         Ok(Some(Self {
             authority: authority.clone(),
             observation: effect_observation,
+            speech_disposition: effect_speech_disposition,
             retry_allowed: *retry_allowed,
             recovery_required: *recovery_required,
         }))
@@ -4136,6 +4272,11 @@ impl LiveDelegationResultDeliveryReceipt {
     #[must_use]
     pub const fn observation(&self) -> LiveDelegationResultDeliveryObservation {
         self.observation
+    }
+
+    #[must_use]
+    pub const fn speech_disposition(&self) -> LiveDelegationResultSpeechDisposition {
+        self.speech_disposition
     }
 
     #[must_use]

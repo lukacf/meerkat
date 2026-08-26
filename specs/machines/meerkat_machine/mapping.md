@@ -4193,6 +4193,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveDelegationWorkerTerminalStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveDelegationWorkerAfterRestartExactReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationWorkerRetirementIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7306,6 +7351,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveDelegationWorkerTerminalRecorded`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveDelegationWorkerRestartReconciled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveDelegationWorkerRetirementAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7618,6 +7666,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_result_delivery_is_exact_and_terminal_once`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_result_speech_suppression_is_exact_and_non_cancelling`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_result_recovery_is_exact_and_channel_scoped`

@@ -440,6 +440,129 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         )
         .await
         .expect("recover committed result resolution without replay");
+
+    let ambiguous_operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        OperationId::new(),
+        operation.domain_correlation().clone(),
+    );
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority before ambiguous delivery");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        let operation_id = mm_dsl::OperationId::from_domain(ambiguous_operation.operation_id());
+        state.live_delegation_reconciliation_by_operation.insert(
+            operation_id.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        state.live_delegation_interaction_by_operation.insert(
+            operation_id.clone(),
+            ambiguous_operation
+                .domain_correlation()
+                .interaction_id()
+                .to_string(),
+        );
+        state.live_delegation_provider_turn_by_operation.insert(
+            operation_id.clone(),
+            ambiguous_operation
+                .domain_correlation()
+                .provider()
+                .user_turn_id()
+                .to_string(),
+        );
+        state
+            .live_delegation_worker_identity_by_operation
+            .insert(operation_id.clone(), "worker:ambiguous-result".to_string());
+        state.live_delegation_worker_phase_by_operation.insert(
+            operation_id.clone(),
+            mm_dsl::LiveDelegationWorkerPhase::Terminal,
+        );
+        state.live_delegation_worker_terminal_by_operation.insert(
+            operation_id.clone(),
+            mm_dsl::LiveDelegationWorkerTerminalKind::Completed,
+        );
+        state
+            .live_delegation_result_eligible_operations
+            .insert(operation_id.clone());
+        state
+            .live_result_released_operations
+            .insert(operation_id.clone());
+        state.live_result_release_disposition_by_operation.insert(
+            operation_id,
+            mm_dsl::LiveDelegationResultDisposition::OpenTurn,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed ambiguous committed result release state");
+    }
+    let ambiguous_release =
+        crate::live_execution::LiveDelegationResultReleaseAuthority::from_recovered_generated_state(
+            &session_id,
+            &ambiguous_operation,
+            meerkat_core::LiveResultDisposition::OpenTurn,
+        );
+    let ambiguous_delivery = machine
+        .authorize_live_delegation_result_delivery(
+            &ambiguous_release,
+            "ambiguously delivered terminal result",
+        )
+        .await
+        .expect("authorize ambiguous result delivery");
+    let first_recovery = match machine
+        .resolve_live_delegation_result_delivery(
+            &ambiguous_delivery,
+            crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous,
+        )
+        .await
+        .expect("resolve ambiguous result delivery")
+    {
+        crate::live_execution::LiveDelegationResultDeliveryResolution::AmbiguityRecovery(
+            recovery,
+        ) => recovery,
+        crate::live_execution::LiveDelegationResultDeliveryResolution::Resolved(_) => {
+            panic!("ambiguous delivery must mint recovery authority")
+        }
+    };
+    let recovered_recovery = match machine
+        .resolve_live_delegation_result_delivery(
+            &ambiguous_delivery,
+            crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous,
+        )
+        .await
+        .expect("reconstruct committed ambiguity recovery without replay")
+    {
+        crate::live_execution::LiveDelegationResultDeliveryResolution::AmbiguityRecovery(
+            recovery,
+        ) => recovery,
+        crate::live_execution::LiveDelegationResultDeliveryResolution::Resolved(_) => {
+            panic!("committed ambiguous delivery must reconstruct recovery authority")
+        }
+    };
+    assert_eq!(
+        recovered_recovery.closing_channel_id(),
+        first_recovery.closing_channel_id()
+    );
+    assert_eq!(
+        recovered_recovery.replacement_channel_id(),
+        first_recovery.replacement_channel_id()
+    );
+    assert_eq!(
+        recovered_recovery.canonical_seed_cursor(),
+        first_recovery.canonical_seed_cursor()
+    );
+    assert_eq!(
+        recovered_recovery.llm_identity(),
+        first_recovery.llm_identity()
+    );
+    assert_eq!(recovered_recovery.runtime_id(), first_recovery.runtime_id());
+    assert_eq!(
+        recovered_recovery.fence_token(),
+        first_recovery.fence_token()
+    );
+    assert_eq!(recovered_recovery.generation(), first_recovery.generation());
 }
 
 fn uuid(n: u128) -> uuid::Uuid {

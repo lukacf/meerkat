@@ -457,6 +457,7 @@ impl Gate0CandidateCorrelations {
         let event = received.into_event();
         match event {
             ServerEvent::SessionStarted(_) => Ok(Gate0CandidateObservation::SessionStarted),
+            ServerEvent::SessionUsageUpdated(_) => Ok(Gate0CandidateObservation::Other),
             ServerEvent::TurnCreated(created) => Ok(Gate0CandidateObservation::TurnStarted {
                 turn: self.turn(&created.turn.id)?,
                 role: created.turn.role,
@@ -880,6 +881,19 @@ mod tests {
         );
         assert_eq!(observation.kind(), "candidate.only.unknown");
         assert_eq!(observation.raw_json()["opaque"]["x"], 1);
+    }
+
+    #[test]
+    fn usage_telemetry_remains_non_authoritative_in_candidate_lowering() {
+        let raw =
+            r#"{"type":"session.usage.updated","usage":{"input_tokens":7,"output_tokens":11}}"#;
+        let received = decode_received_server_event(EventCarrier::Sideband, raw)
+            .expect("typed usage telemetry");
+        let observation = Gate0CandidateCorrelations::default()
+            .lower(received)
+            .expect("non-authoritative candidate lowering");
+
+        assert!(matches!(observation, Gate0CandidateObservation::Other));
     }
 
     #[test]

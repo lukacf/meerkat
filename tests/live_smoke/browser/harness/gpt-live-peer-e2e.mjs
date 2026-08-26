@@ -27,6 +27,11 @@ async function prepare() {
   };
   const offerSdp = await page.evaluate(async ({ fixtures }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });
+    const fixtureBuffers = {};
+    for (const [name, fixture] of Object.entries(fixtures)) {
+      const response = await fetch(fixture);
+      fixtureBuffers[name] = await audioContext.decodeAudioData(await response.arrayBuffer());
+    }
     const destination = audioContext.createMediaStreamDestination();
     const oscillator = audioContext.createOscillator();
     const gain = audioContext.createGain();
@@ -107,22 +112,52 @@ async function prepare() {
       destination,
       events: [],
       eventTransport: { rawMessages: 0, parseFailures: 0 },
-      fixtures,
+      fixtureBuffers,
+      bargeIn: { armedFixture: null, failures: 0, starts: [] },
       peer,
       remoteAudio,
+    };
+    globalThis.__gptLivePeer.startFixture = (fixtureName, waitForEnd) => {
+      const state = globalThis.__gptLivePeer;
+      const buffer = state.fixtureBuffers[fixtureName];
+      if (!buffer) throw new Error(`unknown audio fixture: ${fixtureName}`);
+      const source = state.audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(state.destination);
+      const ended = new Promise((resolve) => { source.onended = resolve; });
+      source.start();
+      return waitForEnd ? ended : Promise.resolve();
     };
     channel.onmessage = async (event) => {
       const state = globalThis.__gptLivePeer;
       state.eventTransport.rawMessages += 1;
+      let parsed;
       try {
         const text = typeof event.data === 'string'
           ? event.data
           : event.data instanceof Blob
             ? await event.data.text()
             : new TextDecoder().decode(event.data);
-        state.events.push(JSON.parse(text));
+        parsed = JSON.parse(text);
       } catch {
         state.eventTransport.parseFailures += 1;
+        return;
+      }
+      state.events.push(parsed);
+      if (parsed?.type === 'turn.created'
+        && parsed?.turn?.role === 'assistant'
+        && state.bargeIn.armedFixture) {
+        const fixtureName = state.bargeIn.armedFixture;
+        state.bargeIn.armedFixture = null;
+        try {
+          await state.startFixture(fixtureName, false);
+          state.bargeIn.starts.push({
+            assistant_turn_id: parsed.turn.id,
+            event_count_at_start: state.events.length,
+          });
+        } catch {
+          state.bargeIn.failures += 1;
+        }
       }
     };
     const offer = await peer.createOffer();
@@ -151,18 +186,21 @@ async function answer(sdp) {
 }
 
 async function play(name) {
-  await page.evaluate(async (fixtureName) => {
-    const state = globalThis.__gptLivePeer;
-    const response = await fetch(state.fixtures[fixtureName]);
-    const buffer = await state.audioContext.decodeAudioData(await response.arrayBuffer());
-    const source = state.audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(state.destination);
-    const ended = new Promise((resolve) => { source.onended = resolve; });
-    source.start();
-    await ended;
-  }, name);
+  await page.evaluate(
+    async (fixtureName) => globalThis.__gptLivePeer.startFixture(fixtureName, true),
+    name,
+  );
   return { played: name };
+}
+
+async function armBargeIn(name) {
+  await page.evaluate((fixtureName) => {
+    const state = globalThis.__gptLivePeer;
+    if (!state.fixtureBuffers[fixtureName]) throw new Error(`unknown audio fixture: ${fixtureName}`);
+    if (state.bargeIn.armedFixture) throw new Error('barge-in fixture is already armed');
+    state.bargeIn.armedFixture = fixtureName;
+  }, name);
+  return { armed: name };
 }
 
 async function snapshot() {
@@ -197,6 +235,7 @@ async function snapshot() {
       },
       event_transport: state.eventTransport,
       events: state.events,
+      barge_in: state.bargeIn,
     };
   });
 }
@@ -212,6 +251,7 @@ async function handle(command) {
   switch (command.type) {
     case 'prepare': return prepare();
     case 'answer': return answer(command.answer_sdp);
+    case 'arm_barge_in': return armBargeIn(command.name);
     case 'play': return play(command.name);
     case 'snapshot': return snapshot();
     case 'close': return close();

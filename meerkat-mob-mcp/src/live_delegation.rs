@@ -36,9 +36,10 @@ use meerkat_runtime::live_execution::{
     LiveBridgeSubmissionAttemptAuthority, LiveBridgeSubmissionAuthority,
     LiveBridgeSubmissionReceipt, LiveDelegationCancellationDirective,
     LiveDelegationCancellationOutcome, LiveDelegationExecutionAdmission,
-    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
-    LiveDelegationResultDeliveryResolution, LiveDelegationResultReleaseAuthority,
-    LiveDelegationWorkerTerminalKind, LiveHandoffReconciliationReceipt,
+    LiveDelegationRecoverySnapshot, LiveDelegationResultDeliveryAuthority,
+    LiveDelegationResultDeliveryObservation, LiveDelegationResultDeliveryResolution,
+    LiveDelegationResultReleaseAuthority, LiveDelegationWorkerTerminalKind,
+    LiveHandoffReconciliationReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
@@ -56,6 +57,14 @@ const LIVE_BRIDGE_SUBMISSION_OUTPUT_DIGEST_DOMAIN: &[u8] =
     b"meerkat.live-bridge-submission-output.v1\0";
 const RESPONSES_RESTART_OBSERVE_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
+const CLIENT_CONTEXT_RESTART_OBSERVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+const CLIENT_CONTEXT_RESTART_PASS_BOUND: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const CLIENT_CONTEXT_RESTART_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(25);
+const CLIENT_CONTEXT_RESTART_RETRY_MAX_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(1);
 
 type ActiveChannelKey = (SessionId, meerkat_core::LiveChannelId);
 
@@ -446,6 +455,36 @@ pub struct ExperimentalResponsesRestartReport {
     disposition: ExperimentalResponsesRestartDisposition,
 }
 
+/// Restart reconciliation outcome for one durable ClientContext executor.
+///
+/// This report carries no provider output or work-admission authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExperimentalClientContextRestartDisposition {
+    InFlight,
+    Reconciled { completed: bool },
+    AlreadyReconciled,
+    Broken { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExperimentalClientContextRestartReport {
+    operation_id: OperationId,
+    disposition: ExperimentalClientContextRestartDisposition,
+}
+
+impl ExperimentalClientContextRestartReport {
+    #[must_use]
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    #[must_use]
+    pub fn disposition(&self) -> &ExperimentalClientContextRestartDisposition {
+        &self.disposition
+    }
+}
+
 impl ExperimentalResponsesRestartReport {
     #[must_use]
     pub fn operation_id(&self) -> &OperationId {
@@ -534,6 +573,12 @@ struct ExactDelegationResultProjection<Authority> {
     result_text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExactDelegationResultProjectionEvidence {
+    delegation_ref_digest: String,
+    result_digest: String,
+}
+
 impl<Authority> ExactDelegationResultProjection<Authority> {
     fn new(
         authority: Authority,
@@ -547,12 +592,23 @@ impl<Authority> ExactDelegationResultProjection<Authority> {
         }
     }
 
-    async fn dispatch<Output, Release, ReleaseFuture>(self, release: Release) -> Output
+    async fn dispatch<Output, Release, ReleaseFuture>(
+        self,
+        release: Release,
+    ) -> (Output, ExactDelegationResultProjectionEvidence)
     where
         Release: FnOnce(Authority, LiveSidebandDelegationRef, String) -> ReleaseFuture,
         ReleaseFuture: std::future::Future<Output = Output>,
     {
-        release(self.authority, self.delegation, self.result_text).await
+        let evidence = ExactDelegationResultProjectionEvidence {
+            delegation_ref_digest: format!(
+                "sha256:{:x}",
+                Sha256::digest(self.delegation.adapter_key().as_bytes())
+            ),
+            result_digest: format!("sha256:{:x}", Sha256::digest(self.result_text.as_bytes())),
+        };
+        let output = release(self.authority, self.delegation, self.result_text).await;
+        (output, evidence)
     }
 }
 
@@ -782,10 +838,229 @@ pub struct ExperimentalLiveDelegationCoordinator {
         >,
     >,
     result_recovery_tasks: Arc<Mutex<std::collections::HashMap<OperationId, OwnedResultRecovery>>>,
-    active_turns: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveProviderTurn>>>,
+    // User-input custody is channel-serial. Assistant output custody is
+    // independently frozen by provider turn ref in `MeerkatMachine`, so a
+    // later user turn may barge in without replacing the interrupted
+    // assistant turn's interaction.
+    active_user_turns: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveProviderTurn>>>,
     completed_delegation_turns:
         Arc<Mutex<std::collections::HashMap<CompletedDelegationTurnKey, CompletedDelegationTurn>>>,
     bound_channels: BoundChannelMap,
+    client_context_restart_reconciler_armed: Arc<std::sync::atomic::AtomicBool>,
+    client_context_restart_inventory_ready: Arc<ClientContextRestartInventoryReady>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClientContextRestartInventoryEntry {
+    session_id: SessionId,
+    operation_id: OperationId,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClientContextRestartInventory {
+    entries: Vec<ClientContextRestartInventoryEntry>,
+}
+
+impl ClientContextRestartInventory {
+    #[cfg(test)]
+    fn contains(&self, session_id: &SessionId, operation_id: &OperationId) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| &entry.session_id == session_id && &entry.operation_id == operation_id)
+    }
+}
+
+#[derive(Default)]
+struct ClientContextRestartInventoryReady {
+    ready: std::sync::atomic::AtomicBool,
+    changed: tokio::sync::Notify,
+}
+
+impl ClientContextRestartInventoryReady {
+    fn mark_ready(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.is_ready() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClientContextRestartReconcileTiming {
+    observation_bound: std::time::Duration,
+    in_flight_delay: std::time::Duration,
+    retry_delay: std::time::Duration,
+    retry_max_delay: std::time::Duration,
+}
+
+impl ClientContextRestartReconcileTiming {
+    const SHIPPING: Self = Self {
+        observation_bound: CLIENT_CONTEXT_RESTART_PASS_BOUND,
+        in_flight_delay: CLIENT_CONTEXT_RESTART_OBSERVE_INTERVAL,
+        retry_delay: CLIENT_CONTEXT_RESTART_RETRY_DELAY,
+        retry_max_delay: CLIENT_CONTEXT_RESTART_RETRY_MAX_DELAY,
+    };
+}
+
+#[async_trait::async_trait]
+trait ClientContextRestartRecoveryOwner: Send + Sync {
+    async fn force_mob_restore(&self) -> Result<(), String>;
+
+    async fn capture_client_context_restart_inventory(
+        &self,
+    ) -> Result<ClientContextRestartInventory, String>;
+
+    async fn observe_client_context_restart_pass(
+        &self,
+        inventory: &ClientContextRestartInventory,
+        observation_bound: std::time::Duration,
+    ) -> Result<Vec<ExperimentalClientContextRestartReport>, String>;
+}
+
+async fn run_client_context_restart_reconciler<R>(
+    owner: std::sync::Weak<R>,
+    inventory_ready: Arc<ClientContextRestartInventoryReady>,
+    timing: ClientContextRestartReconcileTiming,
+) where
+    R: ClientContextRestartRecoveryOwner + ?Sized + 'static,
+{
+    let mut retry_delay = timing.retry_delay;
+    loop {
+        let Some(current_owner) = owner.upgrade() else {
+            return;
+        };
+        let restore = current_owner.force_mob_restore().await;
+        drop(current_owner);
+        match restore {
+            Ok(()) => break,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ClientContext restart reconciliation could not restore Mob state"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
+            }
+        }
+    }
+
+    retry_delay = timing.retry_delay;
+    let mut inventory = loop {
+        let Some(current_owner) = owner.upgrade() else {
+            return;
+        };
+        let capture = current_owner
+            .capture_client_context_restart_inventory()
+            .await;
+        drop(current_owner);
+        match capture {
+            Ok(inventory) => break inventory,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ClientContext restart inventory capture remains pending"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
+            }
+        }
+    };
+    inventory_ready.mark_ready();
+
+    retry_delay = timing.retry_delay;
+    loop {
+        let Some(current_owner) = owner.upgrade() else {
+            return;
+        };
+        let pass = current_owner
+            .observe_client_context_restart_pass(&inventory, timing.observation_bound)
+            .await;
+        drop(current_owner);
+        match pass {
+            Ok(reports) => {
+                retry_delay = timing.retry_delay;
+                for report in &reports {
+                    if matches!(
+                        report.disposition(),
+                        ExperimentalClientContextRestartDisposition::Broken { .. }
+                    ) {
+                        tracing::warn!(
+                            operation_id = %report.operation_id(),
+                            disposition_reason = "durable_client_context_recovery_broken",
+                            "ClientContext restart reconciliation stopped with durable recovery debt"
+                        );
+                    }
+                }
+                let in_flight_operations = reports
+                    .iter()
+                    .filter_map(|report| {
+                        matches!(
+                            report.disposition(),
+                            ExperimentalClientContextRestartDisposition::InFlight
+                        )
+                        .then(|| report.operation_id().clone())
+                    })
+                    .collect::<Vec<_>>();
+                if in_flight_operations.is_empty() {
+                    return;
+                }
+                inventory
+                    .entries
+                    .retain(|entry| in_flight_operations.contains(&entry.operation_id));
+                tokio::time::sleep(timing.in_flight_delay).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ClientContext restart reconciliation scan remains pending"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
+            }
+        }
+    }
+}
+
+fn try_arm_client_context_restart_reconciler<R>(
+    armed: &std::sync::atomic::AtomicBool,
+    owner: Arc<R>,
+    inventory_ready: Arc<ClientContextRestartInventoryReady>,
+    timing: ClientContextRestartReconcileTiming,
+) -> Option<JoinHandle<()>>
+where
+    R: ClientContextRestartRecoveryOwner + ?Sized + 'static,
+{
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    if armed
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return None;
+    }
+    Some(runtime.spawn(run_client_context_restart_reconciler(
+        Arc::downgrade(&owner),
+        inventory_ready,
+        timing,
+    )))
 }
 
 /// Compose the one shared live-delegation lifecycle owner used by RPC and
@@ -796,7 +1071,9 @@ pub fn compose_experimental_live_delegation_coordinator(
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
 ) -> Arc<ExperimentalLiveDelegationCoordinator> {
-    Arc::new(ExperimentalLiveDelegationCoordinator::new(runtime, mobs))
+    let coordinator = Arc::new(ExperimentalLiveDelegationCoordinator::new(runtime, mobs));
+    coordinator.arm_client_context_restart_reconciler();
+    coordinator
 }
 
 impl ExperimentalLiveDelegationCoordinator {
@@ -838,10 +1115,26 @@ impl ExperimentalLiveDelegationCoordinator {
             result_delivery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pending_result_recoveries: Arc::new(Mutex::new(std::collections::HashMap::new())),
             result_recovery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_user_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
             completed_delegation_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bound_channels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            client_context_restart_reconciler_armed: Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            client_context_restart_inventory_ready: Arc::new(
+                ClientContextRestartInventoryReady::default(),
+            ),
         }
+    }
+
+    fn arm_client_context_restart_reconciler(self: &Arc<Self>) -> bool {
+        try_arm_client_context_restart_reconciler(
+            &self.client_context_restart_reconciler_armed,
+            Arc::clone(self),
+            Arc::clone(&self.client_context_restart_inventory_ready),
+            ClientContextRestartReconcileTiming::SHIPPING,
+        )
+        .is_some()
     }
 
     /// Whether Meerkat has supplied the durable-fork execution half of
@@ -1057,6 +1350,148 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    async fn reconcile_one_client_context_snapshot(
+        &self,
+        mob_handle: &meerkat_mob::MobHandle,
+        snapshot: &LiveDelegationRecoverySnapshot,
+        observe_until: tokio::time::Instant,
+    ) -> ExperimentalClientContextRestartDisposition {
+        if snapshot.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Retired
+            && snapshot.late()
+            && !snapshot.result_eligible()
+        {
+            return ExperimentalClientContextRestartDisposition::AlreadyReconciled;
+        }
+        if snapshot.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Failed
+        {
+            return ExperimentalClientContextRestartDisposition::Broken {
+                reason: "generated ClientContext worker start failed before restart recovery"
+                    .to_string(),
+            };
+        }
+
+        let child_identity = AgentIdentity::from(snapshot.worker_identity());
+        let delivery_identity = match MobDeliveryIdentity::new(
+            snapshot.operation_id().to_string(),
+            snapshot.interaction_id().to_string(),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return ExperimentalClientContextRestartDisposition::Broken {
+                    reason: format!(
+                        "recovered ClientContext delivery identity is invalid: {error}"
+                    ),
+                };
+            }
+        };
+        let result_spec =
+            match BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: format!(
+                            "recovered ClientContext result specification is invalid: {error}"
+                        ),
+                    };
+                }
+            };
+
+        loop {
+            let recovery = match mob_handle
+                .recover_bounded_work_for_identity_with_delivery_identity(
+                    &child_identity,
+                    &delivery_identity,
+                    &result_spec,
+                )
+                .await
+            {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: format!(
+                            "durable ClientContext executor observation failed: {error}"
+                        ),
+                    };
+                }
+            };
+            let (member, work) = recovery.into_parts();
+            let terminal = match work {
+                DurableBoundedWorkState::Absent => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: "generated ClientContext worker has no durable work admission; restart recovery never resubmits"
+                            .to_string(),
+                    };
+                }
+                DurableBoundedWorkState::Broken { reason, .. } => {
+                    return ExperimentalClientContextRestartDisposition::Broken { reason };
+                }
+                DurableBoundedWorkState::InFlight { .. } => {
+                    if tokio::time::Instant::now() >= observe_until {
+                        return ExperimentalClientContextRestartDisposition::InFlight;
+                    }
+                    tokio::time::sleep(CLIENT_CONTEXT_RESTART_OBSERVE_INTERVAL).await;
+                    continue;
+                }
+                DurableBoundedWorkState::Terminal { result, .. } => {
+                    if result.is_ok() {
+                        LiveDelegationWorkerTerminalKind::Completed
+                    } else {
+                        LiveDelegationWorkerTerminalKind::Failed
+                    }
+                }
+                _ => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: "durable ClientContext recovery returned an unsupported work state"
+                            .to_string(),
+                    };
+                }
+            };
+
+            match member {
+                DurableBoundedMemberState::Active { .. }
+                | DurableBoundedMemberState::Retiring { .. } => {
+                    if let Err(error) = mob_handle.retire(child_identity.clone()).await {
+                        return ExperimentalClientContextRestartDisposition::Broken {
+                            reason: format!(
+                                "durable ClientContext executor retirement remains pending: {error}"
+                            ),
+                        };
+                    }
+                }
+                DurableBoundedMemberState::Retired { .. } => {}
+                DurableBoundedMemberState::Absent => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: "durable ClientContext executor terminal lost member custody"
+                            .to_string(),
+                    };
+                }
+                DurableBoundedMemberState::Broken { reason, .. } => {
+                    return ExperimentalClientContextRestartDisposition::Broken { reason };
+                }
+                _ => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason:
+                            "durable ClientContext recovery returned an unsupported member state"
+                                .to_string(),
+                    };
+                }
+            }
+
+            if let Err(error) = self
+                .runtime
+                .reconcile_revoked_live_delegation_worker_after_restart(snapshot, terminal)
+                .await
+            {
+                return ExperimentalClientContextRestartDisposition::Broken {
+                    reason: format!("durable ClientContext terminal remains unreconciled: {error}"),
+                };
+            }
+            return ExperimentalClientContextRestartDisposition::Reconciled {
+                completed: terminal == LiveDelegationWorkerTerminalKind::Completed,
+            };
+        }
+    }
+
     /// Reconcile Responses executor work whose process-local waiter was lost.
     ///
     /// Stale provider channels are abandoned before child observation, which
@@ -1135,6 +1570,131 @@ impl ExperimentalLiveDelegationCoordinator {
                     });
                 }
             }
+        }
+        Ok(recovered)
+    }
+
+    async fn collect_client_context_restart_inventory(
+        &self,
+    ) -> Result<ClientContextRestartInventory, String> {
+        let handles = self
+            .mobs
+            .mob_handles_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut inventory = ClientContextRestartInventory::default();
+        let mut seen_sessions = std::collections::HashSet::new();
+        for (_, mob_handle) in handles {
+            for member in mob_handle.list_members_including_retiring().await {
+                let source_identity = member.agent_identity;
+                let Some(session_id) = mob_handle.resolve_bridge_session_id(&source_identity).await
+                else {
+                    continue;
+                };
+                if !seen_sessions.insert(session_id.clone()) {
+                    continue;
+                }
+                let snapshots = self
+                    .runtime
+                    .live_delegation_recovery_snapshots(&session_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for snapshot in snapshots {
+                    inventory.entries.push(ClientContextRestartInventoryEntry {
+                        session_id: session_id.clone(),
+                        operation_id: snapshot.operation_id().clone(),
+                    });
+                }
+            }
+        }
+        inventory.entries.sort_by(|left, right| {
+            (left.session_id.to_string(), left.operation_id.to_string())
+                .cmp(&(right.session_id.to_string(), right.operation_id.to_string()))
+        });
+        inventory.entries.dedup();
+        Ok(inventory)
+    }
+
+    /// Reconcile only the ClientContext executor operations captured before
+    /// live channel preparation was released for this process epoch.
+    ///
+    /// A channel is revoked only after its exact session/operation identity
+    /// matches the fixed startup inventory. Operations admitted after the
+    /// readiness boundary are invisible to every repeated recovery pass.
+    async fn reconcile_client_context_inventory_after_restart(
+        &self,
+        inventory: &ClientContextRestartInventory,
+        observation_bound: std::time::Duration,
+    ) -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
+        if inventory.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let handles = self
+            .mobs
+            .mob_handles_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut recovered = Vec::new();
+        let mut pending = inventory.entries.clone();
+        let mut seen_sessions = std::collections::HashSet::new();
+        let observe_until = tokio::time::Instant::now() + observation_bound;
+        for (_, mob_handle) in handles {
+            for member in mob_handle.list_members_including_retiring().await {
+                let source_identity = member.agent_identity;
+                let Some(session_id) = mob_handle.resolve_bridge_session_id(&source_identity).await
+                else {
+                    continue;
+                };
+                if !seen_sessions.insert(session_id.clone()) {
+                    continue;
+                }
+                let snapshots = self
+                    .runtime
+                    .live_delegation_recovery_snapshots(&session_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for snapshot in snapshots {
+                    let Some(pending_index) = pending.iter().position(|entry| {
+                        &entry.session_id == &session_id
+                            && &entry.operation_id == snapshot.operation_id()
+                    }) else {
+                        continue;
+                    };
+                    pending.swap_remove(pending_index);
+                    if self
+                        .runtime
+                        .live_channel_is_active_for_session(&session_id, snapshot.channel_id())
+                        .await
+                    {
+                        self.runtime
+                            .abandon_live_open_admission(&session_id, snapshot.channel_id())
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "failed to fence stale ClientContext channel '{}' before recovery: {error}",
+                                    snapshot.channel_id()
+                                )
+                            })?;
+                    }
+                    let disposition = self
+                        .reconcile_one_client_context_snapshot(
+                            &mob_handle,
+                            &snapshot,
+                            observe_until,
+                        )
+                        .await;
+                    recovered.push(ExperimentalClientContextRestartReport {
+                        operation_id: snapshot.operation_id().clone(),
+                        disposition,
+                    });
+                }
+            }
+        }
+        if !pending.is_empty() {
+            return Err(format!(
+                "{} startup ClientContext operation(s) remain unavailable for exact recovery observation",
+                pending.len()
+            ));
         }
         Ok(recovered)
     }
@@ -1771,6 +2331,15 @@ impl ExperimentalLiveDelegationCoordinator {
         runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
         control: Arc<dyn ExperimentalGptLiveControlPlane>,
     ) -> Result<(), String> {
+        if !self
+            .client_context_restart_reconciler_armed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(
+                "experimental live startup recovery was not armed on a Tokio runtime".to_string(),
+            );
+        }
+        self.client_context_restart_inventory_ready.wait().await;
         control
             .active_binding(runtime_binding.session_id())
             .await
@@ -2025,6 +2594,9 @@ impl ExperimentalLiveDelegationCoordinator {
                 self.observe_delegation_turn_finished(&terminal, delegation, final_transcript)
                     .await
             }
+            // The outer context-mirror host owns the one-shot assistant-turn
+            // correlation used by canonical playback projection. Repeating
+            // that transition here would consume the same authority twice.
             LiveSidebandObservationKind::TurnStarted { .. }
             | LiveSidebandObservationKind::TurnFinished { .. }
             | LiveSidebandObservationKind::TurnSnapshotDelta { .. } => Ok(()),
@@ -2045,7 +2617,7 @@ impl ExperimentalLiveDelegationCoordinator {
             authority.binding().session_id().clone(),
             authority.binding().channel_id().clone(),
         );
-        let mut turns = self.active_turns.lock().await;
+        let mut turns = self.active_user_turns.lock().await;
         if turns.contains_key(&key) {
             return Err(
                 "provider turn start duplicated an active local turn projection".to_string(),
@@ -2068,9 +2640,14 @@ impl ExperimentalLiveDelegationCoordinator {
             finished.binding().session_id().clone(),
             finished.binding().channel_id().clone(),
         );
-        let started = self.active_turns.lock().await.remove(&key).ok_or_else(|| {
-            "provider turn finish has no local started-turn projection".to_string()
-        })?;
+        let started = self
+            .active_user_turns
+            .lock()
+            .await
+            .remove(&key)
+            .ok_or_else(|| {
+                "provider turn finish has no local started-turn projection".to_string()
+            })?;
         if started.authority.binding() != finished.binding()
             || started.authority.interaction_id() != finished.interaction_id()
             || started.authority.provider_turn_ref() != finished.provider_turn_ref()
@@ -2095,7 +2672,7 @@ impl ExperimentalLiveDelegationCoordinator {
             provider_binding.channel_id().clone(),
         );
         let started = self
-            .active_turns
+            .active_user_turns
             .lock()
             .await
             .get(&channel_key)
@@ -2159,7 +2736,7 @@ impl ExperimentalLiveDelegationCoordinator {
             .observe_live_provider_turn_finished(observation)
             .await
             .map_err(|error| error.to_string())?;
-        self.active_turns.lock().await.remove(&channel_key);
+        self.active_user_turns.lock().await.remove(&channel_key);
         if started.binding() != finished.binding()
             || started.interaction_id() != finished.interaction_id()
             || started.provider_turn_ref() != finished.provider_turn_ref()
@@ -2860,7 +3437,10 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn release_exact_delegation_result_projection(
         control: &dyn ExperimentalGptLiveControlPlane,
         projection: ExactDelegationResultProjection<LiveDelegationResultDeliveryAuthority>,
-    ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
+    ) -> (
+        Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>,
+        ExactDelegationResultProjectionEvidence,
+    ) {
         projection
             .dispatch(|authority, delegation, result_text| {
                 control.release_delegation_context(authority, delegation, result_text)
@@ -2935,7 +3515,7 @@ impl ExperimentalLiveDelegationCoordinator {
             }
         };
         let ambiguity_authority = delivery.clone();
-        let dispatch = Self::release_exact_delegation_result_projection(
+        let (dispatch, projection_evidence) = Self::release_exact_delegation_result_projection(
             retained.control.as_ref(),
             ExactDelegationResultProjection::new(
                 delivery,
@@ -2971,6 +3551,14 @@ impl ExperimentalLiveDelegationCoordinator {
             Ok(ExperimentalGptLiveResultDeliveryDispatch::Resolved(resolution)) => resolution,
         };
         let (authority, observation) = resolution.into_parts();
+        if observation == LiveDelegationResultDeliveryObservation::Delivered {
+            tracing::info!(
+                operation_id = %retained.operation.operation_id(),
+                delegation_ref_digest = %projection_evidence.delegation_ref_digest,
+                result_digest = %projection_evidence.result_digest,
+                "exact bounded live delegation result received provider append acknowledgement"
+            );
+        }
         let resolution = retry_reconciled_cleanup_step("result-delivery-resolution", || {
             self.runtime
                 .resolve_live_delegation_result_delivery(&authority, observation)
@@ -3119,7 +3707,7 @@ impl ExperimentalLiveDelegationCoordinator {
 
     async fn cancel_channel_binding(&self, binding: &ProviderWebrtcBinding) {
         let key = (binding.session_id().clone(), binding.channel_id().clone());
-        self.active_turns.lock().await.remove(&key);
+        self.active_user_turns.lock().await.remove(&key);
         self.completed_delegation_turns
             .lock()
             .await
@@ -3195,6 +3783,31 @@ impl ExperimentalLiveDelegationCoordinator {
         }
         self.settle_responses_retirement_debt_for_binding(binding)
             .await;
+    }
+}
+
+#[async_trait::async_trait]
+impl ClientContextRestartRecoveryOwner for ExperimentalLiveDelegationCoordinator {
+    async fn force_mob_restore(&self) -> Result<(), String> {
+        self.mobs
+            .ensure_restored()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn capture_client_context_restart_inventory(
+        &self,
+    ) -> Result<ClientContextRestartInventory, String> {
+        ExperimentalLiveDelegationCoordinator::collect_client_context_restart_inventory(self).await
+    }
+
+    async fn observe_client_context_restart_pass(
+        &self,
+        inventory: &ClientContextRestartInventory,
+        observation_bound: std::time::Duration,
+    ) -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
+        self.reconcile_client_context_inventory_after_restart(inventory, observation_bound)
+            .await
     }
 }
 
@@ -3460,6 +4073,182 @@ mod tests {
     use meerkat_core::exact_operation::ExactOperationIdentity;
     use meerkat_core::interaction::InteractionId;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RestartRecoveryInvocation {
+        ForceRestore,
+        CaptureInventory,
+        ObservePass,
+    }
+
+    #[derive(Default)]
+    struct RestartRecoveryProbe {
+        invocations: std::sync::Mutex<Vec<RestartRecoveryInvocation>>,
+        observed_inventories: std::sync::Mutex<Vec<ClientContextRestartInventory>>,
+        capture_entered: tokio::sync::Notify,
+        observed: tokio::sync::Notify,
+    }
+
+    struct ScriptedRestartRecoveryOwner {
+        probe: Arc<RestartRecoveryProbe>,
+        restore_results: std::sync::Mutex<std::collections::VecDeque<Result<(), String>>>,
+        inventory_results: std::sync::Mutex<
+            std::collections::VecDeque<Result<ClientContextRestartInventory, String>>,
+        >,
+        pass_results: std::sync::Mutex<
+            std::collections::VecDeque<Result<Vec<ExperimentalClientContextRestartReport>, String>>,
+        >,
+        default_in_flight: bool,
+        capture_release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl ScriptedRestartRecoveryOwner {
+        fn new(
+            restore_results: Vec<Result<(), String>>,
+            inventory_results: Vec<Result<ClientContextRestartInventory, String>>,
+            pass_results: Vec<Result<Vec<ExperimentalClientContextRestartReport>, String>>,
+            default_in_flight: bool,
+        ) -> (Arc<Self>, Arc<RestartRecoveryProbe>) {
+            Self::new_with_optional_capture_gate(
+                restore_results,
+                inventory_results,
+                pass_results,
+                default_in_flight,
+                None,
+            )
+        }
+
+        fn new_with_optional_capture_gate(
+            restore_results: Vec<Result<(), String>>,
+            inventory_results: Vec<Result<ClientContextRestartInventory, String>>,
+            pass_results: Vec<Result<Vec<ExperimentalClientContextRestartReport>, String>>,
+            default_in_flight: bool,
+            capture_release: Option<Arc<tokio::sync::Notify>>,
+        ) -> (Arc<Self>, Arc<RestartRecoveryProbe>) {
+            let probe = Arc::new(RestartRecoveryProbe::default());
+            (
+                Arc::new(Self {
+                    probe: Arc::clone(&probe),
+                    restore_results: std::sync::Mutex::new(restore_results.into()),
+                    inventory_results: std::sync::Mutex::new(inventory_results.into()),
+                    pass_results: std::sync::Mutex::new(pass_results.into()),
+                    default_in_flight,
+                    capture_release,
+                }),
+                probe,
+            )
+        }
+
+        fn report_for(
+            operation_id: &OperationId,
+            disposition: ExperimentalClientContextRestartDisposition,
+        ) -> ExperimentalClientContextRestartReport {
+            ExperimentalClientContextRestartReport {
+                operation_id: operation_id.clone(),
+                disposition,
+            }
+        }
+
+        fn inventory(
+            session_id: &SessionId,
+            operation_ids: &[OperationId],
+        ) -> ClientContextRestartInventory {
+            ClientContextRestartInventory {
+                entries: operation_ids
+                    .iter()
+                    .cloned()
+                    .map(|operation_id| ClientContextRestartInventoryEntry {
+                        session_id: session_id.clone(),
+                        operation_id,
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClientContextRestartRecoveryOwner for ScriptedRestartRecoveryOwner {
+        async fn force_mob_restore(&self) -> Result<(), String> {
+            self.probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RestartRecoveryInvocation::ForceRestore);
+            self.restore_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+
+        async fn capture_client_context_restart_inventory(
+            &self,
+        ) -> Result<ClientContextRestartInventory, String> {
+            self.probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RestartRecoveryInvocation::CaptureInventory);
+            if let Some(release) = &self.capture_release {
+                let released = release.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
+                self.probe.capture_entered.notify_waiters();
+                released.await;
+            }
+            self.inventory_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| Ok(ClientContextRestartInventory::default()))
+        }
+
+        async fn observe_client_context_restart_pass(
+            &self,
+            inventory: &ClientContextRestartInventory,
+            _observation_bound: std::time::Duration,
+        ) -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
+            self.probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RestartRecoveryInvocation::ObservePass);
+            self.probe
+                .observed_inventories
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(inventory.clone());
+            self.probe.observed.notify_waiters();
+            self.pass_results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| {
+                    if self.default_in_flight {
+                        let operation_id = inventory
+                            .entries
+                            .first()
+                            .map(|entry| entry.operation_id.clone())
+                            .unwrap_or_else(OperationId::new);
+                        Ok(vec![Self::report_for(
+                            &operation_id,
+                            ExperimentalClientContextRestartDisposition::InFlight,
+                        )])
+                    } else {
+                        Ok(Vec::new())
+                    }
+                })
+        }
+    }
+
+    fn immediate_restart_reconcile_timing() -> ClientContextRestartReconcileTiming {
+        ClientContextRestartReconcileTiming {
+            observation_bound: std::time::Duration::ZERO,
+            in_flight_delay: std::time::Duration::ZERO,
+            retry_delay: std::time::Duration::ZERO,
+            retry_max_delay: std::time::Duration::ZERO,
+        }
+    }
+
     fn test_bridge_admission(
         session_id: SessionId,
         binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
@@ -3516,6 +4305,370 @@ mod tests {
             generation + 100,
             generation,
         )
+    }
+
+    #[test]
+    fn client_context_restart_reconciler_does_not_arm_without_tokio_runtime() {
+        std::thread::spawn(|| {
+            let armed = std::sync::atomic::AtomicBool::new(false);
+            let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+            let (owner, probe) = ScriptedRestartRecoveryOwner::new(vec![], vec![], vec![], false);
+
+            assert!(
+                try_arm_client_context_restart_reconciler(
+                    &armed,
+                    owner,
+                    Arc::clone(&inventory_ready),
+                    immediate_restart_reconcile_timing(),
+                )
+                .is_none(),
+                "sync composition must not panic or claim an arm without a Tokio runtime"
+            );
+            assert!(!armed.load(std::sync::atomic::Ordering::Acquire));
+            assert!(!inventory_ready.is_ready());
+            assert!(
+                probe
+                    .invocations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            );
+        })
+        .join()
+        .expect("no-runtime arm probe thread exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_reconciler_single_arm_reobserves_until_terminal() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let old_operation = OperationId::new();
+        let broken_operation = OperationId::new();
+        let fixed_inventory = ScriptedRestartRecoveryOwner::inventory(
+            &session_id,
+            &[old_operation.clone(), broken_operation.clone()],
+        );
+        let in_flight_inventory = ScriptedRestartRecoveryOwner::inventory(
+            &session_id,
+            std::slice::from_ref(&old_operation),
+        );
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Err("restore temporarily unavailable".to_string()), Ok(())],
+            vec![Ok(fixed_inventory.clone())],
+            vec![
+                Err("scan temporarily unavailable".to_string()),
+                Ok(vec![
+                    ScriptedRestartRecoveryOwner::report_for(
+                        &old_operation,
+                        ExperimentalClientContextRestartDisposition::InFlight,
+                    ),
+                    ScriptedRestartRecoveryOwner::report_for(
+                        &broken_operation,
+                        ExperimentalClientContextRestartDisposition::Broken {
+                            reason: "permanent old-operation debt".to_string(),
+                        },
+                    ),
+                ]),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &old_operation,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+            ],
+            false,
+        );
+        let first = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("first coordinator composition arms restart recovery");
+        assert!(
+            try_arm_client_context_restart_reconciler(
+                &armed,
+                Arc::clone(&owner),
+                Arc::clone(&inventory_ready),
+                immediate_restart_reconcile_timing(),
+            )
+            .is_none(),
+            "the same coordinator cannot arm a duplicate restart driver"
+        );
+        first.await.expect("restart reconciliation task completes");
+        assert!(
+            try_arm_client_context_restart_reconciler(
+                &armed,
+                owner,
+                Arc::clone(&inventory_ready),
+                immediate_restart_reconcile_timing(),
+            )
+            .is_none(),
+            "a completed startup reconciler remains one-shot for its coordinator lifetime"
+        );
+        assert_eq!(
+            *probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the restart driver command alphabet is restore plus read-only observation only; no work-start, resubmit, or provider-release callback exists"
+        );
+        assert!(inventory_ready.is_ready());
+        let new_active_operation = OperationId::new();
+        let observed_inventories = probe
+            .observed_inventories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            observed_inventories.as_slice(),
+            &[
+                fixed_inventory.clone(),
+                fixed_inventory.clone(),
+                in_flight_inventory,
+            ]
+        );
+        assert!(fixed_inventory.contains(&session_id, &old_operation));
+        assert!(
+            !fixed_inventory.contains(&session_id, &new_active_operation),
+            "an operation admitted after readiness is outside every repeated recovery pass and cannot have its active channel abandoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_inventory_capture_precedes_live_prepare_readiness() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let capture_release = Arc::new(tokio::sync::Notify::new());
+        let inventory = ScriptedRestartRecoveryOwner::inventory(
+            &SessionId::new(),
+            std::slice::from_ref(&OperationId::new()),
+        );
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new_with_optional_capture_gate(
+            vec![Ok(())],
+            vec![Ok(inventory)],
+            vec![Ok(Vec::new())],
+            false,
+            Some(Arc::clone(&capture_release)),
+        );
+        let capture_entered = probe.capture_entered.notified();
+        tokio::pin!(capture_entered);
+        capture_entered.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm inventory-readiness ordering probe");
+        capture_entered.await;
+        assert!(!inventory_ready.is_ready());
+
+        let prepare_wait = tokio::spawn({
+            let inventory_ready = Arc::clone(&inventory_ready);
+            async move { inventory_ready.wait().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !prepare_wait.is_finished(),
+            "bound-channel preparation remains gated while startup inventory capture is pending"
+        );
+
+        capture_release.notify_one();
+        prepare_wait
+            .await
+            .expect("prepare readiness releases after inventory capture");
+        task.await
+            .expect("inventory-ordering restart reconciler completes");
+        assert!(inventory_ready.is_ready());
+        assert_eq!(
+            *probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::ObservePass,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_broken_debt_is_terminal_for_startup_driver() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let operation_id = OperationId::new();
+        let inventory = ScriptedRestartRecoveryOwner::inventory(
+            &SessionId::new(),
+            std::slice::from_ref(&operation_id),
+        );
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(inventory)],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Broken {
+                    reason: "unsanitized mechanical detail stays out of the warning".to_string(),
+                },
+            )])],
+            true,
+        );
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            inventory_ready,
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm permanent-debt restart probe");
+        task.await
+            .expect("permanent broken debt ends the startup driver");
+        assert_eq!(
+            *probe
+                .invocations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "permanent Broken debt is observable but is not retried as a transient scan failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_context_restart_reconciler_drops_with_coordinator_owner() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let inventory = ScriptedRestartRecoveryOwner::inventory(
+            &SessionId::new(),
+            std::slice::from_ref(&OperationId::new()),
+        );
+        let (owner, probe) =
+            ScriptedRestartRecoveryOwner::new(vec![Ok(())], vec![Ok(inventory)], vec![], true);
+        let observed = probe.observed.notified();
+        tokio::pin!(observed);
+        observed.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            inventory_ready,
+            ClientContextRestartReconcileTiming {
+                observation_bound: std::time::Duration::ZERO,
+                in_flight_delay: std::time::Duration::from_millis(1),
+                retry_delay: std::time::Duration::ZERO,
+                retry_max_delay: std::time::Duration::ZERO,
+            },
+        )
+        .expect("arm drop-sensitive restart reconciliation");
+        observed.await;
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_millis(100), task)
+            .await
+            .expect("weakly-owned restart driver exits after coordinator drop")
+            .expect("restart driver exits cleanly");
+        assert_eq!(Arc::strong_count(&probe), 1);
+    }
+
+    #[test]
+    fn barge_in_user_start_preserves_frozen_assistant_interaction() {
+        use meerkat_runtime::meerkat_machine::dsl::{
+            AgentRuntimeId, FenceToken, Generation, MeerkatMachineAuthority, MeerkatMachineInput,
+            MeerkatMachineMutator, MeerkatMachineState,
+        };
+
+        let channel_id = "live:barge-in".to_string();
+        let runtime_id = AgentRuntimeId("runtime:barge-in".to_string());
+        let fence_token = FenceToken(41);
+        let generation = Generation(7);
+        let first_interaction = InteractionId::new().to_string();
+        let second_interaction = InteractionId::new().to_string();
+        let first_user_turn = "provider:user:1".to_string();
+        let first_assistant_turn = "provider:assistant:1".to_string();
+        let second_user_turn = "provider:user:2".to_string();
+        let mut state = MeerkatMachineState {
+            lifecycle_phase: meerkat_runtime::meerkat_machine::dsl::MeerkatPhase::Idle,
+            ..Default::default()
+        };
+        state
+            .live_execution_runtime_id_by_channel
+            .insert(channel_id.clone(), runtime_id.clone());
+        state
+            .live_execution_fence_by_channel
+            .insert(channel_id.clone(), fence_token);
+        state
+            .live_execution_generation_by_channel
+            .insert(channel_id.clone(), generation);
+        state.live_channel_session_by_channel.insert(
+            channel_id.clone(),
+            "session:barge-in-authority-fixture".to_string(),
+        );
+        let mut authority = MeerkatMachineAuthority::recover_from_state(state)
+            .expect("recover exact generated barge-in fixture");
+
+        for input in [
+            MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                channel_id: channel_id.clone(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                interaction_id: first_interaction.clone(),
+                provider_turn_ref: first_user_turn.clone(),
+            },
+            MeerkatMachineInput::CompleteLiveInteraction {
+                channel_id: channel_id.clone(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                provider_turn_ref: first_user_turn,
+            },
+            MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+                channel_id: channel_id.clone(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                assistant_turn_ref: first_assistant_turn.clone(),
+            },
+            // This is the full-duplex ordering under review: the next user
+            // turn starts before assistant turn 1 reaches playback terminal.
+            MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                channel_id: channel_id.clone(),
+                runtime_id,
+                fence_token,
+                generation,
+                interaction_id: second_interaction.clone(),
+                provider_turn_ref: second_user_turn.clone(),
+            },
+        ] {
+            MeerkatMachineMutator::apply(&mut authority, input)
+                .expect("generated custody accepts the exact barge-in ordering");
+        }
+
+        let state = authority.state();
+        assert_eq!(
+            state
+                .live_assistant_interaction_by_turn
+                .get(&first_assistant_turn),
+            Some(&first_interaction),
+            "barge-in cannot retarget the interrupted assistant output"
+        );
+        assert_eq!(
+            state.live_active_interaction_by_channel.get(&channel_id),
+            Some(&second_interaction),
+            "the new user turn owns foreground input custody"
+        );
+        assert_eq!(
+            state.live_provider_turn_by_channel.get(&channel_id),
+            Some(&second_user_turn),
+            "user-input custody advances independently of assistant output"
+        );
     }
 
     #[test]
@@ -3608,6 +4761,8 @@ mod tests {
         #[derive(Debug, PartialEq, Eq)]
         struct TestAcknowledgement {
             authority: TestDeliveryAuthority,
+            delegation_ref: String,
+            result_digest: String,
         }
 
         let authority = TestDeliveryAuthority("delivery:exact-bounded-result");
@@ -3616,10 +4771,15 @@ mod tests {
             "delegation:exact-retained-ref".to_string(),
         )
         .expect("provider delegation fixture");
-        let bounded_executor_result =
-            "line one from executor\nline two remains byte-exact  ".to_string();
+        let bounded_executor_result = retain_terminal_result(
+            true,
+            LiveDelegationWorkerTerminalKind::Completed,
+            false,
+            Some("line one from executor\nline two remains byte-exact  ".to_string()),
+        )
+        .expect("retired exact bounded completion is projection-eligible");
 
-        let acknowledgement = ExactDelegationResultProjection::new(
+        let (acknowledgement, projection_evidence) = ExactDelegationResultProjection::new(
             authority.clone(),
             retained_delegation.clone(),
             bounded_executor_result.clone(),
@@ -3631,6 +4791,11 @@ mod tests {
                 assert_eq!(received_result, bounded_executor_result);
                 TestAcknowledgement {
                     authority: received_authority,
+                    delegation_ref: received_delegation.adapter_key().to_string(),
+                    result_digest: format!(
+                        "sha256:{:x}",
+                        Sha256::digest(received_result.as_bytes())
+                    ),
                 }
             },
         )
@@ -3640,6 +4805,599 @@ mod tests {
             acknowledgement.authority,
             TestDeliveryAuthority("delivery:exact-bounded-result"),
             "the acknowledgement resolves the same delivery authority consumed by the projection"
+        );
+        assert_eq!(
+            acknowledgement.delegation_ref, "adapter:client-context",
+            "the acknowledgement is correlated to the exact retained delegation ref"
+        );
+        assert_eq!(
+            acknowledgement.result_digest,
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(b"line one from executor\nline two remains byte-exact  ")
+            ),
+            "the acknowledged projection carries a safe digest of the exact bounded final text"
+        );
+        assert_eq!(
+            projection_evidence.result_digest, acknowledgement.result_digest,
+            "the provider dispatch evidence is derived from the same exact bounded final"
+        );
+        assert_eq!(
+            projection_evidence.delegation_ref_digest,
+            format!("sha256:{:x}", Sha256::digest(b"adapter:client-context")),
+            "the provider dispatch evidence is derived from the same retained delegation ref"
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    struct ExactProjectionTestAgent {
+        session: meerkat_core::Session,
+        identity: meerkat_core::SessionLlmIdentity,
+        transient: meerkat_core::TransientTurnContextStateHandle,
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[async_trait::async_trait]
+    impl meerkat_session::SessionAgent for ExactProjectionTestAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: meerkat_core::ContentInput,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>,
+        ) -> Result<meerkat_core::RunResult, meerkat_core::AgentError> {
+            Ok(meerkat_core::RunResult {
+                text: "unused".to_string(),
+                session_id: self.session.id().clone(),
+                usage: meerkat_core::Usage::default(),
+                turns: 0,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_turn_tool_overlay(
+            &mut self,
+            _overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), meerkat_core::AgentError> {
+            self.identity = identity;
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            self.session.id().clone()
+        }
+
+        fn snapshot(&self) -> meerkat_session::ephemeral::SessionSnapshot {
+            meerkat_session::ephemeral::SessionSnapshot {
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: self.session.messages().len(),
+                total_tokens: 0,
+                usage: meerkat_core::Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+            Ok(self.session.clone())
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<
+            meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+            meerkat_core::AgentError,
+        > {
+            meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(
+                &self.session,
+            )
+        }
+
+        fn observed_session_tail(
+            &self,
+        ) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+            meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
+        }
+
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
+        fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+            self.transient.clone()
+        }
+
+        fn append_realtime_transcript_event(
+            &mut self,
+            event: meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::AgentError>
+        {
+            Ok(self.session.append_realtime_transcript_event(event))
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    struct ExactProjectionTestAgentBuilder(SessionId);
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[async_trait::async_trait]
+    impl meerkat_session::SessionAgentBuilder for ExactProjectionTestAgentBuilder {
+        type Agent = ExactProjectionTestAgent;
+
+        async fn build_agent(
+            &self,
+            req: &meerkat_core::service::CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>,
+        ) -> Result<Self::Agent, meerkat_core::service::SessionError> {
+            Ok(ExactProjectionTestAgent {
+                session: meerkat_core::Session::with_id(self.0.clone()),
+                identity: meerkat_core::SessionLlmIdentity {
+                    model: req.model.clone(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                transient: meerkat_core::TransientTurnContextStateHandle::new(),
+            })
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    struct ExactProjectionControlCapture {
+        authority: LiveDelegationResultDeliveryAuthority,
+        delegation_matches_authority: bool,
+        delegation_ref_digest: String,
+        result_digest: String,
+        result_text: String,
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[derive(Default)]
+    struct ExactProjectionControl {
+        capture: Mutex<Option<ExactProjectionControlCapture>>,
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    struct ExactProjectionSideband;
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[async_trait::async_trait]
+    impl meerkat_live::ProviderWebrtcSidebandSession for ExactProjectionSideband {
+        async fn send_command(
+            &self,
+            _command: meerkat_live::LiveSidebandCommand,
+        ) -> Result<
+            meerkat_live::LiveSidebandCommandDelivery,
+            meerkat_live::ProviderWebrtcBrokerError,
+        > {
+            Err(meerkat_live::ProviderWebrtcBrokerError::Unavailable)
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveSidebandObservation>, meerkat_live::ProviderWebrtcBrokerError>
+        {
+            Ok(None)
+        }
+
+        async fn close(&self) -> Result<(), meerkat_live::ProviderWebrtcBrokerError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    struct ExactProjectionBoundReadyResolver;
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[async_trait::async_trait]
+    impl meerkat_live::ProviderWebrtcPendingBoundReadyResolver for ExactProjectionBoundReadyResolver {
+        async fn resolve(self: Box<Self>) -> Result<u64, meerkat_live::ProviderWebrtcBrokerError> {
+            Ok(0)
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[async_trait::async_trait]
+    impl ExperimentalGptLiveControlPlane for ExactProjectionControl {
+        async fn active_binding(&self, _session_id: &SessionId) -> Option<ProviderWebrtcBinding> {
+            None
+        }
+
+        async fn next_observation(
+            &self,
+            _binding: &ProviderWebrtcBinding,
+        ) -> Result<
+            Option<ExperimentalGptLiveControlObservation>,
+            meerkat_live::ProviderWebrtcBrokerError,
+        > {
+            Ok(None)
+        }
+
+        async fn append_session_context(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            _text: String,
+        ) -> Result<
+            meerkat::experimental_gpt_live::ExperimentalGptLiveAppendDispatch,
+            ExperimentalGptLiveBridgeError,
+        > {
+            Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)
+        }
+
+        async fn release_delegation_context(
+            &self,
+            authority: LiveDelegationResultDeliveryAuthority,
+            delegation: LiveSidebandDelegationRef,
+            text: String,
+        ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>
+        {
+            *self.capture.lock().await = Some(ExactProjectionControlCapture {
+                authority: authority.clone(),
+                delegation_matches_authority: delegation.adapter_key()
+                    == authority
+                        .operation()
+                        .domain_correlation()
+                        .provider()
+                        .delegation_item_id(),
+                delegation_ref_digest: format!(
+                    "sha256:{:x}",
+                    Sha256::digest(delegation.adapter_key().as_bytes())
+                ),
+                result_digest: format!("sha256:{:x}", Sha256::digest(text.as_bytes())),
+                result_text: text,
+            });
+            Ok(ExperimentalGptLiveResultDeliveryDispatch::Resolved(
+                meerkat::experimental_gpt_live::ExperimentalGptLiveResultDeliveryResolution::__gate0_harness(
+                    authority,
+                    LiveDelegationResultDeliveryObservation::Delivered,
+                ),
+            ))
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[tokio::test]
+    async fn retained_terminal_result_runs_control_ack_and_runtime_resolution_chain() {
+        use meerkat_core::service::{
+            CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
+        };
+
+        let session_id = SessionId::new();
+        let channel_id = meerkat_core::LiveChannelId::new("live:exact-result-projection");
+
+        let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
+            ExactProjectionTestAgentBuilder(session_id.clone()),
+            1,
+        ));
+        SessionService::create_session(
+            session_service.as_ref(),
+            CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "exact-projection-test".to_string(),
+                prompt: "unused".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            },
+        )
+        .await
+        .expect("materialize canonical transcript owner");
+
+        let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let _bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare exact runtime binding");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "experimental-live".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        runtime
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("admit exact live channel");
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                "test-client-context",
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("construct exact test execution profile");
+        runtime
+            .resolve_live_execution_profile_admission(&session_id, &channel_id, &execution_profile)
+            .await
+            .expect("admit exact client-context mode");
+        let stage = runtime
+            .stage_experimental_live_execution(&session_id, &channel_id, 0)
+            .await
+            .expect("stage exact experimental live execution");
+        runtime
+            .register_live_playback_owner(&stage, "test-exact-result-playback-owner")
+            .await
+            .expect("register exact playback owner");
+        runtime
+            .record_live_webrtc_token_issued(
+                &session_id,
+                &channel_id,
+                "test-exact-result-token",
+                100,
+                1_000,
+            )
+            .await
+            .expect("record exact signaling token");
+        let mut answer_admission = runtime
+            .resolve_live_webrtc_answer_admission(
+                &session_id,
+                &channel_id,
+                "test-exact-result-token",
+                101,
+            )
+            .await
+            .expect("resolve exact signaling admission");
+        assert!(answer_admission.admitted);
+        let admitted_offer = meerkat_live::LiveWebrtcAdmittedOffer::from_machine_admission(
+            channel_id.clone(),
+            session_id.clone(),
+            Some(meerkat_live::LiveWebrtcRuntimeBinding {
+                generation: stage.binding().generation(),
+                fence: stage.binding().fence_token(),
+            }),
+            "test-offer-sdp".to_string(),
+            answer_admission
+                .transport_seal
+                .take()
+                .expect("admitted answer carries one-use provider seal"),
+        );
+        let provider_offer = admitted_offer
+            .into_provider_offer()
+            .expect("consume exact signaling admission");
+        let provider_binding = provider_offer.binding().clone();
+        let answer = provider_offer.into_pending_bound_ready_answer(
+            "test-answer-sdp".to_string(),
+            Arc::new(ExactProjectionSideband),
+            Box::new(ExactProjectionBoundReadyResolver),
+        );
+        let (_, _, pending_bound_ready) = answer.into_parts();
+        let bound_ready = pending_bound_ready
+            .__resolve_after_answer_delivery()
+            .await
+            .expect("provider acknowledges exact empty canonical seed");
+        runtime
+            .accept_live_webrtc_answer_and_bind_execution(&provider_binding, &bound_ready, 1)
+            .await
+            .expect("bind exact live execution after provider readiness");
+
+        let turn = LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "turn:exact-result-projection".to_string(),
+            "provider-private-turn-ref".to_string(),
+        )
+        .expect("provider turn fixture");
+        let turn_started = runtime
+            .observe_live_provider_turn_started(&LiveSidebandObservation::new(
+                provider_binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("admit exact provider turn");
+        let provider_turn_ref = turn_started.provider_turn_ref().to_string();
+        let provider = OpaqueProviderCorrelation::new(
+            "delegation:exact-result-projection",
+            provider_turn_ref.clone(),
+        )
+        .expect("provider correlation fixture");
+        let correlation = LiveUserTurnCorrelation::new(
+            channel_id.clone(),
+            turn_started.interaction_id(),
+            provider,
+        )
+        .expect("live turn correlation fixture");
+        let operation = ExactOperationIdentity::for_domain(OperationId::new(), correlation.clone());
+        let provisional = ProvisionalLiveHandoff::new(
+            correlation,
+            "exact final delegated user input",
+            LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff fixture");
+        runtime
+            .admit_live_delegation(turn_started.binding(), &operation, &provisional)
+            .await
+            .expect("admit exact live delegation");
+        let runtime_id = turn_started.binding().runtime_id().clone();
+        let fence_token = turn_started.binding().fence_token();
+        let generation = turn_started.binding().generation();
+
+        let final_transcript = session_service
+            .commit_live_user_transcript_final(
+                &session_id,
+                provisional.clone(),
+                Some(meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: provider_turn_ref,
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "exact final delegated user input".to_string(),
+                }),
+            )
+            .await
+            .expect("commit exact final transcript evidence");
+        let reconciliation = runtime
+            .reconcile_live_delegation_transcript(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                &final_transcript,
+            )
+            .await
+            .expect("reconcile exact final transcript");
+        let admission = runtime
+            .authorize_live_delegation_worker_start(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                "exact-result-projection-worker",
+            )
+            .await
+            .expect("authorize exact bounded worker");
+        runtime
+            .resolve_live_delegation_worker_start(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+                true,
+            )
+            .await
+            .expect("record exact bounded worker start");
+        let terminal_receipt = runtime
+            .record_live_delegation_worker_terminal(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+                LiveDelegationWorkerTerminalKind::Completed,
+            )
+            .await
+            .expect("record exact completed bounded worker");
+        let retirement = runtime
+            .authorize_live_delegation_worker_retirement(
+                &runtime_id,
+                fence_token,
+                generation,
+                &admission,
+            )
+            .await
+            .expect("authorize exact bounded worker retirement");
+        runtime
+            .resolve_live_delegation_worker_retirement(
+                &runtime_id,
+                fence_token,
+                generation,
+                &retirement,
+                true,
+            )
+            .await
+            .expect("record exact bounded worker retirement");
+        let exact_result = retain_terminal_result(
+            true,
+            LiveDelegationWorkerTerminalKind::Completed,
+            terminal_receipt.late(),
+            Some("line one from executor\nline two remains byte-exact  ".to_string()),
+        )
+        .expect("retired exact bounded completion is projection-eligible");
+
+        let control = Arc::new(ExactProjectionControl::default());
+        let binding = turn_started.binding().clone();
+        let retained = Arc::new(RetainedDelegation {
+            operation: operation.clone(),
+            provisional,
+            runtime_binding: binding,
+            admission,
+            delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                "delegation:exact-result-projection".to_string(),
+                "provider-private-delegation-ref".to_string(),
+            )
+            .expect("provider delegation fixture"),
+            control: Arc::clone(&control) as Arc<dyn ExperimentalGptLiveControlPlane>,
+            result: Mutex::new(RetainedDelegationResult {
+                reconciliation: Some(reconciliation),
+                result_text: Some(exact_result.clone()),
+                ..RetainedDelegationResult::default()
+            }),
+        });
+        let coordinator = ExperimentalLiveDelegationCoordinator::new(
+            Arc::clone(&runtime),
+            crate::MobMcpState::new_in_memory_with_archive_delay(0),
+        );
+        coordinator
+            .retained
+            .lock()
+            .await
+            .insert(operation.operation_id().clone(), Arc::clone(&retained));
+
+        coordinator
+            .try_release_retained_result(&retained)
+            .await
+            .expect("production retained-result chain settles provider acknowledgement");
+
+        let capture = control
+            .capture
+            .lock()
+            .await
+            .take()
+            .expect("control plane received exact production projection");
+        assert_eq!(capture.result_text, exact_result);
+        assert!(capture.authority.authorizes_text(&capture.result_text));
+        assert_eq!(capture.authority.operation(), &operation);
+        assert!(capture.delegation_matches_authority);
+        assert_eq!(
+            capture.result_digest,
+            format!("sha256:{:x}", Sha256::digest(exact_result.as_bytes()))
+        );
+        assert_eq!(
+            capture.delegation_ref_digest,
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(b"delegation:exact-result-projection")
+            )
+        );
+        let settled = runtime
+            .resolve_live_delegation_result_delivery(
+                &capture.authority,
+                LiveDelegationResultDeliveryObservation::Delivered,
+            )
+            .await
+            .expect("recover terminal provider-delivery resolution with the same authority");
+        let LiveDelegationResultDeliveryResolution::Resolved(settled) = settled else {
+            panic!("delivered terminal authority cannot become ambiguity recovery")
+        };
+        assert_eq!(
+            settled.observation(),
+            LiveDelegationResultDeliveryObservation::Delivered
+        );
+        assert_eq!(settled.authority().operation(), &operation);
+        assert!(
+            !coordinator
+                .retained
+                .lock()
+                .await
+                .contains_key(operation.operation_id()),
+            "terminal provider acknowledgement retires exact retained custody"
         );
     }
 

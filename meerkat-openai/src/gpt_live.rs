@@ -951,6 +951,7 @@ impl GptLiveBrokerSessionState {
             ),
             ServerEvent::TurnCreated(event) => {
                 let role = GptLiveTurnRole::from_provider_role(&event.turn.role);
+                tracing::debug!(?role, "lowered GPT Live turn start");
                 self.queued_observations
                     .push_back(GptLiveBrokerObservation::TurnStarted {
                         turn: GptLiveTurnRef(event.turn.id),
@@ -966,6 +967,7 @@ impl GptLiveBrokerSessionState {
             }
             ServerEvent::TurnDone(event) => {
                 let role = GptLiveTurnRole::from_provider_role(&event.turn.role);
+                tracing::debug!(?role, "lowered GPT Live turn finish");
                 let turn = GptLiveTurnRef(event.turn.id);
                 let transcript = event.turn.transcript;
                 if self.delegation_mode == GptLiveBrokerDelegationMode::Client
@@ -1015,31 +1017,13 @@ impl GptLiveBrokerSessionState {
                 );
             }
             ServerEvent::Unknown(event) => {
-                let message = event
-                    .raw()
-                    .pointer("/error/message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let error_class = if message.contains("maximum")
-                    || message.contains("too long")
-                    || message.contains("exceed")
-                {
-                    "size_limit"
-                } else if message.contains("Unknown parameter") {
-                    "unknown_parameter"
-                } else if message.contains("Missing required parameter") {
-                    "missing_parameter"
-                } else if message.contains("Invalid") || message.contains("invalid") {
-                    "invalid_parameter"
-                } else if event.kind() == "error" {
-                    "other_provider_error"
-                } else {
-                    "unsupported_event"
-                };
+                let summary = summarize_unknown_private_event(&event);
                 tracing::warn!(
-                    provider_event_kind = event.kind(),
-                    error_class,
-                    message_bytes = message.len(),
+                    provider_event_class = "unknown",
+                    error_class = summary.error_class,
+                    top_level_field_count = summary.top_level_field_count,
+                    normalized_json_bytes = summary.normalized_json_bytes,
+                    message_bytes = summary.message_bytes,
                     "experimental GPT Live received an unsupported private sideband event"
                 );
                 self.queued_observations
@@ -1117,6 +1101,46 @@ impl GptLiveBrokerSessionState {
 fn protocol_error() -> GptLiveBrokerError {
     GptLiveBrokerError::Transport {
         class: GptLiveBrokerTerminalClass::Protocol,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnknownPrivateEventSummary {
+    error_class: &'static str,
+    top_level_field_count: usize,
+    normalized_json_bytes: usize,
+    message_bytes: usize,
+}
+
+fn summarize_unknown_private_event(
+    event: &oai_rt_rs::experimental::gpt_live::UnknownEvent,
+) -> UnknownPrivateEventSummary {
+    let message = event
+        .raw()
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let error_class = if message.contains("maximum")
+        || message.contains("too long")
+        || message.contains("exceed")
+    {
+        "size_limit"
+    } else if message.contains("Unknown parameter") {
+        "unknown_parameter"
+    } else if message.contains("Missing required parameter") {
+        "missing_parameter"
+    } else if message.contains("Invalid") || message.contains("invalid") {
+        "invalid_parameter"
+    } else if event.kind() == "error" {
+        "other_provider_error"
+    } else {
+        "unsupported_event"
+    };
+    UnknownPrivateEventSummary {
+        error_class,
+        top_level_field_count: event.raw().as_object().map_or(0, serde_json::Map::len),
+        normalized_json_bytes: serde_json::to_vec(event.raw()).map_or(0, |bytes| bytes.len()),
+        message_bytes: message.len(),
     }
 }
 
@@ -1277,6 +1301,34 @@ mod tests {
                 class: GptLiveBrokerTerminalClass::Protocol
             }
         ));
+    }
+
+    #[test]
+    fn unknown_private_event_summary_contains_only_fixed_classes_and_counts() {
+        let event = oai_rt_rs::experimental::gpt_live::decode_server_event(
+            &json!({
+                "type": "FIXTURE_PRIVATE_UNKNOWN_KIND",
+                "error": {
+                    "message": "Invalid FIXTURE_PRIVATE_MESSAGE_SECRET"
+                },
+                "secret": "FIXTURE_PRIVATE_PAYLOAD_SECRET"
+            })
+            .to_string(),
+        )
+        .expect("unknown fixture event");
+        let ServerEvent::Unknown(event) = event else {
+            panic!("fixture must remain unknown");
+        };
+
+        let summary = summarize_unknown_private_event(&event);
+        assert_eq!(summary.error_class, "invalid_parameter");
+        assert_eq!(summary.top_level_field_count, 3);
+        assert!(summary.normalized_json_bytes > 0);
+        assert!(summary.message_bytes > 0);
+        let diagnostics = format!("{summary:?}");
+        assert!(!diagnostics.contains("FIXTURE_PRIVATE_UNKNOWN_KIND"));
+        assert!(!diagnostics.contains("FIXTURE_PRIVATE_MESSAGE_SECRET"));
+        assert!(!diagnostics.contains("FIXTURE_PRIVATE_PAYLOAD_SECRET"));
     }
 
     #[derive(Default)]

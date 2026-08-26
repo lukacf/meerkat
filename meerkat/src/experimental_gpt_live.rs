@@ -261,6 +261,10 @@ pub struct ExperimentalGptLiveOpenAuthorityConfig {
     pub agent_factory: crate::AgentFactory,
     pub config_source: Arc<dyn ExperimentalLiveCurrentConfigSource>,
     pub binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
+    /// Host-owned fixed execution identity for the registered GPT Live
+    /// profile. Callers can select the profile but cannot override any part of
+    /// this identity or its configured auth binding.
+    pub execution_identity: meerkat_core::SessionLlmIdentity,
     pub realm: meerkat_core::RealmId,
     pub factory_identity: crate::ExperimentalLiveFactoryIdentity,
     pub transport: Arc<ExperimentalGptLiveWebrtcTransport>,
@@ -271,14 +275,16 @@ pub struct ExperimentalGptLiveOpenAuthorityConfig {
 /// authority.
 ///
 /// The embedding host supplies authenticated durable-session authorization,
-/// while this owner performs every other step: strict wire lowering, current
-/// config read, side-effect-free target preparation, exact binding
-/// authorization, credential materialization, lower-layer admission, and
-/// construction of one opaque pending provider channel.
+/// the fixed execution identity, and its configured auth binding. This owner
+/// performs every other step: strict profile selection, current config read,
+/// side-effect-free target preparation, exact binding authorization,
+/// credential materialization, lower-layer admission, and construction of one
+/// opaque pending provider channel.
 pub struct ExperimentalGptLiveOpenAuthority {
     agent_factory: crate::AgentFactory,
     config_source: Arc<dyn ExperimentalLiveCurrentConfigSource>,
     binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
+    execution_identity: meerkat_core::SessionLlmIdentity,
     realm: meerkat_core::RealmId,
     factory_identity: crate::ExperimentalLiveFactoryIdentity,
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
@@ -310,10 +316,24 @@ impl ExperimentalGptLiveOpenAuthority {
         if config.voice.trim().is_empty() {
             return Err(ExperimentalGptLiveOpenAuthorityError::MissingVoice);
         }
+        if config.execution_identity.provider != meerkat_core::Provider::OpenAI
+            || config.execution_identity.model != "gpt-live-1-codex"
+            || config.execution_identity.self_hosted_server_id.is_some()
+            || config.execution_identity.provider_params.is_some()
+            || !matches!(
+                config.execution_identity.auth_binding.as_ref(),
+                Some(binding)
+                    if binding.origin == meerkat_core::BindingOrigin::Configured
+                        && binding.realm == config.realm
+            )
+        {
+            return Err(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity);
+        }
         Ok(Self {
             agent_factory: config.agent_factory,
             config_source: config.config_source,
             binding_authority: config.binding_authority,
+            execution_identity: config.execution_identity,
             realm: config.realm,
             factory_identity: config.factory_identity,
             transport: config.transport,
@@ -339,50 +359,14 @@ impl ExperimentalGptLiveOpenAuthority {
         self.test_endpoints = Some((call_url.into(), sideband_base_url.into()));
         self
     }
-
-    fn lower_execution_identity(
-        execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
-    ) -> Result<meerkat_core::SessionLlmIdentity, ExperimentalLiveOpenAuthorityError> {
-        use meerkat_contracts::WireLiveIdentityOverride;
-        use meerkat_contracts::wire::WireProvider;
-
-        if execution_identity.profile_id.trim().is_empty() {
-            return Err(ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity);
-        }
-        let model = execution_identity
-            .model
-            .clone()
-            .ok_or(ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity)?;
-        let provider = match execution_identity.provider {
-            Some(WireProvider::OpenAi) => meerkat_core::Provider::OpenAI,
-            _ => return Err(ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity),
-        };
-        if execution_identity.self_hosted_server_id.is_some() {
-            return Err(ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity);
-        }
-        let auth_binding = match execution_identity.auth_binding.clone() {
-            Some(WireLiveIdentityOverride::Set(binding)) => Some(meerkat_core::AuthBindingRef {
-                realm: binding.realm,
-                binding: binding.binding,
-                profile: binding.profile,
-                origin: meerkat_core::BindingOrigin::Configured,
-            }),
-            Some(WireLiveIdentityOverride::Clear) | None => None,
-        };
-        Ok(meerkat_core::SessionLlmIdentity {
-            model,
-            provider,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ExperimentalGptLiveOpenAuthorityError {
     #[error("experimental GPT Live open authority requires a non-empty voice")]
     MissingVoice,
+    #[error("experimental GPT Live open authority requires the canonical host-owned identity")]
+    InvalidExecutionIdentity,
 }
 
 #[async_trait]
@@ -407,7 +391,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         self.binding_authority
             .validate_live_durable_source_availability(canonical_session_id)
             .await?;
-        let identity = Self::lower_execution_identity(execution_identity)?;
+        let identity = self.execution_identity.clone();
         let config = self
             .config_source
             .current_config()
@@ -3504,7 +3488,176 @@ struct SidebandCorrelations {
     next_turn_ref: u64,
     delegations: HashMap<String, GptLiveDelegationRef>,
     turns: HashMap<String, LiveSidebandTurnRef>,
-    append_attempts: HashMap<GptLiveAppendToken, LiveSidebandAppendAttempt>,
+    appends: SidebandAppendCorrelations<GptLiveAppendToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SidebandAppendLane {
+    SessionContext,
+    DelegationContext,
+}
+
+#[derive(Clone)]
+struct SidebandAppendReservation {
+    lane: SidebandAppendLane,
+    attempt: LiveSidebandAppendAttempt,
+}
+
+enum SidebandAppendReservationState<Token> {
+    Reserved {
+        attempt: LiveSidebandAppendAttempt,
+    },
+    AcknowledgedBeforeCommit {
+        attempt: LiveSidebandAppendAttempt,
+        token: Token,
+    },
+}
+
+struct CommittedSidebandAppend {
+    lane: SidebandAppendLane,
+    attempt: LiveSidebandAppendAttempt,
+}
+
+struct SidebandAppendCorrelations<Token> {
+    reservations: HashMap<SidebandAppendLane, SidebandAppendReservationState<Token>>,
+    committed: HashMap<Token, CommittedSidebandAppend>,
+}
+
+impl<Token> Default for SidebandAppendCorrelations<Token> {
+    fn default() -> Self {
+        Self {
+            reservations: HashMap::new(),
+            committed: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebandAppendCommit {
+    AwaitingAcknowledgement,
+    AlreadyAcknowledged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebandAppendRollback {
+    RolledBack,
+    AlreadyAcknowledged,
+}
+
+impl<Token> SidebandAppendCorrelations<Token>
+where
+    Token: Clone + Eq + std::hash::Hash,
+{
+    fn reserve(
+        &mut self,
+        lane: SidebandAppendLane,
+        attempt: LiveSidebandAppendAttempt,
+    ) -> Result<SidebandAppendReservation, ProviderWebrtcBrokerError> {
+        if self.reservations.contains_key(&lane)
+            || self
+                .committed
+                .values()
+                .any(|committed| committed.lane == lane)
+        {
+            return Err(ProviderWebrtcBrokerError::ProtocolDrift);
+        }
+        self.reservations.insert(
+            lane,
+            SidebandAppendReservationState::Reserved {
+                attempt: attempt.clone(),
+            },
+        );
+        Ok(SidebandAppendReservation { lane, attempt })
+    }
+
+    fn commit(
+        &mut self,
+        reservation: &SidebandAppendReservation,
+        token: Token,
+    ) -> Result<SidebandAppendCommit, ProviderWebrtcBrokerError> {
+        let state = self
+            .reservations
+            .remove(&reservation.lane)
+            .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+        match state {
+            SidebandAppendReservationState::Reserved { attempt }
+                if attempt == reservation.attempt =>
+            {
+                if self.committed.contains_key(&token) {
+                    return Err(ProviderWebrtcBrokerError::ProtocolDrift);
+                }
+                self.committed.insert(
+                    token,
+                    CommittedSidebandAppend {
+                        lane: reservation.lane,
+                        attempt,
+                    },
+                );
+                Ok(SidebandAppendCommit::AwaitingAcknowledgement)
+            }
+            SidebandAppendReservationState::AcknowledgedBeforeCommit {
+                attempt,
+                token: acknowledged,
+            } if attempt == reservation.attempt && acknowledged == token => {
+                Ok(SidebandAppendCommit::AlreadyAcknowledged)
+            }
+            _ => Err(ProviderWebrtcBrokerError::ProtocolDrift),
+        }
+    }
+
+    fn rollback(
+        &mut self,
+        reservation: &SidebandAppendReservation,
+    ) -> Result<SidebandAppendRollback, ProviderWebrtcBrokerError> {
+        let state = self
+            .reservations
+            .remove(&reservation.lane)
+            .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+        match state {
+            SidebandAppendReservationState::Reserved { attempt }
+                if attempt == reservation.attempt =>
+            {
+                Ok(SidebandAppendRollback::RolledBack)
+            }
+            SidebandAppendReservationState::AcknowledgedBeforeCommit { attempt, .. }
+                if attempt == reservation.attempt =>
+            {
+                Ok(SidebandAppendRollback::AlreadyAcknowledged)
+            }
+            _ => Err(ProviderWebrtcBrokerError::ProtocolDrift),
+        }
+    }
+
+    fn acknowledge(
+        &mut self,
+        lane: SidebandAppendLane,
+        token: &Token,
+    ) -> Result<LiveSidebandAppendAttempt, ProviderWebrtcBrokerError> {
+        if let Some(committed) = self.committed.remove(token) {
+            return (committed.lane == lane)
+                .then_some(committed.attempt)
+                .ok_or(ProviderWebrtcBrokerError::ProtocolDrift);
+        }
+        let state = self
+            .reservations
+            .remove(&lane)
+            .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+        match state {
+            SidebandAppendReservationState::Reserved { attempt } => {
+                self.reservations.insert(
+                    lane,
+                    SidebandAppendReservationState::AcknowledgedBeforeCommit {
+                        attempt: attempt.clone(),
+                        token: token.clone(),
+                    },
+                );
+                Ok(attempt)
+            }
+            SidebandAppendReservationState::AcknowledgedBeforeCommit { .. } => {
+                Err(ProviderWebrtcBrokerError::ProtocolDrift)
+            }
+        }
+    }
 }
 
 impl SidebandCorrelations {
@@ -3573,8 +3726,14 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
         }
         match command.__into_provider_command() {
             LiveSidebandProviderCommand::AppendSessionContext { attempt, text, .. } => {
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::SessionContext, attempt)?;
                 let result = self.session.append_session_context(text).await;
-                self.lower_append_delivery(attempt, result).await
+                self.lower_append_delivery(reservation, result).await
             }
             LiveSidebandProviderCommand::ReleaseDelegationContext {
                 attempt,
@@ -3590,11 +3749,17 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .get(delegation.__provider_opaque_value())
                     .cloned()
                     .ok_or(ProviderWebrtcBrokerError::Rejected)?;
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::DelegationContext, attempt)?;
                 let result = self
                     .session
                     .append_delegation_context(&provider_delegation, text)
                     .await;
-                self.lower_append_delivery(attempt, result).await
+                self.lower_append_delivery(reservation, result).await
             }
         }
     }
@@ -3704,34 +3869,58 @@ impl ExperimentalGptLiveSideband {
 
     async fn lower_append_delivery(
         &self,
-        attempt: LiveSidebandAppendAttempt,
+        reservation: SidebandAppendReservation,
         result: Result<GptLiveAppendToken, GptLiveBrokerError>,
     ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
         match result {
             Ok(token) => {
-                self.correlations
+                let commit = self
+                    .correlations
                     .lock()
                     .await
-                    .append_attempts
-                    .insert(token, attempt);
+                    .appends
+                    .commit(&reservation, token)?;
+                debug_assert!(matches!(
+                    commit,
+                    SidebandAppendCommit::AwaitingAcknowledgement
+                        | SidebandAppendCommit::AlreadyAcknowledged
+                ));
                 Ok(LiveSidebandCommandDelivery::Accepted)
             }
             Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token }) => {
-                self.correlations
+                let commit = self
+                    .correlations
                     .lock()
                     .await
-                    .append_attempts
-                    .insert(token, attempt.clone());
+                    .appends
+                    .commit(&reservation, token)?;
+                if commit == SidebandAppendCommit::AlreadyAcknowledged {
+                    return Ok(LiveSidebandCommandDelivery::Accepted);
+                }
                 self.synthetic_tx
                     .send(LiveSidebandObservation::new(
                         self.binding.clone(),
-                        LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { attempt },
+                        LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal {
+                            attempt: reservation.attempt,
+                        },
                     ))
                     .await
                     .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
                 Ok(LiveSidebandCommandDelivery::AmbiguousTerminal)
             }
-            Err(error) => Err(map_broker_error(error)),
+            Err(error) => {
+                let rollback = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .rollback(&reservation)?;
+                if rollback == SidebandAppendRollback::AlreadyAcknowledged {
+                    Ok(LiveSidebandCommandDelivery::Accepted)
+                } else {
+                    Err(map_broker_error(error))
+                }
+            }
         }
     }
 
@@ -3741,15 +3930,22 @@ impl ExperimentalGptLiveSideband {
     ) -> Result<LiveSidebandObservation, ProviderWebrtcBrokerError> {
         let kind = match observation {
             GptLiveBrokerObservation::SessionReady => LiveSidebandObservationKind::SessionReady,
-            GptLiveBrokerObservation::SessionContextAppendAcknowledged { token }
-            | GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token } => {
+            GptLiveBrokerObservation::SessionContextAppendAcknowledged { token } => {
                 let attempt = self
                     .correlations
                     .lock()
                     .await
-                    .append_attempts
-                    .remove(&token)
-                    .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                    .appends
+                    .acknowledge(SidebandAppendLane::SessionContext, &token)?;
+                LiveSidebandObservationKind::AppendAcknowledged { attempt }
+            }
+            GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .acknowledge(SidebandAppendLane::DelegationContext, &token)?;
                 LiveSidebandObservationKind::AppendAcknowledged { attempt }
             }
             GptLiveBrokerObservation::UserTranscriptFragment { item, text } => {
@@ -3916,6 +4112,83 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn configured_live_identity(
+        binding: meerkat_core::AuthBindingRef,
+    ) -> meerkat_core::SessionLlmIdentity {
+        meerkat_core::SessionLlmIdentity {
+            model: "gpt-live-1-codex".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(binding),
+        }
+    }
+
+    fn configured_live_binding(realm: &meerkat_core::RealmId) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: realm.clone(),
+            binding: meerkat_core::BindingId::parse("chatgpt").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_append_ack_resolves_the_pre_io_reserved_attempt() {
+        let correlations = Arc::new(Mutex::new(SidebandAppendCorrelations::<u64>::default()));
+        let attempt = LiveSidebandAppendAttempt::__from_generated_append_id(
+            "append:immediate-ack".to_string(),
+        )
+        .expect("generated append attempt");
+        let reservation = correlations
+            .lock()
+            .await
+            .reserve(SidebandAppendLane::DelegationContext, attempt.clone())
+            .expect("pre-IO reservation");
+
+        let acknowledgement_correlations = Arc::clone(&correlations);
+        let acknowledgement = tokio::spawn(async move {
+            acknowledgement_correlations
+                .lock()
+                .await
+                .acknowledge(SidebandAppendLane::DelegationContext, &41)
+                .expect("acknowledgement can race provider send return")
+        })
+        .await
+        .expect("acknowledgement task");
+        assert_eq!(acknowledgement, attempt);
+        assert_eq!(
+            correlations
+                .lock()
+                .await
+                .commit(&reservation, 41)
+                .expect("provider return commits the exact reserved token"),
+            SidebandAppendCommit::AlreadyAcknowledged
+        );
+
+        let retry_attempt =
+            LiveSidebandAppendAttempt::__from_generated_append_id("append:rollback".to_string())
+                .expect("generated retry attempt");
+        let failed = correlations
+            .lock()
+            .await
+            .reserve(SidebandAppendLane::DelegationContext, retry_attempt.clone())
+            .expect("failed send reservation");
+        assert_eq!(
+            correlations
+                .lock()
+                .await
+                .rollback(&failed)
+                .expect("definitive send failure rolls back reservation"),
+            SidebandAppendRollback::RolledBack
+        );
+        correlations
+            .lock()
+            .await
+            .reserve(SidebandAppendLane::DelegationContext, retry_attempt)
+            .expect("rollback permits a later exact attempt");
+    }
 
     struct CountingConfigSource {
         reads: Arc<AtomicUsize>,
@@ -4787,6 +5060,7 @@ mod tests {
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let factory_identity = crate::ExperimentalLiveFactoryIdentity::parse("private-live", "v1")
             .expect("factory identity");
+        let execution_identity = configured_live_identity(configured_live_binding(&realm));
         let authority =
             ExperimentalGptLiveOpenAuthority::new(ExperimentalGptLiveOpenAuthorityConfig {
                 agent_factory: crate::AgentFactory::minimal(),
@@ -4798,6 +5072,7 @@ mod tests {
                     eligibility_calls: Arc::clone(&eligibility_calls),
                     authorization_calls: Arc::clone(&authorization_calls),
                 }),
+                execution_identity,
                 realm,
                 factory_identity,
                 transport: Arc::new(ExperimentalGptLiveWebrtcTransport::new()),
@@ -4810,11 +5085,7 @@ mod tests {
                 &meerkat_core::SessionId::new(),
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
-                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
-                    model: Some("gpt-live-1-codex".to_string()),
-                    provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
-                    self_hosted_server_id: None,
-                    auth_binding: None,
+                    profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
                 },
             )
             .await
@@ -4836,6 +5107,7 @@ mod tests {
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let factory_identity = crate::ExperimentalLiveFactoryIdentity::parse("private-live", "v1")
             .expect("factory identity");
+        let selected_binding = configured_live_binding(&realm);
         let mut current_config = meerkat_core::Config::default();
         let mut realm_config = meerkat_core::RealmConfigSection::default();
         realm_config.backend.insert(
@@ -4896,13 +5168,9 @@ mod tests {
                 }),
                 binding_authority: Arc::new(NeverBindingAuthority {
                     calls: Arc::clone(&binding_calls),
-                    expected: meerkat_core::AuthBindingRef {
-                        realm: realm.clone(),
-                        binding: meerkat_core::BindingId::parse("chatgpt").expect("binding"),
-                        profile: None,
-                        origin: meerkat_core::BindingOrigin::Configured,
-                    },
+                    expected: selected_binding.clone(),
                 }),
+                execution_identity: configured_live_identity(selected_binding),
                 realm,
                 factory_identity,
                 transport: Arc::new(ExperimentalGptLiveWebrtcTransport::new()),
@@ -4914,11 +5182,7 @@ mod tests {
                 &meerkat_core::SessionId::new(),
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
-                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
-                    model: Some("gpt-live-1-codex".to_string()),
-                    provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
-                    self_hosted_server_id: None,
-                    auth_binding: None,
+                    profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
                 },
             )
             .await;
@@ -5062,11 +5326,12 @@ mod tests {
                 }),
                 binding_authority: Arc::new(ExactAllowBindingAuthority {
                     session_id: session_id.clone(),
-                    expected: selected_binding,
+                    expected: selected_binding.clone(),
                     calls: Arc::clone(&binding_calls),
                     auth_lease,
                     events: Arc::clone(&events),
                 }),
+                execution_identity: configured_live_identity(selected_binding),
                 realm,
                 factory_identity,
                 transport: Arc::clone(&transport),
@@ -5078,11 +5343,7 @@ mod tests {
                 &session_id,
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
-                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
-                    model: Some("gpt-live-1-codex".to_string()),
-                    provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
-                    self_hosted_server_id: None,
-                    auth_binding: None,
+                    profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
                 },
             )
             .await
@@ -6355,10 +6616,6 @@ mod tests {
         let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
             version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
             profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
-            model: Some("gpt-live-1-codex".to_string()),
-            provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
-            self_hosted_server_id: None,
-            auth_binding: None,
         };
 
         for (ordinal, exit) in [
@@ -6802,10 +7059,6 @@ mod tests {
         let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
             version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
             profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
-            model: Some("gpt-live-1-codex".to_string()),
-            provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
-            self_hosted_server_id: None,
-            auth_binding: None,
         };
 
         let opened = member_host

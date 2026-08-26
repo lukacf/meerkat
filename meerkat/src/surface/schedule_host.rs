@@ -31,7 +31,7 @@ use tokio_with_wasm::alias::task::JoinHandle;
 
 pub struct ScheduleHostHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join: JoinHandle<()>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl ScheduleHostHandle {
@@ -39,7 +39,24 @@ impl ScheduleHostHandle {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
-        let _ = self.join.await;
+        // Await through the handle owned by `self`. If this shutdown future is
+        // cancelled while the driver is blocked inside a tick, Drop still owns
+        // and aborts the task instead of silently detaching it.
+        if let Some(join) = self.join.as_mut() {
+            let _ = join.await;
+        }
+        self.join.take();
+    }
+}
+
+impl Drop for ScheduleHostHandle {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
     }
 }
 
@@ -1036,7 +1053,7 @@ pub fn spawn_schedule_host(
 
     ScheduleHostHandle {
         shutdown_tx: Some(shutdown_tx),
-        join,
+        join: Some(join),
     }
 }
 
@@ -1270,6 +1287,96 @@ pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blocked_schedule_host_shutdown_future_is_abort_safe() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TaskDrop(Arc<AtomicBool>);
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = oneshot::channel();
+        let join = tokio::spawn({
+            let task_dropped = Arc::clone(&task_dropped);
+            async move {
+                let _drop = TaskDrop(task_dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        started_rx.await.expect("blocked host task should start");
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = ScheduleHostHandle {
+            shutdown_tx: Some(shutdown_tx),
+            join: Some(join),
+        };
+
+        // A caller can be cancelled before polling shutdown at all. Dropping
+        // that future must still abort the blocked driver task.
+        let shutdown = handle.shutdown();
+        drop(shutdown);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping shutdown must abort the blocked host task");
+    }
+
+    #[tokio::test]
+    async fn cancelling_polled_schedule_host_shutdown_aborts_blocked_task() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TaskDrop(Arc<AtomicBool>);
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_observed_tx, shutdown_observed_rx) = oneshot::channel();
+        let join = tokio::spawn({
+            let task_dropped = Arc::clone(&task_dropped);
+            async move {
+                let _drop = TaskDrop(task_dropped);
+                let _ = shutdown_rx.await;
+                let _ = shutdown_observed_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        let handle = ScheduleHostHandle {
+            shutdown_tx: Some(shutdown_tx),
+            join: Some(join),
+        };
+
+        // Drive shutdown through its signal send and into the blocked join,
+        // then cancel the outer waiter as a timeout would. The handle remains
+        // owned by that future, so its Drop must abort the inner host task.
+        let shutdown_task = tokio::spawn(handle.shutdown());
+        tokio::time::timeout(Duration::from_secs(1), shutdown_observed_rx)
+            .await
+            .expect("shutdown should reach the host task")
+            .expect("host task should observe the shutdown signal");
+        shutdown_task.abort();
+        let _ = shutdown_task.await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling a polled shutdown must abort the blocked host task");
+    }
 
     /// Ask 16: a driver that cannot claim is an incident, not a no-op. The
     /// tracker logs a new/changed condition once at ERROR, heartbeats with
@@ -1758,7 +1865,7 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A session host that must never be asked to materialize. Any
     /// `materialize_session` call records a hit and returns an error so the
@@ -1766,6 +1873,21 @@ mod tests {
     /// a silent duplicate session.
     struct PanicOnMaterializeHost {
         materialize_calls: Arc<AtomicUsize>,
+    }
+
+    struct BlockingProbeHost {
+        entered: tokio::sync::Notify,
+        probe_calls: Arc<AtomicUsize>,
+        delivery_calls: Arc<AtomicUsize>,
+        probe_future_dropped: Arc<AtomicBool>,
+    }
+
+    struct ProbeFutureDrop(Arc<AtomicBool>);
+
+    impl Drop for ProbeFutureDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
 
     struct IdentityResolvingHost {
@@ -1815,6 +1937,151 @@ mod tests {
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
             Ok(immediate_completed_dispatch(occurrence, None))
         }
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for BlockingProbeHost {
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            self.probe_calls.fetch_add(1, Ordering::AcqRel);
+            let _drop = ProbeFutureDrop(Arc::clone(&self.probe_future_dropped));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &Occurrence,
+            _create: &SessionMaterializationSpec,
+            _prompt_system_prompt: Option<&str>,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            panic!("blocked probe must prevent materialization")
+        }
+
+        async fn deliver_prompt(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            _dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.delivery_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            _event_type: String,
+            _payload: serde_json::Value,
+            _render_metadata: Option<RenderMetadata>,
+            _materialized_session_id: Option<SessionId>,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.delivery_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+    }
+
+    #[tokio::test]
+    async fn real_schedule_host_cancellation_aborts_blocked_tick_without_later_fire() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("abort-safe-real-host".to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                    session_id: SessionId::new(),
+                    action: ScheduledSessionAction::Prompt {
+                        prompt: ContentInput::Text("must not outlive shutdown".to_string()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+                misfire_policy: meerkat_schedule::MisfirePolicy::CatchUpWithin {
+                    window_seconds: 60,
+                },
+                overlap_policy: meerkat_schedule::OverlapPolicy::SkipIfRunning,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule create should plan the due occurrence");
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let delivery_calls = Arc::new(AtomicUsize::new(0));
+        let probe_future_dropped = Arc::new(AtomicBool::new(false));
+        let blocking_host = Arc::new(BlockingProbeHost {
+            entered: tokio::sync::Notify::new(),
+            probe_calls: Arc::clone(&probe_calls),
+            delivery_calls: Arc::clone(&delivery_calls),
+            probe_future_dropped: Arc::clone(&probe_future_dropped),
+        });
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = blocking_host.clone();
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+        let handle = spawn_schedule_host(service.clone(), adapter, "abort-safe-owner");
+
+        tokio::time::timeout(Duration::from_secs(1), blocking_host.entered.notified())
+            .await
+            .expect("real driver should block inside target probe");
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(delivery_calls.load(Ordering::Acquire), 0);
+
+        // Model the gateway's bounded outer owner: shutdown sends cancellation
+        // but the real driver remains blocked inside its in-flight tick. Timing
+        // out and aborting that outer task must Drop the handle and abort the
+        // inner schedule-host task.
+        let mut shutdown_owner = tokio::spawn(handle.shutdown());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut shutdown_owner)
+                .await
+                .is_err(),
+            "real host shutdown should still be waiting on the blocked tick"
+        );
+        shutdown_owner.abort();
+        assert!(
+            shutdown_owner
+                .await
+                .expect_err("outer shutdown owner should be cancelled")
+                .is_cancelled()
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !probe_future_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborting outer shutdown must drop the real blocked tick");
+
+        // More than two test poll intervals later there can be no detached
+        // claim/probe or delivery fire from the retired host.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(delivery_calls.load(Ordering::Acquire), 0);
+        let occurrences = service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("occurrence remains inspectable");
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].attempt_count, 1);
     }
 
     #[async_trait]

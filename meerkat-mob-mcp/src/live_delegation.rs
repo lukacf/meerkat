@@ -603,6 +603,17 @@ struct ActiveProviderTurn {
     authority: meerkat_runtime::meerkat_machine::LiveProviderTurnStartedAuthority,
 }
 
+type CompletedDelegationTurnKey = (SessionId, meerkat_core::LiveChannelId, String);
+
+#[derive(Clone)]
+struct CompletedDelegationTurn {
+    authority: meerkat_runtime::meerkat_machine::LiveProviderTurnFinishedAuthority,
+    operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+    provisional: ProvisionalLiveHandoff,
+    runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    delegation_ref: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoundChannelPhase {
     Prepared,
@@ -772,6 +783,8 @@ pub struct ExperimentalLiveDelegationCoordinator {
     >,
     result_recovery_tasks: Arc<Mutex<std::collections::HashMap<OperationId, OwnedResultRecovery>>>,
     active_turns: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveProviderTurn>>>,
+    completed_delegation_turns:
+        Arc<Mutex<std::collections::HashMap<CompletedDelegationTurnKey, CompletedDelegationTurn>>>,
     bound_channels: BoundChannelMap,
 }
 
@@ -826,6 +839,7 @@ impl ExperimentalLiveDelegationCoordinator {
             pending_result_recoveries: Arc::new(Mutex::new(std::collections::HashMap::new())),
             result_recovery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            completed_delegation_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
             bound_channels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -1988,58 +2002,34 @@ impl ExperimentalLiveDelegationCoordinator {
                 role: meerkat_live::LiveSidebandTurnRole::User,
                 ..
             } => self.observe_turn_finished(observation).await,
-            LiveSidebandObservationKind::DelegationRequested { .. } => Ok(()),
+            LiveSidebandObservationKind::DelegationRequested {
+                delegation,
+                turn,
+                final_transcript,
+                ..
+            } => {
+                // In client mode the joined delegation is the provider's sole
+                // terminal observation for this user turn. Project that exact
+                // terminal fact into conversational lifecycle authority before
+                // the provider can begin its assistant acknowledgement. The
+                // ordinary transcript adapter must not see a duplicate user
+                // final - canonical delegation commitment remains below.
+                let terminal = LiveSidebandObservation::new(
+                    observation.binding().clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: turn.clone(),
+                        role: meerkat_live::LiveSidebandTurnRole::User,
+                        transcript: final_transcript.clone(),
+                    },
+                );
+                self.observe_delegation_turn_finished(&terminal, delegation, final_transcript)
+                    .await
+            }
             LiveSidebandObservationKind::TurnStarted { .. }
             | LiveSidebandObservationKind::TurnFinished { .. }
             | LiveSidebandObservationKind::TurnSnapshotDelta { .. } => Ok(()),
             _ => Err("provider lifecycle seam received a non-lifecycle observation".to_string()),
         }
-    }
-
-    async fn finish_client_delegation_turn(
-        &self,
-        provider_binding: &ProviderWebrtcBinding,
-        turn: LiveSidebandTurnRef,
-        final_transcript: String,
-    ) -> Result<(), String> {
-        let terminal = LiveSidebandObservation::new(
-            provider_binding.clone(),
-            LiveSidebandObservationKind::TurnFinished {
-                turn: turn.clone(),
-                role: meerkat_live::LiveSidebandTurnRole::User,
-                transcript: final_transcript,
-            },
-        );
-        let finished = self
-            .runtime
-            .observe_live_provider_turn_finished(&terminal)
-            .await
-            .map_err(|error| error.to_string())?;
-        let channel_key = (
-            finished.binding().session_id().clone(),
-            finished.binding().channel_id().clone(),
-        );
-        let started = self
-            .active_turns
-            .lock()
-            .await
-            .remove(&channel_key)
-            .ok_or_else(|| {
-                "client delegation final has no local started-turn projection".to_string()
-            })?;
-        if started.authority.binding() != finished.binding()
-            || started.authority.interaction_id() != finished.interaction_id()
-            || started.authority.provider_turn_ref() != finished.provider_turn_ref()
-            || finished.provider_turn_ref() != turn.adapter_key()
-        {
-            return Err(
-                "client delegation final does not match the exact started turn".to_string(),
-            );
-        }
-        self.runtime
-            .drain_live_context_outbox(finished.binding().session_id())
-            .await
-            .map_err(|error| error.to_string())
     }
 
     async fn observe_turn_started(
@@ -2093,6 +2083,120 @@ impl ExperimentalLiveDelegationCoordinator {
             .map_err(|error| error.to_string())
     }
 
+    async fn observe_delegation_turn_finished(
+        &self,
+        observation: &LiveSidebandObservation,
+        delegation: &LiveSidebandDelegationRef,
+        final_transcript: &str,
+    ) -> Result<(), String> {
+        let provider_binding = observation.binding();
+        let channel_key = (
+            provider_binding.session_id().clone(),
+            provider_binding.channel_id().clone(),
+        );
+        let started = self
+            .active_turns
+            .lock()
+            .await
+            .get(&channel_key)
+            .map(|active| active.authority.clone())
+            .ok_or_else(|| {
+                "client delegation final has no local started-turn projection".to_string()
+            })?;
+        let LiveSidebandObservationKind::TurnFinished { turn, .. } = observation.kind() else {
+            return Err("client delegation final requires a typed terminal user turn".to_string());
+        };
+        if started.binding().session_id() != provider_binding.session_id()
+            || started.binding().channel_id() != provider_binding.channel_id()
+            || started.binding().fence_token() != provider_binding.runtime_fence().get()
+            || started.binding().generation() != provider_binding.runtime_generation().get()
+            || started.provider_turn_ref() != turn.adapter_key()
+        {
+            return Err(
+                "client delegation final does not match the exact started turn".to_string(),
+            );
+        }
+        let provider_correlation =
+            OpaqueProviderCorrelation::new(delegation.adapter_key(), turn.adapter_key())
+                .map_err(|error| error.to_string())?;
+        let correlation = LiveUserTurnCorrelation::new(
+            provider_binding.channel_id().clone(),
+            started.interaction_id(),
+            provider_correlation,
+        )
+        .map_err(|error| error.to_string())?;
+        let runtime_binding = self
+            .runtime
+            .live_delegation_runtime_binding(
+                provider_binding.session_id(),
+                correlation.channel_id(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if runtime_binding.fence_token() != provider_binding.runtime_fence().get()
+            || runtime_binding.generation() != provider_binding.runtime_generation().get()
+        {
+            return Err("delegation observation has a stale runtime binding".to_string());
+        }
+        let operation = ExactOperationIdentity::for_domain(OperationId::new(), correlation);
+        let provisional = ProvisionalLiveHandoff::new(
+            operation.domain_correlation().clone(),
+            final_transcript,
+            LiveHandoffInputProvenance::ProvisionalTranscriptSnapshot,
+        )
+        .map_err(|error| error.to_string())?;
+        // The provider can start its assistant acknowledgement immediately
+        // after the joined delegation turn. Admit the exact provisional join
+        // while the generated interaction is still active, then close the
+        // conversational turn. Canonical transcript reconciliation and all
+        // executor authority remain control-owned below.
+        self.runtime
+            .admit_live_delegation(&runtime_binding, &operation, &provisional)
+            .await
+            .map_err(|error| error.to_string())?;
+        let finished = self
+            .runtime
+            .observe_live_provider_turn_finished(observation)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.active_turns.lock().await.remove(&channel_key);
+        if started.binding() != finished.binding()
+            || started.interaction_id() != finished.interaction_id()
+            || started.provider_turn_ref() != finished.provider_turn_ref()
+        {
+            return Err(
+                "client delegation final does not match the exact finished turn".to_string(),
+            );
+        }
+        let completed_key = (
+            finished.binding().session_id().clone(),
+            finished.binding().channel_id().clone(),
+            finished.provider_turn_ref().to_string(),
+        );
+        if self
+            .completed_delegation_turns
+            .lock()
+            .await
+            .insert(
+                completed_key,
+                CompletedDelegationTurn {
+                    authority: finished.clone(),
+                    operation,
+                    provisional,
+                    runtime_binding,
+                    delegation_ref: delegation.adapter_key().to_string(),
+                },
+            )
+            .is_some()
+        {
+            return Err("client delegation final duplicated completed-turn custody".to_string());
+        }
+        self.runtime
+            .drain_live_context_outbox(finished.binding().session_id())
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Client-context capability only. The provider-final transcript remains
     /// provisional until the canonical session owner commits it and runtime
     /// reconciliation confirms the exact digest. No executor model or tool
@@ -2105,35 +2209,38 @@ impl ExperimentalLiveDelegationCoordinator {
         delegation: LiveSidebandDelegationRef,
         final_transcript: String,
     ) -> Result<(), String> {
+        tracing::debug!("client-context control received an exact delegation join");
         let session_id = provider_binding.session_id();
         let channel_key = (session_id.clone(), provider_binding.channel_id().clone());
-        let turn_authority = self
-            .active_turns
+        let completed_key = (
+            session_id.clone(),
+            provider_binding.channel_id().clone(),
+            turn.adapter_key().to_string(),
+        );
+        let completed_turn = self
+            .completed_delegation_turns
             .lock()
             .await
-            .get(&channel_key)
-            .map(|active| active.authority.clone())
-            .ok_or_else(|| "delegation has no exact active provider turn".to_string())?;
-        if turn_authority.binding().channel_id() != provider_binding.channel_id()
-            || turn_authority.binding().session_id() != session_id
-            || turn_authority.provider_turn_ref() != turn.adapter_key()
+            .get(&completed_key)
+            .cloned()
+            .ok_or_else(|| "delegation has no exact completed provider turn".to_string())?;
+        if completed_turn.authority.binding().channel_id() != provider_binding.channel_id()
+            || completed_turn.authority.binding().session_id() != session_id
+            || completed_turn.authority.provider_turn_ref() != turn.adapter_key()
+            || completed_turn.delegation_ref != delegation.adapter_key()
+            || completed_turn.provisional.executor_input() != final_transcript
         {
-            return Err("delegation turn ref does not match the active generated turn".to_string());
+            return Err(
+                "delegation turn ref does not match the completed generated turn".to_string(),
+            );
         }
-        let provider_correlation =
-            OpaqueProviderCorrelation::new(delegation.adapter_key(), turn.adapter_key())
-                .map_err(|error| error.to_string())?;
-        let correlation = LiveUserTurnCorrelation::new(
-            provider_binding.channel_id().clone(),
-            turn_authority.interaction_id(),
-            provider_correlation,
-        )
-        .map_err(|error| error.to_string())?;
-        let runtime_binding = self
-            .runtime
-            .live_delegation_runtime_binding(session_id, correlation.channel_id())
-            .await
-            .map_err(|error| error.to_string())?;
+        let operation = completed_turn.operation;
+        let provisional = completed_turn.provisional;
+        let runtime_binding = completed_turn.runtime_binding;
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control claimed pre-admitted delegation custody"
+        );
         if runtime_binding.fence_token() != provider_binding.runtime_fence().get()
             || runtime_binding.generation() != provider_binding.runtime_generation().get()
         {
@@ -2147,14 +2254,6 @@ impl ExperimentalLiveDelegationCoordinator {
             .ok_or_else(|| {
                 "live delegation requires a durable Meerkat-Mob member owner".to_string()
             })?;
-        let operation = ExactOperationIdentity::for_domain(OperationId::new(), correlation);
-        let provisional = ProvisionalLiveHandoff::new(
-            operation.domain_correlation().clone(),
-            final_transcript.clone(),
-            LiveHandoffInputProvenance::ProvisionalTranscriptSnapshot,
-        )
-        .map_err(|error| error.to_string())?;
-
         let final_event = meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
             item_id: turn.adapter_key().to_string(),
             previous_item_id: None,
@@ -2167,6 +2266,10 @@ impl ExperimentalLiveDelegationCoordinator {
             .commit_live_delegation_final_transcript(session_id, provisional.clone(), final_event)
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control committed canonical final transcript"
+        );
 
         if let Some(previous) = self.active.lock().await.remove(&channel_key) {
             if previous.task.is_finished() {
@@ -2223,10 +2326,6 @@ impl ExperimentalLiveDelegationCoordinator {
                     .map_err(|error| format!("live delegation terminal task failed: {error}"))?;
             }
         }
-        self.runtime
-            .admit_live_delegation(&runtime_binding, &operation, &provisional)
-            .await
-            .map_err(|error| error.to_string())?;
         let reconciliation = self
             .runtime
             .reconcile_live_delegation_transcript(
@@ -2240,28 +2339,38 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            disposition = ?reconciliation.disposition(),
+            "client-context control reconciled canonical transcript"
+        );
         if reconciliation.disposition() != LiveHandoffReconciliation::Confirmed {
             return Err(
                 "canonical final transcript did not confirm the client delegation".to_string(),
             );
         }
-        self.finish_client_delegation_turn(provider_binding, turn, final_transcript)
-            .await?;
-
-        self.start_admitted_delegation(
-            provider_binding,
-            control,
-            channel_key,
-            operation,
-            provisional,
-            runtime_binding,
-            mob_handle,
-            source_identity,
-            delegation,
-            final_evidence,
-            reconciliation,
-        )
-        .await
+        let started = self
+            .start_admitted_delegation(
+                provider_binding,
+                control,
+                channel_key,
+                operation,
+                provisional,
+                runtime_binding,
+                mob_handle,
+                source_identity,
+                delegation,
+                final_evidence,
+                reconciliation,
+            )
+            .await;
+        if started.is_ok() {
+            self.completed_delegation_turns
+                .lock()
+                .await
+                .remove(&completed_key);
+        }
+        started
     }
 
     #[allow(
@@ -2295,7 +2404,11 @@ impl ExperimentalLiveDelegationCoordinator {
             })?;
 
         let worker_identity =
-            AgentIdentity::from(format!("live-delegation:{}", operation.operation_id()));
+            AgentIdentity::from(format!("live-delegation-{}", operation.operation_id()));
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control requesting generated worker-start authority"
+        );
         let admission = self
             .runtime
             .authorize_live_delegation_worker_start(
@@ -2309,6 +2422,10 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control received generated worker-start authority"
+        );
         let consequential = self
             .runtime
             .authorize_live_consequential_effect(
@@ -2321,6 +2438,10 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await
             .map_err(|error| error.to_string())?;
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control received consequential-effect authority"
+        );
         admission
             .release_tool_execution(&consequential)
             .map_err(|error| error.to_string())?;
@@ -2335,6 +2456,10 @@ impl ExperimentalLiveDelegationCoordinator {
             admission.clone(),
         )
         .with_durable_fork(source_identity, Some(committed_message_count));
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "client-context control entering durable delegation service"
+        );
         let execution = match service.start(request).await {
             Ok(execution) => execution,
             Err(error) => {
@@ -2376,6 +2501,10 @@ impl ExperimentalLiveDelegationCoordinator {
                 return Err(format!("{start_error}{report_error}"));
             }
         };
+        tracing::debug!(
+            operation_id = %operation.operation_id(),
+            "durable live delegation worker accepted its bounded turn"
+        );
         let Some(cancellation) = execution.cancellation_handle() else {
             let operation_id = operation.operation_id().clone();
             let cleanup_operation_id = operation_id.clone();
@@ -2467,6 +2596,12 @@ impl ExperimentalLiveDelegationCoordinator {
                 execution.await_terminal().await,
             )
             .await;
+            tracing::debug!(
+                operation_id = %task_retained.operation.operation_id(),
+                result_present = terminal.result_text.is_some(),
+                terminal_ineligible = terminal.terminal_ineligible,
+                "durable live delegation worker reached realized terminality"
+            );
             task_coordinator
                 .record_terminal_realization(&task_retained, terminal)
                 .await;
@@ -2985,6 +3120,12 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn cancel_channel_binding(&self, binding: &ProviderWebrtcBinding) {
         let key = (binding.session_id().clone(), binding.channel_id().clone());
         self.active_turns.lock().await.remove(&key);
+        self.completed_delegation_turns
+            .lock()
+            .await
+            .retain(|(session_id, channel_id, _), _| {
+                session_id != binding.session_id() || channel_id != binding.channel_id()
+            });
         self.cancel_responses_executions_for_binding(binding).await;
         self.settle_result_recovery_tasks(binding).await;
         self.settle_failed_start_cleanups(binding).await;

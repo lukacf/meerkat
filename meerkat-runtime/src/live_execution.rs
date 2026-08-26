@@ -1405,21 +1405,23 @@ impl LiveBridgeToolExecutionAdmissionGate {
         if !same_live_bridge_admission(&self.admission, authority.admission()) {
             return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
         }
-        match self.state_tx.borrow().clone() {
+        let mut outcome = Ok(());
+        self.state_tx.send_if_modified(|state| match state {
             LiveBridgeToolGateState::AwaitingFinalInput => {
-                self.state_tx
-                    .send_replace(LiveBridgeToolGateState::Released(authority.clone()));
-                Ok(())
+                *state = LiveBridgeToolGateState::Released(authority.clone());
+                true
             }
             LiveBridgeToolGateState::Released(existing)
                 if same_live_bridge_admission(existing.admission(), authority.admission()) =>
             {
-                Ok(())
+                false
             }
             LiveBridgeToolGateState::Released(_) | LiveBridgeToolGateState::Closed => {
-                Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal)
+                outcome = Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal);
+                false
             }
-        }
+        });
+        outcome
     }
 
     pub fn close_after_terminal(
@@ -2339,18 +2341,22 @@ impl LiveToolExecutionAdmissionGate {
         if !witness.authorizes(witness.session_id(), &self.operation) {
             return Err(LiveExecutionAuthorityError::CorrelationMismatch);
         }
-        match self.state_tx.borrow().clone() {
+        // Inspect and publish under one write lock. A read-then-send sequence
+        // can deadlock by trying to upgrade the watch read guard in place.
+        let mut outcome = Ok(());
+        self.state_tx.send_if_modified(|state| match state {
             LiveToolExecutionAdmissionState::AwaitingFinalInput => {
-                self.state_tx
-                    .send_replace(LiveToolExecutionAdmissionState::Released(witness.clone()));
-                Ok(())
+                *state = LiveToolExecutionAdmissionState::Released(witness.clone());
+                true
             }
-            LiveToolExecutionAdmissionState::Released(existing) if existing == *witness => Ok(()),
+            LiveToolExecutionAdmissionState::Released(existing) if *existing == *witness => false,
             LiveToolExecutionAdmissionState::Released(_)
             | LiveToolExecutionAdmissionState::Closed => {
-                Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal)
+                outcome = Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal);
+                false
             }
-        }
+        });
+        outcome
     }
 
     fn close(&self) {
@@ -3874,8 +3880,7 @@ impl LiveDelegationResultDeliveryAuthority {
         {
             return Err(LiveExecutionAuthorityError::ProviderBindingMismatch);
         }
-        if !delegation.__matches_provider_delegation_id(correlation.provider().delegation_item_id())
-        {
+        if !delegation.__matches_adapter_key(correlation.provider().delegation_item_id()) {
             return Err(LiveExecutionAuthorityError::ProviderDelegationMismatch);
         }
         if !self.authorizes_text(text) {
@@ -4300,6 +4305,40 @@ mod tests {
     }
 
     #[test]
+    fn live_tool_execution_release_drops_watch_read_before_publication() {
+        let session_id = session(1);
+        let operation = exact_operation("channel-a", "provider-turn-secret", 11);
+        let receipt = LiveHandoffReconciliationReceipt::from_generated_effect(
+            &session_id,
+            &operation,
+            &provisional(&operation),
+            LiveHandoffReconciliation::Confirmed,
+            &reconciliation_effect(&operation, LiveDelegationReconciliation::Confirmed),
+        )
+        .expect("reconciliation")
+        .expect("generated effect");
+        let witness = FinalUserInputOperationWitness::from_generated_effect(
+            &session_id,
+            &operation,
+            &receipt,
+            &consequential_effect(&operation),
+        )
+        .expect("consequential authority")
+        .expect("generated effect");
+        let gate = LiveToolExecutionAdmissionGate::new(operation);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(gate.release(&witness));
+        });
+
+        assert_eq!(
+            result_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(Ok(())),
+            "tool gate release must not hold a watch read lock across publication"
+        );
+    }
+
+    #[test]
     fn context_append_authority_is_pre_send_exact_and_resolution_is_sealed() {
         let session_id = session(1);
         let channel_id = LiveChannelId::new("channel-a");
@@ -4423,8 +4462,8 @@ mod tests {
             meerkat_live::LiveRuntimeBindingFence::new(9),
         );
         let delegation = LiveSidebandDelegationRef::__from_provider_observation(
-            "adapter-key".to_string(),
             "delegation-secret".to_string(),
+            "private-provider-delegation-id".to_string(),
         )
         .expect("delegation");
 

@@ -400,11 +400,15 @@ impl LiveSidebandDelegationRef {
     }
 
     /// Exact comparison used only when generated release authority is sealed.
+    ///
+    /// Generated correlation carries this stable adapter-local key, not the
+    /// private provider identifier. The adapter retains the provider value
+    /// separately and resolves it only after the local key has been sealed.
     #[cfg(feature = "__meerkat-generated-authority-bridge")]
     #[doc(hidden)]
     #[must_use]
-    pub fn __matches_provider_delegation_id(&self, expected: &str) -> bool {
-        self.provider_delegation_id == expected
+    pub fn __matches_adapter_key(&self, expected: &str) -> bool {
+        self.provider_adapter_key == expected
     }
 }
 

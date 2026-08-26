@@ -147,7 +147,26 @@ fn bind_and_admit(authority: &mut mm::MeerkatMachineAuthority) {
     admit_provider_turn_delegation(authority);
 }
 
+fn confirm_delegation_transcript(authority: &mut mm::MeerkatMachineAuthority) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        },
+    )
+    .expect("canonical final transcript confirms the exact operation before worker start");
+}
+
 fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthority) {
+    confirm_delegation_transcript(authority);
     apply(
         authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
@@ -189,7 +208,7 @@ fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthorit
             terminal: mm::LiveDelegationWorkerTerminalKind::Completed,
         },
     )
-    .expect("completed worker terminal is recorded before transcript evidence");
+    .expect("completed worker terminal is recorded after transcript confirmation");
     apply(
         authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerRetirement {
@@ -217,21 +236,6 @@ fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthorit
         },
     )
     .expect("worker retirement clears only channel serialization state");
-    apply(
-        authority,
-        mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            interaction_id: INTERACTION.to_string(),
-            operation_id: operation_id(),
-            provider_turn_correlation: PROVIDER_TURN.to_string(),
-            final_transcript_committed: true,
-            normalized_digest_matches: true,
-        },
-    )
-    .expect("final transcript confirms the retired operation");
 }
 
 #[cfg(feature = "live")]
@@ -794,6 +798,114 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
 }
 
 #[test]
+fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("provider user turn opens the immediate assistant acknowledgement slot");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "assistant-acknowledgement".to_string(),
+        },
+    )
+    .expect("assistant acknowledgement consumes the user-turn response slot");
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("late bounded result is released as deferred context");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: "deferred-result-digest".to_string(),
+            disposition: mm::LiveDelegationResultDisposition::DeferredContext,
+        },
+    )
+    .expect("exact deferred result receives provider delivery authority");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: "deferred-result-digest".to_string(),
+            replacement_channel_id: String::new(),
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+        },
+    )
+    .expect("provider acknowledgement reopens one result-response slot");
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "assistant-result-response".to_string(),
+        },
+    )
+    .expect("resumed speech is frozen to the exact delegated interaction");
+    assert_eq!(
+        authority
+            .state()
+            .live_assistant_interaction_by_turn
+            .get("assistant-result-response")
+            .map(String::as_str),
+        Some(INTERACTION)
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                assistant_turn_ref: "unsolicited-after-result".to_string(),
+            },
+        )
+        .is_err(),
+        "one delivered result cannot authorize an unbounded stream of assistant turns"
+    );
+}
+
+#[test]
 fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() {
     let mut authority = opened_authority();
     bind_experimental(&mut authority, 0);
@@ -990,6 +1102,7 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
 fn terminal_worker_supersession_requires_no_cancellation_and_allows_fresh_atomic_admission() {
     let mut authority = opened_authority();
     bind_and_legacy_atomic_admit(&mut authority);
+    confirm_delegation_transcript(&mut authority);
     apply(
         &mut authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
@@ -1108,6 +1221,7 @@ fn terminal_worker_supersession_requires_no_cancellation_and_allows_fresh_atomic
 fn running_worker_supersession_authorizes_cancellation_and_suppresses_late_terminal_result() {
     let mut authority = opened_authority();
     bind_and_legacy_atomic_admit(&mut authority);
+    confirm_delegation_transcript(&mut authority);
     apply(
         &mut authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
@@ -1253,6 +1367,7 @@ fn running_worker_supersession_authorizes_cancellation_and_suppresses_late_termi
 fn completed_turn_pending_worker_can_be_superseded_without_abandoning_new_active_turn() {
     let mut authority = opened_authority();
     bind_and_admit(&mut authority);
+    confirm_delegation_transcript(&mut authority);
     apply(
         &mut authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
@@ -1423,6 +1538,7 @@ fn completed_turn_pending_worker_can_be_superseded_without_abandoning_new_active
 fn failed_start_retirement_clears_the_active_channel_fail_closed() {
     let mut authority = opened_authority();
     bind_and_admit(&mut authority);
+    confirm_delegation_transcript(&mut authority);
     apply(
         &mut authority,
         mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {

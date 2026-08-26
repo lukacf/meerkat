@@ -485,6 +485,7 @@ impl DelegationExecutionService {
         &self,
         request: DelegationExecutionRequest,
     ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
+        tracing::debug!("delegation service received a bounded execution request");
         let DelegationExecutionRequest {
             identity,
             task,
@@ -564,6 +565,11 @@ impl DelegationExecutionService {
                     .map(|(_, interaction_id)| *interaction_id)
             });
 
+        tracing::debug!(
+            delegated_identity = %identity,
+            durable_fork = matches!(&source, DelegationExecutionSource::DurableFork { .. }),
+            "delegation service resolving member role"
+        );
         let role = match &source {
             DelegationExecutionSource::Fresh => ProfileName::from("delegate"),
             DelegationExecutionSource::DurableFork {
@@ -581,6 +587,10 @@ impl DelegationExecutionService {
                     })?
             }
         };
+        tracing::debug!(
+            delegated_identity = %identity,
+            "delegation service resolved member role"
+        );
         let mut spec = SpawnMemberSpec::new(role, identity.clone());
         spec.initial_message = None;
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
@@ -609,11 +619,20 @@ impl DelegationExecutionService {
                 // `fork_member_then_run_bounded`, while retaining a started
                 // turn handle so generated callers can keep terminal custody
                 // and retirement as separate lifecycle steps.
+                tracing::debug!(
+                    delegated_identity = %identity,
+                    source_identity = %source_identity,
+                    "delegation service starting durable fork"
+                );
                 let fork = self
                     .handle
                     .fork_member(&source_identity, spec, message_count)
                     .await
                     .map_err(DelegationExecutionError::Spawn)?;
+                tracing::debug!(
+                    delegated_identity = %identity,
+                    "delegation service completed durable fork"
+                );
                 SpawnResult::new(fork.agent_identity, fork.agent_runtime_id, fork.fence_token)
             }
         };
@@ -630,6 +649,10 @@ impl DelegationExecutionService {
         if let Some(interaction_id) = delivery_interaction_id {
             work = work.with_interaction_id(interaction_id);
         }
+        tracing::debug!(
+            delegated_identity = %identity,
+            "delegation service admitting bounded work turn"
+        );
         let turn_result = if let Some(delivery_identity) = exact_delivery_identity {
             self.handle
                 .start_work_for_identity_with_delivery_identity_bounded(
@@ -650,6 +673,11 @@ impl DelegationExecutionService {
                 )
                 .await
         };
+        tracing::debug!(
+            delegated_identity = %identity,
+            accepted = turn_result.is_ok(),
+            "delegation service resolved bounded work admission"
+        );
         let turn_handle = match turn_result {
             Ok(turn) => turn,
             Err(error) => {

@@ -223,6 +223,13 @@ pub enum LiveAssistantPlaybackObservationResult {
     Resolved(LiveAssistantPlaybackTruncationEvidence),
 }
 
+impl LiveAssistantPlaybackObservationResult {
+    #[must_use]
+    pub const fn is_resolved(&self) -> bool {
+        matches!(self, Self::Resolved(_))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_live_assistant_playback_target(
     agent: &mut dyn SessionAgent,

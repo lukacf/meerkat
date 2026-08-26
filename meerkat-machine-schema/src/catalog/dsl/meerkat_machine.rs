@@ -24203,6 +24203,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_result_delivery_channel_by_operation.remove(operation_id);
                 self.live_result_delivery_digest_by_operation.remove(operation_id);
                 self.live_result_delivery_observation_by_operation.insert(operation_id, observation);
+                if observation == LiveDelegationResultDeliveryObservation::Delivered {
+                    self.live_awaiting_assistant_interaction_by_channel.insert(
+                        channel_id,
+                        self.live_delegation_interaction_by_operation
+                            .get_cloned(operation_id).get("value")
+                    );
+                }
             }
             to Idle
             emit LiveDelegationResultDeliveryResolved {

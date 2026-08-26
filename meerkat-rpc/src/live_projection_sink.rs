@@ -609,6 +609,47 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
+    async fn resolve_assistant_playback_after_final(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::InteractionId>, LiveProjectionError> {
+        let Some(target) = self
+            .runtime
+            .live_assistant_playback_target(
+                session_id,
+                channel_id.clone(),
+                provider_item_id.to_string(),
+                content_index,
+            )
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))?
+        else {
+            return Ok(None);
+        };
+        if target.response_id() != response_id {
+            return Err(LiveProjectionError::Rejected(
+                "assistant final did not match the active playback response".to_string(),
+            ));
+        }
+        let interaction_id = target.interaction_id();
+        self.runtime
+            .observe_live_assistant_playback_final(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+            )
+            .await
+            .map(|receipt| receipt.map(|_| interaction_id))
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
     async fn admit_assistant_playback_target(
         &self,
         session_id: &SessionId,
@@ -655,6 +696,34 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             )
             .await
             .map(|_receipt| ())
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
+    async fn observe_assistant_playback_terminal(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        evidence: &meerkat_core::LiveAssistantPlaybackEvidence,
+        stop_reason: StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<bool, LiveProjectionError> {
+        self.runtime
+            .observe_live_assistant_playback_terminal(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+                evidence.clone(),
+                stop_reason,
+                usage,
+            )
+            .await
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 

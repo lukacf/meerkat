@@ -50,6 +50,11 @@ async function prepare() {
     peer.ontrack = (event) => {
       if (event.track.kind !== 'audio') return;
       const stream = new MediaStream([event.track]);
+      const playback = document.createElement('audio');
+      playback.autoplay = true;
+      playback.srcObject = event.streams[0] || stream;
+      document.body.append(playback);
+      playback.play().catch(() => {});
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
@@ -66,7 +71,7 @@ async function prepare() {
         if (rms >= 0.002) remoteAudio.nonSilentFrames += 1;
       }, 50);
       event.track.addEventListener('ended', () => clearInterval(timer), { once: true });
-      remoteAudio.sources.push({ analyser, source, stream, timer });
+      remoteAudio.sources.push({ analyser, playback, source, stream, timer });
       if (remoteAudio.processorSupported) {
         const processor = new MediaStreamTrackProcessor({ track: event.track });
         const reader = processor.readable.getReader();

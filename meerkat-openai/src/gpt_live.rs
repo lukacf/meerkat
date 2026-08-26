@@ -923,6 +923,11 @@ impl GptLiveBrokerSessionState {
             ServerEvent::SessionStarted(_) => self
                 .queued_observations
                 .push_back(GptLiveBrokerObservation::SessionReady),
+            ServerEvent::SessionUsageUpdated(_) => {
+                // Observed provider accounting telemetry. It carries no
+                // conversational, transcript, delegation, or effect
+                // authority and is intentionally not projected upward.
+            }
             ServerEvent::SessionContextAppended(_) => {
                 let token = self
                     .pending_session_append

@@ -1412,6 +1412,23 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         Ok(Some(session))
     }
 
+    async fn fork_persisted_session(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+    ) -> Result<meerkat_core::SessionForkResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_persisted_session(
+            &self.service,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+        )
+        .await
+    }
+
     async fn load_revivable_retired_session(
         &self,
         session_id: &SessionId,
@@ -5795,6 +5812,40 @@ impl SessionRuntime {
         })
     }
 
+    pub async fn live_assistant_playback_target(
+        &self,
+        session_id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTarget>, SessionError> {
+        self.service
+            .live_assistant_playback_target(session_id, channel_id, item_id, content_index)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_live_assistant_playback_final(
+        &self,
+        session_id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        self.service
+            .observe_live_assistant_playback_final(
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            )
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_live_assistant_playback_truncation(
         &self,
@@ -5843,6 +5894,35 @@ impl SessionRuntime {
                 usage,
             )
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn observe_live_assistant_playback_terminal(
+        &self,
+        session_id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<bool, SessionError> {
+        self.service
+            .observe_live_assistant_playback_terminal(
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                stop_reason,
+                usage,
+            )
+            .await
+            .map(|outcome| outcome.is_resolved())
     }
 
     pub async fn fail_assistant_output_publication(

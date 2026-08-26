@@ -3256,8 +3256,8 @@ fn spawn_sideband_actors(
                 .await
             {
                 Ok(outcome) => outcome,
-                Err(_) => {
-                    tracing::warn!("experimental live adapter observation application failed");
+                Err(error) => {
+                    tracing::warn!(%error, "experimental live adapter observation application failed");
                     break;
                 }
             };

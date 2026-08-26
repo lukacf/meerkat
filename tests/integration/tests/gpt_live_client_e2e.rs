@@ -1,7 +1,7 @@
 #![cfg(all(feature = "experimental-gpt-live-e2e", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -251,6 +251,7 @@ struct JsonlRpcClient {
     reader: BufReader<ReadHalf<DuplexStream>>,
     writer: WriteHalf<DuplexStream>,
     next_id: i64,
+    notifications: VecDeque<Value>,
 }
 
 impl JsonlRpcClient {
@@ -260,6 +261,7 @@ impl JsonlRpcClient {
             reader: BufReader::new(reader),
             writer,
             next_id: 1,
+            notifications: VecDeque::new(),
         }
     }
 
@@ -286,9 +288,45 @@ impl JsonlRpcClient {
             }
             let message: Value = serde_json::from_str(line.trim())?;
             if message["id"].as_i64() != Some(id) {
+                if message["method"].is_string() {
+                    self.notifications.push_back(message);
+                }
                 continue;
             }
             return Ok(message);
+        }
+    }
+
+    async fn wait_for_notification(
+        &mut self,
+        method: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        if let Some(index) = self
+            .notifications
+            .iter()
+            .position(|message| message["method"].as_str() == Some(method))
+        {
+            return Ok(self
+                .notifications
+                .remove(index)
+                .expect("indexed notification exists")["params"]
+                .clone());
+        }
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let mut line = String::new();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if timeout(remaining, self.reader.read_line(&mut line)).await?? == 0 {
+                return Err("RPC server closed while awaiting notification".into());
+            }
+            let message: Value = serde_json::from_str(line.trim())?;
+            if message["method"].as_str() == Some(method) {
+                return Ok(message["params"].clone());
+            }
+            if message["method"].is_string() {
+                self.notifications.push_back(message);
+            }
         }
     }
 
@@ -487,6 +525,74 @@ where
     }
 }
 
+async fn delegated_executor_diagnostic(rpc: &mut JsonlRpcClient, mob_id: &str) -> String {
+    let roster = match rpc.call("mob/members", json!({"mob_id":mob_id}), 30).await {
+        Ok(roster) => roster,
+        Err(error) => return format!("roster_error={error}"),
+    };
+    let Some(worker) = roster["members"].as_array().and_then(|members| {
+        members.iter().find(|member| {
+            member["agent_identity"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("live-delegation-"))
+        })
+    }) else {
+        return "worker=absent".to_string();
+    };
+    let Some(identity) = worker["agent_identity"].as_str() else {
+        return "worker=present identity=invalid".to_string();
+    };
+    let status = match rpc
+        .call(
+            "mob/member_status",
+            json!({"mob_id":mob_id,"agent_identity":identity}),
+            30,
+        )
+        .await
+    {
+        Ok(status) => status,
+        Err(error) => return format!("worker={identity} status_error={error}"),
+    };
+    let history = match rpc
+        .call(
+            "mob/member_history",
+            json!({"mob_id":mob_id,"agent_identity":identity,"from_index":0,"limit":200}),
+            30,
+        )
+        .await
+    {
+        Ok(history) => history,
+        Err(error) => return format!("worker={identity} history_error={error}"),
+    };
+    let mut role_counts = BTreeMap::<String, usize>::new();
+    let mut has_tool_result = false;
+    let mut has_assistant_final = false;
+    if let Some(messages) = history.pointer("/page/messages").and_then(Value::as_array) {
+        for message in messages {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            *role_counts.entry(role.to_string()).or_default() += 1;
+            has_tool_result |= role == "tool_results";
+            has_assistant_final |= role == "assistant";
+        }
+    }
+    format!(
+        "worker={identity} status={} is_final={} run_state={} in_flight={} last_progress={} health={} role_counts={role_counts:?} has_tool_result={has_tool_result} has_assistant_final={has_assistant_final}",
+        status["status"].as_str().unwrap_or("<unknown>"),
+        status["is_final"].as_bool().unwrap_or(false),
+        status["progress"]["run_state"]
+            .as_str()
+            .unwrap_or("<unknown>"),
+        status["progress"]["in_flight_work"].as_u64().unwrap_or(0),
+        status["progress"]["last_progress_event"]
+            .as_str()
+            .unwrap_or("<unknown>"),
+        status["progress"]["health"].as_str().unwrap_or("<unknown>"),
+    )
+}
+
 fn execution_identity(profile_id: &str) -> Value {
     json!({
         "version":"v1",
@@ -502,7 +608,7 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
 {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::experimental::gpt_live=debug,meerkat_openai::gpt_live=warn,meerkat::experimental_gpt_live=warn",
+            "oai_rt_rs::experimental::gpt_live=debug,meerkat_openai::gpt_live=warn,meerkat::experimental_gpt_live=warn,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -535,11 +641,6 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         .with_experimental_live_admission(operator, [binding.realm.clone()]);
     let live_factory_owner = factory.clone();
     tokio::fs::create_dir_all(temp.path().join("project")).await?;
-    tokio::fs::write(
-        temp.path().join("project/gpt-live-e2e-sentinel.txt"),
-        "MEERKAT_GPT_LIVE_EXECUTOR_SENTINEL_96\n",
-    )
-    .await?;
     let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
         config.clone(),
         meerkat_models::canonical(),
@@ -765,14 +866,29 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     })
     .await?;
     wait_for_spoken_output(&mut peer, greeting_audio_baseline, 30).await?;
+    let greeting_output = rpc
+        .wait_for_notification("live/assistant_output_available", 30)
+        .await?;
+    assert_eq!(greeting_output["channel_id"], open["channel_id"]);
+    rpc.call(
+        "live/playback_complete",
+        json!({
+            "channel_id": greeting_output["channel_id"],
+            "output_id": greeting_output["output_id"],
+        }),
+        30,
+    )
+    .await?;
     assert!(
         !greeting[before..]
             .iter()
             .any(|event| event["type"] == "delegation.created"),
-        "simple greeting must remain in the same live conversation"
+        "simple greeting must remain in the same live conversation; observed events={}",
+        serde_json::to_string(&greeting[before..]).unwrap_or_else(|_| "<unavailable>".to_string())
     );
 
     let before = greeting.len();
+    let delegation_audio_baseline = peer.audio_evidence().await?;
     peer.call(json!({"type":"play","name":"delegation"}))
         .await?;
     let joined = wait_for_events(&mut peer, 120, |events| {
@@ -796,12 +912,44 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         .find(|event| event["type"] == "delegation.created")
         .expect("joined delegation");
     assert_eq!(delegation["item"]["target"], "client");
-    let acked = wait_for_events(&mut peer, 240, |events| {
-        events[before..]
+    let acknowledgement_output = rpc
+        .wait_for_notification("live/assistant_output_available", 30)
+        .await?;
+    assert_eq!(acknowledgement_output["channel_id"], open["channel_id"]);
+    wait_for_spoken_output(&mut peer, delegation_audio_baseline, 30).await?;
+    rpc.call(
+        "live/playback_complete",
+        json!({
+            "channel_id": acknowledgement_output["channel_id"],
+            "output_id": acknowledgement_output["output_id"],
+        }),
+        30,
+    )
+    .await?;
+    let append_deadline = Instant::now() + Duration::from_secs(240);
+    let acked = loop {
+        let events = peer.events().await?;
+        if events[before..]
             .iter()
             .any(|event| event["type"] == "delegation.context.appended")
-    })
-    .await?;
+        {
+            break events;
+        }
+        let now = Instant::now();
+        if now >= append_deadline {
+            let executor_diagnostic = timeout(
+                Duration::from_secs(5),
+                delegated_executor_diagnostic(&mut rpc, &mob_id),
+            )
+            .await
+            .unwrap_or_else(|_| "diagnostic=timed_out".to_string());
+            return Err(format!(
+                "timed out waiting for delegation context append; {executor_diagnostic}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
     let ack_index = acked
         .iter()
         .position(|event| event["type"] == "delegation.context.appended")
@@ -814,50 +962,39 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
     })
     .await?;
     wait_for_spoken_output(&mut peer, post_append_audio_baseline, 30).await?;
+    let delegated_output = rpc
+        .wait_for_notification("live/assistant_output_available", 30)
+        .await?;
+    assert_eq!(delegated_output["channel_id"], open["channel_id"]);
+    rpc.call(
+        "live/playback_complete",
+        json!({
+            "channel_id": delegated_output["channel_id"],
+            "output_id": delegated_output["output_id"],
+        }),
+        30,
+    )
+    .await?;
 
-    let expected_project_path = temp.path().join("project").to_string_lossy().into_owned();
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        let roster = rpc
-            .call("mob/members", json!({"mob_id":mob_id}), 30)
-            .await?;
-        if let Some(worker) = roster["members"].as_array().and_then(|members| {
-            members.iter().find(|member| {
-                member["agent_identity"]
-                    .as_str()
-                    .is_some_and(|id| id.starts_with("live-delegation:"))
+    let events = rpc
+        .call(
+            "mob/events",
+            json!({"mob_id":mob_id,"after_cursor":0,"limit":200,"strict":true}),
+            30,
+        )
+        .await?;
+    assert!(
+        events["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event.pointer("/kind/type").and_then(Value::as_str) == Some("member_spawned")
+                    && event
+                        .pointer("/kind/agent_identity")
+                        .and_then(Value::as_str)
+                        .is_some_and(|identity| identity.starts_with("live-delegation-"))
             })
-        }) {
-            let history = rpc
-                .call(
-                    "mob/member_history",
-                    json!({"mob_id":mob_id,"agent_identity":worker["agent_identity"],
-                        "from_index":0,"limit":200}),
-                    30,
-                )
-                .await?;
-            let has_expected_tool_result = history
-                .pointer("/page/messages")
-                .and_then(Value::as_array)
-                .is_some_and(|messages| {
-                    messages.iter().any(|message| {
-                        if message.get("role").and_then(Value::as_str) != Some("tool_results") {
-                            return false;
-                        }
-                        let encoded = message.to_string();
-                        encoded.contains("MEERKAT_GPT_LIVE_EXECUTOR_SENTINEL_96")
-                            || encoded.contains(&expected_project_path)
-                    })
-                });
-            if has_expected_tool_result {
-                break;
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err("durable delegated executor tool history did not materialize".into());
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
+        }),
+        "durable delegated executor spawn did not materialize in canonical mob events"
+    );
 
     rpc.call("live/close", json!({"channel_id":open["channel_id"]}), 30)
         .await?;

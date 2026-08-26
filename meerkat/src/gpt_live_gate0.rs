@@ -176,13 +176,19 @@ impl LiveWebrtcBoundReadyBinder for Gate0CandidateBoundReadyBinder {
 
 #[async_trait]
 impl LiveWebrtcBoundReadyCustody for Gate0CandidateBoundReadyCustody {
-    async fn commit(self: Box<Self>) {
+    async fn commit(self: Box<Self>) -> Result<(), String> {
         let binding = self.authority.binding().clone();
-        let _ = self
+        let activated = self
             .transport
             .commit_bound_channel_activation(&binding)
             .await;
+        if !activated {
+            return self.rollback().await.and_then(|()| {
+                Err("Gate0 candidate activation did not start all bound tasks".to_string())
+            });
+        }
         let _ = self.authority.commit();
+        Ok(())
     }
 
     async fn rollback(self: Box<Self>) -> Result<(), String> {

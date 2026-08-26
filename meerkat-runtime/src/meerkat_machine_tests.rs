@@ -152,6 +152,82 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             .expect("seed exact live delegation state");
     }
 
+    assert!(
+        machine
+            .authorize_live_delegation_worker_start(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                "live-worker-convergence",
+            )
+            .await
+            .is_err(),
+        "provisional user input must not authorize executor startup"
+    );
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mismatched = mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: channel.to_string(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: interaction_id.to_string(),
+            operation_id: mm_dsl::OperationId::from_domain(operation.operation_id()),
+            provider_turn_correlation: "wrong-provider-turn".to_string(),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        };
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, mismatched)
+            .expect_err("mismatched reconciliation cannot confirm final input");
+    }
+    assert!(
+        machine
+            .authorize_live_delegation_worker_start(
+                &session_id,
+                &runtime_id,
+                fence_token,
+                generation,
+                &operation,
+                &provisional,
+                "live-worker-convergence",
+            )
+            .await
+            .is_err(),
+        "rejected reconciliation must not unlock executor startup"
+    );
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let effects = mm_dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+                channel_id: channel.to_string(),
+                runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                generation: mm_dsl::Generation::from_domain(generation),
+                interaction_id: interaction_id.to_string(),
+                operation_id: mm_dsl::OperationId::from_domain(operation.operation_id()),
+                provider_turn_correlation: "provider-turn".to_string(),
+                final_transcript_committed: true,
+                normalized_digest_matches: true,
+            },
+        )
+        .expect("exact canonical reconciliation confirms final input");
+        assert!(effects.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::LiveDelegationTranscriptReconciled {
+                reconciliation: mm_dsl::LiveDelegationReconciliation::Confirmed,
+                ..
+            }
+        )));
+    }
+
     let admission = machine
         .authorize_live_delegation_worker_start(
             &session_id,
@@ -312,6 +388,13 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         state
             .live_experimental_execution_channels
             .insert(channel.to_string());
+        state.live_execution_phase_by_channel.insert(
+            channel.to_string(),
+            mm_dsl::LiveExecutionChannelPhase::Active,
+        );
+        state
+            .live_context_cursor_by_channel
+            .insert(channel.to_string(), 0);
         state.live_delegation_reconciliation_by_operation.insert(
             operation_id.clone(),
             mm_dsl::LiveDelegationReconciliation::Confirmed,

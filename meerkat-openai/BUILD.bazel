@@ -34,6 +34,8 @@ rust_library(
     crate_name = "meerkat_openai",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
+        "oai-rt-rs/experimental-gpt-live",
         "oauth",
         "realtime",
         "test-realtime-fixtures",
@@ -70,6 +72,8 @@ rust_library(
     crate_name = "meerkat_openai",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
+        "oai-rt-rs/experimental-gpt-live",
         "oauth",
         "realtime",
         "test-realtime-fixtures",
@@ -114,6 +118,8 @@ rust_test(
     crate_name = "meerkat_openai",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
+        "oai-rt-rs/experimental-gpt-live",
         "oauth",
         "realtime",
         "test-realtime-fixtures",
@@ -170,6 +176,8 @@ rust_test(
     crate_name = "mock_realtime_ws_selftest",
     crate_root = "tests/mock_realtime_ws_selftest.rs",
     crate_features = [
+        "experimental-gpt-live",
+        "oai-rt-rs/experimental-gpt-live",
         "oauth",
         "realtime",
         "test-realtime-fixtures",
@@ -229,6 +237,8 @@ rust_test(
     crate_name = "oauth_resolve",
     crate_root = "tests/oauth_resolve.rs",
     crate_features = [
+        "experimental-gpt-live",
+        "oai-rt-rs/experimental-gpt-live",
         "oauth",
         "realtime",
         "test-realtime-fixtures",

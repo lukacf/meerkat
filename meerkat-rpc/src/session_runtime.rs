@@ -1153,6 +1153,22 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
     #[cfg(feature = "experimental-gpt-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript(
+            &self.service,
+            session_id,
+            provisional,
+            final_event,
+        )
+        .await
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -24671,6 +24687,10 @@ mod tests {
         }))
         .expect("serialize live/open params");
 
+        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+        let experimental_live_playback_custodies =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
         let ctx = crate::handlers::live::LiveOpenHandlerContext {
             host: &host,
             live_ws: None,
@@ -24682,6 +24702,8 @@ mod tests {
             session_factory: None,
             #[cfg(feature = "experimental-gpt-live")]
             experimental_live_open_authority: None,
+            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            experimental_live_playback_custodies: &experimental_live_playback_custodies,
         };
 
         let response =

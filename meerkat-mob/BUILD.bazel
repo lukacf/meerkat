@@ -51,6 +51,7 @@ rust_library(
     crate_name = "meerkat_mob",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -112,6 +113,7 @@ rust_library(
     crate_name = "meerkat_mob",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -191,6 +193,7 @@ rust_test(
     crate_name = "meerkat_mob",
     crate_root = "src/lib.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -267,6 +270,7 @@ rust_test(
     crate_name = "cold_restart_mob_resume",
     crate_root = "tests/cold_restart_mob_resume.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -348,6 +352,7 @@ rust_test(
     crate_name = "cross_host_events",
     crate_root = "tests/cross_host_events.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -427,6 +432,7 @@ rust_test(
     crate_name = "cross_host_flows",
     crate_root = "tests/cross_host_flows.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -506,6 +512,7 @@ rust_test(
     crate_name = "cross_host_live",
     crate_root = "tests/cross_host_live.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -585,6 +592,7 @@ rust_test(
     crate_name = "cross_host_wiring",
     crate_root = "tests/cross_host_wiring.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -664,6 +672,7 @@ rust_test(
     crate_name = "dispatcher_rule_synthetic_injection",
     crate_root = "tests/dispatcher_rule_synthetic_injection.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -743,6 +752,7 @@ rust_test(
     crate_name = "flow_frame_recovery_tests",
     crate_root = "tests/flow_frame_recovery_tests.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -820,6 +830,7 @@ rust_test(
     crate_name = "host_actor",
     crate_root = "tests/host_actor.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -897,6 +908,7 @@ rust_test(
     crate_name = "host_actor_persistence",
     crate_root = "tests/host_actor_persistence.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -976,6 +988,7 @@ rust_test(
     crate_name = "host_bind_ceremony",
     crate_root = "tests/host_bind_ceremony.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1057,6 +1070,7 @@ rust_test(
     crate_name = "host_materialize_serving",
     crate_root = "tests/host_materialize_serving.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1138,6 +1152,7 @@ rust_test(
     crate_name = "host_member_release",
     crate_root = "tests/host_member_release.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1217,6 +1232,7 @@ rust_test(
     crate_name = "host_member_revival",
     crate_root = "tests/host_member_revival.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1298,6 +1314,7 @@ rust_test(
     crate_name = "host_orphan_reconciliation",
     crate_root = "tests/host_orphan_reconciliation.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1377,6 +1394,7 @@ rust_test(
     crate_name = "host_release_disposal",
     crate_root = "tests/host_release_disposal.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1456,6 +1474,7 @@ rust_test(
     crate_name = "host_resume_recovery",
     crate_root = "tests/host_resume_recovery.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1535,6 +1554,7 @@ rust_test(
     crate_name = "kickoff_spawn_teardown_quiesce",
     crate_root = "tests/kickoff_spawn_teardown_quiesce.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1612,6 +1632,7 @@ rust_test(
     crate_name = "member_revival_rebinding",
     crate_root = "tests/member_revival_rebinding.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1689,6 +1710,7 @@ rust_test(
     crate_name = "member_session_bindings",
     crate_root = "tests/member_session_bindings.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1766,6 +1788,7 @@ rust_test(
     crate_name = "member_turn_options_public_api",
     crate_root = "tests/member_turn_options_public_api.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1843,6 +1866,7 @@ rust_test(
     crate_name = "member_upcall_lane",
     crate_root = "tests/member_upcall_lane.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -1924,6 +1948,7 @@ rust_test(
     crate_name = "mob_host_binding_authority",
     crate_root = "tests/mob_host_binding_authority.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2001,6 +2026,7 @@ rust_test(
     crate_name = "mob_orchestrator_kernel",
     crate_root = "tests/mob_orchestrator_kernel.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2078,6 +2104,7 @@ rust_test(
     crate_name = "multi_host_machine",
     crate_root = "tests/multi_host_machine.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2155,6 +2182,7 @@ rust_test(
     crate_name = "placed_member_respawn",
     crate_root = "tests/placed_member_respawn.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2234,6 +2262,7 @@ rust_test(
     crate_name = "placed_spawn_carrier_store",
     crate_root = "tests/placed_spawn_carrier_store.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2311,6 +2340,7 @@ rust_test(
     crate_name = "remote_spawn_ladder",
     crate_root = "tests/remote_spawn_ladder.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2390,6 +2420,7 @@ rust_test(
     crate_name = "remote_spawn_materialization",
     crate_root = "tests/remote_spawn_materialization.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2469,6 +2500,7 @@ rust_test(
     crate_name = "scope_matrix",
     crate_root = "tests/scope_matrix.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2549,6 +2581,7 @@ rust_test(
     crate_name = "shadow_state_absent",
     crate_root = "tests/shadow_state_absent.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2626,6 +2659,7 @@ rust_test(
     crate_name = "smoke_mob_flow_runtime",
     crate_root = "tests/smoke_mob_flow_runtime.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2707,6 +2741,7 @@ rust_test(
     crate_name = "smoke_mob_generated_image_comms",
     crate_root = "tests/smoke_mob_generated_image_comms.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2786,6 +2821,7 @@ rust_test(
     crate_name = "smoke_mob_idle_burn",
     crate_root = "tests/smoke_mob_idle_burn.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2863,6 +2899,7 @@ rust_test(
     crate_name = "smoke_mob_pictionary",
     crate_root = "tests/smoke_mob_pictionary.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -2940,6 +2977,7 @@ rust_test(
     crate_name = "smoke_mob_resume",
     crate_root = "tests/smoke_mob_resume.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",
@@ -3019,6 +3057,7 @@ rust_test(
     crate_name = "smoke_mob_turn_latency",
     crate_root = "tests/smoke_mob_turn_latency.rs",
     crate_features = [
+        "experimental-gpt-live",
         "integration-real-tests",
         "runtime-adapter",
         "schema",

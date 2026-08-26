@@ -1237,7 +1237,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    16, 21, 22, 23, 25, 26, 27, 28, 30, 31, 38, 39,`,
     `    43, 44, 47, 48, 49, 50, 51, 52, 53, 54, 71, 72,`,
     `    74, 76, 77, 79, 80, 82, 83, 84, 85, 86, 87, 88,`,
-    `    89, 90, 92, 93, 94,`,
+    `    89, 90, 92, 93, 94, 96,`,
     `]`,
     ``,
     `E2E_SMOKE_TURBO_S_SUITES = [`,

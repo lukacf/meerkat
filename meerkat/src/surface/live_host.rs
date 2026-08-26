@@ -34,6 +34,7 @@ use meerkat_live::{LiveAdapterHost, LiveChannelId, LiveWsState};
 #[cfg(feature = "live-webrtc")]
 use meerkat_live::{
     LiveWebrtcAdmittedOffer, LiveWebrtcAnswerTransport, LiveWebrtcBindingRequest, LiveWebrtcError,
+    ProviderWebrtcPendingBoundReadySeal,
 };
 use meerkat_llm_core::realtime_session::RealtimeSessionFactory;
 use meerkat_runtime::MeerkatMachine;
@@ -229,6 +230,15 @@ enum LiveWebrtcAnswerDeliveryDisposition {
     Reject,
 }
 
+#[cfg(feature = "live-webrtc")]
+enum LiveWebrtcPostDeliverySettlement {
+    Plain,
+    PendingBoundReady {
+        pending: ProviderWebrtcPendingBoundReadySeal,
+        binder: Arc<dyn LiveWebrtcBoundReadyBinder>,
+    },
+}
+
 /// Surface-neutral delivery custody for one machine-accepted WebRTC answer.
 /// A surface must confirm that its response was published; drop or explicit
 /// rejection closes the exact sequence-keyed provider binding.
@@ -386,7 +396,7 @@ impl LiveWebrtcBoundReadyBindFailure {
 #[cfg(feature = "live-webrtc")]
 #[async_trait]
 pub trait LiveWebrtcBoundReadyCustody: Send {
-    async fn commit(self: Box<Self>);
+    async fn commit(self: Box<Self>) -> Result<(), String>;
     async fn rollback(self: Box<Self>) -> Result<(), String>;
 }
 
@@ -507,8 +517,8 @@ pub async fn coordinate_live_webrtc_answer(
     let binding = admitted_offer.binding_request();
     let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
     let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
-    let (bound_custody_tx, bound_custody_rx) =
-        tokio::sync::oneshot::channel::<Option<Box<dyn LiveWebrtcBoundReadyCustody>>>();
+    let (settlement_tx, settlement_rx) =
+        tokio::sync::oneshot::channel::<LiveWebrtcPostDeliverySettlement>();
     let (liveness_tx, mut liveness_rx) = tokio::sync::oneshot::channel::<()>();
     let task_runtime = Arc::clone(&runtime);
     let task_transport = Arc::clone(&answer_transport);
@@ -542,36 +552,109 @@ pub async fn coordinate_live_webrtc_answer(
                         .await
                         .map_err(|error| error.to_string())
                 } else {
-                    let bound_custody = bound_custody_rx.await.ok().flatten();
+                    let settlement = settlement_rx.await.ok();
                     match decision_rx.await {
                         Ok(LiveWebrtcAnswerDeliveryDisposition::Accept) => {
-                            task_transport.accept_answer(&task_binding, sequence).await;
-                            if let Some(custody) = bound_custody {
-                                custody.commit().await;
+                            let Some(settlement) = settlement else {
+                                return task_transport
+                                    .reject_answer(&task_binding, sequence)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                                    .and_then(|()| {
+                                        Err("answer delivery accepted without settlement custody"
+                                            .to_string())
+                                    });
+                            };
+                            match settlement {
+                                LiveWebrtcPostDeliverySettlement::Plain => {
+                                    task_transport.accept_answer(&task_binding, sequence).await;
+                                    Ok(())
+                                }
+                                LiveWebrtcPostDeliverySettlement::PendingBoundReady {
+                                    pending,
+                                    binder,
+                                } => {
+                                    let receipt = match pending
+                                        .__resolve_after_answer_delivery()
+                                        .await
+                                    {
+                                        Ok(receipt) => receipt,
+                                        Err(error) => {
+                                            let physical = task_transport
+                                                .reject_answer(&task_binding, sequence)
+                                                .await
+                                                .map_err(|close| close.to_string());
+                                            return match physical {
+                                                Ok(()) => Err(format!(
+                                                    "provider bound-ready seed failed after answer delivery: {error}"
+                                                )),
+                                                Err(close) => Err(format!(
+                                                    "provider bound-ready seed failed after answer delivery: {error}; exact answer close also failed: {close}"
+                                                )),
+                                            };
+                                        }
+                                    };
+                                    let custody = match binder
+                                        .bind_answer_ready(
+                                            Arc::clone(&task_runtime),
+                                            &task_binding,
+                                            receipt,
+                                            sequence,
+                                        )
+                                        .await
+                                    {
+                                        Ok(custody) => custody,
+                                        Err(error) => {
+                                            let (detail, rollback) = error.into_parts();
+                                            let semantic = match rollback {
+                                                Some(custody) => custody.rollback().await,
+                                                None => Ok(()),
+                                            };
+                                            let physical = task_transport
+                                                .reject_answer(&task_binding, sequence)
+                                                .await
+                                                .map_err(|close| close.to_string());
+                                            return match (physical, semantic) {
+                                                (Ok(()), Ok(())) => Err(format!(
+                                                    "bound-ready activation failed after answer delivery: {detail}"
+                                                )),
+                                                (Err(close), Ok(())) => Err(format!(
+                                                    "bound-ready activation failed after answer delivery: {detail}; exact answer close also failed: {close}"
+                                                )),
+                                                (Ok(()), Err(rollback)) => Err(format!(
+                                                    "bound-ready activation failed after answer delivery: {detail}; semantic rollback also failed: {rollback}"
+                                                )),
+                                                (Err(close), Err(rollback)) => Err(format!(
+                                                    "bound-ready activation failed after answer delivery: {detail}; exact answer close failed: {close}; semantic rollback also failed: {rollback}"
+                                                )),
+                                            };
+                                        }
+                                    };
+                                    if let Err(error) = custody.commit().await {
+                                        let physical = task_transport
+                                            .reject_answer(&task_binding, sequence)
+                                            .await
+                                            .map_err(|close| close.to_string());
+                                        return match physical {
+                                            Ok(()) => Err(format!(
+                                                "bound-ready activation commit failed after answer delivery: {error}"
+                                            )),
+                                            Err(close) => Err(format!(
+                                                "bound-ready activation commit failed after answer delivery: {error}; exact answer close also failed: {close}"
+                                            )),
+                                        };
+                                    }
+                                    task_transport.accept_answer(&task_binding, sequence).await;
+                                    Ok(())
+                                }
                             }
-                            Ok(())
                         }
                         Ok(LiveWebrtcAnswerDeliveryDisposition::Reject) | Err(_) => {
                             let physical = task_transport
                                 .reject_answer(&task_binding, sequence)
                                 .await
                                 .map_err(|error| error.to_string());
-                            let semantic = match bound_custody {
-                                Some(custody) => custody.rollback().await,
-                                None => Ok(()),
-                            };
-                            match (physical, semantic) {
-                                (Ok(()), Ok(())) => Ok(()),
-                                (Err(physical), Ok(())) => Err(format!(
-                                    "physical answer rejection failed after semantic rollback: {physical}"
-                                )),
-                                (Ok(()), Err(semantic)) => Err(format!(
-                                    "semantic answer rollback failed after physical rejection: {semantic}"
-                                )),
-                                (Err(physical), Err(semantic)) => Err(format!(
-                                    "physical answer rejection failed: {physical}; semantic rollback also failed: {semantic}"
-                                )),
-                            }
+                            physical
                         }
                     }
                 }
@@ -618,9 +701,8 @@ pub async fn coordinate_live_webrtc_answer(
         }
     };
     let sequence = answer.answer_observation_sequence;
-    let bound_custody = if let Some(receipt) = answer.bound_ready.take() {
+    let settlement = if let Some(pending) = answer.pending_bound_ready.take() {
         let Some(binder) = bound_ready_binder else {
-            let _ = bound_custody_tx.send(None);
             let _ = decision_tx.send(LiveWebrtcAnswerDeliveryDisposition::Reject);
             return Err(rejected_answer_error_after_cleanup(
                 cleanup_task,
@@ -628,22 +710,7 @@ pub async fn coordinate_live_webrtc_answer(
             )
             .await);
         };
-        match binder
-            .bind_answer_ready(Arc::clone(&runtime), &binding, receipt, sequence)
-            .await
-        {
-            Ok(custody) => Some(custody),
-            Err(error) => {
-                let (detail, rollback) = error.into_parts();
-                let _ = bound_custody_tx.send(rollback);
-                let _ = decision_tx.send(LiveWebrtcAnswerDeliveryDisposition::Reject);
-                return Err(rejected_answer_error_after_cleanup(
-                    cleanup_task,
-                    LiveWebrtcAnswerCoordinatorError::BoundChannelActivation(detail),
-                )
-                .await);
-            }
-        }
+        LiveWebrtcPostDeliverySettlement::PendingBoundReady { pending, binder }
     } else {
         let result_authority = runtime
             .resolve_live_webrtc_answer_result(&session_id, &channel_id, sequence)
@@ -657,10 +724,9 @@ pub async fn coordinate_live_webrtc_answer(
                         meerkat_runtime::meerkat_machine::dsl::LiveWebrtcAnswerPublicStatus::Answered
                     ) =>
             {
-                None
+                LiveWebrtcPostDeliverySettlement::Plain
             }
             Ok(_) => {
-                let _ = bound_custody_tx.send(None);
                 let _ = decision_tx.send(LiveWebrtcAnswerDeliveryDisposition::Reject);
                 return Err(
                     rejected_answer_error_after_cleanup(
@@ -671,13 +737,12 @@ pub async fn coordinate_live_webrtc_answer(
                 );
             }
             Err(error) => {
-                let _ = bound_custody_tx.send(None);
                 let _ = decision_tx.send(LiveWebrtcAnswerDeliveryDisposition::Reject);
                 return Err(rejected_answer_error_after_cleanup(cleanup_task, error).await);
             }
         }
     };
-    if bound_custody_tx.send(bound_custody).is_err() {
+    if settlement_tx.send(settlement).is_err() {
         let _ = decision_tx.send(LiveWebrtcAnswerDeliveryDisposition::Reject);
         let _ = cleanup_task.await;
         return Err(LiveWebrtcAnswerCoordinatorError::CoordinatorStopped);

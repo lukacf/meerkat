@@ -1078,6 +1078,8 @@ impl ExperimentalLiveOpenDeliveryCustody {
         runtime: Arc<SessionRuntime>,
         host: Arc<meerkat_live::LiveAdapterHost>,
         publication: handlers::live::ExperimentalLiveOpenPublication,
+        #[cfg(feature = "live-webrtc")]
+        playback_custodies: handlers::live::ExperimentalLivePlaybackCustodies,
     ) -> Self {
         let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
         let cleanup_task = tokio::spawn(async move {
@@ -1087,6 +1089,11 @@ impl ExperimentalLiveOpenDeliveryCustody {
             ) {
                 return Ok(());
             }
+            #[cfg(feature = "live-webrtc")]
+            playback_custodies
+                .lock()
+                .await
+                .remove(&publication.channel_id);
             runtime
                 .cleanup_experimental_live_channel_after_publication_failure(
                     &host,
@@ -1255,6 +1262,8 @@ pub struct MethodRouter {
     #[cfg(feature = "experimental-gpt-live")]
     experimental_live_public_observation_publisher:
         Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>>,
+    #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+    experimental_live_playback_custodies: handlers::live::ExperimentalLivePlaybackCustodies,
     #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
     experimental_live_delegation_coordinator:
         Arc<meerkat_mob_mcp::live_delegation::ExperimentalLiveDelegationCoordinator>,
@@ -1353,6 +1362,8 @@ impl MethodRouter {
             experimental_live_open_authority: None,
             #[cfg(feature = "experimental-gpt-live")]
             experimental_live_public_observation_publisher: None,
+            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            experimental_live_playback_custodies: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
             experimental_live_delegation_coordinator,
             #[cfg(all(
@@ -1871,6 +1882,8 @@ impl MethodRouter {
             experimental_live_open_authority: None,
             #[cfg(feature = "experimental-gpt-live")]
             experimental_live_public_observation_publisher: None,
+            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            experimental_live_playback_custodies: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "experimental-gpt-live")]
             experimental_live_delegation_coordinator,
             #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
@@ -2616,6 +2629,9 @@ impl MethodRouter {
                         experimental_live_open_authority: self
                             .experimental_live_open_authority
                             .as_ref(),
+                        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+                        experimental_live_playback_custodies: &self
+                            .experimental_live_playback_custodies,
                     },
                 )
                 .await;
@@ -2630,6 +2646,8 @@ impl MethodRouter {
                             Arc::clone(&self.runtime),
                             Arc::clone(&self.live_adapter_host),
                             publication,
+                            #[cfg(feature = "live-webrtc")]
+                            Arc::clone(&self.experimental_live_playback_custodies),
                         )
                     });
                     return Some(RoutedRpcResponse::with_experimental_live_open(
@@ -2656,6 +2674,8 @@ impl MethodRouter {
                             self.experimental_live_public_observation_publisher.clone(),
                             #[cfg(feature = "experimental-gpt-live")]
                             &self.live_adapter_host,
+                            #[cfg(feature = "experimental-gpt-live")]
+                            &self.experimental_live_playback_custodies,
                         )
                         .await,
                     ));
@@ -11816,7 +11836,7 @@ mod tests {
             Ok(meerkat_live::LiveWebrtcAnswerAccepted {
                 answer_sdp: "remote-answer".to_string(),
                 answer_observation_sequence: 41,
-                bound_ready: None,
+                pending_bound_ready: None,
             })
         }
 
@@ -12320,6 +12340,7 @@ mod tests {
                 "transport": "webrtc",
                 "execution_identity": {
                     "version": "v1",
+                    "profile_id": meerkat::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
                     "model": "gpt-live-1-codex",
                     "provider": "openai"
                 }
@@ -12424,6 +12445,23 @@ mod tests {
                 .as_str()
                 .expect("channel_id"),
         );
+        let playback_custody = router
+            .experimental_live_playback_custodies
+            .lock()
+            .await
+            .get(&channel_id)
+            .cloned()
+            .expect("strict open retains connection-local playback custody");
+        router
+            .runtime_adapter
+            .validate_live_playback_owner_readiness(
+                &session_id,
+                &channel_id,
+                &playback_custody.pending_receipt,
+                &playback_custody.readiness_receipt,
+            )
+            .await
+            .expect("strict open registers exact playback-owner readiness");
         let bound = router
             .runtime_adapter
             .live_channel_bound_llm_identity(&session_id, &channel_id)
@@ -12476,6 +12514,26 @@ mod tests {
         );
         assert_eq!(*log.lock().await, vec!["prepare", "factory", "bind"]);
         assert_eq!(router.live_adapter_host.active_channels().await.len(), 1);
+        let channel_id = meerkat_live::LiveChannelId::new(
+            result_value(&routed.response)["channel_id"]
+                .as_str()
+                .expect("channel_id"),
+        );
+        let playback_custody = router
+            .experimental_live_playback_custodies
+            .lock()
+            .await
+            .get(&channel_id)
+            .cloned()
+            .expect("playback custody before publication settlement");
+        assert_eq!(
+            router
+                .experimental_live_playback_custodies
+                .lock()
+                .await
+                .len(),
+            1
+        );
 
         routed
             .settle_delivery(false)
@@ -12487,5 +12545,103 @@ mod tests {
             vec!["prepare", "factory", "bind", "unbind"]
         );
         assert!(router.live_adapter_host.active_channels().await.is_empty());
+        assert!(
+            router
+                .experimental_live_playback_custodies
+                .lock()
+                .await
+                .is_empty(),
+            "publication rejection must drop connection-local playback custody"
+        );
+        assert!(
+            router
+                .runtime_adapter
+                .validate_live_playback_owner_readiness(
+                    &session_id,
+                    &channel_id,
+                    &playback_custody.pending_receipt,
+                    &playback_custody.readiness_receipt,
+                )
+                .await
+                .is_err(),
+            "publication cleanup must clear machine playback-owner readiness"
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn strict_live_answer_without_connection_custody_stops_before_provider_io() {
+        let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;
+        let (router, _notifications) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "durable text agent",
+                    "initial_turn": "deferred",
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic"
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(create.error.is_none(), "session/create failed: {create:?}");
+        let session_id = SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session_id"),
+        )
+        .expect("canonical session id");
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let authority = Arc::new(ExperimentalAuthorityTestProvider { log, deny: false });
+        let transport = Arc::new(TestRemoteAnswerTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: false,
+        });
+        let router = attach_experimental_test_webrtc(router)
+            .with_live_webrtc_answer_transport(transport.clone())
+            .with_experimental_live_open_authority(authority);
+        let opened = router
+            .dispatch(experimental_open_request(&session_id))
+            .await
+            .expect("strict live/open response");
+        assert!(
+            opened.error.is_none(),
+            "strict live/open failed: {opened:?}"
+        );
+        let channel_id = meerkat_live::LiveChannelId::new(
+            result_value(&opened)["channel_id"]
+                .as_str()
+                .expect("channel_id"),
+        );
+        let token = result_value(&opened)["transport"]["token"]
+            .as_str()
+            .expect("WebRTC token")
+            .to_string();
+
+        router
+            .experimental_live_playback_custodies
+            .lock()
+            .await
+            .remove(&channel_id)
+            .expect("remove connection custody fixture");
+        let response = router
+            .dispatch(make_request(
+                "live/webrtc/answer",
+                serde_json::json!({
+                    "channel_id": channel_id.to_string(),
+                    "token": token,
+                    "offer_sdp": "secret-offer"
+                }),
+            ))
+            .await
+            .expect("answer rejection response");
+
+        assert!(response.error.is_some());
+        assert_eq!(
+            transport.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "strict answer must validate playback custody before provider IO"
+        );
     }
 }

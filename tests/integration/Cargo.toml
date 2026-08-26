@@ -52,6 +52,11 @@ uuid = { workspace = true, features = ["v4"] }
 
 [features]
 integration-real-tests = []
+experimental-gpt-live-e2e = [
+    "meerkat/experimental-gpt-live",
+    "meerkat-mob-mcp/experimental-gpt-live",
+    "meerkat-rpc/experimental-gpt-live",
+]
 # The shared multi-host fixture is path-included into this package as well as
 # `meerkat-mob`'s own integration tests. Declare the same feature name here so
 # its crash-only helpers remain cfg-valid in both crate contexts; all-feature
@@ -66,6 +71,11 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "smoke_shared_realm"
 path = "tests/smoke_shared_realm.rs"
+
+[[test]]
+name = "gpt_live_client_e2e"
+path = "tests/gpt_live_client_e2e.rs"
+required-features = ["experimental-gpt-live-e2e"]
 
 [[test]]
 name = "system_shared_realm"

@@ -24,6 +24,19 @@ use meerkat_core::provider_matrix::self_hosted::{SelfHostedAuthMethod, SelfHoste
 
 pub use crate::provider_runtime::catalog::ValidatedBinding;
 
+/// Exact factory kind qualified by the validated GPT Live client-context POC.
+pub const GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND: &str = "private-live";
+/// Exact factory version qualified by the validated GPT Live client-context POC.
+pub const GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION: &str = "v1";
+/// Version of the client-context Gate0 evidence contract compiled into this build.
+pub const GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION: &str = "gate0-v1";
+/// SHA-256 of the redacted validated client-context evidence artifact.
+///
+/// Source artifact:
+/// `work/probe/minimum-matrix/client-managed-sideband-delegation-context-v1.json`
+pub const GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST: &str =
+    "145a6ffa26833083c606bb76b16fa2efc614a8619dedf74ca2d497758bbb3228";
+
 /// Provider-tagged normalized backend kind. Each variant is produced by the
 /// provider runtime catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,6 +255,7 @@ pub struct ExperimentalRealtimeQualificationPolicy {
     factory_kind: String,
     factory_version: String,
     required_gate0_version: String,
+    execution_mode: meerkat_core::LiveExecutionMode,
 }
 
 impl ExperimentalRealtimeQualificationPolicy {
@@ -250,12 +264,14 @@ impl ExperimentalRealtimeQualificationPolicy {
         factory_kind: impl Into<String>,
         factory_version: impl Into<String>,
         required_gate0_version: impl Into<String>,
+        execution_mode: meerkat_core::LiveExecutionMode,
     ) -> Result<Self, ExperimentalRealtimeAdmissionError> {
         let policy = Self {
             realm,
             factory_kind: factory_kind.into(),
             factory_version: factory_version.into(),
             required_gate0_version: required_gate0_version.into(),
+            execution_mode,
         };
         if !valid_experimental_component(&policy.factory_kind)
             || !valid_experimental_component(&policy.factory_version)
@@ -268,6 +284,10 @@ impl ExperimentalRealtimeQualificationPolicy {
 
     pub fn realm(&self) -> &meerkat_core::RealmId {
         &self.realm
+    }
+
+    pub fn execution_mode(&self) -> meerkat_core::LiveExecutionMode {
+        self.execution_mode
     }
 }
 
@@ -306,15 +326,23 @@ impl ExperimentalRealtimeAdmissionAuthority {
     /// Construct only when operator policy exactly matches this compiled
     /// artifact's Gate0 witness.
     pub fn from_compiled_gate0_policy(
-        _policy: ExperimentalRealtimeQualificationPolicy,
+        policy: ExperimentalRealtimeQualificationPolicy,
     ) -> Result<Self, ExperimentalRealtimeAdmissionError> {
         if !cfg!(feature = "experimental-gpt-live") {
             return Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled);
         }
-        // No source-bound verifier exists for the still-unknown direct
-        // Responses function event. Build environment strings cannot mint an
-        // authority; the unqualified tree is structurally closed.
-        Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable)
+        if policy.factory_kind != GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND
+            || policy.factory_version != GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION
+            || policy.required_gate0_version != GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION
+            || policy.execution_mode != meerkat_core::LiveExecutionMode::ClientContext
+        {
+            return Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch);
+        }
+        Ok(Self {
+            inner: Arc::new(ExperimentalRealtimeAdmissionAuthorityInner),
+            policy,
+            protocol_digest: GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST.to_string(),
+        })
     }
 
     pub fn qualify(
@@ -322,10 +350,12 @@ impl ExperimentalRealtimeAdmissionAuthority {
         realm: &meerkat_core::RealmId,
         factory_kind: &str,
         factory_version: &str,
+        execution_mode: meerkat_core::LiveExecutionMode,
     ) -> Result<ExperimentalRealtimeQualificationWitness, ExperimentalRealtimeAdmissionError> {
         if realm != &self.policy.realm
             || factory_kind != self.policy.factory_kind
             || factory_version != self.policy.factory_version
+            || execution_mode != self.policy.execution_mode
         {
             return Err(ExperimentalRealtimeAdmissionError::QualificationMismatch);
         }
@@ -334,6 +364,7 @@ impl ExperimentalRealtimeAdmissionAuthority {
             realm: realm.clone(),
             factory_kind: factory_kind.to_string(),
             factory_version: factory_version.to_string(),
+            execution_mode,
             protocol_digest: self.protocol_digest.clone(),
         })
     }
@@ -348,6 +379,7 @@ impl ExperimentalRealtimeAdmissionAuthority {
             || qualification.realm != self.policy.realm
             || qualification.factory_kind != self.policy.factory_kind
             || qualification.factory_version != self.policy.factory_version
+            || qualification.execution_mode != self.policy.execution_mode
             || qualification.protocol_digest != self.protocol_digest
         {
             return Err(ExperimentalRealtimeAdmissionError::QualificationMismatch);
@@ -379,7 +411,14 @@ pub struct ExperimentalRealtimeQualificationWitness {
     realm: meerkat_core::RealmId,
     factory_kind: String,
     factory_version: String,
+    execution_mode: meerkat_core::LiveExecutionMode,
     protocol_digest: String,
+}
+
+impl ExperimentalRealtimeQualificationWitness {
+    pub fn execution_mode(&self) -> meerkat_core::LiveExecutionMode {
+        self.execution_mode
+    }
 }
 
 impl std::fmt::Debug for ExperimentalRealtimeQualificationWitness {
@@ -389,6 +428,7 @@ impl std::fmt::Debug for ExperimentalRealtimeQualificationWitness {
             .field("realm", &self.realm)
             .field("factory_kind", &self.factory_kind)
             .field("factory_version", &self.factory_version)
+            .field("execution_mode", &self.execution_mode)
             .field("protocol_digest", &self.protocol_digest)
             .field("authority", &"[OPAQUE]")
             .finish()
@@ -495,6 +535,7 @@ mod experimental_realtime_admission_tests {
                 FACTORY_KIND,
                 FACTORY_VERSION,
                 "gate0-v1",
+                meerkat_core::LiveExecutionMode::ClientContext,
             )
             .expect("valid policy"),
             protocol_digest: digest_byte.repeat(32),
@@ -555,33 +596,83 @@ mod experimental_realtime_admission_tests {
     fn qualification_rejects_wrong_realm_and_factory() {
         let authority = authority("voice", "ab");
         assert!(matches!(
-            authority.qualify(&realm("other"), FACTORY_KIND, FACTORY_VERSION),
+            authority.qualify(
+                &realm("other"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
         assert!(matches!(
-            authority.qualify(&realm("voice"), "other-live", FACTORY_VERSION),
+            authority.qualify(
+                &realm("voice"),
+                "other-live",
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
         assert!(matches!(
-            authority.qualify(&realm("voice"), FACTORY_KIND, "v2"),
+            authority.qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                "v2",
+                meerkat_core::LiveExecutionMode::ClientContext,
+            ),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+        assert!(matches!(
+            authority.qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+            ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
     }
 
     #[test]
-    fn compiled_gate0_policy_cannot_be_qualified_by_build_strings() {
-        let policy = ExperimentalRealtimeQualificationPolicy::new(
+    fn compiled_gate0_policy_qualifies_only_exact_client_context_evidence() {
+        let client_policy = ExperimentalRealtimeQualificationPolicy::new(
             realm("voice"),
-            FACTORY_KIND,
-            FACTORY_VERSION,
-            "gate0-v1",
+            GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND,
+            GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
+            GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION,
+            meerkat_core::LiveExecutionMode::ClientContext,
         )
         .expect("valid policy");
-        assert!(matches!(
-            ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(policy),
-            Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable)
-                | Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
-        ));
+        let client =
+            ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(client_policy);
+        if cfg!(feature = "experimental-gpt-live") {
+            let client = client.expect("compiled client-context evidence");
+            assert_eq!(
+                client.protocol_digest,
+                GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST
+            );
+        } else {
+            assert!(matches!(
+                client,
+                Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
+            ));
+        }
+
+        for mode in [meerkat_core::LiveExecutionMode::FunctionBridge] {
+            let policy = ExperimentalRealtimeQualificationPolicy::new(
+                realm("voice"),
+                GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND,
+                GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
+                GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION,
+                mode,
+            )
+            .expect("valid policy shape");
+            assert!(matches!(
+                ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(policy),
+                Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch)
+                    | Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
+            ));
+        }
     }
 
     #[test]
@@ -590,7 +681,12 @@ mod experimental_realtime_admission_tests {
         let foreign = authority("voice", "ab");
         let binding = binding("voice", "chatgpt");
         let foreign_witness = foreign
-            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            )
             .expect("foreign qualification");
         assert!(matches!(
             owner.admit_target(
@@ -602,7 +698,12 @@ mod experimental_realtime_admission_tests {
         ));
 
         let mut stale_digest = owner
-            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            )
             .expect("owned qualification");
         stale_digest.protocol_digest = "cd".repeat(32);
         assert!(matches!(
@@ -619,7 +720,12 @@ mod experimental_realtime_admission_tests {
     fn admission_rejects_binding_witness_mismatch() {
         let owner = authority("voice", "ab");
         let qualification = owner
-            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            )
             .expect("qualification");
         assert!(matches!(
             owner.admit_target(
@@ -636,7 +742,12 @@ mod experimental_realtime_admission_tests {
         for model in ["gpt-realtime-2", "gpt-5.3-codex"] {
             let owner = authority("voice", "ab");
             let qualification = owner
-                .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+                .qualify(
+                    &realm("voice"),
+                    FACTORY_KIND,
+                    FACTORY_VERSION,
+                    meerkat_core::LiveExecutionMode::ClientContext,
+                )
                 .expect("qualification");
             let binding = binding("voice", "chatgpt");
             assert!(
@@ -658,7 +769,12 @@ mod experimental_realtime_admission_tests {
         let owner = authority("voice", "ab");
         let authority_liveness = Arc::downgrade(&owner.inner);
         let qualification = owner
-            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .qualify(
+                &realm("voice"),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            )
             .expect("qualification");
         let binding = binding("voice", "chatgpt");
         let admitted = owner

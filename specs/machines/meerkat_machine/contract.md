@@ -14171,6 +14171,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `exact_operation_join`
+  - `canonical_final_transcript_confirmed`
   - `worker_unbound`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Idle`
@@ -14184,6 +14185,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `exact_operation_join`
+  - `canonical_final_transcript_confirmed`
   - `worker_unbound`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Attached`
@@ -14197,6 +14199,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `exact_operation_join`
+  - `canonical_final_transcript_confirmed`
   - `worker_unbound`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Running`

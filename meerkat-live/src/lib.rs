@@ -35,6 +35,7 @@ pub use provider_webrtc::{
     LiveWebrtcAdmissionSealError, LiveWebrtcAnswerAdmissionSeal, LiveWebrtcRuntimeBinding,
     ProviderWebrtcBinding, ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBroker,
     ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError, ProviderWebrtcOffer,
+    ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcPendingBoundReadySeal,
     ProviderWebrtcSidebandSession, ProviderWebrtcSignalingError,
 };
 pub use transport::{

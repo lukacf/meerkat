@@ -18,6 +18,8 @@ pub use binding::{
     AdmittedExperimentalRealtimeTarget, DynamicLease, ExperimentalRealtimeAdmissionAuthority,
     ExperimentalRealtimeAdmissionError, ExperimentalRealtimeAdmissionRetention,
     ExperimentalRealtimeQualificationPolicy, ExperimentalRealtimeQualificationWitness,
+    GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND, GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
+    GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION, GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST,
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedRealtimeTarget,
     StaticLease,
 };

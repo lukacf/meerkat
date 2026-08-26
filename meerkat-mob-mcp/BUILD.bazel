@@ -33,7 +33,9 @@ rust_library(
     aliases = aliases(package_name = "meerkat-mob-mcp"),
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -69,7 +71,9 @@ rust_library(
     aliases = aliases(package_name = "meerkat-mob-mcp"),
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -119,7 +123,9 @@ rust_test(
     ),
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -170,7 +176,9 @@ rust_binary(
     aliases = aliases(package_name = "meerkat-mob-mcp"),
     crate_name = "rkat_mob_mcp",
     crate_root = "src/main.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",

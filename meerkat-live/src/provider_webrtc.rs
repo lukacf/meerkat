@@ -154,13 +154,61 @@ pub struct ProviderWebrtcBinding {
     runtime_fence: LiveRuntimeBindingFence,
 }
 
-/// Opaque one-use evidence that the admitted provider sideband reached
-/// SessionReady and acknowledged the exact canonical seed cursor.
+/// Opaque one-use evidence that the admitted answer was published, its
+/// provider sideband was connected, and the exact canonical seed cursor was
+/// acknowledged when the seed was non-empty.
 #[derive(Clone)]
 pub struct ProviderWebrtcBoundReadyReceipt {
     binding: ProviderWebrtcBinding,
     canonical_seed_cursor: u64,
     consumed: Arc<AtomicBool>,
+}
+
+/// Provider-owned one-shot work that runs after answer publication and
+/// acknowledges the exact canonical seed over the already-connected
+/// sideband. The provider-neutral wrapper below owns the binding and is the
+/// only component that can turn the returned cursor into bound-ready
+/// evidence.
+#[doc(hidden)]
+#[async_trait]
+pub trait ProviderWebrtcPendingBoundReadyResolver: Send {
+    async fn resolve(self: Box<Self>) -> Result<u64, ProviderWebrtcBrokerError>;
+}
+
+/// Opaque pending bound-ready custody retained until the surface confirms
+/// that the SDP answer was published. It is intentionally non-Clone: reject
+/// or drop discards the resolver without reading provider readiness or
+/// seeding canonical context.
+#[doc(hidden)]
+pub struct ProviderWebrtcPendingBoundReadySeal {
+    binding: ProviderWebrtcBinding,
+    resolver: Box<dyn ProviderWebrtcPendingBoundReadyResolver>,
+}
+
+impl fmt::Debug for ProviderWebrtcPendingBoundReadySeal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderWebrtcPendingBoundReadySeal")
+            .field("binding", &self.binding)
+            .field("resolver", &"[OPAQUE]")
+            .finish()
+    }
+}
+
+impl ProviderWebrtcPendingBoundReadySeal {
+    /// Resolve provider readiness only after response delivery, then mint the
+    /// exact one-use receipt consumed by the generated atomic answer-and-bind
+    /// transition.
+    #[doc(hidden)]
+    pub async fn __resolve_after_answer_delivery(
+        self,
+    ) -> Result<ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBrokerError> {
+        let canonical_seed_cursor = self.resolver.resolve().await?;
+        Ok(ProviderWebrtcBoundReadyReceipt::from_seed_ack(
+            self.binding,
+            canonical_seed_cursor,
+        ))
+    }
 }
 
 impl fmt::Debug for ProviderWebrtcBoundReadyReceipt {
@@ -270,22 +318,23 @@ impl ProviderWebrtcOffer {
         &self.offer_sdp
     }
 
-    /// Consume the admitted provider offer into a seeded answer. Only the
-    /// broker holding this unforgeable offer can mint bound-ready evidence.
+    /// Consume the admitted provider offer into an answer with pending seed
+    /// custody. No bound-ready evidence exists until response delivery has
+    /// been accepted and the provider resolver acknowledges the exact seed.
     #[must_use]
-    pub fn into_seeded_answer(
+    pub fn into_pending_bound_ready_answer(
         self,
         answer_sdp: String,
         sideband: Arc<dyn ProviderWebrtcSidebandSession>,
-        canonical_seed_cursor: u64,
+        resolver: Box<dyn ProviderWebrtcPendingBoundReadyResolver>,
     ) -> ProviderWebrtcBrokerAnswer {
         ProviderWebrtcBrokerAnswer {
             answer_sdp,
             sideband,
-            bound_ready: ProviderWebrtcBoundReadyReceipt::from_seed_ack(
-                self.binding,
-                canonical_seed_cursor,
-            ),
+            pending_bound_ready: ProviderWebrtcPendingBoundReadySeal {
+                binding: self.binding,
+                resolver,
+            },
         }
     }
 }
@@ -842,7 +891,10 @@ pub enum LiveSidebandObservationKind {
     DelegationRequested {
         turn: LiveSidebandTurnRef,
         delegation: LiveSidebandDelegationRef,
-        actionable_input: String,
+        /// Provider-final user transcript joined to this exact client
+        /// delegation. This remains provider evidence until the canonical
+        /// session owner commits it and returns sealed final-input evidence.
+        final_transcript: String,
     },
     /// A client-context delegation whose provider payload cannot establish a
     /// normalized prose handoff. This is not a Responses function call and
@@ -948,7 +1000,7 @@ pub trait ProviderWebrtcSidebandSession: Send + Sync {
 pub struct ProviderWebrtcBrokerAnswer {
     answer_sdp: String,
     sideband: Arc<dyn ProviderWebrtcSidebandSession>,
-    bound_ready: ProviderWebrtcBoundReadyReceipt,
+    pending_bound_ready: ProviderWebrtcPendingBoundReadySeal,
 }
 
 impl ProviderWebrtcBrokerAnswer {
@@ -958,9 +1010,9 @@ impl ProviderWebrtcBrokerAnswer {
     ) -> (
         String,
         Arc<dyn ProviderWebrtcSidebandSession>,
-        ProviderWebrtcBoundReadyReceipt,
+        ProviderWebrtcPendingBoundReadySeal,
     ) {
-        (self.answer_sdp, self.sideband, self.bound_ready)
+        (self.answer_sdp, self.sideband, self.pending_bound_ready)
     }
 }
 
@@ -1002,6 +1054,43 @@ pub enum ProviderWebrtcSignalingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::Notify;
+
+    struct ControlledPendingResolver {
+        calls: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        result: Result<u64, ProviderWebrtcBrokerError>,
+    }
+
+    #[async_trait]
+    impl ProviderWebrtcPendingBoundReadyResolver for ControlledPendingResolver {
+        async fn resolve(self: Box<Self>) -> Result<u64, ProviderWebrtcBrokerError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.release.notified().await;
+            self.result
+        }
+    }
+
+    fn pending_seal(
+        binding: ProviderWebrtcBinding,
+        calls: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        result: Result<u64, ProviderWebrtcBrokerError>,
+    ) -> ProviderWebrtcPendingBoundReadySeal {
+        ProviderWebrtcPendingBoundReadySeal {
+            binding,
+            resolver: Box::new(ControlledPendingResolver {
+                calls,
+                started,
+                release,
+                result,
+            }),
+        }
+    }
 
     fn binding() -> ProviderWebrtcBinding {
         ProviderWebrtcBinding::new(
@@ -1010,6 +1099,119 @@ mod tests {
             LiveRuntimeBindingGeneration::new(3),
             LiveRuntimeBindingFence::new(5),
         )
+    }
+
+    #[tokio::test]
+    async fn pending_bound_ready_is_inert_until_explicit_delivery_resolution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let expected = binding();
+        let pending = pending_seal(
+            expected.clone(),
+            Arc::clone(&calls),
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Ok(41),
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let mut resolution = tokio::spawn(pending.__resolve_after_answer_delivery());
+        started.notified().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut resolution)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        let receipt = resolution
+            .await
+            .expect("resolution task")
+            .expect("pending seed resolves");
+
+        #[cfg(feature = "__meerkat-generated-authority-bridge")]
+        assert_eq!(
+            receipt
+                .__consume_for_generated_bind(&expected)
+                .expect("exact binding consumes receipt"),
+            41
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_bound_ready_never_runs_seed_work() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let pending = pending_seal(
+            binding(),
+            Arc::clone(&calls),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Ok(9),
+        );
+        drop(pending);
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_pending_seed_mints_no_bound_ready_receipt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let pending = pending_seal(
+            binding(),
+            Arc::clone(&calls),
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Err(ProviderWebrtcBrokerError::ProtocolDrift),
+        );
+        let resolution = tokio::spawn(pending.__resolve_after_answer_delivery());
+        started.notified().await;
+        release.notify_one();
+        assert!(matches!(
+            resolution.await.expect("resolution task"),
+            Err(ProviderWebrtcBrokerError::ProtocolDrift)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "__meerkat-generated-authority-bridge")]
+    #[tokio::test]
+    async fn bound_ready_receipt_rejects_wrong_binding_and_preserves_exact_consumption() {
+        let expected = binding();
+        let wrong = ProviderWebrtcBinding::new(
+            LiveChannelId::new("wrong-channel"),
+            expected.session_id().clone(),
+            expected.runtime_generation(),
+            expected.runtime_fence(),
+        );
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let pending = pending_seal(
+            expected.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Ok(73),
+        );
+        let resolution = tokio::spawn(pending.__resolve_after_answer_delivery());
+        started.notified().await;
+        release.notify_one();
+        let receipt = resolution
+            .await
+            .expect("resolution task")
+            .expect("seed acknowledgement");
+        assert_eq!(
+            receipt.__consume_for_generated_bind(&wrong),
+            Err(LiveWebrtcAdmissionSealError::BindingMismatch)
+        );
+        assert_eq!(
+            receipt
+                .__consume_for_generated_bind(&expected)
+                .expect("failed wrong-binding attempt does not consume exact receipt"),
+            73
+        );
     }
 
     #[test]

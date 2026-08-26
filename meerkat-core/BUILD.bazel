@@ -664,7 +664,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.28",
+        "CARGO_PKG_VERSION": "0.8.29",
         "CARGO_BIN_NAME": "live_assistant_playback_authority",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",

@@ -524,6 +524,38 @@ struct RetainedDelegation {
     result: Mutex<RetainedDelegationResult>,
 }
 
+/// One ownership-preserving handoff of an exact bounded executor result to
+/// the exact provider delegation that requested it. The carrier deliberately
+/// performs no normalization or interpretation: machine authorization binds
+/// the result before this mechanical dispatch seam.
+struct ExactDelegationResultProjection<Authority> {
+    authority: Authority,
+    delegation: LiveSidebandDelegationRef,
+    result_text: String,
+}
+
+impl<Authority> ExactDelegationResultProjection<Authority> {
+    fn new(
+        authority: Authority,
+        delegation: LiveSidebandDelegationRef,
+        result_text: String,
+    ) -> Self {
+        Self {
+            authority,
+            delegation,
+            result_text,
+        }
+    }
+
+    async fn dispatch<Output, Release, ReleaseFuture>(self, release: Release) -> Output
+    where
+        Release: FnOnce(Authority, LiveSidebandDelegationRef, String) -> ReleaseFuture,
+        ReleaseFuture: std::future::Future<Output = Output>,
+    {
+        release(self.authority, self.delegation, self.result_text).await
+    }
+}
+
 #[derive(Default)]
 struct RetainedDelegationResult {
     reconciliation: Option<LiveHandoffReconciliationReceipt>,
@@ -1833,7 +1865,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     if let LiveSidebandObservationKind::DelegationRequested {
                         turn,
                         delegation,
-                        actionable_input,
+                        final_transcript,
                     } = observation.kind()
                         && let Err(error) = self
                             .start_client_context_delegation(
@@ -1841,7 +1873,7 @@ impl ExperimentalLiveDelegationCoordinator {
                                 Arc::clone(&control),
                                 turn.clone(),
                                 delegation.clone(),
-                                actionable_input.clone(),
+                                final_transcript.clone(),
                             )
                             .await
                     {
@@ -1956,11 +1988,58 @@ impl ExperimentalLiveDelegationCoordinator {
                 role: meerkat_live::LiveSidebandTurnRole::User,
                 ..
             } => self.observe_turn_finished(observation).await,
+            LiveSidebandObservationKind::DelegationRequested { .. } => Ok(()),
             LiveSidebandObservationKind::TurnStarted { .. }
             | LiveSidebandObservationKind::TurnFinished { .. }
             | LiveSidebandObservationKind::TurnSnapshotDelta { .. } => Ok(()),
             _ => Err("provider lifecycle seam received a non-lifecycle observation".to_string()),
         }
+    }
+
+    async fn finish_client_delegation_turn(
+        &self,
+        provider_binding: &ProviderWebrtcBinding,
+        turn: LiveSidebandTurnRef,
+        final_transcript: String,
+    ) -> Result<(), String> {
+        let terminal = LiveSidebandObservation::new(
+            provider_binding.clone(),
+            LiveSidebandObservationKind::TurnFinished {
+                turn: turn.clone(),
+                role: meerkat_live::LiveSidebandTurnRole::User,
+                transcript: final_transcript,
+            },
+        );
+        let finished = self
+            .runtime
+            .observe_live_provider_turn_finished(&terminal)
+            .await
+            .map_err(|error| error.to_string())?;
+        let channel_key = (
+            finished.binding().session_id().clone(),
+            finished.binding().channel_id().clone(),
+        );
+        let started = self
+            .active_turns
+            .lock()
+            .await
+            .remove(&channel_key)
+            .ok_or_else(|| {
+                "client delegation final has no local started-turn projection".to_string()
+            })?;
+        if started.authority.binding() != finished.binding()
+            || started.authority.interaction_id() != finished.interaction_id()
+            || started.authority.provider_turn_ref() != finished.provider_turn_ref()
+            || finished.provider_turn_ref() != turn.adapter_key()
+        {
+            return Err(
+                "client delegation final does not match the exact started turn".to_string(),
+            );
+        }
+        self.runtime
+            .drain_live_context_outbox(finished.binding().session_id())
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn observe_turn_started(
@@ -2014,15 +2093,17 @@ impl ExperimentalLiveDelegationCoordinator {
             .map_err(|error| error.to_string())
     }
 
-    /// Client-context capability only. Its normalized prose handoff and
-    /// helper lifecycle are not valid Responses function-call evidence.
+    /// Client-context capability only. The provider-final transcript remains
+    /// provisional until the canonical session owner commits it and runtime
+    /// reconciliation confirms the exact digest. No executor model or tool
+    /// work starts before that boundary.
     async fn start_client_context_delegation(
         &self,
         provider_binding: &ProviderWebrtcBinding,
         control: Arc<dyn ExperimentalGptLiveControlPlane>,
         turn: LiveSidebandTurnRef,
         delegation: LiveSidebandDelegationRef,
-        actionable_input: String,
+        final_transcript: String,
     ) -> Result<(), String> {
         let session_id = provider_binding.session_id();
         let channel_key = (session_id.clone(), provider_binding.channel_id().clone());
@@ -2031,7 +2112,7 @@ impl ExperimentalLiveDelegationCoordinator {
             .lock()
             .await
             .get(&channel_key)
-            .map(|turn| turn.authority.clone())
+            .map(|active| active.authority.clone())
             .ok_or_else(|| "delegation has no exact active provider turn".to_string())?;
         if turn_authority.binding().channel_id() != provider_binding.channel_id()
             || turn_authority.binding().session_id() != session_id
@@ -2058,7 +2139,7 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             return Err("delegation observation has a stale runtime binding".to_string());
         }
-        let (_, mob_handle, _) = self
+        let (_, mob_handle, source_identity) = self
             .mobs
             .live_member_owner(session_id)
             .await
@@ -2069,10 +2150,23 @@ impl ExperimentalLiveDelegationCoordinator {
         let operation = ExactOperationIdentity::for_domain(OperationId::new(), correlation);
         let provisional = ProvisionalLiveHandoff::new(
             operation.domain_correlation().clone(),
-            actionable_input,
-            LiveHandoffInputProvenance::NormalizedHandoff,
+            final_transcript.clone(),
+            LiveHandoffInputProvenance::ProvisionalTranscriptSnapshot,
         )
         .map_err(|error| error.to_string())?;
+
+        let final_event = meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+            item_id: turn.adapter_key().to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: final_transcript.clone(),
+        };
+        let final_evidence = self
+            .mobs
+            .session_service()
+            .commit_live_delegation_final_transcript(session_id, provisional.clone(), final_event)
+            .await
+            .map_err(|error| error.to_string())?;
 
         if let Some(previous) = self.active.lock().await.remove(&channel_key) {
             if previous.task.is_finished() {
@@ -2092,35 +2186,16 @@ impl ExperimentalLiveDelegationCoordinator {
                     )
                     .await
                 {
-                    Ok(directive) => directive,
-                    Err(_error) if previous.task.is_finished() => {
-                        previous.task.await.map_err(|task_error| {
-                            format!("live delegation terminal task failed: {task_error}")
-                        })?;
-                        self.runtime
-                            .admit_live_delegation(&runtime_binding, &operation, &provisional)
-                            .await
-                            .map_err(|admit_error| admit_error.to_string())?;
-                        return self
-                            .start_admitted_delegation(
-                                provider_binding,
-                                Arc::clone(&control),
-                                channel_key,
-                                operation,
-                                provisional,
-                                runtime_binding,
-                                mob_handle,
-                                delegation,
-                            )
-                            .await;
-                    }
+                    Ok(directive) => Some(directive),
+                    Err(_error) if previous.task.is_finished() => None,
                     Err(error) => {
                         self.active.lock().await.insert(channel_key, previous);
                         return Err(error.to_string());
                     }
                 };
-                if let LiveDelegationCancellationDirective::CancellationAuthorized(cancellation) =
-                    directive
+                if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(
+                    cancellation,
+                )) = directive
                 {
                     let outcome = previous
                         .cancellation
@@ -2152,6 +2227,26 @@ impl ExperimentalLiveDelegationCoordinator {
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
             .map_err(|error| error.to_string())?;
+        let reconciliation = self
+            .runtime
+            .reconcile_live_delegation_transcript(
+                session_id,
+                runtime_binding.runtime_id(),
+                runtime_binding.fence_token(),
+                runtime_binding.generation(),
+                &operation,
+                &provisional,
+                &final_evidence,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if reconciliation.disposition() != LiveHandoffReconciliation::Confirmed {
+            return Err(
+                "canonical final transcript did not confirm the client delegation".to_string(),
+            );
+        }
+        self.finish_client_delegation_turn(provider_binding, turn, final_transcript)
+            .await?;
 
         self.start_admitted_delegation(
             provider_binding,
@@ -2161,7 +2256,10 @@ impl ExperimentalLiveDelegationCoordinator {
             provisional,
             runtime_binding,
             mob_handle,
+            source_identity,
             delegation,
+            final_evidence,
+            reconciliation,
         )
         .await
     }
@@ -2179,9 +2277,22 @@ impl ExperimentalLiveDelegationCoordinator {
         provisional: ProvisionalLiveHandoff,
         runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
         mob_handle: meerkat_mob::MobHandle,
+        source_identity: AgentIdentity,
         delegation: LiveSidebandDelegationRef,
+        final_evidence: FinalLiveUserTranscriptCommitEvidence,
+        reconciliation: LiveHandoffReconciliationReceipt,
     ) -> Result<(), String> {
         let session_id = provider_binding.session_id();
+
+        if reconciliation.disposition() != LiveHandoffReconciliation::Confirmed {
+            return Err(
+                "live delegation worker start requires Confirmed reconciliation".to_string(),
+            );
+        }
+        let committed_message_count =
+            final_evidence.committed_message_count().ok_or_else(|| {
+                "confirmed live delegation is missing its exact transcript boundary".to_string()
+            })?;
 
         let worker_identity =
             AgentIdentity::from(format!("live-delegation:{}", operation.operation_id()));
@@ -2198,6 +2309,21 @@ impl ExperimentalLiveDelegationCoordinator {
             )
             .await
             .map_err(|error| error.to_string())?;
+        let consequential = self
+            .runtime
+            .authorize_live_consequential_effect(
+                session_id,
+                runtime_binding.runtime_id(),
+                runtime_binding.fence_token(),
+                runtime_binding.generation(),
+                &operation,
+                &reconciliation,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        admission
+            .release_tool_execution(&consequential)
+            .map_err(|error| error.to_string())?;
         let result_spec =
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
                 .map_err(|error| error.to_string())?;
@@ -2207,7 +2333,8 @@ impl ExperimentalLiveDelegationCoordinator {
             provisional.executor_input(),
             result_spec,
             admission.clone(),
-        );
+        )
+        .with_durable_fork(source_identity, Some(committed_message_count));
         let execution = match service.start(request).await {
             Ok(execution) => execution,
             Err(error) => {
@@ -2298,7 +2425,10 @@ impl ExperimentalLiveDelegationCoordinator {
             admission,
             delegation,
             control,
-            result: Mutex::new(RetainedDelegationResult::default()),
+            result: Mutex::new(RetainedDelegationResult {
+                reconciliation: Some(reconciliation),
+                ..RetainedDelegationResult::default()
+            }),
         });
         self.retained.lock().await.insert(
             retained.operation.operation_id().clone(),
@@ -2592,6 +2722,17 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    async fn release_exact_delegation_result_projection(
+        control: &dyn ExperimentalGptLiveControlPlane,
+        projection: ExactDelegationResultProjection<LiveDelegationResultDeliveryAuthority>,
+    ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError> {
+        projection
+            .dispatch(|authority, delegation, result_text| {
+                control.release_delegation_context(authority, delegation, result_text)
+            })
+            .await
+    }
+
     async fn try_release_retained_result(
         &self,
         retained: &Arc<RetainedDelegation>,
@@ -2659,10 +2800,15 @@ impl ExperimentalLiveDelegationCoordinator {
             }
         };
         let ambiguity_authority = delivery.clone();
-        let dispatch = retained
-            .control
-            .release_delegation_context(delivery, retained.delegation.clone(), result_text)
-            .await;
+        let dispatch = Self::release_exact_delegation_result_projection(
+            retained.control.as_ref(),
+            ExactDelegationResultProjection::new(
+                delivery,
+                retained.delegation.clone(),
+                result_text,
+            ),
+        )
+        .await;
         let resolution = match dispatch {
             Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable) => {
                 retained.result.lock().await.release_delivery(reservation);
@@ -3310,6 +3456,49 @@ mod tests {
                 Some("   ".to_string()),
             )
             .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_bounded_result_and_delegation_ref_share_one_acknowledged_projection() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct TestDeliveryAuthority(&'static str);
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct TestAcknowledgement {
+            authority: TestDeliveryAuthority,
+        }
+
+        let authority = TestDeliveryAuthority("delivery:exact-bounded-result");
+        let retained_delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            "adapter:client-context".to_string(),
+            "delegation:exact-retained-ref".to_string(),
+        )
+        .expect("provider delegation fixture");
+        let bounded_executor_result =
+            "line one from executor\nline two remains byte-exact  ".to_string();
+
+        let acknowledgement = ExactDelegationResultProjection::new(
+            authority.clone(),
+            retained_delegation.clone(),
+            bounded_executor_result.clone(),
+        )
+        .dispatch(
+            |received_authority, received_delegation, received_result| async move {
+                assert_eq!(received_authority, authority);
+                assert_eq!(received_delegation, retained_delegation);
+                assert_eq!(received_result, bounded_executor_result);
+                TestAcknowledgement {
+                    authority: received_authority,
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            acknowledgement.authority,
+            TestDeliveryAuthority("delivery:exact-bounded-result"),
+            "the acknowledgement resolves the same delivery authority consumed by the projection"
         );
     }
 

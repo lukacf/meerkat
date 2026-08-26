@@ -36,6 +36,7 @@ rust_library(
     crate_features = [
         "__meerkat-generated-authority-bridge",
         "test-support",
+        "webrtc",
     ],
     edition = "2024",
     rustc_flags = [
@@ -72,6 +73,7 @@ rust_library(
     crate_features = [
         "__meerkat-generated-authority-bridge",
         "test-support",
+        "webrtc",
     ],
     edition = "2024",
     rustc_flags = [
@@ -116,6 +118,7 @@ rust_test(
     crate_features = [
         "__meerkat-generated-authority-bridge",
         "test-support",
+        "webrtc",
     ],
     edition = "2024",
     rustc_flags = [

@@ -28,7 +28,8 @@ use meerkat_live::{
     LiveSidebandTurnRole, LiveWebrtcAdmittedOffer, LiveWebrtcAnswerAccepted,
     LiveWebrtcAnswerTransport, LiveWebrtcBindingRequest, LiveWebrtcError, ProviderWebrtcBinding,
     ProviderWebrtcBroker, ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError,
-    ProviderWebrtcOffer, ProviderWebrtcSidebandSession, ProviderWebrtcSignalingError,
+    ProviderWebrtcOffer, ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcSidebandSession,
+    ProviderWebrtcSignalingError,
 };
 use meerkat_llm_core::realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSessionFactory, RealtimeSessionOpenConfig,
@@ -393,7 +394,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
             .experimental_live_execution_feature_capabilities(
                 &self.realm,
                 &self.factory_identity,
-                crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
+                crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID,
             )
             .map_err(|_| ExperimentalLiveOpenAuthorityError::Unavailable)
     }
@@ -893,7 +894,7 @@ impl crate::surface::LiveWebrtcBoundReadyBinder for ExperimentalGptLiveBoundRead
 
 #[async_trait]
 impl crate::surface::LiveWebrtcBoundReadyCustody for ExperimentalGptLiveBoundReadyCustody {
-    async fn commit(self: Box<Self>) {
+    async fn commit(self: Box<Self>) -> Result<(), String> {
         let binding = self.authority.binding().clone();
         let activated = self
             .transport
@@ -905,10 +906,12 @@ impl crate::surface::LiveWebrtcBoundReadyCustody for ExperimentalGptLiveBoundRea
             )
             .await;
         if !activated {
-            let _ = self.rollback().await;
-            return;
+            return self.rollback().await.and_then(|()| {
+                Err("provider activation did not start all bound tasks".to_string())
+            });
         }
         let _ = self.authority.commit();
+        Ok(())
     }
 
     async fn rollback(self: Box<Self>) -> Result<(), String> {
@@ -1187,6 +1190,7 @@ pub enum ExperimentalGptLiveControlObservation {
 struct ExperimentalGptLiveWebrtcBroker {
     factory: GptLiveBrokerFactory,
     voice: String,
+    execution_mode: meerkat_core::LiveExecutionMode,
     responses: Option<GptLiveResponsesSessionConfig>,
     session_instructions: Option<String>,
     initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
@@ -1198,12 +1202,94 @@ struct ExperimentalGptLiveInitialSeed {
     _projection_lease: meerkat_core::RealtimeOpenProjectionLease,
 }
 
+enum ExperimentalGptLiveSeedCustody {
+    Pending(Option<ExperimentalGptLiveInitialSeed>),
+    InFlight {
+        canonical_seed_cursor: u64,
+        task: JoinHandle<Result<(), GptLiveBrokerError>>,
+    },
+    Ready,
+    Failed(ProviderWebrtcBrokerError),
+}
+
+struct ExperimentalGptLivePendingBoundReady {
+    sideband: Arc<ExperimentalGptLiveSideband>,
+}
+
+#[async_trait]
+impl ProviderWebrtcPendingBoundReadyResolver for ExperimentalGptLivePendingBoundReady {
+    async fn resolve(self: Box<Self>) -> Result<u64, ProviderWebrtcBrokerError> {
+        self.sideband.resolve_initial_seed().await
+    }
+}
+
+#[async_trait]
+trait ExperimentalGptLiveBrokerSession: Send + Sync {
+    async fn await_ready_and_seed_session_context(
+        &self,
+        commentary: Option<String>,
+    ) -> Result<(), GptLiveBrokerError>;
+
+    async fn append_session_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError>;
+
+    async fn append_delegation_context(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError>;
+
+    async fn next_observation(
+        &self,
+    ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError>;
+
+    async fn close(&self) -> Result<(), GptLiveBrokerError>;
+}
+
+#[async_trait]
+impl ExperimentalGptLiveBrokerSession for GptLiveBrokerSession {
+    async fn await_ready_and_seed_session_context(
+        &self,
+        commentary: Option<String>,
+    ) -> Result<(), GptLiveBrokerError> {
+        GptLiveBrokerSession::await_ready_and_seed_session_context(self, commentary).await
+    }
+
+    async fn append_session_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        GptLiveBrokerSession::append_session_context(self, text).await
+    }
+
+    async fn append_delegation_context(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        GptLiveBrokerSession::append_delegation_context(self, delegation, text).await
+    }
+
+    async fn next_observation(
+        &self,
+    ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
+        GptLiveBrokerSession::next_observation(self).await
+    }
+
+    async fn close(&self) -> Result<(), GptLiveBrokerError> {
+        GptLiveBrokerSession::close(self).await
+    }
+}
+
 impl fmt::Debug for ExperimentalGptLiveWebrtcBroker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExperimentalGptLiveWebrtcBroker")
             .field("factory", &"[OPAQUE]")
             .field("voice", &"[REDACTED]")
+            .field("execution_mode", &self.execution_mode)
             .field("responses_qualified", &self.responses.is_some())
             .field(
                 "session_instructions",
@@ -1221,6 +1307,7 @@ impl ExperimentalGptLiveWebrtcBroker {
     fn new(
         factory: GptLiveBrokerFactory,
         voice: impl Into<String>,
+        execution_mode: meerkat_core::LiveExecutionMode,
         session_instructions: Option<String>,
         initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
@@ -1231,6 +1318,7 @@ impl ExperimentalGptLiveWebrtcBroker {
         Ok(Self {
             factory,
             voice,
+            execution_mode,
             // Gate0 has not promoted the exact raw inbound function event or
             // its catalog-bound Responses model. No shipping constructor can
             // populate this field in the unqualified tree.
@@ -1238,6 +1326,26 @@ impl ExperimentalGptLiveWebrtcBroker {
             session_instructions,
             initial_seed,
         })
+    }
+
+    fn open_config(
+        execution_mode: meerkat_core::LiveExecutionMode,
+        responses: Option<GptLiveResponsesSessionConfig>,
+        offer_sdp: &str,
+        voice: &str,
+        session_instructions: Option<String>,
+    ) -> Result<GptLiveBrokerOpenConfig, ProviderWebrtcBrokerError> {
+        let config = GptLiveBrokerOpenConfig::new(offer_sdp, voice).map_err(map_broker_error)?;
+        let mut config = match execution_mode {
+            meerkat_core::LiveExecutionMode::ClientContext => config.with_client_delegation(),
+            meerkat_core::LiveExecutionMode::FunctionBridge => {
+                config.with_responses_session(responses.ok_or(ProviderWebrtcBrokerError::Rejected)?)
+            }
+        };
+        if let Some(instructions) = session_instructions {
+            config = config.with_session_instructions(instructions);
+        }
+        Ok(config)
     }
 }
 
@@ -1247,15 +1355,18 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
         &self,
         offer: ProviderWebrtcOffer,
     ) -> Result<ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError> {
-        // This check precedes `GptLiveBrokerFactory::open`. FunctionBridge is
-        // a Responses-tool profile, and the direct raw inbound function event
-        // and lineage have not passed Gate0. The unqualified tree therefore
-        // has no Responses config to consume and cannot silently substitute
-        // client-context mode.
-        let responses = self
-            .responses
-            .clone()
-            .ok_or(ProviderWebrtcBrokerError::Rejected)?;
+        // Mode selection is sealed by the admitted execution profile.
+        // FunctionBridge remains Responses-only and rejects before provider IO
+        // while no exact qualified Responses config exists. ClientContext is
+        // an independent fixed provider mode and cannot acquire Responses
+        // tools through this branch.
+        let config = Self::open_config(
+            self.execution_mode,
+            self.responses.clone(),
+            offer.offer_sdp(),
+            &self.voice,
+            self.session_instructions.clone(),
+        )?;
         let binding = offer.binding().clone();
         let seed = self
             .initial_seed
@@ -1263,34 +1374,22 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
             .await
             .take()
             .ok_or(ProviderWebrtcBrokerError::Rejected)?;
-        let mut config = GptLiveBrokerOpenConfig::new(offer.offer_sdp(), self.voice.clone())
-            .map_err(map_broker_error)?
-            .with_responses_session(responses);
-        if let Some(instructions) = self.session_instructions.clone() {
-            config = config.with_session_instructions(instructions);
-        }
         let bootstrap = self.factory.open(config).await.map_err(map_broker_error)?;
         let (answer_sdp, session) = bootstrap.into_parts();
-        session
-            .await_ready_and_seed_session_context(seed.commentary)
-            .await
-            .map_err(map_broker_error)?;
         let (synthetic_tx, synthetic_rx) = mpsc::channel(8);
-        synthetic_tx
-            .send(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::SessionReady,
-            ))
-            .await
-            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
         let sideband = Arc::new(ExperimentalGptLiveSideband {
             binding,
-            session,
+            session: Arc::new(session),
+            seed_custody: Mutex::new(ExperimentalGptLiveSeedCustody::Pending(Some(seed))),
+            seed_changed: Notify::new(),
             correlations: Mutex::new(SidebandCorrelations::default()),
             synthetic_tx,
             synthetic_rx: Mutex::new(synthetic_rx),
         });
-        Ok(offer.into_seeded_answer(answer_sdp, sideband, seed.canonical_seed_cursor))
+        let resolver = Box::new(ExperimentalGptLivePendingBoundReady {
+            sideband: Arc::clone(&sideband),
+        });
+        Ok(offer.into_pending_bound_ready_answer(answer_sdp, sideband, resolver))
     }
 }
 
@@ -1466,6 +1565,7 @@ impl ExperimentalGptLivePendingChannel {
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
+            execution_profile.mode(),
             session_instructions,
             Arc::clone(&initial_seed),
         )?;
@@ -1520,6 +1620,7 @@ impl ExperimentalGptLivePendingChannel {
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
+            execution_profile.mode(),
             session_instructions,
             Arc::clone(&initial_seed),
         )?;
@@ -1596,14 +1697,24 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
         let commentary_messages = open_config
             .seed_messages()
             .iter()
-            .filter(|message| !matches!(message, meerkat_core::types::Message::System(_)))
+            .filter(|message| {
+                !matches!(
+                    message,
+                    meerkat_core::types::Message::System(_)
+                        | meerkat_core::types::Message::SystemNotice(_)
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
-        let canonical_system_messages = open_config.canonical_system_messages_ref();
-        let commentary = (!canonical_system_messages.is_empty() || !commentary_messages.is_empty())
+        // The live endpoint is a tool-less channel embodiment. Executor
+        // system messages and notices may describe tool and callback
+        // authority, so they must not be copied into the provider voice
+        // session. Stable voice behavior belongs to the catalog-owned live
+        // profile instructions; only canonical conversation messages cross
+        // this context seam.
+        let commentary = (!commentary_messages.is_empty())
             .then(|| {
                 serde_json::to_string(&serde_json::json!({
-                    "canonical_system_messages": canonical_system_messages,
                     "canonical_messages": commentary_messages,
                 }))
             })
@@ -2866,7 +2977,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             .answer(offer)
             .await
             .map_err(ProviderWebrtcSignalingError::Broker)?;
-        let (answer_sdp, candidate_sideband, bound_ready) = broker_answer.into_parts();
+        let (answer_sdp, candidate_sideband, pending_bound_ready) = broker_answer.into_parts();
         if answer_sdp.trim().is_empty() {
             candidate_sideband
                 .close()
@@ -2910,7 +3021,7 @@ impl ExperimentalGptLiveWebrtcTransport {
         Ok(LiveWebrtcAnswerAccepted {
             answer_sdp,
             answer_observation_sequence,
-            bound_ready: Some(bound_ready),
+            pending_bound_ready: Some(pending_bound_ready),
         })
     }
 
@@ -3044,14 +3155,18 @@ fn spawn_sideband_actors(
                         observation.kind(),
                         LiveSidebandObservationKind::TurnStarted { .. }
                             | LiveSidebandObservationKind::TurnFinished { .. }
+                            | LiveSidebandObservationKind::DelegationRequested { .. }
                     );
                     if lifecycle_observation
-                        && activation
+                        && let Err(error) = activation
                             .activator
                             .observe_provider_lifecycle(&observation)
                             .await
-                            .is_err()
                     {
+                        tracing::warn!(
+                            error,
+                            "experimental live lifecycle observation failed closed"
+                        );
                         break;
                     }
                     if adapter_observation
@@ -3117,7 +3232,14 @@ fn spawn_sideband_actors(
             };
             let observation = match next {
                 Ok(Some(observation)) => observation,
-                Ok(None) | Err(_) => break,
+                Ok(None) => {
+                    tracing::warn!("experimental live adapter observation stream ended");
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("experimental live adapter observation read failed");
+                    break;
+                }
             };
             if matches!(&observation, LiveAdapterObservation::Error { .. })
                 || matches!(
@@ -3125,6 +3247,7 @@ fn spawn_sideband_actors(
                     LiveAdapterObservation::StatusChanged { status } if status.is_terminal()
                 )
             {
+                tracing::warn!("experimental live adapter emitted a terminal observation");
                 break;
             }
             let outcome = match activation
@@ -3133,7 +3256,10 @@ fn spawn_sideband_actors(
                 .await
             {
                 Ok(outcome) => outcome,
-                Err(_) => break,
+                Err(_) => {
+                    tracing::warn!("experimental live adapter observation application failed");
+                    break;
+                }
             };
             if let meerkat_live::ObservationOutcome::AssistantOutputAvailable(ref output) = outcome
             {
@@ -3147,6 +3273,7 @@ fn spawn_sideband_actors(
                     .await
                     .is_err()
                 {
+                    tracing::warn!("experimental live public observation publication failed");
                     activation
                         .live_adapter_host
                         .fail_playback_waiters_for_channel(
@@ -3162,6 +3289,7 @@ fn spawn_sideband_actors(
                 }
             }
             if matches!(outcome, meerkat_live::ObservationOutcome::Terminal { .. }) {
+                tracing::warn!("experimental live adapter reached a terminal outcome");
                 break;
             }
         }
@@ -3420,7 +3548,9 @@ impl SidebandCorrelations {
 
 struct ExperimentalGptLiveSideband {
     binding: ProviderWebrtcBinding,
-    session: GptLiveBrokerSession,
+    session: Arc<dyn ExperimentalGptLiveBrokerSession>,
+    seed_custody: Mutex<ExperimentalGptLiveSeedCustody>,
+    seed_changed: Notify,
     correlations: Mutex<SidebandCorrelations>,
     synthetic_tx: mpsc::Sender<LiveSidebandObservation>,
     synthetic_rx: Mutex<mpsc::Receiver<LiveSidebandObservation>>,
@@ -3472,6 +3602,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
     async fn next_observation(
         &self,
     ) -> Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError> {
+        self.wait_for_seed_resolution().await?;
         let mut synthetic_rx = self.synthetic_rx.lock().await;
         tokio::select! {
             biased;
@@ -3491,6 +3622,86 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
 }
 
 impl ExperimentalGptLiveSideband {
+    async fn wait_for_seed_resolution(&self) -> Result<(), ProviderWebrtcBrokerError> {
+        loop {
+            let changed = self.seed_changed.notified();
+            match &*self.seed_custody.lock().await {
+                ExperimentalGptLiveSeedCustody::Ready => return Ok(()),
+                ExperimentalGptLiveSeedCustody::Failed(error) => return Err(*error),
+                ExperimentalGptLiveSeedCustody::Pending(_)
+                | ExperimentalGptLiveSeedCustody::InFlight { .. } => {}
+            }
+            changed.await;
+        }
+    }
+
+    /// Resolve the answer-bound seed exactly once from response-delivery
+    /// custody. The spawned task owns the projection lease, so cancellation of
+    /// an outer waiter cannot reconstruct or replay acknowledged seed state.
+    async fn resolve_initial_seed(&self) -> Result<u64, ProviderWebrtcBrokerError> {
+        let mut custody = self.seed_custody.lock().await;
+        if let ExperimentalGptLiveSeedCustody::Pending(seed) = &mut *custody {
+            let seed = seed
+                .take()
+                .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+            let canonical_seed_cursor = seed.canonical_seed_cursor;
+            let session = Arc::clone(&self.session);
+            *custody = ExperimentalGptLiveSeedCustody::InFlight {
+                canonical_seed_cursor,
+                task: tokio::spawn(async move {
+                    let ExperimentalGptLiveInitialSeed {
+                        commentary,
+                        canonical_seed_cursor: _,
+                        _projection_lease,
+                    } = seed;
+                    session
+                        .await_ready_and_seed_session_context(commentary)
+                        .await
+                }),
+            };
+        }
+
+        let (canonical_seed_cursor, result) = match &mut *custody {
+            ExperimentalGptLiveSeedCustody::InFlight {
+                canonical_seed_cursor,
+                task,
+            } => (*canonical_seed_cursor, task.await),
+            ExperimentalGptLiveSeedCustody::Ready => {
+                return Err(ProviderWebrtcBrokerError::ProtocolDrift);
+            }
+            ExperimentalGptLiveSeedCustody::Failed(error) => return Err(*error),
+            ExperimentalGptLiveSeedCustody::Pending(_) => {
+                return Err(ProviderWebrtcBrokerError::ProtocolDrift);
+            }
+        };
+        match result {
+            Ok(Ok(())) => {
+                self.synthetic_tx
+                    .send(LiveSidebandObservation::new(
+                        self.binding.clone(),
+                        LiveSidebandObservationKind::SessionReady,
+                    ))
+                    .await
+                    .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+                *custody = ExperimentalGptLiveSeedCustody::Ready;
+                self.seed_changed.notify_waiters();
+                Ok(canonical_seed_cursor)
+            }
+            Ok(Err(error)) => {
+                let error = map_broker_error(error);
+                *custody = ExperimentalGptLiveSeedCustody::Failed(error);
+                self.seed_changed.notify_waiters();
+                Err(error)
+            }
+            Err(_) => {
+                *custody =
+                    ExperimentalGptLiveSeedCustody::Failed(ProviderWebrtcBrokerError::Unavailable);
+                self.seed_changed.notify_waiters();
+                Err(ProviderWebrtcBrokerError::Unavailable)
+            }
+        }
+    }
+
     async fn lower_append_delivery(
         &self,
         attempt: LiveSidebandAppendAttempt,
@@ -3587,6 +3798,30 @@ impl ExperimentalGptLiveSideband {
                     turn,
                     role,
                     transcript,
+                }
+            }
+            GptLiveBrokerObservation::ClientDelegationFinal {
+                delegation,
+                target: meerkat_openai::gpt_live::GptLiveDelegationTarget::Client,
+                handoff: _,
+                turn,
+                transcript,
+            } => {
+                let turn = self.lower_turn_ref(turn, true).await?;
+                let mut correlations = self.correlations.lock().await;
+                correlations.next_delegation_ref =
+                    correlations.next_delegation_ref.saturating_add(1);
+                let local = format!("delegation:{}", correlations.next_delegation_ref);
+                let opaque = LiveSidebandDelegationRef::__from_provider_observation(
+                    local.clone(),
+                    delegation.__opaque_provider_id().to_string(),
+                )
+                .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
+                correlations.delegations.insert(local, delegation);
+                LiveSidebandObservationKind::DelegationRequested {
+                    turn,
+                    delegation: opaque,
+                    final_transcript: transcript,
                 }
             }
             GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation } => {
@@ -3914,6 +4149,54 @@ mod tests {
         changed: Notify,
     }
 
+    struct ControlledSeedBrokerSession {
+        seed_calls: AtomicUsize,
+        provider_reads: AtomicUsize,
+        started: Notify,
+        release: Notify,
+        commentary: Mutex<Option<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ExperimentalGptLiveBrokerSession for ControlledSeedBrokerSession {
+        async fn await_ready_and_seed_session_context(
+            &self,
+            commentary: Option<String>,
+        ) -> Result<(), GptLiveBrokerError> {
+            self.seed_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            *self.commentary.lock().await = Some(commentary);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn append_session_context(
+            &self,
+            _text: String,
+        ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+            Err(GptLiveBrokerError::MissingContext)
+        }
+
+        async fn append_delegation_context(
+            &self,
+            _delegation: &GptLiveDelegationRef,
+            _text: String,
+        ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+            Err(GptLiveBrokerError::MissingContext)
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
+            self.provider_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Some(GptLiveBrokerObservation::UnsupportedPrivateEvent))
+        }
+
+        async fn close(&self) -> Result<(), GptLiveBrokerError> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl ProviderWebrtcSidebandSession for CountingReadSideband {
         async fn send_command(
@@ -3950,6 +4233,18 @@ mod tests {
         initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
     }
 
+    struct ImmediatePendingBoundReady {
+        canonical_seed_cursor: u64,
+        _seed_custody: Option<ExperimentalGptLiveInitialSeed>,
+    }
+
+    #[async_trait]
+    impl ProviderWebrtcPendingBoundReadyResolver for ImmediatePendingBoundReady {
+        async fn resolve(self: Box<Self>) -> Result<u64, ProviderWebrtcBrokerError> {
+            Ok(self.canonical_seed_cursor)
+        }
+    }
+
     #[async_trait]
     impl ProviderWebrtcBroker for ProjectionSeededAnswerBroker {
         async fn answer(
@@ -3962,10 +4257,14 @@ mod tests {
                 .await
                 .take()
                 .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)?;
-            Ok(offer.into_seeded_answer(
+            let canonical_seed_cursor = seed.canonical_seed_cursor;
+            Ok(offer.into_pending_bound_ready_answer(
                 "test-answer-sdp".to_string(),
                 Arc::clone(&self.sideband),
-                seed.canonical_seed_cursor,
+                Box::new(ImmediatePendingBoundReady {
+                    canonical_seed_cursor,
+                    _seed_custody: Some(seed),
+                }),
             ))
         }
     }
@@ -4420,10 +4719,13 @@ mod tests {
             &self,
             offer: ProviderWebrtcOffer,
         ) -> Result<ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError> {
-            Ok(offer.into_seeded_answer(
+            Ok(offer.into_pending_bound_ready_answer(
                 "test-answer-sdp".to_string(),
                 Arc::clone(&self.sideband),
-                self.canonical_seed_cursor,
+                Box::new(ImmediatePendingBoundReady {
+                    canonical_seed_cursor: self.canonical_seed_cursor,
+                    _seed_custody: None,
+                }),
             ))
         }
     }
@@ -4825,6 +5127,164 @@ mod tests {
         }
     }
 
+    fn prepared_client_context_seed_factory() -> (
+        ExperimentalGptLivePreparedOpen,
+        Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
+        meerkat_core::SessionLlmIdentity,
+    ) {
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "gpt-live-1-codex".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let initial_seed = Arc::new(Mutex::new(None));
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> =
+            Arc::new(AmbiguousCommandSideband::new());
+        let pending = ExperimentalGptLivePendingChannel {
+            registration: RegisteredExperimentalGptLiveChannel {
+                session_id: meerkat_core::SessionId::new(),
+                broker: Arc::new(ProjectionSeededAnswerBroker {
+                    sideband,
+                    initial_seed: Arc::clone(&initial_seed),
+                }),
+                adapter: Arc::new(ExperimentalGptLiveDeferredAdapter::new(identity.clone())),
+                identity: identity.clone(),
+                execution_profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
+            },
+            initial_seed: Arc::clone(&initial_seed),
+            adapter_taken: AtomicBool::new(false),
+            execution_profile:
+                meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                    crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID,
+                    meerkat_core::LiveExecutionMode::ClientContext,
+                    meerkat_core::LiveExecutionCapabilities {
+                        function_bridge: false,
+                        client_context: true,
+                    },
+                )
+                .expect("qualified client-context test execution profile"),
+        };
+        (
+            ExperimentalGptLivePreparedOpen::new(
+                pending,
+                Arc::new(ExperimentalGptLiveWebrtcTransport::new()),
+            ),
+            initial_seed,
+            identity,
+        )
+    }
+
+    fn seed_open_config(
+        identity: meerkat_core::SessionLlmIdentity,
+        messages: Vec<meerkat_core::types::Message>,
+    ) -> RealtimeSessionOpenConfig {
+        let projection_admission = meerkat_core::RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated seed projection admission");
+        RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            identity,
+            Vec::new(),
+            messages,
+        )
+        .expect("fixture seed is valid")
+        .with_open_projection_lease(
+            projection_admission
+                .try_acquire()
+                .expect("fixture projection lease"),
+        )
+    }
+
+    #[tokio::test]
+    async fn production_pending_adapter_seed_excludes_system_authority_from_provider_commentary() {
+        let (prepared, initial_seed, identity) = prepared_client_context_seed_factory();
+        let authority_text =
+            "SYSTEM TOOL AUTHORITY: invoke callbacks and execute direct effects without review";
+        let notice_authority_text =
+            "SYSTEM NOTICE AUTHORITY: callback and direct-effect scope installed";
+        let ordinary = meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(
+            "Please continue our ordinary conversation.",
+        ));
+        let open_config = seed_open_config(
+            identity,
+            vec![
+                meerkat_core::types::Message::System(meerkat_core::types::SystemMessage::new(
+                    authority_text,
+                )),
+                meerkat_core::types::Message::SystemNotice(
+                    meerkat_core::types::SystemNoticeMessage::new(
+                        meerkat_core::types::SystemNoticeKind::ToolScope,
+                        notice_authority_text,
+                    ),
+                ),
+                ordinary.clone(),
+            ],
+        );
+
+        prepared
+            .session_factory()
+            .open_live_adapter(&open_config)
+            .await
+            .expect("production pending factory opens the deferred adapter");
+
+        let seed = initial_seed
+            .lock()
+            .await
+            .take()
+            .expect("production adapter stages one provider seed");
+        let commentary = seed
+            .commentary
+            .expect("ordinary conversation emits provider commentary");
+        let emitted: serde_json::Value =
+            serde_json::from_str(&commentary).expect("provider commentary is valid JSON");
+        assert_eq!(
+            emitted,
+            serde_json::json!({
+                "canonical_messages": [ordinary],
+            })
+        );
+        assert!(emitted.get("canonical_system_messages").is_none());
+        assert!(!commentary.contains(authority_text));
+        assert!(!commentary.contains(notice_authority_text));
+    }
+
+    #[tokio::test]
+    async fn production_pending_adapter_system_only_seed_emits_no_provider_commentary() {
+        let (prepared, initial_seed, identity) = prepared_client_context_seed_factory();
+        let authority_text =
+            "SYSTEM CALLBACK AUTHORITY: dispatch tools and execute direct effects immediately";
+        let notice_authority_text =
+            "SYSTEM NOTICE AUTHORITY: direct callback scope remains installed";
+        let open_config = seed_open_config(
+            identity,
+            vec![
+                meerkat_core::types::Message::System(meerkat_core::types::SystemMessage::new(
+                    authority_text,
+                )),
+                meerkat_core::types::Message::SystemNotice(
+                    meerkat_core::types::SystemNoticeMessage::new(
+                        meerkat_core::types::SystemNoticeKind::ToolScopeWarning,
+                        notice_authority_text,
+                    ),
+                ),
+            ],
+        );
+
+        prepared
+            .session_factory()
+            .open_live_adapter(&open_config)
+            .await
+            .expect("production pending factory opens the deferred adapter");
+
+        let seed = initial_seed
+            .lock()
+            .await
+            .take()
+            .expect("production adapter stages one provider seed");
+        assert!(seed.commentary.is_none());
+    }
+
     #[test]
     fn terminal_errors_lower_without_private_detail() {
         assert_eq!(
@@ -4839,6 +5299,134 @@ mod tests {
             }),
             ProviderWebrtcBrokerError::Unavailable
         );
+    }
+
+    #[test]
+    fn production_broker_config_selects_fixed_client_context_mode() {
+        let config = ExperimentalGptLiveWebrtcBroker::open_config(
+            meerkat_core::LiveExecutionMode::ClientContext,
+            None,
+            "private-offer-sdp",
+            "cedar",
+            Some("catalog instructions".to_string()),
+        )
+        .expect("client-context config is independently available");
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("Client(<platform-owned>)"));
+        assert!(!debug.contains("private-offer-sdp"));
+        assert!(!debug.contains("catalog instructions"));
+        assert!(!debug.contains(meerkat_openai::gpt_live::GPT_LIVE_RESPONSES_BRIDGE_TOOL));
+    }
+
+    #[test]
+    fn production_broker_config_keeps_unqualified_function_bridge_closed() {
+        assert!(matches!(
+            ExperimentalGptLiveWebrtcBroker::open_config(
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+                None,
+                "private-offer-sdp",
+                "cedar",
+                None,
+            ),
+            Err(ProviderWebrtcBrokerError::Rejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_sideband_defers_seed_until_delivery_resolution_and_emits_exact_ready() {
+        let session = Arc::new(ControlledSeedBrokerSession {
+            seed_calls: AtomicUsize::new(0),
+            provider_reads: AtomicUsize::new(0),
+            started: Notify::new(),
+            release: Notify::new(),
+            commentary: Mutex::new(None),
+        });
+        let admission = meerkat_core::RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated seed projection admission");
+        let seed = ExperimentalGptLiveInitialSeed {
+            commentary: Some("exact canonical commentary".to_string()),
+            canonical_seed_cursor: 7,
+            _projection_lease: admission.try_acquire().expect("projection lease"),
+        };
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("deferred-seed-ordering"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let (synthetic_tx, synthetic_rx) = mpsc::channel(8);
+        let sideband = Arc::new(ExperimentalGptLiveSideband {
+            binding,
+            session: Arc::clone(&session) as Arc<dyn ExperimentalGptLiveBrokerSession>,
+            seed_custody: Mutex::new(ExperimentalGptLiveSeedCustody::Pending(Some(seed))),
+            seed_changed: Notify::new(),
+            correlations: Mutex::new(SidebandCorrelations::default()),
+            synthetic_tx,
+            synthetic_rx: Mutex::new(synthetic_rx),
+        });
+
+        // Constructing the sideband is the answer-return boundary. It must not
+        // read SessionReady or begin the ordered seed before the browser can
+        // apply that answer and the observation actor starts.
+        assert_eq!(session.seed_calls.load(AtomicOrdering::SeqCst), 0);
+        let observation_sideband = Arc::clone(&sideband);
+        let mut first = tokio::spawn(async move { observation_sideband.next_observation().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut first)
+                .await
+                .is_err()
+        );
+        assert_eq!(session.seed_calls.load(AtomicOrdering::SeqCst), 0);
+        let resolver_sideband = Arc::clone(&sideband);
+        let mut resolver =
+            tokio::spawn(async move { resolver_sideband.resolve_initial_seed().await });
+        session.started.notified().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut resolver)
+                .await
+                .is_err()
+        );
+        assert_eq!(session.provider_reads.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            session
+                .commentary
+                .lock()
+                .await
+                .as_ref()
+                .and_then(Option::as_deref),
+            Some("exact canonical commentary")
+        );
+
+        session.release.notify_one();
+        assert_eq!(
+            resolver
+                .await
+                .expect("seed resolution task")
+                .expect("seed acknowledgement"),
+            7
+        );
+        let ready = first
+            .await
+            .expect("observation task")
+            .expect("seed acknowledgement")
+            .expect("sanitized ready observation");
+        assert!(matches!(
+            ready.kind(),
+            LiveSidebandObservationKind::SessionReady
+        ));
+        assert_eq!(session.seed_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let next = sideband
+            .next_observation()
+            .await
+            .expect("provider observation")
+            .expect("provider observation present");
+        assert!(matches!(
+            next.kind(),
+            LiveSidebandObservationKind::UnsupportedProviderEvent
+        ));
+        assert_eq!(session.provider_reads.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -5459,7 +6047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_ready_activation_observes_atomic_bind_and_failure_rolls_back_before_return() {
+    async fn bound_ready_activation_runs_only_after_delivery_and_failure_rolls_back() {
         let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
         let session_id = meerkat_core::SessionId::new();
         let _runtime_bindings = runtime
@@ -5573,7 +6161,7 @@ mod tests {
                 pending_result_recovery: Arc::new(Mutex::new(HashMap::new())),
             });
 
-        let result = crate::surface::coordinate_live_webrtc_answer(
+        let coordinated = crate::surface::coordinate_live_webrtc_answer(
             Arc::clone(&runtime),
             Arc::clone(&transport) as Arc<dyn LiveWebrtcAnswerTransport>,
             Some(binder),
@@ -5581,7 +6169,19 @@ mod tests {
             token.to_string(),
             "test-offer-sdp".to_string(),
         )
-        .await;
+        .await
+        .expect("answer materializes before response delivery settles bound readiness");
+
+        assert_eq!(activator.calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            runtime
+                .live_delegation_runtime_binding(&session_id, &channel_id)
+                .await
+                .is_err(),
+            "answer construction cannot bind execution before delivery"
+        );
+
+        let result = coordinated.delivery_custody.delivered().await;
 
         let result_detail = result
             .as_ref()
@@ -5591,12 +6191,10 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(crate::surface::LiveWebrtcAnswerCoordinatorError::Settlement(
-                    detail
-                )) if detail.contains("fixture activation failure")
-                    && detail.contains("physical answer rejection failed after semantic rollback")
+                Err(crate::surface::LiveWebrtcAnswerCoordinatorError::Settlement(detail))
+                    if detail.contains("fixture activation failure")
             ),
-            "unexpected coordinated answer result: {result_detail}"
+            "unexpected delivered answer result: {result_detail}"
         );
         assert_eq!(activator.calls.load(AtomicOrdering::SeqCst), 1);
         assert!(

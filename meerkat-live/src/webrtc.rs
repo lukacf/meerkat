@@ -879,11 +879,12 @@ fn observation_requires_generated_close(observation: &LiveAdapterObservation) ->
 ///
 /// The SDP is transport payload. The sequence is monotonic evidence consumed
 /// by MeerkatMachine before the RPC surface projects a public success result.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LiveWebrtcAnswerAccepted {
     pub answer_sdp: String,
     pub answer_observation_sequence: u64,
-    pub bound_ready: Option<crate::provider_webrtc::ProviderWebrtcBoundReadyReceipt>,
+    #[doc(hidden)]
+    pub pending_bound_ready: Option<crate::provider_webrtc::ProviderWebrtcPendingBoundReadySeal>,
 }
 
 /// Provider-neutral answer request passed only after token admission.
@@ -1339,7 +1340,7 @@ impl LiveWebrtcState {
         Ok(LiveWebrtcAnswerAccepted {
             answer_sdp,
             answer_observation_sequence,
-            bound_ready: None,
+            pending_bound_ready: None,
         })
     }
 

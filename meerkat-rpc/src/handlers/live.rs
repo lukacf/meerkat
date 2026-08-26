@@ -10,6 +10,8 @@
 //! facade pipeline. `live/webrtc/answer` (signaling) stays RPC-only by
 //! design (DL9) and keeps its machine-reaching helpers here.
 
+#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "live-webrtc")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -801,6 +803,9 @@ pub struct LiveOpenHandlerContext<'a> {
     #[cfg(feature = "experimental-gpt-live")]
     pub experimental_live_open_authority:
         Option<&'a Arc<dyn ExperimentalLiveOpenAuthorityProvider>>,
+    /// Opaque pending/readiness receipts retained by this RPC connection.
+    #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+    pub experimental_live_playback_custodies: &'a ExperimentalLivePlaybackCustodies,
 }
 
 #[cfg(feature = "experimental-gpt-live")]
@@ -867,6 +872,115 @@ pub(crate) struct ExperimentalLiveOpenPublication {
     pub(crate) authority: Arc<dyn ExperimentalLiveOpenAuthorityProvider>,
 }
 
+/// Connection-local custody for the opaque machine receipts needed to answer
+/// one strict experimental channel. This is transport mechanics only: the
+/// generated machine remains the sole owner of pending phase and playback
+/// readiness, and every use revalidates these receipts against that authority.
+#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct ExperimentalLivePlaybackCustody {
+    pub(crate) session_id: SessionId,
+    pub(crate) pending_receipt: String,
+    pub(crate) readiness_receipt: String,
+}
+
+#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[doc(hidden)]
+pub type ExperimentalLivePlaybackCustodies =
+    Arc<tokio::sync::Mutex<HashMap<LiveChannelId, ExperimentalLivePlaybackCustody>>>;
+
+#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+async fn register_experimental_live_playback_custody(
+    runtime: &SessionRuntime,
+    pending: &meerkat::surface::ExperimentalLivePendingChannel,
+    custodies: &ExperimentalLivePlaybackCustodies,
+) -> Result<(), String> {
+    let stage = runtime
+        .runtime_adapter()
+        .validate_live_pending_channel_receipt(
+            pending.session_id(),
+            pending.channel_id(),
+            pending.pending_receipt(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let readiness = runtime
+        .runtime_adapter()
+        .register_live_playback_owner(&stage, &uuid::Uuid::new_v4().to_string())
+        .await
+        .map_err(|error| error.to_string())?;
+    let custody = ExperimentalLivePlaybackCustody {
+        session_id: pending.session_id().clone(),
+        pending_receipt: pending.pending_receipt().to_string(),
+        readiness_receipt: readiness.readiness_id().to_string(),
+    };
+    let mut custodies = custodies.lock().await;
+    if custodies.contains_key(pending.channel_id()) {
+        return Err("strict live/open collided with existing connection custody".to_string());
+    }
+    custodies.insert(pending.channel_id().clone(), custody);
+    Ok(())
+}
+
+#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+async fn validate_experimental_live_playback_custody_before_answer(
+    runtime: &SessionRuntime,
+    channel_id: &LiveChannelId,
+    token: &str,
+    custodies: &ExperimentalLivePlaybackCustodies,
+) -> Result<(), meerkat::surface::LiveWebrtcAnswerCoordinatorError> {
+    let runtime_adapter = runtime.runtime_adapter();
+    let session_id = match runtime_adapter.live_session_for_webrtc_token(token).await {
+        Some(session_id) => session_id,
+        None => match runtime_adapter
+            .live_session_for_active_channel(channel_id)
+            .await
+        {
+            Some(session_id) => session_id,
+            None => return Ok(()),
+        },
+    };
+    let phase = runtime_adapter
+        .live_execution_channel_phase(&session_id, channel_id)
+        .await
+        .map_err(|error| {
+            meerkat::surface::LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(
+                error.to_string(),
+            )
+        })?;
+    let custody = custodies.lock().await.get(channel_id).cloned();
+    if phase.is_none() && custody.is_none() {
+        return Ok(());
+    }
+    let custody = custody.ok_or_else(|| {
+        meerkat::surface::LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(
+            "strict WebRTC answer has no connection-local playback custody".to_string(),
+        )
+    })?;
+    if custody.session_id != session_id {
+        return Err(
+            meerkat::surface::LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(
+                "strict WebRTC answer playback custody belongs to another session".to_string(),
+            ),
+        );
+    }
+    runtime_adapter
+        .validate_live_playback_owner_readiness(
+            &session_id,
+            channel_id,
+            &custody.pending_receipt,
+            &custody.readiness_receipt,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            meerkat::surface::LiveWebrtcAnswerCoordinatorError::PendingPhaseAuthority(
+                error.to_string(),
+            )
+        })
+}
+
 pub(crate) struct LiveOpenHandlerResult {
     pub(crate) response: RpcResponse,
     #[cfg(feature = "experimental-gpt-live")]
@@ -906,6 +1020,8 @@ pub(crate) async fn handle_live_open_routed(
         session_factory,
         #[cfg(feature = "experimental-gpt-live")]
         experimental_live_open_authority,
+        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+        experimental_live_playback_custodies,
     } = ctx;
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -990,6 +1106,44 @@ pub(crate) async fn handle_live_open_routed(
             }
         };
         let channel_id = pending.channel_id().clone();
+        #[cfg(feature = "live-webrtc")]
+        if let Err(playback_error) = register_experimental_live_playback_custody(
+            runtime,
+            &pending,
+            experimental_live_playback_custodies,
+        )
+        .await
+        {
+            experimental_live_playback_custodies
+                .lock()
+                .await
+                .remove(&channel_id);
+            let cleanup = runtime
+                .cleanup_experimental_live_channel_after_publication_failure(
+                    host,
+                    authority.as_ref(),
+                    &session_id,
+                    &channel_id,
+                )
+                .await;
+            return match cleanup {
+                Ok(()) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "strict live/open playback authority registration failed: {playback_error}"
+                    ),
+                ),
+                Err(cleanup_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!(
+                        "strict live/open playback authority registration failed: {playback_error}; cleanup failed: {cleanup_error}"
+                    ),
+                ),
+            }
+            .into();
+        }
         return match serde_json::to_value(pending.open()) {
             Ok(value) => LiveOpenHandlerResult {
                 response: RpcResponse::success(id, value),
@@ -1000,6 +1154,11 @@ pub(crate) async fn handle_live_open_routed(
                 }),
             },
             Err(serialize_error) => {
+                #[cfg(feature = "live-webrtc")]
+                experimental_live_playback_custodies
+                    .lock()
+                    .await
+                    .remove(&channel_id);
                 let cleanup = runtime
                     .cleanup_experimental_live_channel_after_publication_failure(
                         host,
@@ -1070,12 +1229,25 @@ pub(crate) async fn handle_live_webrtc_answer(
         Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>,
     >,
     #[cfg(feature = "experimental-gpt-live")] live_adapter_host: &Arc<LiveAdapterHost>,
+    #[cfg(feature = "experimental-gpt-live")]
+    experimental_live_playback_custodies: &ExperimentalLivePlaybackCustodies,
 ) -> LiveWebrtcAnswerHandlerResult {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
         Ok(parsed) => parsed,
         Err(response) => return response.into(),
     };
     let channel_id = LiveChannelId::new(parsed.channel_id);
+    #[cfg(feature = "experimental-gpt-live")]
+    if let Err(error) = validate_experimental_live_playback_custody_before_answer(
+        runtime,
+        &channel_id,
+        &parsed.token,
+        experimental_live_playback_custodies,
+    )
+    .await
+    {
+        return RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string()).into();
+    }
     let coordinated = meerkat::surface::coordinate_live_webrtc_answer(
         runtime.runtime_adapter(),
         Arc::clone(answer_transport),

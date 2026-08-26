@@ -33,7 +33,9 @@ rust_library(
     aliases = aliases(package_name = "meerkat-llm-core"),
     crate_name = "meerkat_llm_core",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -62,7 +64,9 @@ rust_library(
     aliases = aliases(package_name = "meerkat-llm-core"),
     crate_name = "meerkat_llm_core",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -99,7 +103,9 @@ rust_test(
     ),
     crate_name = "meerkat_llm_core",
     crate_root = "src/lib.rs",
-    crate_features = [],
+    crate_features = [
+        "experimental-gpt-live",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",

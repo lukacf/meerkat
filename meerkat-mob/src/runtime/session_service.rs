@@ -910,6 +910,24 @@ pub(crate) async fn retire_runtime_session_for_archive(
 pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
+    /// Commit one provider-final client-delegation transcript through the
+    /// canonical session actor and SessionDocument authority.
+    ///
+    /// The provider observation is not executor authority. Only the sealed
+    /// evidence returned by this method may be reconciled by the live runtime
+    /// before any delegated model or tool work starts.
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "session service cannot commit a live delegation final transcript".into(),
+        ))
+    }
+
     /// Validate the exact current durable member's bridge policy and isolated
     /// client capability before any live channel/provider open.
     #[cfg(feature = "experimental-gpt-live")]
@@ -1676,6 +1694,17 @@ where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
     #[cfg(feature = "experimental-gpt-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        self.commit_live_user_transcript_final(session_id, provisional, Some(final_event))
+            .await
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
         session_id: &SessionId,
@@ -2121,6 +2150,17 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        self.commit_live_user_transcript_final(session_id, provisional, Some(final_event))
+            .await
+    }
+
     #[cfg(feature = "experimental-gpt-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,

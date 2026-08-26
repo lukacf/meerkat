@@ -7952,7 +7952,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             self.live_delegation_worker_identity_by_operation.keys()
                 == self.live_delegation_worker_phase_by_operation.keys()
             && for_all(operation_id in self.live_delegation_worker_identity_by_operation.keys(),
-                self.live_delegation_interaction_by_operation.contains_key(operation_id))
+                self.live_delegation_interaction_by_operation.contains_key(operation_id)
+                && self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationReconciliation::Confirmed))
         }
 
         invariant live_delegation_terminal_is_worker_bound {
@@ -23222,6 +23224,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_provider_turn_by_operation.get_cloned(operation_id) == Some(provider_turn_correlation)
+            }
+            guard "canonical_final_transcript_confirmed" {
+                self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationReconciliation::Confirmed)
             }
             guard "worker_unbound" {
                 !self.live_delegation_worker_identity_by_operation.contains_key(operation_id)

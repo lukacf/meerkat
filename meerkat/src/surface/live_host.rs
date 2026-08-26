@@ -1467,6 +1467,35 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         context
     }
 
+    /// Truncate one stock-realtime provider item through the canonical live
+    /// orchestrator. The caller supplies only the legacy provider cursor;
+    /// interaction identity remains owned by the orchestrator and never
+    /// crosses this facade.
+    pub async fn truncate_stock_live_output(
+        &self,
+        channel_id: &LiveChannelId,
+        item_id: &str,
+        content_index: u32,
+        audio_played_ms: u64,
+        reported_playback_prefix: Option<String>,
+    ) -> Result<meerkat_contracts::LiveTruncateResult, LiveChannelVerbError> {
+        self.orchestrator()
+            .truncate_live_output(
+                &self.host,
+                self.transport_context(),
+                channel_id,
+                None,
+                crate::session_runtime::live_orchestration::LiveTruncateCursor {
+                    output_id: None,
+                    item_id: Some(item_id.to_string()),
+                    content_index: Some(content_index),
+                    audio_played_ms,
+                    reported_playback_prefix,
+                },
+            )
+            .await
+    }
+
     /// Resolve an experimental assistant output through its machine-sealed,
     /// public-safe address. Provider response and item identifiers never
     /// cross this facade.

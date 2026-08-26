@@ -943,6 +943,35 @@ mod live_pipeline {
             .expect("status probe succeeds");
         assert_eq!(report.channel_id, opened.channel_id);
 
+        // Stock-realtime truncation enters the same canonical orchestrator
+        // through an owner facade. The downstream surface supplies no
+        // interaction identity and constructs no adapter command itself.
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+        member_host
+            .truncate_stock_live_output(
+                &LiveChannelId::new(&opened.channel_id),
+                "legacy-provider-item",
+                2,
+                125,
+                Some("legacy played".to_string()),
+            )
+            .await
+            .expect("stock truncate succeeds through owner facade");
+        let commands = adapter.commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                LiveAdapterCommand::TruncateAssistantOutput {
+                    item_id,
+                    content_index: 2,
+                    audio_played_ms: 125,
+                    reported_playback_prefix: Some(prefix),
+                    ..
+                } if item_id == "legacy-provider-item" && prefix == "legacy played"
+            )),
+            "stock truncate must reach the canonical adapter command: {commands:?}"
+        );
+
         // Close-by-id clears; a re-close is the typed not-found
         // (idempotent-safe for the caller-driven reconciliation loop).
         let status = member_host

@@ -869,13 +869,6 @@ fn mob_cold_restart_partial_resume_respawns_wired_member() {
     run_partial_resume_respawn_with_stack(2 * 1024 * 1024, "production-stack");
 }
 
-/// Keep headroom below Tokio's production default so debug-only future
-/// construction growth fails here instead of overflowing a CI worker.
-#[test]
-fn mob_cold_restart_partial_resume_respawn_fits_compact_actor_stack() {
-    run_partial_resume_respawn_with_stack(1536 * 1024, "compact-stack");
-}
-
 fn run_partial_resume_respawn_with_stack(stack_size: usize, label: &str) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

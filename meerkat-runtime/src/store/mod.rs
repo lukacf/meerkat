@@ -9955,6 +9955,10 @@ mod lifecycle_record_compatibility_tests {
             .as_object_mut()
             .expect("lifecycle record object")
             .remove("pre_run_phase");
+        value
+            .as_object_mut()
+            .expect("lifecycle record object")
+            .remove("live_bridge_recovery");
         let bytes = serde_json::to_vec(&value).expect("serialize v3 row");
         let decoded = decode_machine_lifecycle_store_record(&bytes).expect("decode v3 row");
         assert_eq!(decoded, expected);

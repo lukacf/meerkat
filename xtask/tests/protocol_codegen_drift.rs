@@ -450,9 +450,12 @@ fn comms_trust_authority_minting_is_generated_only() {
             relative == "meerkat-core/src/comms.rs" || relative == "meerkat-core/src/handles.rs";
         let generated_bridge_validator_file = core_bridge_file
             || relative == "meerkat-core/src/service/mod.rs"
+            || relative == "meerkat-core/src/agent.rs"
             || relative == "meerkat-live/src/host.rs"
             || relative == "meerkat-runtime/src/meerkat_machine/mod.rs"
-            || relative == "meerkat-runtime/src/mob_operator_authority.rs";
+            || relative == "meerkat-runtime/src/mob_operator_authority.rs"
+            || relative == "meerkat-runtime/src/live_execution.rs"
+            || relative == "meerkat-session/src/live_transcript_authority.rs";
         if (source.contains(concat!(
             "impl meerkat_core::comms::",
             "GeneratedCommsTrustAuthorityParts"

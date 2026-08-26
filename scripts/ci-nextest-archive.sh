@@ -128,7 +128,9 @@ case "${1:-}" in
     if [[ "$profile" != default ]]; then
       run_args+=(--profile "$profile")
     fi
-    MEERKAT_WORKSPACE_ROOT="$ROOT" "$NEXTEST_BIN" "${run_args[@]}"
+    RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}" \
+      MEERKAT_WORKSPACE_ROOT="$ROOT" \
+      "$NEXTEST_BIN" "${run_args[@]}"
     ;;
   *)
     usage

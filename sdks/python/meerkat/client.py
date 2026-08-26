@@ -94,6 +94,8 @@ from .generated.types import (
     LiveCloseResult,
     LiveCloseStatus,
     LiveOpenResult,
+    LivePlaybackCompleteResult,
+    LivePlaybackCompleteStatus,
     LiveRefreshResult,
     LiveRefreshStatus,
     LiveStatusResult,
@@ -4525,6 +4527,32 @@ class MeerkatClient:
                 "content_index": content_index,
                 "audio_played_ms": audio_played_ms,
             },
+        )
+
+    async def live_playback_complete(
+        self,
+        channel_id: str,
+        output_id: str,
+    ) -> LivePlaybackCompleteResult:
+        """Report completed client playback for one assistant output.
+
+        Wraps ``live/playback_complete``. A successful result means the
+        server accepted completion for the exact generated output id.
+        """
+        raw = await self._request(
+            "live/playback_complete",
+            {"channel_id": channel_id, "output_id": output_id},
+        )
+        context = "Invalid live/playback_complete response"
+        raw = self._require_dict(raw, "result", context)
+        status = self._require_string_field(raw, "status", context)
+        if status != "completed":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported status {status!r}",
+            )
+        return LivePlaybackCompleteResult(
+            status=cast("LivePlaybackCompleteStatus", status),
         )
 
     async def live_refresh(self, channel_id: str) -> LiveRefreshResult:

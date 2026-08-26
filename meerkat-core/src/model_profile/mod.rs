@@ -358,11 +358,13 @@ mod tests {
     /// and a schema regeneration.
     const EXPECTED_MODEL_PROFILE_FIELDS: &[&str] = &[
         "provider",
+        "release_stage",
         "model_family",
         "supports_temperature",
         "supports_thinking",
         "supports_reasoning",
         "supports_web_search",
+        "supports_mid_conversation_system_messages",
         "inline_video",
         "vision",
         "image_input",

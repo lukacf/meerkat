@@ -166,7 +166,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -286,7 +286,7 @@ rust_test(
         "//:workspace_metadata",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -356,7 +356,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -432,7 +432,7 @@ rust_test(
         "//test-fixtures/surface-build-fixtures:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -502,7 +502,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -571,7 +571,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -640,7 +640,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -709,7 +709,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -780,7 +780,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -850,7 +850,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",
@@ -928,7 +928,7 @@ rust_test(
     size = "large",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rest",

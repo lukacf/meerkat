@@ -45631,29 +45631,33 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held_gate = Arc::clone(&gate).lock_owned().await;
     let boundary_baseline = service.turn_finalization_acquire_counts();
+    let assert_retained_retry = |error: &MobError| {
+        match error {
+            MobError::LifecycleOperationPending { intent } => assert!(
+                intent == "explicit_resume"
+                    || intent == &format!("explicit_resume_attachment_retirement:{session_id}")
+            ),
+            MobError::LifecycleOperationProgressStalled { intent, .. } => {
+                assert_eq!(intent, "explicit_resume");
+            }
+            other => panic!("wedged takeover returned {other:?}"),
+        }
+        assert_eq!(
+            error.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionBusy)
+        );
+        let data = error
+            .structured_data()
+            .expect("retained retry observation must carry stable structured data");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(data["authority_retained"], true);
+    };
 
     let first = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
         .await
         .expect("first explicit resume must remain caller-bounded")
         .expect_err("wedged exact takeover must report retained authority");
-    assert!(
-        matches!(
-            &first,
-            MobError::LifecycleOperationPending { intent }
-                if intent == "explicit_resume"
-                    || intent == &format!("explicit_resume_attachment_retirement:{session_id}")
-        ),
-        "wedged takeover returned {first:?}"
-    );
-    assert_eq!(
-        first.wire_error_code(),
-        Some(meerkat_contracts::ErrorCode::SessionBusy)
-    );
-    let retained_data = first
-        .structured_data()
-        .expect("retained lifecycle pending must carry stable structured data");
-    assert_eq!(retained_data["retryable"], true);
-    assert_eq!(retained_data["authority_retained"], true);
+    assert_retained_retry(&first);
     assert_eq!(
         service.turn_finalization_acquire_counts(),
         (boundary_baseline.0 + 1, boundary_baseline.1),
@@ -45664,7 +45668,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         .await
         .expect("level-trigger retry must remain caller-bounded")
         .expect_err("retry must join the retained takeover");
-    assert!(matches!(second, MobError::LifecycleOperationPending { .. }));
+    assert_retained_retry(&second);
     assert_eq!(
         service.turn_finalization_acquire_counts(),
         (boundary_baseline.0 + 1, boundary_baseline.1),
@@ -45676,7 +45680,10 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         loop {
             match resumed.resume().await {
                 Ok(()) => break,
-                Err(MobError::LifecycleOperationPending { .. }) => {
+                Err(
+                    MobError::LifecycleOperationPending { .. }
+                    | MobError::LifecycleOperationProgressStalled { .. },
+                ) => {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => {

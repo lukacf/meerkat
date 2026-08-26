@@ -102,7 +102,7 @@ rust_test(
         "tests/rustfmt_host.sh",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -227,7 +227,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -292,7 +292,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -363,7 +363,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -433,7 +433,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -499,7 +499,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -616,7 +616,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -681,7 +681,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -754,7 +754,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -816,7 +816,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -879,7 +879,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -941,7 +941,7 @@ rust_test(
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",

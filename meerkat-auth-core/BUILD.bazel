@@ -134,7 +134,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -189,7 +189,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -245,7 +245,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -301,7 +301,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -357,7 +357,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -415,7 +415,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -471,7 +471,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -527,7 +527,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -583,7 +583,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-auth-core",

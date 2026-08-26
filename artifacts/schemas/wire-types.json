@@ -78895,6 +78895,52 @@
     "title": "LiveOpenTransport",
     "type": "string"
   },
+  "LivePlaybackCompleteParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "output_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "output_id"
+    ],
+    "title": "LivePlaybackCompleteParams",
+    "type": "object"
+  },
+  "LivePlaybackCompleteResult": {
+    "$defs": {
+      "LivePlaybackCompleteStatus": {
+        "enum": [
+          "completed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "status": {
+        "$ref": "#/$defs/LivePlaybackCompleteStatus"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "title": "LivePlaybackCompleteResult",
+    "type": "object"
+  },
+  "LivePlaybackCompleteStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "completed"
+    ],
+    "title": "LivePlaybackCompleteStatus",
+    "type": "string"
+  },
   "LiveRefreshResult": {
     "$defs": {
       "LiveRefreshStatus": {

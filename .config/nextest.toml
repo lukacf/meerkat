@@ -185,6 +185,19 @@ threads-required = "num-cpus"
 filter = 'test(~test_branch_winner_and_join_any_behavior) or test(~test_branch_winner_is_selected_only_after_success_allowing_fallback)'
 threads-required = "num-cpus"
 
+[[profile.fast.overrides]]
+# This peer-webhook capacity test holds the admission semaphore full while a
+# running target terminalizes through the REST path. It passed 10/10 in
+# isolation but returned HTTP 500 once beside the saturated workspace gate,
+# so reserve the lane without changing the production timeout or semantics.
+filter = 'test(~rest_peer_terminal_webhook_allows_running_target_when_capacity_full)'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+# The authoritative workspace unit gate uses the default profile.
+filter = 'test(~rest_peer_terminal_webhook_allows_running_target_when_capacity_full)'
+threads-required = "num-cpus"
+
 [[profile.default.overrides]]
 # System-lane tests spawn nested cargo invocations and copy binaries into
 # scenario-specific target directories. Running them concurrently under a broad

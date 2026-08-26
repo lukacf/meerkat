@@ -224,6 +224,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "LiveSendInputParams": schema_for!(crate::wire::LiveSendInputParams),
         "LiveInputChunkWire": schema_for!(crate::wire::LiveInputChunkWire),
         "LiveTruncateParams": schema_for!(crate::wire::LiveTruncateParams),
+        "LivePlaybackCompleteParams": schema_for!(crate::wire::LivePlaybackCompleteParams),
         // G9 (P2): emit `LiveCommitInputParams` and `WireLiveResponseModality`
         // at the top level so SDK codegen produces typed shapes (param
         // struct + discriminated modality union) for `live/commit_input`
@@ -249,6 +250,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "LiveInterruptStatus": schema_for!(crate::wire::LiveInterruptStatus),
         "LiveTruncateResult": schema_for!(crate::wire::LiveTruncateResult),
         "LiveTruncateStatus": schema_for!(crate::wire::LiveTruncateStatus),
+        "LivePlaybackCompleteResult": schema_for!(crate::wire::LivePlaybackCompleteResult),
+        "LivePlaybackCompleteStatus": schema_for!(crate::wire::LivePlaybackCompleteStatus),
         // CC5/CC6: emit the typed wire mirrors at the top level so SDK
         // codegen produces named typed shapes (TypedDict / interface /
         // discriminated union) instead of inlining them as anonymous `Any`

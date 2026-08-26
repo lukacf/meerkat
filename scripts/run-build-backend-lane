@@ -37,6 +37,10 @@ source "${root}/scripts/build-backend-env"
 
 cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
 
+use_standard_rust_test_stack() {
+  export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+}
+
 run_head_canonical_kill_window() {
   # This is the sole real-process-death HeadCanonical regression. Its hidden
   # crash-stop command is intentionally feature-gated, so run the one target
@@ -155,6 +159,7 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test
     fi
+    use_standard_rust_test_stack
     # Cargo's worktree+parent config-merge concatenates list-form aliases
     # (the workspace's `fast`/`int`/`rct` aliases live as TOML arrays at
     # both the worktree and the main checkout's `.cargo/config.toml`),
@@ -169,18 +174,21 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-all
     fi
+    use_standard_rust_test_stack
     exec "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail --all-features
     ;;
   test-unit)
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-unit
     fi
+    use_standard_rust_test_stack
     exec "${cargo_bin}" nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
     ;;
   test-int)
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-int
     fi
+    use_standard_rust_test_stack
     "${cargo_bin}" nextest run --workspace --tests --profile fast --show-progress none --status-level none --final-status-level fail
     run_head_canonical_kill_window
     ;;

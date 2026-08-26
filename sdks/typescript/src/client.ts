@@ -89,6 +89,8 @@ import {
   type LiveCommitInputParams,
   type LiveOpenParams,
   type LiveOpenResult,
+  type LivePlaybackCompleteParams,
+  type LivePlaybackCompleteResult,
   type LiveRefreshResult,
   type LiveSendInputParams,
   type LiveStatusResult,
@@ -4132,6 +4134,13 @@ export class MeerkatClient {
     await this.request("live/truncate", params);
   }
 
+  async livePlaybackComplete(
+    params: LivePlaybackCompleteParams,
+  ): Promise<LivePlaybackCompleteResult> {
+    const result = await this.request("live/playback_complete", params);
+    return MeerkatClient.parseLivePlaybackCompleteResult(result);
+  }
+
 
   /**
    * Apply mutable session config (instructions / tools / audio) to an open
@@ -5614,6 +5623,23 @@ export class MeerkatClient {
     const record = MeerkatClient.requireRecord(raw, "result", context);
     const status = MeerkatClient.requireStringField(record, "status", context);
     if (status !== "closed") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported status ${JSON.stringify(status)}`,
+      );
+    }
+    return {
+      status,
+    };
+  }
+
+  private static parseLivePlaybackCompleteResult(
+    raw: unknown,
+  ): LivePlaybackCompleteResult {
+    const context = "Invalid live/playback_complete response";
+    const record = MeerkatClient.requireRecord(raw, "result", context);
+    const status = MeerkatClient.requireStringField(record, "status", context);
+    if (status !== "completed") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         `${context}: unsupported status ${JSON.stringify(status)}`,

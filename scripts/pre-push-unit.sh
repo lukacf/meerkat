@@ -13,6 +13,10 @@ GIT_BIN="${GIT_BIN:-git}"
 CACHE_VERSION="v10"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-300}"
 BUILD_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_BUILD_TIMEOUT_SECS:-${MEERKAT_PRE_PUSH_NARROW_BUILD_TIMEOUT_SECS:-900}}"
+# Generated machine state is intentionally broad enough that some integration
+# fixtures exceed libtest's platform-default thread stack. Keep the detached
+# Cargo/nextest authority lane aligned with the workspace-wide verified floor.
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 # The unit lane includes a dense-topology stress test with its own 300-second
 # assertion budget. Compilation is a separate lane so linker time cannot spend
 # the test-runtime budget.

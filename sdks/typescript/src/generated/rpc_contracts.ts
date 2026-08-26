@@ -84,6 +84,8 @@ import type {
   LiveInterruptResult,
   LiveOpenParams,
   LiveOpenResult,
+  LivePlaybackCompleteParams,
+  LivePlaybackCompleteResult,
   LiveRefreshResult,
   LiveSendInputParams,
   LiveSendInputResult,
@@ -675,6 +677,10 @@ export interface RpcMethodContracts {
   "live/truncate": {
     params: LiveTruncateParams;
     result: (LiveTruncateResult) & Record<string, unknown>;
+  };
+  "live/playback_complete": {
+    params: LivePlaybackCompleteParams;
+    result: (LivePlaybackCompleteResult) & Record<string, unknown>;
   };
   "live/refresh": {
     params: LiveChannelParams;

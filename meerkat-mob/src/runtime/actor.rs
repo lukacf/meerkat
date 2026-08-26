@@ -129,8 +129,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
-const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
+const ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const ROLLBACK_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
 /// A status projection is observational and must never hold the single mob
 /// actor behind a slow or wedged session-runtime read. Unknown progress is a
 /// truthful result; delaying lifecycle commands is not.
@@ -12190,37 +12190,14 @@ impl MobActor {
             );
             return;
         }
-        let autonomous_stop_deadline = Instant::now() + STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE;
-        loop {
-            match self.stop_all_autonomous_members().await {
-                Ok(()) => break,
-                Err(stop_error @ MobError::AutonomousStopInterruptsPending { .. }) => {
-                    let now = Instant::now();
-                    if now >= autonomous_stop_deadline {
-                        tracing::warn!(
-                            mob_id = %self.definition.id,
-                            error = %stop_error,
-                            failure_label,
-                            "startup failure Stop did not prove exact autonomous cleanup before its deadline"
-                        );
-                        return;
-                    }
-                    tokio::time::sleep(
-                        STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL
-                            .min(autonomous_stop_deadline - now),
-                    )
-                    .await;
-                }
-                Err(stop_error) => {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        error = %stop_error,
-                        failure_label,
-                        "startup failure Stop remains pending on autonomous cleanup"
-                    );
-                    return;
-                }
-            }
+        if let Err(stop_error) = self.stop_all_autonomous_members_for_rollback().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %stop_error,
+                failure_label,
+                "startup failure Stop remains pending on autonomous cleanup"
+            );
+            return;
         }
         if let Err(error) = self.commit_stopped_lifecycle_after_cleanup().await {
             tracing::warn!(
@@ -15162,6 +15139,29 @@ impl MobActor {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Complete an exact rollback instead of exposing the ordinary
+    /// level-triggered interrupt-pending observation to its caller. Interrupt
+    /// bridge I/O remains actor-owned and bounded; this loop only polls the
+    /// retained result until every exact incarnation is settled or the
+    /// rollback cleanup budget is exhausted.
+    async fn stop_all_autonomous_members_for_rollback(&mut self) -> Result<(), MobError> {
+        let deadline = Instant::now() + ROLLBACK_AUTONOMOUS_STOP_DEADLINE;
+        loop {
+            match self.stop_all_autonomous_members().await {
+                Ok(()) => return Ok(()),
+                Err(error @ MobError::AutonomousStopInterruptsPending { .. }) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(ROLLBACK_AUTONOMOUS_STOP_POLL_INTERVAL.min(deadline - now))
+                        .await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Fence every local session at the explicit stopped -> running resume
@@ -22564,7 +22564,9 @@ impl MobActor {
                                 && let Err(error) =
                                     self.ensure_autonomous_runtimes_from_roster(true, None).await
                             {
-                                if let Err(stop_error) = self.stop_all_autonomous_members().await {
+                                if let Err(stop_error) =
+                                    self.stop_all_autonomous_members_for_rollback().await
+                                {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
@@ -22593,7 +22595,7 @@ impl MobActor {
                                     };
                                 if !rebuilt_attachment
                                     && let Err(stop_error) =
-                                        self.stop_all_autonomous_members().await
+                                        self.stop_all_autonomous_members_for_rollback().await
                                 {
                                     self.provisioner.cancel_all_checkpointers().await;
                                     return Err(MobError::Internal(format!(
@@ -22608,7 +22610,7 @@ impl MobActor {
                             if let Err(error) = self.resume_lifecycle_after_quiesce().await {
                                 if !rebuilt_attachment
                                     && let Err(stop_error) =
-                                        self.stop_all_autonomous_members().await
+                                        self.stop_all_autonomous_members_for_rollback().await
                                 {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,

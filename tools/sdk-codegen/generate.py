@@ -3690,6 +3690,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Typed JSON-RPC error data for scoped live/send_input rejections.",
     )
     append_python_dataclass("LiveTruncateParams", wire_schema, "Request payload for live/truncate.")
+    append_python_dataclass(
+        "LivePlaybackCompleteParams",
+        wire_schema,
+        "Request payload for live/playback_complete.",
+    )
     # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`,
     # then the params dataclass that references it.
     append_python_alias(
@@ -3768,6 +3773,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "LiveTruncateResult",
         wire_schema,
         "Response payload for live/truncate: typed `status` discriminator.",
+    )
+    append_python_alias(
+        "LivePlaybackCompleteStatus",
+        wire_schema,
+        "Wire projection of LivePlaybackCompleteStatus (today: only `completed`).",
+    )
+    append_python_dataclass(
+        "LivePlaybackCompleteResult",
+        wire_schema,
+        "Response payload for live/playback_complete: typed `status` discriminator.",
     )
     # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
     # tagged-payload helpers. Aliases (not dataclasses) because each is a
@@ -4426,6 +4441,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveSendInputParams", wire_schema)
     append_typescript_interface("LiveSendInputErrorData", wire_schema)
     append_typescript_interface("LiveTruncateParams", wire_schema)
+    append_typescript_interface("LivePlaybackCompleteParams", wire_schema)
     # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`
     # (discriminated union on `modality`), then the params interface that
     # references it.
@@ -4447,6 +4463,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveInterruptResult", wire_schema)
     append_typescript_alias("LiveTruncateStatus", wire_schema)
     append_typescript_interface("LiveTruncateResult", wire_schema)
+    append_typescript_alias("LivePlaybackCompleteStatus", wire_schema)
+    append_typescript_interface("LivePlaybackCompleteResult", wire_schema)
     append_typescript_alias("LiveInputChunkWire", wire_schema)
     # FIX-SDK-OBS: typed adapter observation discriminated unions. Aliases
     # because each is a serde-tagged enum. `RealtimeTranscriptEvent` is

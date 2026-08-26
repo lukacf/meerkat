@@ -1789,10 +1789,10 @@ fn scenario_env(
     // Live/mob-heavy tests recursively drive the runtime through many
     // layered async frames (spawn → wire → retire → destroy) which can
     // exceed the default 2 MiB main-thread stack under debug builds.
-    // Default-raise to 16 MiB for every spec; scenarios can still
+    // Default-raise to 32 MiB for every spec; scenarios can still
     // override by setting their own `RUST_MIN_STACK` in `spec.env`.
     env.entry("RUST_MIN_STACK".to_string())
-        .or_insert_with(|| (16 * 1024 * 1024).to_string());
+        .or_insert_with(|| (32 * 1024 * 1024).to_string());
     for (key, value) in spec.env {
         env.insert((*key).to_string(), expand_template(value, cargo_target_dir));
     }
@@ -2500,6 +2500,9 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
     match key {
         "meerkat-integration-tests:smoke_shared_realm" => {
             Ok("tests/integration/smoke_shared_realm_test")
+        }
+        "meerkat-integration-tests:gpt_live_client_e2e" => {
+            Ok("tests/integration/gpt_live_client_e2e_test")
         }
         "meerkat-comms:e2e" => Ok("meerkat-comms/e2e_test"),
         "meerkat-mob:smoke_mob_flow_runtime" => Ok("meerkat-mob/smoke_mob_flow_runtime_test"),

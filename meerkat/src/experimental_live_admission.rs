@@ -1390,7 +1390,11 @@ mod tests {
             closed
                 .qualify_capability(&admitted_realm, &selected_factory)
                 .expect_err("no Gate0 means no capability advertisement"),
-            ExperimentalLiveAdmissionError::OperatorNotConfigured
+            if cfg!(feature = "experimental-gpt-live") {
+                ExperimentalLiveAdmissionError::OperatorNotConfigured
+            } else {
+                ExperimentalLiveAdmissionError::FeatureNotCompiled
+            }
         );
     }
 

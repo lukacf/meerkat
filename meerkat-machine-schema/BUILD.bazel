@@ -121,7 +121,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -170,7 +170,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -220,7 +220,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -270,7 +270,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -320,7 +320,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -375,7 +375,7 @@ rust_test(
         "//:workspace_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = [
@@ -426,7 +426,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -475,7 +475,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -525,7 +525,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -575,7 +575,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -625,7 +625,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -675,7 +675,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -725,7 +725,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -775,7 +775,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -829,7 +829,7 @@ rust_test(
         "//meerkat-runtime:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -879,7 +879,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",

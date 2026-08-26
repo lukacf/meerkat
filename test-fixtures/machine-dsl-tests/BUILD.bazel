@@ -91,7 +91,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -152,7 +152,7 @@ rust_test(
         "@rules_rust//rust/toolchain:current_rustc_lib_files",
     ],
     env = {
-        "RUST_MIN_STACK": "16777216",
+        "RUST_MIN_STACK": "33554432",
         "CARGO_TARGET_DIR": "trybuild-target",
     },
     proc_macro_deps = [

@@ -34,7 +34,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
-    from .generated.types import LiveCloseResult, LiveRefreshResult
+    from .generated.types import (
+        LiveCloseResult,
+        LivePlaybackCompleteResult,
+        LiveRefreshResult,
+    )
 
 
 class LiveChannel:
@@ -219,6 +223,19 @@ class LiveChannel:
         """
         return await self._client.live_truncate(
             self._require_channel_id(), item_id, content_index, audio_played_ms
+        )
+
+    async def playback_complete(
+        self,
+        output_id: str,
+    ) -> LivePlaybackCompleteResult:
+        """Report completed client playback for one generated output.
+
+        Calls ``live/playback_complete`` with this channel's id and the exact
+        output id observed from the live stream.
+        """
+        return await self._client.live_playback_complete(
+            self._require_channel_id(), output_id
         )
 
     # -- Internal ----------------------------------------------------------

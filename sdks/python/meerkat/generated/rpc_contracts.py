@@ -92,6 +92,8 @@ from .types import (
     LiveInterruptResult,
     LiveOpenParams,
     LiveOpenResult,
+    LivePlaybackCompleteParams,
+    LivePlaybackCompleteResult,
     LiveRefreshResult,
     LiveSendInputParams,
     LiveSendInputResult,
@@ -1084,6 +1086,14 @@ class RpcRequest(Protocol):
         params: LiveTruncateParams,
         /,
     ) -> Awaitable[LiveTruncateResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["live/playback_complete"],
+        params: LivePlaybackCompleteParams,
+        /,
+    ) -> Awaitable[LivePlaybackCompleteResult]: ...
 
     @overload
     def __call__(

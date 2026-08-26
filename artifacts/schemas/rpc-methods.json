@@ -590,6 +590,12 @@
       "result_type": "LiveTruncateResult"
     },
     {
+      "description": "Report that client playback completed for one assistant output",
+      "name": "live/playback_complete",
+      "params_type": "LivePlaybackCompleteParams",
+      "result_type": "LivePlaybackCompleteResult"
+    },
+    {
       "description": "Apply mutable session config (instructions/tools/audio) to an open live channel via a single session.update; does NOT replay history. Identity swaps (model/provider) require close + reopen.",
       "name": "live/refresh",
       "params_type": "LiveChannelParams",

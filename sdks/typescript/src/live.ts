@@ -38,6 +38,8 @@ import type {
   LiveCommitInputParams,
   LiveOpenParams,
   LiveOpenResult,
+  LivePlaybackCompleteParams,
+  LivePlaybackCompleteResult,
   LiveRefreshResult,
   LiveSendInputParams,
   LiveStatusResult,
@@ -279,6 +281,18 @@ export class LiveChannel {
       audio_played_ms: audioPlayedMs,
     };
     await this.client.liveTruncate(params);
+  }
+
+  /**
+   * Report completed client playback for one generated assistant output.
+   * Calls `live/playback_complete` with this channel's exact output id.
+   */
+  async playbackComplete(outputId: string): Promise<LivePlaybackCompleteResult> {
+    const params: LivePlaybackCompleteParams = {
+      channel_id: this.requireChannelId(),
+      output_id: outputId,
+    };
+    return await this.client.livePlaybackComplete(params);
   }
 
   // -- Internal helpers ---------------------------------------------------

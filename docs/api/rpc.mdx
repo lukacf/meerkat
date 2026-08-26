@@ -155,6 +155,7 @@ subset.
 | `live/commit_input` | Live | `LiveCommitInputParams` | `LiveCommitInputResult` | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Live | `LiveChannelParams` | `LiveInterruptResult` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Live | `LiveTruncateParams` | `LiveTruncateResult` | Truncate assistant output at a client-tracked playback cursor |
+| `live/playback_complete` | Live | `LivePlaybackCompleteParams` | `LivePlaybackCompleteResult` | Report completed client playback for one generated assistant output |
 | `live/refresh` | Live | `LiveChannelParams` | `LiveRefreshResult` | Apply mutable session config (instructions/tools/audio) to an open live channel |
 | `session/stream_open` | Session | `SessionStreamOpenParams` | `SessionStreamOpenResult` | Open a standalone session event stream |
 | `session/stream_close` | Session | `SessionStreamCloseParams` | `SessionStreamCloseResult` | Close a standalone session event stream |
@@ -1654,6 +1655,7 @@ transport details.
 | `live/commit_input` | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Truncate assistant output at a client-tracked playback cursor |
+| `live/playback_complete` | Report completed client playback for one generated assistant output |
 | `live/refresh` | Apply mutable session config (instructions/tools/audio) to an open channel; config-only, does not replay history; identity swaps and canonical transcript/user-content rewrites return typed reopen-required errors |
 
 WebSocket calls require `--live-ws <addr>`. WebRTC open/answer requires a build

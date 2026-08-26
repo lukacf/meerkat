@@ -405,6 +405,9 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         state
             .live_result_released_operations
             .insert(operation_id.clone());
+        state
+            .live_result_delivery_operation_by_channel
+            .insert(channel.to_string(), operation_id.clone());
         state.live_result_release_disposition_by_operation.insert(
             operation_id,
             mm_dsl::LiveDelegationResultDisposition::OpenTurn,
@@ -491,6 +494,9 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         state
             .live_result_released_operations
             .insert(operation_id.clone());
+        state
+            .live_result_delivery_operation_by_channel
+            .insert(channel.to_string(), operation_id.clone());
         state.live_result_release_disposition_by_operation.insert(
             operation_id,
             mm_dsl::LiveDelegationResultDisposition::OpenTurn,

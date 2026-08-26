@@ -10512,6 +10512,7 @@ mod recovery_tests {
                             "pre_run_phase": pre_run_phase,
                             "supervisor_authority": { "kind": "unbound_no_receipt" },
                             "unregister_progress": null,
+                            "live_bridge_recovery": crate::live_execution::LiveBridgeRecoveryImage::default(),
                         }))
                         .expect("serialize torn runtime observation");
                         let store = crate::store::InMemoryRuntimeStore::new();

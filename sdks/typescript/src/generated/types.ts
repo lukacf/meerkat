@@ -5003,6 +5003,11 @@ export interface LiveTruncateParams {
   reported_playback_prefix?: string | null;
 }
 
+export interface LivePlaybackCompleteParams {
+  channel_id: string;
+  output_id: string;
+}
+
 export interface WireLiveResponseModalityAudio {
   modality: "audio";
 }
@@ -5057,6 +5062,12 @@ export type LiveTruncateStatus = "truncated";
 
 export interface LiveTruncateResult {
   status: "truncated";
+}
+
+export type LivePlaybackCompleteStatus = "completed";
+
+export interface LivePlaybackCompleteResult {
+  status: "completed";
 }
 
 export interface LiveInputChunkWireAudio {

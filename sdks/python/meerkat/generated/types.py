@@ -4743,6 +4743,13 @@ cursor in here when they want to truncate."""
     reported_playback_prefix: Optional[str] = None
 
 
+@dataclass
+class LivePlaybackCompleteParams:
+    """Request payload for live/playback_complete."""
+    channel_id: str
+    output_id: str
+
+
 # Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
 #
 # Internally-tagged on `modality` (snake_case) — matches the core enum's
@@ -4883,6 +4890,15 @@ class LiveTruncateResult:
 
 Clients route on the typed `status` discriminator."""
     status: Literal['truncated']
+
+
+# Wire projection of LivePlaybackCompleteStatus (today: only `completed`).
+LivePlaybackCompleteStatus = Literal['completed']
+
+@dataclass
+class LivePlaybackCompleteResult:
+    """Response payload for live/playback_complete: typed `status` discriminator."""
+    status: Literal['completed']
 
 
 # Public-wire mirror of [`RealtimeTranscriptEvent`].

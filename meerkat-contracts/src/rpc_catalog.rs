@@ -717,6 +717,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "LiveTruncateResult",
             ),
             RpcMethodDescriptor::typed(
+                "live/playback_complete",
+                "Report that client playback completed for one assistant output",
+                "LivePlaybackCompleteParams",
+                "LivePlaybackCompleteResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "live/refresh",
                 "Apply mutable session config (instructions/tools/audio) to an open live channel via a single session.update; does NOT replay history. Identity swaps (model/provider) require close + reopen.",
                 "LiveChannelParams",

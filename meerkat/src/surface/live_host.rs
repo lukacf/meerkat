@@ -646,13 +646,10 @@ pub async fn coordinate_live_webrtc_answer(
                                 }
                             }
                         }
-                        Ok(LiveWebrtcAnswerDeliveryDisposition::Reject) | Err(_) => {
-                            let physical = task_transport
-                                .reject_answer(&task_binding, sequence)
-                                .await
-                                .map_err(|error| error.to_string());
-                            physical
-                        }
+                        Ok(LiveWebrtcAnswerDeliveryDisposition::Reject) | Err(_) => task_transport
+                            .reject_answer(&task_binding, sequence)
+                            .await
+                            .map_err(|error| error.to_string()),
                     }
                 }
             }

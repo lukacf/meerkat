@@ -4422,12 +4422,18 @@ mod tests {
         changed: Notify,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum ControlledSeedCommentary {
+        NotCalled,
+        Called(Option<String>),
+    }
+
     struct ControlledSeedBrokerSession {
         seed_calls: AtomicUsize,
         provider_reads: AtomicUsize,
         started: Notify,
         release: Notify,
-        commentary: Mutex<Option<Option<String>>>,
+        commentary: Mutex<ControlledSeedCommentary>,
     }
 
     #[async_trait]
@@ -4437,7 +4443,7 @@ mod tests {
             commentary: Option<String>,
         ) -> Result<(), GptLiveBrokerError> {
             self.seed_calls.fetch_add(1, AtomicOrdering::SeqCst);
-            *self.commentary.lock().await = Some(commentary);
+            *self.commentary.lock().await = ControlledSeedCommentary::Called(commentary);
             self.started.notify_one();
             self.release.notified().await;
             Ok(())
@@ -5601,7 +5607,7 @@ mod tests {
             provider_reads: AtomicUsize::new(0),
             started: Notify::new(),
             release: Notify::new(),
-            commentary: Mutex::new(None),
+            commentary: Mutex::new(ControlledSeedCommentary::NotCalled),
         });
         let admission = meerkat_core::RealtimeOpenProjectionAdmission::new(1, 1)
             .expect("isolated seed projection admission");
@@ -5650,13 +5656,8 @@ mod tests {
         );
         assert_eq!(session.provider_reads.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(
-            session
-                .commentary
-                .lock()
-                .await
-                .as_ref()
-                .and_then(Option::as_deref),
-            Some("exact canonical commentary")
+            &*session.commentary.lock().await,
+            &ControlledSeedCommentary::Called(Some("exact canonical commentary".to_string()))
         );
 
         session.release.notify_one();

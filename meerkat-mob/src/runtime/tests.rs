@@ -45842,7 +45842,7 @@ async fn test_explicit_resume_terminal_survives_observer_drop_and_is_shared() {
 }
 
 #[tokio::test]
-async fn test_explicit_resume_member_progress_resets_patience_after_admission() {
+async fn test_explicit_resume_host_materialization_uses_typed_host_terminality() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let (command_tx, mut command_rx) =
         tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
@@ -45863,10 +45863,19 @@ async fn test_explicit_resume_member_progress_resets_patience_after_admission() 
             panic!("expected ResumeLifecycle command");
         };
         admission.admit();
-        for member_id in [AgentIdentity::from("slow-a"), AgentIdentity::from("slow-b")] {
-            progress.awaiting_member(&member_id, "member_live_materialization");
-            tokio::time::sleep(Duration::from_millis(1_100)).await;
-            progress.member_progress(&member_id, "member_live_materialization");
+        for (member_id, delay) in [
+            (AgentIdentity::from("slow-a"), Duration::from_millis(2_200)),
+            (AgentIdentity::from("slow-b"), Duration::from_millis(100)),
+        ] {
+            progress.awaiting_member(
+                &member_id,
+                super::state::LifecycleProgressStage::MemberLiveMaterialization,
+            );
+            tokio::time::sleep(delay).await;
+            progress.member_progress(
+                &member_id,
+                super::state::LifecycleProgressStage::MemberLiveMaterialization,
+            );
         }
         let _ = reply_tx.send(Ok(()));
     });
@@ -45876,8 +45885,8 @@ async fn test_explicit_resume_member_progress_resets_patience_after_admission() 
         shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
     )
     .await
-    .expect("progressing Resume remains bounded by per-progress patience")
-    .expect("two slow host-owned member builds may exceed the original total deadline");
+    .expect("host-owned materialization still completes within the test harness bound")
+    .expect("one typed host materialization may exceed Meerkat's platform-stage patience");
     responder.await.expect("Resume responder task");
 }
 
@@ -45906,7 +45915,7 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
         admission.admit();
         progress.awaiting_member(
             &AgentIdentity::from("wedged-host-build"),
-            "member_live_materialization",
+            super::state::LifecycleProgressStage::MemberCommsReadiness,
         );
         let _ = release_rx.await;
         let _ = reply_tx.send(Ok(()));
@@ -45927,13 +45936,13 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
             stage,
         } if intent == "explicit_resume"
             && member_id.as_str() == "wedged-host-build"
-            && *stage == "member_live_materialization"
+            && *stage == "member_comms_readiness"
     ));
     let structured = error
         .structured_data()
         .expect("progress stall has stable structured diagnostics");
     assert_eq!(structured["member_id"], "wedged-host-build");
-    assert_eq!(structured["stage"], "member_live_materialization");
+    assert_eq!(structured["stage"], "member_comms_readiness");
     assert_eq!(structured["authority_retained"], true);
 
     let _ = release_tx.send(());

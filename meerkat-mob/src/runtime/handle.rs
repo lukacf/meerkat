@@ -5188,6 +5188,28 @@ impl MobHandle {
                     }
                 }
                 ResumeOperationState::LifecycleAuthorityAdmitted => {
+                    let progress = progress_rx.borrow().clone();
+                    if progress.stage.uses_host_owned_terminality() {
+                        // An opaque host build may legitimately take longer
+                        // than any platform-owned inactivity budget. Await its
+                        // typed completion or failure instead of converting
+                        // host latency into a run-ending Meerkat stall.
+                        progress_deadline = None;
+                        tokio::select! {
+                            changed = state_rx.changed() => {
+                                if changed.is_err() {
+                                    return Err(MobError::ActorReplyChannelClosed);
+                                }
+                            }
+                            changed = progress_rx.changed() => {
+                                if changed.is_err() {
+                                    return Err(MobError::ActorReplyChannelClosed);
+                                }
+                                observed_progress_epoch = progress_rx.borrow().epoch;
+                            }
+                        }
+                        continue;
+                    }
                     let deadline = progress_deadline.get_or_insert_with(|| {
                         Instant::now() + super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT
                     });
@@ -5196,7 +5218,7 @@ impl MobHandle {
                         return Err(MobError::LifecycleOperationProgressStalled {
                             intent: "explicit_resume".to_string(),
                             member_id: stalled.member_id,
-                            stage: stalled.stage,
+                            stage: stalled.stage.as_str(),
                         });
                     };
                     tokio::select! {

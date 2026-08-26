@@ -15486,7 +15486,10 @@ impl MobActor {
                 .labels
                 .clone()
                 .unwrap_or_else(|| entry.labels.clone());
-            progress.awaiting_member(&entry.agent_identity, "member_live_materialization");
+            progress.awaiting_member(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberLiveMaterialization,
+            );
             {
                 let mut retained = self.per_spawn_external_tools.write().await;
                 if let Some(tools) = restore_spec.external_tools {
@@ -15534,7 +15537,10 @@ impl MobActor {
                     }
                 }
             }
-            progress.member_progress(&entry.agent_identity, "member_live_materialization");
+            progress.member_progress(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberLiveMaterialization,
+            );
         }
         if let Some(error) = first_infrastructure_error {
             return Err(error);
@@ -15620,7 +15626,10 @@ impl MobActor {
         };
         for entry in &all_entries {
             if let Some(progress) = progress {
-                progress.awaiting_member(&entry.agent_identity, "member_comms_readiness");
+                progress.awaiting_member(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::MemberCommsReadiness,
+                );
             }
             let ensure_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 self.provisioner
@@ -15648,7 +15657,10 @@ impl MobActor {
                         });
                     }
                     if let Some(progress) = progress {
-                        progress.member_progress(&entry.agent_identity, "member_comms_readiness");
+                        progress.member_progress(
+                            &entry.agent_identity,
+                            super::state::LifecycleProgressStage::MemberCommsReadiness,
+                        );
                     }
                     continue;
                 }
@@ -15664,12 +15676,18 @@ impl MobActor {
                 }
             }
             if let Some(progress) = progress {
-                progress.member_progress(&entry.agent_identity, "member_comms_readiness");
+                progress.member_progress(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::MemberCommsReadiness,
+                );
             }
         }
         for entry in &entries {
             if let Some(progress) = progress {
-                progress.awaiting_member(&entry.agent_identity, "autonomous_runtime_readiness");
+                progress.awaiting_member(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
+                );
             }
             let ensure_result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -15695,8 +15713,10 @@ impl MobActor {
                         });
                     }
                     if let Some(progress) = progress {
-                        progress
-                            .member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
+                        progress.member_progress(
+                            &entry.agent_identity,
+                            super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
+                        );
                     }
                     continue;
                 }
@@ -15711,7 +15731,10 @@ impl MobActor {
                     first_error = Some(error);
                 }
                 if let Some(progress) = progress {
-                    progress.member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
+                    progress.member_progress(
+                        &entry.agent_identity,
+                        super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
+                    );
                 }
                 continue;
             }
@@ -15750,7 +15773,10 @@ impl MobActor {
                 }
             }
             if let Some(progress) = progress {
-                progress.member_progress(&entry.agent_identity, "autonomous_runtime_readiness");
+                progress.member_progress(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
+                );
             }
         }
 
@@ -22606,7 +22632,9 @@ impl MobActor {
                                 return Err(timeout_error);
                             }
                             admission.admit();
-                            progress.awaiting_stage("durable_resume_transition");
+                            progress.awaiting_stage(
+                                super::state::LifecycleProgressStage::DurableResumeTransition,
+                            );
                             if let Err(error) = self.resume_lifecycle_after_quiesce().await {
                                 if !rebuilt_attachment
                                     && let Err(stop_error) =
@@ -22627,7 +22655,9 @@ impl MobActor {
                                 let rebuild_result = self
                                     .rebuild_explicit_resume_member_sessions(rebuild, &progress)
                                     .await;
-                                progress.awaiting_stage("post_rebuild_readiness");
+                                progress.awaiting_stage(
+                                    super::state::LifecycleProgressStage::PostRebuildReadiness,
+                                );
                                 let readiness_result =
                                     self.ensure_autonomous_runtimes_from_roster(
                                         false,
@@ -22646,7 +22676,9 @@ impl MobActor {
 
                             #[cfg(feature = "runtime-adapter")]
                             {
-                                progress.awaiting_stage("resume_topology_reconciliation");
+                                progress.awaiting_stage(
+                                    super::state::LifecycleProgressStage::ResumeTopologyReconciliation,
+                                );
                                 // All exact session attachments are settled before
                                 // topology repair. The shared reconciler consumes its
                                 // generated trust handoffs directly; routing the same

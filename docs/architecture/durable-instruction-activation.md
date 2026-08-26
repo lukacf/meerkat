@@ -424,17 +424,16 @@ errors. They do not classify state or rebuild receipts.
 | Same-lineage activation audit | Transcript plus retained revision graph | Load fails closed on malformed state |
 | Rollback | Later typed activation | No deletion or restore |
 
-## Development binding and delivery
+## Release binding and delivery
 
-This isolated correction branch is an implementation proof on the published
-paired 0.8.29 line. Its manifest and lockfile still name the early immutable
-Realtime revision `e3b8fa99da062919a0f85f7f42f0a74e7a9f829d`; this branch is
-therefore not a publishable integration candidate.
+The reviewed durable activation authority is integrated into the release
+authority's exact qualified realtime Meerkat head for the 0.8.30 candidate.
+Its manifest and lockfile both pin the public reviewed `oai-rt-rs` merge commit
+`f308903654073bf7cdf0db154ae5cceb006934b6`. Until the candidate is merged,
+tagged, and published, this exact integration commit remains development Git
+truth rather than a released package.
 
-The reviewed durable commit is replayed onto the release authority's exact
-qualified realtime Meerkat head. That integrated head must preserve the
-Realtime source and immutable revision recorded by that head's manifest and
-lockfile. MobKit then binds its Meerkat dependency to the exact integrated
+MobKit binds its Meerkat dependency to the exact origin-reachable integration
 commit, not to a package release or movable branch, and preserves the same
 locked Realtime source. Cross-repository CI consequently tests the development
 graph it claims to review.

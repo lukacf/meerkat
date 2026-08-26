@@ -78560,24 +78560,12 @@
   },
   "LiveOpenParams": {
     "$defs": {
-      "BindingId": {
-        "description": "Opaque slug identifying a binding inside a realm.",
-        "type": "string"
-      },
       "LiveOpenTransport": {
         "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
         "enum": [
           "websocket",
           "webrtc"
         ],
-        "type": "string"
-      },
-      "ProfileId": {
-        "description": "Opaque slug identifying an auth profile override on a connection.",
-        "type": "string"
-      },
-      "RealmId": {
-        "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
       "RealtimeTurningMode": {
@@ -78588,75 +78576,21 @@
         ],
         "type": "string"
       },
-      "WireLiveAuthBindingRef": {
-        "additionalProperties": false,
-        "description": "Strict live-only projection of [`crate::wire::WireAuthBindingRef`].",
-        "properties": {
-          "binding": {
-            "$ref": "#/$defs/BindingId"
-          },
-          "profile": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ProfileId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "realm": {
-            "$ref": "#/$defs/RealmId"
-          }
-        },
-        "required": [
-          "realm",
-          "binding"
-        ],
-        "type": "object"
-      },
       "WireLiveExecutionIdentityOverrideV1": {
         "additionalProperties": false,
-        "description": "Strict, versioned channel-scoped LLM identity override for live execution.",
+        "description": "Strict, versioned channel-scoped profile selector for live execution.",
         "properties": {
-          "auth_binding": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WireLiveIdentityOverride"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WireProvider"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "self_hosted_server_id": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "profile_id": {
+            "description": "Stable host-registered execution profile selected for this channel.\n\nThe host-owned profile definition owns the full LLM identity, provider\nmode, auth binding, capability atoms, and approved session instructions.\nCallers select only this catalog identity.",
+            "type": "string"
           },
           "version": {
             "$ref": "#/$defs/WireLiveExecutionIdentityVersion"
           }
         },
         "required": [
-          "version"
+          "version",
+          "profile_id"
         ],
         "type": "object"
       },
@@ -78666,61 +78600,6 @@
           "v1"
         ],
         "type": "string"
-      },
-      "WireLiveIdentityOverride": {
-        "description": "Strict tri-state override used inside live execution identity.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "action": {
-                "const": "set",
-                "type": "string"
-              },
-              "value": {
-                "$ref": "#/$defs/WireLiveAuthBindingRef"
-              }
-            },
-            "required": [
-              "action",
-              "value"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "action": {
-                "const": "clear",
-                "type": "string"
-              }
-            },
-            "required": [
-              "action"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "WireProvider": {
-        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins each provider's canonical wire name with an explicit\n`#[serde(rename)]` (`\"openai\"`, `\"anthropic\"`, `\"gemini\"`, …). The core\n`Provider` enum now agrees (its `OpenAI` variant carries an explicit\n`#[serde(rename = \"openai\")]` so `rename_all = \"snake_case\"` can no longer\nmangle it into `\"open_a_i\"`); `WireProvider` exists as the dedicated wire\nmirror so SDK consumers get a stable, explicitly-named contract plus the\nfail-loud `Unknown` sentinel below, per the wire-mirror dogma used\nthroughout this module.",
-        "oneOf": [
-          {
-            "enum": [
-              "anthropic",
-              "openai",
-              "gemini",
-              "self_hosted",
-              "other"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "unknown",
-            "description": "Fail-loud sentinel for future core variants. When a new\n`Provider` variant is added, add an explicit arm in the `From`\nimpl rather than letting it fall through to `Unknown`.\n\nUnlike other wire-mirror `Unknown` variants, this is a unit\nvariant because `WireProvider` serializes as a flat string value\n(not an internally-tagged object). The debug payload from the\nsource variant is captured in the `WireConversionError::Provider`\nerror on the reverse path (and logged server-side in the forward\n`From<Provider>` impl via `debug_assert!`).",
-            "type": "string"
-          }
-        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -78736,7 +78615,7 @@
             "type": "null"
           }
         ],
-        "description": "Channel-scoped execution identity. This never mutates the durable\nsession identity and requires negotiated\n[`LIVE_EXECUTION_IDENTITY_V1_CAPABILITY`] support."
+        "description": "Channel-scoped execution profile selection. The host owns the full\nexecution identity. This never mutates the durable session identity and\nrequires negotiated\n[`LIVE_EXECUTION_IDENTITY_V1_CAPABILITY`] support."
       },
       "seed_max_chars": {
         "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn dialogue\nsuffix window; an existing compaction-summary head may be retained. If\nany history is omitted, the open result reports degraded continuity\nrather than pretending the bounded replay was complete.\n\nOrdered System and SystemNotice messages are excluded from this replay\nbudget and projected separately from the full active materialized\ntranscript. Optional System message identity is never provider-projected.\nCanonical multimodal identity, tombstone, and accounting state remain\noutside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",

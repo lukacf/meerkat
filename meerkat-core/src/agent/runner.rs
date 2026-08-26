@@ -1809,10 +1809,8 @@ where
             &mut self.cancel_after_boundary_rx,
             bridge_cancel_after_boundary_rx,
         );
-        let saved_transient_turn_context_state = std::mem::replace(
-            &mut self.transient_turn_context_state,
-            crate::session::TransientTurnContextStateHandle::new(),
-        );
+        let saved_transient_turn_context_state =
+            std::mem::take(&mut self.transient_turn_context_state);
         let saved_compactor = self.compactor.take();
         let saved_compaction_curator = self.compaction_curator.take();
         let saved_last_input_tokens = self.last_input_tokens;

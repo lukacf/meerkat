@@ -9680,6 +9680,9 @@ ORDER BY runtime_id";
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        // Keep every transactional boundary component explicit here; callers
+        // must not hide the optional write fence inside an ambient store.
+        #[allow(clippy::too_many_arguments)]
         async fn commit_prepared_whole_blob_boundary(
             &self,
             runtime_id: &LogicalRuntimeId,

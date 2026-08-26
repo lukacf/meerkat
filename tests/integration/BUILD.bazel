@@ -795,6 +795,7 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//meerkat:cargo_manifest",
         "//meerkat:package_runfiles",
     ],
     env = {

@@ -47,6 +47,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # Report grammar, transcribed from a real cargo-semver-checks 0.48.0 run
 # (fixture: scripts/fixtures/semver-breaks/report-meerkat-sqlite-0.8.22.txt).
 FAILURE_HEADER_RE = re.compile(r"^--- failure ([A-Za-z0-9_]+):")
+WARNING_HEADER_RE = re.compile(r"^--- warning ([A-Za-z0-9_]+):")
 CHECKING_RE = re.compile(r"^\s+Checking (\S+) v")
 FINISHED_RE = re.compile(r"^\s+Finished \[[^\]]*\] (\S+)\s*$")
 SUMMARY_RE = re.compile(r"^\s+Summary\b")
@@ -205,8 +206,63 @@ def _symbols_derive_trait_impl_removed(text: str) -> tuple[str, ...] | None:
     return _path_symbols(match.group(1)) + _path_symbols(match.group(2))
 
 
+def _symbols_auto_trait_impl_removed(text: str) -> tuple[str, ...] | None:
+    # type LiveWebrtcAnswerAccepted is no longer Sync
+    match = re.fullmatch(
+        r"type\s+([A-Za-z0-9_:]+)\s+is\s+no\s+longer\s+([A-Za-z0-9_:]+)",
+        text,
+    )
+    if not match:
+        return None
+    return _path_symbols(match.group(1)) + _path_symbols(match.group(2))
+
+
+def _symbols_struct_missing(text: str) -> tuple[str, ...] | None:
+    # struct meerkat_live::host::LiveChannelId
+    match = re.fullmatch(r"struct\s+([A-Za-z0-9_:]+)", text)
+    return _path_symbols(match.group(1)) if match else None
+
+
+def _symbols_callable_parameter_count_changed(text: str) -> tuple[str, ...] | None:
+    # meerkat_rpc::handlers::live::handle_live_close now takes 6 parameters instead of 5
+    # SessionRuntime::truncate_live_output takes 6 parameters in <baseline>, but now ...
+    match = re.match(
+        r"([A-Za-z0-9_:]+)\s+(?:now\s+)?takes\s+\d+\s+"
+        r"(?:parameters\b|instead\s+of\s+\d+\s+parameters\b)",
+        text,
+    )
+    return _symbols_path_member(match.group(1)) if match else None
+
+
+def _symbols_function_parameter_count_changed(text: str) -> tuple[str, ...] | None:
+    symbols = _symbols_callable_parameter_count_changed(text)
+    return symbols[-1:] if symbols else None
+
+
+def _symbols_method_generic_count_changed(text: str) -> tuple[str, ...] | None:
+    # PendingPromotionCleanup::recover takes 1 generic types instead of 0
+    match = re.match(
+        r"([A-Za-z0-9_:]+)\s+takes\s+\d+\s+generic\s+types\s+instead\s+of\s+\d+",
+        text,
+    )
+    return _symbols_path_member(match.group(1)) if match else None
+
+
+def _symbols_partial_ord_struct_field_reordered(text: str) -> tuple[str, ...] | None:
+    # SessionLlmCapabilitySurface.image_generation moved from position 9 to 10
+    match = re.fullmatch(
+        r"([A-Za-z0-9_:]+)\.([A-Za-z0-9_]+)\s+moved\s+from\s+position\s+\d+\s+to\s+\d+",
+        text,
+    )
+    if not match:
+        return None
+    return _path_symbols(match.group(1)) + (match.group(2),)
+
+
 STRUCTURAL_EXTRACTORS = {
+    "auto_trait_impl_removed": _symbols_auto_trait_impl_removed,
     "constructible_struct_adds_field": _symbols_constructible_struct_adds_field,
+    "constructible_struct_adds_private_field": _symbols_constructible_struct_adds_field,
     "enum_no_repr_variant_discriminant_changed": (
         _symbols_enum_no_repr_variant_discriminant_changed
     ),
@@ -215,8 +271,15 @@ STRUCTURAL_EXTRACTORS = {
     "enum_variant_missing": _symbols_enum_variant_missing,
     "derive_trait_impl_removed": _symbols_derive_trait_impl_removed,
     "inherent_method_missing": _symbols_inherent_method_missing,
+    "function_parameter_count_changed": _symbols_function_parameter_count_changed,
+    "method_parameter_count_changed": _symbols_callable_parameter_count_changed,
+    "method_requires_different_generic_type_params": _symbols_method_generic_count_changed,
+    "partial_ord_enum_variants_reordered": _symbols_enum_variant_added,
+    "partial_ord_struct_fields_reordered": _symbols_partial_ord_struct_field_reordered,
+    "struct_missing": _symbols_struct_missing,
     "struct_pub_field_missing": _symbols_struct_pub_field_missing,
     "trait_method_added": _symbols_trait_method_added,
+    "trait_method_parameter_count_changed": _symbols_callable_parameter_count_changed,
 }
 
 
@@ -270,7 +333,7 @@ def parse_report(text: str) -> ReportParse:
     for raw_line in ANSI_RE.sub("", text).splitlines():
         line = raw_line.rstrip("\n")
 
-        header = FAILURE_HEADER_RE.match(line)
+        header = FAILURE_HEADER_RE.match(line) or WARNING_HEADER_RE.match(line)
         if header:
             current_lint = header.group(1)
             collecting = False

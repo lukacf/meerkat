@@ -163,6 +163,84 @@ class ReportParsingTests(unittest.TestCase):
                 self.assertTrue(structural)
                 self.assertEqual(symbols, expected)
 
+    def test_extracts_new_0_8_30_callable_and_type_shapes(self) -> None:
+        cases = [
+            (
+                "auto_trait_impl_removed",
+                "type LiveWebrtcAnswerAccepted is no longer Sync",
+                ("LiveWebrtcAnswerAccepted", "Sync"),
+            ),
+            (
+                "constructible_struct_adds_private_field",
+                "field RealtimeSessionOpenProjection.owner_session_id",
+                ("RealtimeSessionOpenProjection", "owner_session_id"),
+            ),
+            (
+                "function_parameter_count_changed",
+                "meerkat_rpc::handlers::live::handle_live_close now takes 6 parameters instead of 5",
+                ("handle_live_close",),
+            ),
+            (
+                "method_parameter_count_changed",
+                "meerkat_rpc::session_runtime::SessionRuntime::truncate_live_output takes 6 parameters in /baseline.rs:1, but now takes 8 parameters",
+                ("SessionRuntime", "truncate_live_output"),
+            ),
+            (
+                "method_requires_different_generic_type_params",
+                "meerkat::session_runtime::PendingPromotionCleanup::recover takes 1 generic types instead of 0",
+                ("PendingPromotionCleanup", "recover"),
+            ),
+            (
+                "partial_ord_enum_variants_reordered",
+                "MeerkatMachineEffectVariant::Close moved from position 1 to 2",
+                ("MeerkatMachineEffectVariant", "Close"),
+            ),
+            (
+                "partial_ord_struct_fields_reordered",
+                "SessionLlmCapabilitySurface.image_generation moved from position 9 to 10",
+                ("SessionLlmCapabilitySurface", "image_generation"),
+            ),
+            (
+                "struct_missing",
+                "struct meerkat_live::host::LiveChannelId",
+                ("LiveChannelId",),
+            ),
+            (
+                "trait_method_parameter_count_changed",
+                "LiveProjectionSink::truncate_assistant_transcript now takes 8 instead of 6 parameters",
+                ("LiveProjectionSink", "truncate_assistant_transcript"),
+            ),
+        ]
+        for lint_id, item, expected in cases:
+            with self.subTest(lint_id=lint_id):
+                symbols, structural = gate.extract_symbols(lint_id, item)
+                self.assertTrue(structural)
+                self.assertEqual(symbols, expected)
+
+    def test_warning_header_does_not_inherit_previous_failure_lint(self) -> None:
+        report = """\
+    Checking crate v1.0.0 -> v1.0.1
+--- failure trait_method_parameter_count_changed: changed ---
+Failed in:
+  LiveProjectionSink::truncate now takes 8 instead of 6 parameters, in /repo/a.rs:1
+--- warning partial_ord_enum_variants_reordered: reordered ---
+Failed in:
+  Effect::Close moved from position 1 to 2, in /repo/b.rs:2
+     Summary semver requires new major version
+    Finished [ 0.1s] crate
+"""
+        parsed = gate.parse_report(report)
+        self.assertEqual(
+            [(finding.lint_id, finding.symbols) for finding in parsed.findings],
+            [
+                (
+                    "trait_method_parameter_count_changed",
+                    ("LiveProjectionSink", "truncate"),
+                ),
+                ("partial_ord_enum_variants_reordered", ("Effect", "Close")),
+            ],
+        )
+
     def test_observed_message_shapes_still_require_the_changed_member(self) -> None:
         cases = [
             (

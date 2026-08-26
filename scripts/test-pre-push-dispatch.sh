@@ -298,6 +298,25 @@ if ! cmp -s "$expected_bb_args" "$BB_ARG_LOG"; then
   exit 1
 fi
 
+# The lock gate must also invoke bb successfully when no detached-worktree
+# output base is supplied. Bash 3.2 treats expansion of an empty array under
+# nounset as an error, so this is a distinct portability contract.
+: > "$BB_ARG_LOG"
+BUILDBUDDY_BB="$FAKE_BB" \
+  MEERKAT_DISPATCH_BB_ARG_LOG="$BB_ARG_LOG" \
+  MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE= \
+  "$REPO_ROOT/scripts/pre-push-bazel-locks.sh" --require-bb >/dev/null
+cat > "$expected_bb_args" <<'EOF'
+mod
+deps
+--lockfile_mode=error
+EOF
+if ! cmp -s "$expected_bb_args" "$BB_ARG_LOG"; then
+  echo "Bazel lock gate did not support an empty startup-argument set" >&2
+  diff -u "$expected_bb_args" "$BB_ARG_LOG" >&2 || true
+  exit 1
+fi
+
 assert_rejected_without_invocation() {
   local label="$1"
   local stdin_payload="$2"

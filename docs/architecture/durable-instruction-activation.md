@@ -428,14 +428,16 @@ errors. They do not classify state or rebuild receipts.
 
 The reviewed durable activation authority is integrated into the release
 authority's exact qualified realtime Meerkat head for the 0.8.30 candidate.
-Its manifest and lockfile both pin the public reviewed `oai-rt-rs` merge commit
-`f308903654073bf7cdf0db154ae5cceb006934b6`. Until the candidate is merged,
-tagged, and published, this exact integration commit remains development Git
-truth rather than a released package.
+Its manifest and lockfile both resolve the public `oai-rt-rs` 0.4.1 release,
+tagged from exact commit `c051ee75479aaf71a8f1fd5cef2ea2bbe90f15e1` and
+independently verified from crates.io with SHA-256
+`fe8d87027059933028b385e8ea9059d452cad805c632531ed3c20314492b6aa8`.
+Until the candidate is merged, tagged, and published, this exact integration
+commit remains development Git truth rather than a released package.
 
 MobKit binds its Meerkat dependency to the exact origin-reachable integration
 commit, not to a package release or movable branch, and preserves the same
-locked Realtime source. Cross-repository CI consequently tests the development
+locked Realtime release. Cross-repository CI consequently tests the development
 graph it claims to review.
 
 After the integrated gate, the release authority owns BuildBuddy Turbo S

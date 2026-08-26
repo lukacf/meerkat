@@ -234,16 +234,16 @@ else
 fi
 
 oai_rt_rs_version="$(awk -F'"' '/^oai-rt-rs = / { print $2; exit }' Cargo.toml)"
-if [[ -n "${oai_rt_rs_version}" ]] &&
-  grep -Fq 'oai-rt-rs = { path = "third-party/oai-rt-rs" }' Cargo.toml &&
-  grep -Fq '//third-party/oai-rt-rs:package_runfiles' BUILD.bazel &&
-  grep -Fq 'name = "package_runfiles"' third-party/oai-rt-rs/BUILD.bazel &&
-  grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
-  grep -Fq 'additive_build_file_content' MODULE.bazel &&
-  grep -Fq "crates__oai-rt-rs-${oai_rt_rs_version}" MODULE.bazel.lock; then
-  pass "oai-rt-rs path patch is portable and exported to remote runfiles"
+if [[ "${oai_rt_rs_version}" == "=0.4.1" ]] &&
+  grep -Fq 'features = ["experimental-gpt-live"]' Cargo.toml &&
+  ! grep -Fq 'oai-rt-rs = { path = ' Cargo.toml &&
+  [[ ! -e third-party/oai-rt-rs/Cargo.toml ]] &&
+  ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
+  grep -Fq 'crates__oai-rt-rs-0.4.1' MODULE.bazel.lock &&
+  ! grep -Fq 'third-party/oai-rt-rs' MODULE.bazel.lock; then
+  pass "oai-rt-rs resolves the published experimental GPT Live crate"
 else
-  bad "oai-rt-rs path patch is missing portable remote-runfiles plumbing"
+  bad "oai-rt-rs is not locked to the published experimental GPT Live crate"
 fi
 
 if grep -Fq -- '--retry 5' scripts/install-buildbuddy-cli &&

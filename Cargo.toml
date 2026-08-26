@@ -51,9 +51,6 @@ members = [
     "test-fixtures/machine-dsl-tests",
     "xtask",
 ]
-# Vendored [patch.crates-io] sources are not workspace members.
-exclude = ["third-party/oai-rt-rs"]
-
 [workspace.package]
 version = "0.8.29"
 edition = "2024"
@@ -183,9 +180,7 @@ meerkat-machine-dsl = { version = "0.8.29", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.29", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.29", path = "meerkat-store", default-features = false }
 meerkat-store-conformance = { version = "0.8.29", path = "meerkat-store-conformance" }
-# Development-only immutable binding for the coordinated GPT Live feature.
-# Replace it with the published protocol crate during the follow-on release.
-oai-rt-rs = { version = "0.4.0", git = "https://github.com/lukacf/oai-rt-rs.git", rev = "f308903654073bf7cdf0db154ae5cceb006934b6" }
+oai-rt-rs = { version = "=0.4.1", features = ["experimental-gpt-live"] }
 
 [profile.dev]
 split-debuginfo = "off"

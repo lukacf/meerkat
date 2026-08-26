@@ -5,12 +5,12 @@ module(
 
 bazel_dep(name = "rules_rust", version = "0.70.0")
 
-# crate_universe records in-tree [patch.crates-io] path dependencies (e.g.
-# third-party/oai-rt-rs) with the absolute path of whichever checkout last
-# evaluated the extension, which breaks every other machine. The patch makes
-# the generated repo specs in MODULE.bazel.lock store those paths
-# workspace-relative and rebases them onto the consuming workspace root when
-# the local_crate_mirror repository is fetched.
+# crate_universe records in-tree [patch.crates-io] path dependencies with the
+# absolute path of whichever checkout last evaluated the extension, which
+# breaks every other machine. The patch makes generated repo specs in
+# MODULE.bazel.lock store those paths workspace-relative and rebases them onto
+# the consuming workspace root when the local_crate_mirror repository is
+# fetched.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
@@ -155,20 +155,6 @@ register_toolchains(
 )
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
-crate.annotation(
-    additive_build_file_content = """
-# Export the complete in-tree path dependency so nested Cargo builds running
-# from Bazel runfiles can resolve the workspace [patch.crates-io] entry.
-filegroup(
-    name = "package_runfiles",
-    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
-    visibility = ["//visibility:public"],
-)
-""",
-    crate = "oai-rt-rs",
-    repositories = ["crates"],
-    version = "0.4.0",
-)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",

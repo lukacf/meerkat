@@ -10,8 +10,6 @@ fi
 
 required=(
   "Cargo.toml"
-  "third-party/oai-rt-rs/Cargo.toml"
-  "third-party/oai-rt-rs/src/lib.rs"
 )
 
 for path in "${required[@]}"; do
@@ -21,9 +19,15 @@ for path in "${required[@]}"; do
   fi
 done
 
-if ! grep -Fq 'oai-rt-rs = { path = "third-party/oai-rt-rs" }' "${workspace_root}/Cargo.toml"; then
-  echo "error: test fixture no longer describes the oai-rt-rs Cargo path patch" >&2
+if ! grep -Fq 'oai-rt-rs = { version = "=0.4.1", features = ["experimental-gpt-live"] }' \
+  "${workspace_root}/Cargo.toml"; then
+  echo "error: workspace no longer binds the published experimental oai-rt-rs crate" >&2
   exit 1
 fi
 
-echo "Bazel workspace runfiles contain the oai-rt-rs Cargo path patch"
+if [[ -e "${workspace_root}/third-party/oai-rt-rs/Cargo.toml" ]]; then
+  echo "error: Bazel workspace runfiles still contain the obsolete oai-rt-rs vendor" >&2
+  exit 1
+fi
+
+echo "Bazel workspace runfiles use the published experimental oai-rt-rs crate"

@@ -10297,6 +10297,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Keep both correlation and terminal truth single-valued: divergent
         // recovery facts are corruption, not an invitation for the shell to
         // overwrite machine truth.
+        //
+        // "Divergent" is scoped by run attribution. `terminal_outcome` /
+        // `terminal_cause_kind` are the facts of whichever run
+        // `turn_terminal_run_id` names; `Prepare` clears the attribution for a
+        // newly bound run but retains the facts, and only StartConversationRun
+        // clears them. A run that is terminalized WITHOUT ever starting a turn
+        // - the staging-refusal abandonment - therefore reaches recovery while
+        // the machine still carries the PREVIOUS run's facts. Those facts are
+        // not evidence about this run, so comparing against them is not a
+        // corruption check; it is a false one that fails the drain closed and
+        // stops the runtime loop. Compare strictly only when the retained
+        // facts belong to the run being recovered.
         transition RecoverRuntimeCompletionResultCorrelation {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input RecoverRuntimeCompletionResultCorrelation { run_id, terminal_outcome, terminal_cause_kind }
@@ -10335,11 +10347,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "terminal_outcome_absent_or_same" {
                 terminal_outcome == None
                 || self.terminal_outcome == None
+                || self.turn_terminal_run_id != Some(run_id)
                 || self.terminal_outcome == terminal_outcome
             }
             guard "terminal_cause_absent_or_same" {
                 terminal_cause_kind == None
                 || self.terminal_cause_kind == None
+                || self.turn_terminal_run_id != Some(run_id)
                 || self.terminal_cause_kind == terminal_cause_kind
             }
             guard "cancelled_has_no_existing_failure_cause" {

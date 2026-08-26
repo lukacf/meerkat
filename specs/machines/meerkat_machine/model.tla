@@ -5283,8 +5283,8 @@ RecoverRuntimeCompletionResultCorrelationInitializing(run_id, arg_terminal_outco
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
@@ -5299,8 +5299,8 @@ RecoverRuntimeCompletionResultCorrelationIdle(run_id, arg_terminal_outcome, arg_
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
@@ -5315,8 +5315,8 @@ RecoverRuntimeCompletionResultCorrelationAttached(run_id, arg_terminal_outcome, 
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
@@ -5331,8 +5331,8 @@ RecoverRuntimeCompletionResultCorrelationRunning(run_id, arg_terminal_outcome, a
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -5347,8 +5347,8 @@ RecoverRuntimeCompletionResultCorrelationRetired(run_id, arg_terminal_outcome, a
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
@@ -5363,8 +5363,8 @@ RecoverRuntimeCompletionResultCorrelationStopped(run_id, arg_terminal_outcome, a
     /\ (session_id # None)
     /\ (IF (runtime_completion_result_run_id = None) THEN TRUE ELSE (runtime_completion_result_run_id = Some(run_id)))
     /\ (IF ((arg_terminal_outcome = None) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("Cancelled")) /\ (arg_terminal_cause_kind = None)) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("BudgetExhausted")) /\ (arg_terminal_cause_kind = Some("BudgetExhausted"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind = Some("TimeBudgetExceeded"))) THEN TRUE ELSE (IF ((arg_terminal_outcome = Some("StructuredOutputValidationFailed")) /\ (arg_terminal_cause_kind = Some("StructuredOutputValidationFailed"))) THEN TRUE ELSE ((arg_terminal_outcome = Some("Failed")) /\ (arg_terminal_cause_kind # None) /\ (arg_terminal_cause_kind # Some("Unknown")) /\ (arg_terminal_cause_kind # Some("BudgetExhausted")) /\ (arg_terminal_cause_kind # Some("TimeBudgetExceeded")) /\ (arg_terminal_cause_kind # Some("StructuredOutputValidationFailed"))))))))
-    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome)))
-    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind)))
+    /\ (IF (arg_terminal_outcome = None) THEN TRUE ELSE (IF (terminal_outcome = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_outcome = arg_terminal_outcome))))
+    /\ (IF (arg_terminal_cause_kind = None) THEN TRUE ELSE (IF (terminal_cause_kind = None) THEN TRUE ELSE (IF (turn_terminal_run_id # Some(run_id)) THEN TRUE ELSE (terminal_cause_kind = arg_terminal_cause_kind))))
     /\ (IF (arg_terminal_outcome # Some("Cancelled")) THEN TRUE ELSE (terminal_cause_kind = None))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1

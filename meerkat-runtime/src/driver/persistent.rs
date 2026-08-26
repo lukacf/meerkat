@@ -2015,6 +2015,42 @@ impl PersistentRuntimeDriver {
         }
     }
 
+    /// Persist the interaction-terminal publication obligation staged for
+    /// inputs the machine abandoned without ever running them.
+    ///
+    /// The abandonment itself is already durable (its own commit); this
+    /// records the exact completion-batch and interaction-outbox rows that
+    /// make the terminal publishable and, after a crash, re-drainable. It is
+    /// deliberately a second commit rather than a widened first one: the
+    /// abandoned subset - and therefore the recipient set - is only known
+    /// after the machine has resolved every refused input.
+    ///
+    /// Fail-closed: on error the caller restores the staged rows, so the
+    /// durable row stays a terminal directed input with no outbox, which
+    /// `input_state_payload_is_retirable` already refuses to retire.
+    pub(crate) async fn persist_terminal_publication_obligation(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let records = self
+            .inner
+            .authorized_stored_input_states_for_ids(input_ids)?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        match self
+            .store
+            .persist_input_states_atomically(&self.runtime_id, &records)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => Err(RuntimeDriverError::Internal(format!(
+                "atomic abandoned interaction terminal obligation persist failed: {error}"
+            ))),
+        }
+    }
+
     pub(crate) async fn abandon_pending_inputs(
         &mut self,
         reason: InputAbandonReason,

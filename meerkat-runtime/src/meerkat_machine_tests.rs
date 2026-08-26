@@ -3642,7 +3642,7 @@ async fn mixed_directed_max_attempt_failure_terminalizes_only_exhausted_contribu
     .await
     .expect("max-attempt terminal must resolve the exhausted waiter");
     match first_completion {
-        CompletionOutcome::AbandonedWithError { reason, error } => {
+        CompletionOutcome::AbandonedWithError { reason, error, .. } => {
             assert_eq!(reason, FAILURE_DETAIL);
             assert_eq!(
                 error.kind,
@@ -39171,6 +39171,7 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
         crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
             reason,
             abandoned_input_ids,
+            ..
         } => {
             assert!(
                 reason.contains("did not authorize StageForRun"),
@@ -39205,6 +39206,448 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
         driver.input_phase(&accepted_input_id),
         Some(crate::input_state::InputLifecycleState::Queued),
         "staging failure should leave the queued input untouched"
+    );
+}
+
+/// Build an ephemeral driver with a registered session authority, which every
+/// directed terminal outbox needs as its owner binding.
+fn stage_refusal_driver(name: &'static str) -> SharedDriver {
+    let runtime_id = LogicalRuntimeId::new(name);
+    let session_id = SessionId::new();
+    let mut ephemeral = EphemeralRuntimeDriver::new(runtime_id.clone());
+    ephemeral
+        .install_registered_authority_for_test(
+            crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+            Some(&runtime_id),
+            Some(1),
+            Some(crate::meerkat_machine::dsl::Generation::from(1)),
+            Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                "stage-refusal-epoch".to_string(),
+            )),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )
+        .expect("stage-refusal fixture installs a registered session authority");
+    Arc::new(tokio::sync::Mutex::new(DriverEntry::Ephemeral(ephemeral)))
+}
+
+/// Burn the generated staging attempts for one queued input by refusing the
+/// batch it heads, and return the refusal that finally terminalized it.
+///
+/// The batch carries an extra unknown id so the generated authority refuses
+/// every attempt: that is the exact field shape (an input the machine will not
+/// stage), reproduced without reaching into the authorizer.
+async fn drive_stage_refusal_to_the_attempt_cap(
+    driver: &SharedDriver,
+    input_id: &InputId,
+) -> (
+    Vec<InputId>,
+    Option<crate::meerkat_machine::driver::StageRefusalAbandonment>,
+    RunId,
+) {
+    for attempt in 0..8 {
+        let run_id = RunId::new();
+        let outcome = prepare_runtime_loop_batch_start(
+            driver,
+            run_id.clone(),
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![
+                input_id.clone(),
+                InputId::new(),
+            ]),
+        )
+        .await
+        .expect("a staging refusal is a typed outcome, not a loop failure");
+        match outcome {
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
+                abandoned_input_ids,
+                abandonment,
+                ..
+            } => {
+                if !abandoned_input_ids.is_empty() {
+                    return (abandoned_input_ids, abandonment, run_id);
+                }
+                assert!(
+                    abandonment.is_none(),
+                    "a deferred refusal owes no terminal delivery (attempt {attempt})"
+                );
+            }
+            other => panic!("staging an unstageable batch must refuse, got {other:?}"),
+        }
+    }
+    panic!("the generated max-attempts valve never terminalized the refused input");
+}
+
+/// D1. A directed input abandoned at the staging-attempt cap must leave a
+/// durable interaction terminal behind, because that terminal is the only
+/// thing any host actually watches.
+///
+/// Before this, the abandonment was reported to waiters as
+/// `CompletionWaitError::AuthorityUnavailable(String)` - the "mechanical or
+/// unknown loss" variant - and nothing durable named the interaction at all.
+/// The mob's directed-turn watcher reads that variant on an explicit no-op arm
+/// and retains Pending, so a flow step or peer wait sat Pending for the life of
+/// the process while the runtime store already read Abandoned.
+#[tokio::test]
+async fn stage_refusal_at_the_attempt_cap_materializes_a_durable_directed_terminal() {
+    let driver = stage_refusal_driver("stage-refusal-directed-terminal");
+    let (input, input_id) = directed_interrupt_yielding_peer_input("directed step that never runs");
+    let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
+    {
+        let mut entry = driver.lock().await;
+        assert!(
+            entry
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .expect("directed peer input should be accepted")
+                .is_accepted()
+        );
+    }
+
+    let (abandoned_input_ids, abandonment, run_id) =
+        drive_stage_refusal_to_the_attempt_cap(&driver, &input_id).await;
+    assert_eq!(abandoned_input_ids, vec![input_id.clone()]);
+    assert!(
+        matches!(
+            abandonment,
+            Some(
+                crate::meerkat_machine::driver::StageRefusalAbandonment::DurableInteractionTerminal
+            )
+        ),
+        "a directed abandonment owes a durable interaction terminal, got {abandonment:?}"
+    );
+
+    let mut entry = driver.lock().await;
+    assert_eq!(
+        entry.as_driver().input_phase(&input_id),
+        Some(crate::input_state::InputLifecycleState::Abandoned),
+    );
+    // The carrier the ordinary recovery drain publishes. Its absence is what
+    // left the mob Pending forever, and it is also why the terminal row could
+    // never retire: `input_state_payload_is_retirable` treats a directed
+    // terminal without an outbox as an unmaterialized publication obligation.
+    let batches = entry
+        .interaction_terminal_recovery_batches()
+        .await
+        .expect("the staged carrier must be a valid recovery batch");
+    let batch = match batches.as_slice() {
+        [batch] => batch,
+        other => panic!(
+            "expected exactly one durable terminal carrier, got {other:?}",
+            other = other.len()
+        ),
+    };
+    assert_eq!(batch.interaction_ids, vec![interaction_id]);
+    assert_eq!(batch.input_ids, vec![input_id.clone()]);
+    assert_eq!(
+        batch.batch_key,
+        crate::input_state::InteractionTerminalBatchKey::Run { run_id },
+    );
+    // The typed abandon cause survives to the durable ledger and to any waiter
+    // resolved from it, rather than being flattened into a display string.
+    assert_eq!(
+        entry.uniform_input_abandon_reason(std::slice::from_ref(&input_id)),
+        Some(crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }),
+    );
+    assert!(
+        matches!(
+            batch.terminal,
+            Some(
+                meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure { .. }
+            )
+        ),
+        "the durable candidate must carry typed failure metadata, got {:?}",
+        batch.terminal
+    );
+}
+
+/// Task 5. A fire-and-forget directed input - nobody registered a completion
+/// waiter - still gets the durable interaction terminal. The delivery this
+/// lane adds is publication-shaped, not waiter-shaped, so waiter presence
+/// cannot decide whether a host can observe the abandonment.
+#[tokio::test]
+async fn stage_refusal_publishes_a_directed_terminal_with_no_waiter_registered() {
+    let driver = stage_refusal_driver("stage-refusal-fire-and-forget");
+    let (input, input_id) = directed_interrupt_yielding_peer_input("fire-and-forget peer message");
+    let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
+    {
+        let mut entry = driver.lock().await;
+        assert!(
+            entry
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .expect("directed peer input should be accepted")
+                .is_accepted()
+        );
+    }
+
+    // No CompletionRegistry, and therefore no waiter, anywhere in this test.
+    let (abandoned_input_ids, abandonment, _run_id) =
+        drive_stage_refusal_to_the_attempt_cap(&driver, &input_id).await;
+    assert_eq!(abandoned_input_ids, vec![input_id.clone()]);
+    assert!(matches!(
+        abandonment,
+        Some(crate::meerkat_machine::driver::StageRefusalAbandonment::DurableInteractionTerminal)
+    ));
+
+    let mut entry = driver.lock().await;
+    let batches = entry
+        .interaction_terminal_recovery_batches()
+        .await
+        .expect("the staged carrier must be a valid recovery batch");
+    assert_eq!(
+        batches
+            .iter()
+            .flat_map(|batch| batch.interaction_ids.clone())
+            .collect::<Vec<_>>(),
+        vec![interaction_id],
+        "a waiter-less directed input must still own a publishable terminal"
+    );
+}
+
+/// Task 2. An input with no interaction identity has no durable event to
+/// publish, so its waiter is the only delivery - and that waiter must receive a
+/// typed TERMINAL FACT carrying the typed abandon cause, not
+/// `AuthorityUnavailable(String)`, which means "mechanical or unknown loss"
+/// and which the one in-tree consumer reads as explicitly non-terminal.
+#[tokio::test]
+async fn stage_refusal_gives_a_non_directed_waiter_the_typed_abandon_reason() {
+    let driver = stage_refusal_driver("stage-refusal-non-directed-waiter");
+    let (input, input_id) = interrupt_yielding_peer_input("non-directed peer message", None);
+    {
+        let mut entry = driver.lock().await;
+        assert!(
+            entry
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .expect("peer input should be accepted")
+                .is_accepted()
+        );
+    }
+    let mut registry = crate::completion::CompletionRegistry::new();
+    let handle = registry.register(input_id.clone());
+
+    let (abandoned_input_ids, abandonment, _run_id) =
+        drive_stage_refusal_to_the_attempt_cap(&driver, &input_id).await;
+    assert_eq!(abandoned_input_ids, vec![input_id.clone()]);
+    let Some(crate::meerkat_machine::driver::StageRefusalAbandonment::ProcessLocalOnly {
+        authority,
+        error,
+        abandon_reason,
+    }) = abandonment
+    else {
+        panic!("an input with no interaction identity owes a process-local terminal fact");
+    };
+    assert_eq!(
+        abandon_reason,
+        Some(crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }),
+    );
+    registry.resolve_process_local_runtime_completion_authorized(
+        std::iter::once(input_id),
+        None,
+        authority,
+        Some(error),
+        abandon_reason,
+    );
+
+    match handle.try_wait().await {
+        Ok(crate::completion::CompletionOutcome::AbandonedWithError {
+            abandon_reason,
+            error,
+            ..
+        }) => {
+            assert_eq!(
+                abandon_reason,
+                Some(crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }),
+                "the typed abandon cause must survive the waiter boundary, not become a string"
+            );
+            assert_eq!(
+                error.kind,
+                meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
+            );
+        }
+        other => panic!(
+            "a machine-terminalized input must resolve as a typed terminal fact, got {other:?}"
+        ),
+    }
+}
+
+/// Put the machine in the state EVERY session is in once it has run a single
+/// turn: retained `terminal_outcome` from that turn.
+///
+/// `Prepare` (fired by `machine_begin_run` for the NEXT run) clears
+/// `turn_terminal_run_id` and `runtime_completion_result_run_id` but not the
+/// terminal facts; only `StartConversationRun` clears those, and a staging
+/// refusal never starts a run. Every transition below is a real generated
+/// machine input, so the state under test is one production reaches, not one
+/// the test poked into place.
+async fn run_one_prior_turn_to_completion(driver: &SharedDriver) -> RunId {
+    let prior_run = RunId::new();
+    let mut entry = driver.lock().await;
+    crate::meerkat_machine::driver::machine_begin_run(&mut entry, prior_run.clone())
+        .expect("a registered session must admit a run");
+    {
+        let authority = entry.shared_dsl_authority();
+        let mut auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *auth,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RunCompleted {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(&prior_run),
+            },
+        )
+        .expect("a bound run may complete");
+        assert_eq!(
+            auth.state().terminal_outcome,
+            Some(mm_dsl::TurnTerminalOutcome::Completed),
+            "the prior turn must leave the retained terminal fact this test is about"
+        );
+    }
+    crate::meerkat_machine::driver::machine_apply_run_return_projection(
+        &mut entry,
+        &prior_run,
+        crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
+    )
+    .expect("a completed run must return its lifecycle binding");
+    prior_run
+}
+
+/// D1 regression, and the reason the first version of this lane could not
+/// work: the durable carrier must be publishable on a session that has ALREADY
+/// RUN A TURN - which is every session after its first turn, and therefore
+/// every session a mob directs follow-up work to.
+///
+/// This drives the real staging refusal, then walks the exact generated-
+/// authority chain `drain_recovered_interaction_terminal_outboxes` walks:
+/// `interaction_terminal_recovery_batches` (which previews
+/// `RecoverRuntimeCompletionResultCorrelation`), then the committing
+/// `machine_recover_runtime_completion_result_correlation`, then
+/// `machine_resolve_runtime_completion_result`, then
+/// `authorize_runtime_terminal_bundle`. Nothing published here is constructed
+/// by the test; the asserted event comes out of the runtime's own publisher.
+///
+/// Before the correlation guards learned run attribution, the FIRST of those
+/// calls returned `ValidationFailed` -> `InteractionTerminalPublicationError::
+/// Corrupt` -> the recovery drain gave up -> `process_queue` returned, which
+/// stops the runtime loop. The pre-lane defect was silence; this would have
+/// been a stopped loop.
+#[tokio::test]
+async fn stage_refusal_terminal_publishes_on_a_session_that_already_ran_a_turn() {
+    let driver = stage_refusal_driver("stage-refusal-after-prior-turn");
+    let prior_run = run_one_prior_turn_to_completion(&driver).await;
+
+    let (input, input_id) = directed_interrupt_yielding_peer_input("directed step that never runs");
+    let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
+    {
+        let mut entry = driver.lock().await;
+        assert!(
+            entry
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .expect("directed peer input should be accepted")
+                .is_accepted()
+        );
+    }
+
+    let (abandoned_input_ids, abandonment, run_id) =
+        drive_stage_refusal_to_the_attempt_cap(&driver, &input_id).await;
+    assert_ne!(run_id, prior_run);
+    assert_eq!(abandoned_input_ids, vec![input_id.clone()]);
+    assert!(matches!(
+        abandonment,
+        Some(crate::meerkat_machine::driver::StageRefusalAbandonment::DurableInteractionTerminal)
+    ));
+
+    let mut entry = driver.lock().await;
+    // The retained fact from the prior turn is still on the machine: this is
+    // the state the correlation guards used to reject.
+    {
+        let authority = entry.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            auth.state().terminal_outcome,
+            Some(mm_dsl::TurnTerminalOutcome::Completed),
+        );
+        assert_eq!(
+            auth.state().turn_terminal_run_id,
+            None,
+            "Prepare cleared the attribution while retaining the fact - that asymmetry is the defect"
+        );
+    }
+
+    let batches = entry.interaction_terminal_recovery_batches().await.expect(
+        "a staged carrier must stay publishable when the machine still holds a PRIOR run's \
+             terminal facts",
+    );
+    let batch = match batches.as_slice() {
+        [batch] => batch,
+        other => panic!(
+            "expected exactly one durable terminal carrier, got {}",
+            other.len()
+        ),
+    };
+    assert_eq!(batch.interaction_ids, vec![interaction_id]);
+
+    // The committing half of the same recovery, exactly as the drain applies
+    // it before publishing.
+    crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
+        &entry,
+        &run_id,
+        batch.terminal_recovery,
+    )
+    .expect("the drain's committing correlation recovery must be accepted");
+    let authority = crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+        &entry,
+        Some(&run_id),
+        batch.terminal_observation,
+        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .expect("generated completion authority must resolve the recovered abandonment");
+    let witness = entry
+        .input_terminal_completion_authorization_witness(&batch.input_ids)
+        .expect("the durable rows must authorize their own terminal batch");
+    let abandon_reason = entry.uniform_input_abandon_reason(&batch.input_ids);
+    let bundle = crate::completion::authorize_runtime_terminal_bundle(
+        &batch.interaction_ids,
+        batch.terminal.as_ref(),
+        authority,
+        witness,
+        batch.completion_error_metadata.clone(),
+        batch.runtime_termination_reason.as_deref(),
+        abandon_reason,
+    )
+    .expect("the recovered abandonment must authorize one exact terminal bundle");
+
+    // What the runtime actually publishes for this abandonment. The mob's
+    // durable-terminal scan reads exactly this event.
+    let published = match bundle.interaction_events() {
+        [event] => event.clone(),
+        other => panic!(
+            "expected one published interaction terminal, got {}",
+            other.len()
+        ),
+    };
+    let mut classifier = meerkat_core::turn_terminal::TurnTerminalClassifier::default();
+    let classified = classifier
+        .observe(&published)
+        .expect("the published interaction terminal must classify as a durable terminal");
+    assert!(
+        matches!(
+            classified.outcome,
+            meerkat_core::turn_terminal::TurnTerminalOutcome::Failed { .. }
+        ),
+        "an abandonment must publish a failed terminal, got {:?}",
+        classified.outcome
+    );
+    assert_eq!(
+        bundle.terminal_completion().outcome().abandon_reason(),
+        Some(&crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }),
+        "the typed abandon cause must reach the published bundle, not just the durable row"
     );
 }
 

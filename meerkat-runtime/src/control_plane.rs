@@ -202,6 +202,7 @@ fn spawn_nondirected_runless_terminal_handoff(
             terminal_completion_witness,
             None,
             Some(&reason),
+            None,
         )
         .map_err(|error| RuntimeDriverError::RecoveryCorruption {
             reason: format!("runtime termination projection failed: {error}"),
@@ -314,6 +315,7 @@ pub(crate) async fn publish_and_resolve_runless_runtime_termination_before(
         terminal_completion_witness,
         None,
         Some(reason),
+        None,
     )
     .map_err(|error| RuntimeDriverError::RecoveryCorruption {
         reason: format!("runtime termination projection failed: {error}"),
@@ -465,6 +467,7 @@ async fn drain_recovered_runless_runtime_terminations_classified(
             terminal_completion_witness,
             None,
             Some(&reason),
+            None,
         )
         .map_err(|error| {
             RunlessTerminalConvergenceError::corrupt(

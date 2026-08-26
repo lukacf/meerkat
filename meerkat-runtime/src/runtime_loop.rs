@@ -1126,16 +1126,21 @@ async fn publish_authorized_runtime_terminal_batch(
     finalization_error: Option<meerkat_core::TurnErrorMetadata>,
     already_finalized_events: Option<&[meerkat_core::event::AgentEvent]>,
 ) -> Result<(), InteractionTerminalPublicationError> {
-    let terminal_completion_witness = driver
-        .lock()
-        .await
-        .input_terminal_completion_authorization_witness(input_ids)
-        .map_err(|error| {
-            InteractionTerminalPublicationError::from_driver(
-                "exact terminal completion batch authorization failed",
-                error,
-            )
-        })?;
+    let (terminal_completion_witness, abandon_reason) = {
+        let driver = driver.lock().await;
+        let witness = driver
+            .input_terminal_completion_authorization_witness(input_ids)
+            .map_err(|error| {
+                InteractionTerminalPublicationError::from_driver(
+                    "exact terminal completion batch authorization failed",
+                    error,
+                )
+            })?;
+        // Read the typed lifecycle abandon cause from the same durable rows
+        // that authorized the batch, so the waiter outcome and the durable
+        // ledger cannot disagree about why an input will never run again.
+        (witness, driver.uniform_input_abandon_reason(input_ids))
+    };
     // A non-directed batch has no durable event/outbox carrier. Acquire the
     // driver and completion guards in canonical order before consuming its
     // one-shot generated authority, then synchronously transfer both guards
@@ -1165,6 +1170,7 @@ async fn publish_authorized_runtime_terminal_batch(
                 terminal_completion_witness,
                 finalization_error,
                 runtime_termination_reason,
+                abandon_reason.clone(),
             )
             .map_err(|error| {
                 InteractionTerminalPublicationError::Corrupt(format!(
@@ -1193,6 +1199,7 @@ async fn publish_authorized_runtime_terminal_batch(
         let owned_terminal = terminal.cloned();
         let owned_runtime_termination_reason = runtime_termination_reason.map(str::to_string);
         let owned_terminal_completion_witness = terminal_completion_witness;
+        let owned_abandon_reason = abandon_reason;
         let handoff = tokio::spawn(async move {
             let _authority_guard = authority_guard;
             let driver_guard = driver.lock_owned().await;
@@ -1217,6 +1224,7 @@ async fn publish_authorized_runtime_terminal_batch(
                 owned_terminal_completion_witness,
                 finalization_error,
                 owned_runtime_termination_reason.as_deref(),
+                owned_abandon_reason,
             )
             .map_err(|error| {
                 InteractionTerminalPublicationError::Corrupt(format!(
@@ -1265,6 +1273,7 @@ async fn publish_authorized_runtime_terminal_batch(
         terminal_completion_witness,
         finalization_error,
         runtime_termination_reason,
+        abandon_reason,
     )
     .map_err(|error| {
         InteractionTerminalPublicationError::Corrupt(format!(
@@ -1748,16 +1757,21 @@ async fn drain_recovered_input_terminal_completions(
                 error,
             )
         })?;
-        let terminal_completion_witness = driver
-            .lock()
-            .await
-            .input_terminal_completion_authorization_witness(&batch.input_ids)
-            .map_err(|error| {
-                InteractionTerminalPublicationError::from_driver(
-                    "terminal completion recovery batch authorization failed",
-                    error,
-                )
-            })?;
+        let (terminal_completion_witness, abandon_reason) = {
+            let driver = driver.lock().await;
+            let witness = driver
+                .input_terminal_completion_authorization_witness(&batch.input_ids)
+                .map_err(|error| {
+                    InteractionTerminalPublicationError::from_driver(
+                        "terminal completion recovery batch authorization failed",
+                        error,
+                    )
+                })?;
+            (
+                witness,
+                driver.uniform_input_abandon_reason(&batch.input_ids),
+            )
+        };
         let bundle = crate::completion::authorize_runtime_terminal_bundle(
             &[],
             batch.terminal.as_ref(),
@@ -1765,6 +1779,7 @@ async fn drain_recovered_input_terminal_completions(
             terminal_completion_witness,
             finalization_error,
             batch.runtime_termination_reason.as_deref(),
+            abandon_reason,
         )
         .map_err(|error| {
             InteractionTerminalPublicationError::Corrupt(format!(
@@ -2112,11 +2127,13 @@ fn resolve_process_local_failed_run_waiters(
         });
     match authorized {
         Ok((authority, error_metadata)) => {
+            let abandon_reason = driver.uniform_input_abandon_reason(&input_ids);
             completions.resolve_process_local_runtime_completion_authorized(
                 input_ids,
                 None,
                 authority,
                 error_metadata,
+                abandon_reason,
             );
         }
         Err(error) => completions.fail_inputs(input_ids, error),
@@ -2239,6 +2256,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
             let terminal = error_metadata
                 .clone()
                 .map(|error| CoreApplyTerminal::MachineTerminalFailure { error });
+            let abandon_reason = driver_guard.uniform_input_abandon_reason(&durable_input_ids);
             crate::completion::authorize_runtime_terminal_bundle(
                 &[],
                 terminal.as_ref(),
@@ -2246,6 +2264,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
                 terminal_completion_witness,
                 error_metadata,
                 None,
+                abandon_reason,
             )
         });
     let bundle = match bundle {
@@ -5444,6 +5463,7 @@ async fn process_queue(
                     Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
                         reason,
                         abandoned_input_ids,
+                        abandonment,
                     }) => {
                         // The machine refused to stage an accepted batch. Its
                         // members are already resolved (another attempt at the
@@ -5457,17 +5477,58 @@ async fn process_queue(
                             abandoned = abandoned_input_ids.len(),
                             "generated staging authority refused an accepted input batch; resolved through machine authority"
                         );
-                        if !abandoned_input_ids.is_empty()
-                            && let Some(completions) = completions.as_ref()
-                        {
-                            let mut completions = completions.lock().await;
-                            fail_completion_waiters(
-                                &mut completions,
-                                &abandoned_input_ids,
-                                format!("runtime batch staging refused: {reason}"),
-                            );
-                        }
                         drop(queue_authority_guard);
+                        // A machine-terminalized input is a terminal fact, not
+                        // mechanical loss. Reporting it as
+                        // `AuthorityUnavailable(String)` parked the mob's
+                        // directed-turn watcher on an explicit no-op arm and
+                        // left the tracked turn Pending for the life of the
+                        // process while the runtime store read Abandoned.
+                        match abandonment {
+                            None => {}
+                            Some(
+                                crate::meerkat_machine::driver::StageRefusalAbandonment::DurableInteractionTerminal,
+                            ) => {
+                                // The exact carrier is already durable. Publish
+                                // it through the ordinary recovery drain so the
+                                // live path and the post-crash path share one
+                                // publisher, one authority, and one receipt CAS.
+                                if drain_recovered_interaction_terminal_outboxes_until_clear(
+                                    driver,
+                                    completions,
+                                    executor,
+                                    authority_binding,
+                                    true,
+                                    RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+                                )
+                                .await
+                                {
+                                    return true;
+                                }
+                            }
+                            Some(
+                                crate::meerkat_machine::driver::StageRefusalAbandonment::ProcessLocalOnly {
+                                    authority,
+                                    error,
+                                    abandon_reason,
+                                },
+                            ) => {
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    completions
+                                        .resolve_process_local_runtime_completion_authorized(
+                                            abandoned_input_ids.clone(),
+                                            None,
+                                            authority,
+                                            Some(error),
+                                            abandon_reason,
+                                        );
+                                } else {
+                                    let attempt = authority.begin_surface_resolution();
+                                    attempt.abandon();
+                                }
+                            }
+                        }
                         continue;
                     }
                     Err(err) => {
@@ -9690,6 +9751,7 @@ mod tests {
                 crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::CallbackPending,
             ),
             None,
+            None,
         );
 
         match handle.wait_authorized().await {
@@ -9733,6 +9795,7 @@ mod tests {
                 crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Completed,
             ),
             None,
+            None,
         );
 
         match handle.wait_authorized().await {
@@ -9759,10 +9822,13 @@ mod tests {
                 crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
             ),
             Some(error),
+            None,
         );
 
         match handle.try_wait().await {
-            Ok(crate::completion::CompletionOutcome::AbandonedWithError { reason, error }) => {
+            Ok(crate::completion::CompletionOutcome::AbandonedWithError {
+                reason, error, ..
+            }) => {
                 assert_eq!(reason, "injected runtime turn failure");
                 assert_eq!(
                     error.kind,

@@ -2039,7 +2039,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::FlowStepDispatchRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
-        MobError::Internal(_) | MobError::ExternalMemberCleanupUncertain { .. } => {
+        MobError::Internal(_)
+        | MobError::CommsParticipantNameOccupied { .. }
+        | MobError::ExternalMemberCleanupUncertain { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         // Chokepoint-(a) scope denial: the caller's principal lacked the verb's
@@ -2963,6 +2965,15 @@ pub enum BoundedTurnFailure {
         session_id: SessionId,
         reason: String,
         error: Box<meerkat_core::TurnErrorMetadata>,
+        /// Typed lifecycle cause when the runtime's durable input row is
+        /// itself `Abandoned`, forwarded from
+        /// [`CompletionOutcome::abandon_reason`](meerkat_runtime::completion::CompletionOutcome::abandon_reason).
+        ///
+        /// A host waiting on a bounded delegate turn reads this to tell "this
+        /// work will never run again, and here is why" from "this attempt
+        /// failed", without parsing `reason`. `None` means the attempt failed
+        /// while the durable input is still machine-owned.
+        abandon_reason: Option<meerkat_runtime::input_state::InputAbandonReason>,
     },
     CompletedWithFinalizationFailure {
         session_id: SessionId,
@@ -3337,11 +3348,16 @@ fn bounded_runtime_turn_result(
                 error: Box::new(error),
             });
         }
-        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+            reason,
+            error,
+            abandon_reason,
+        } => {
             return Err(BoundedTurnFailure::AbandonedWithError {
                 session_id,
                 reason,
                 error: Box::new(error),
+                abandon_reason,
             });
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
@@ -3484,12 +3500,14 @@ pub(crate) fn legacy_exact_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(MobError::Internal(format!("turn abandoned: {reason}")))
         }
-        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
-            Err(MobError::Internal(format!(
-                "turn abandoned: {reason}; error={}",
-                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string())
-            )))
-        }
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+            reason,
+            error,
+            ..
+        } => Err(MobError::Internal(format!(
+            "turn abandoned: {reason}; error={}",
+            serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string())
+        ))),
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
             error,
         } => Err(MobError::Internal(format!(

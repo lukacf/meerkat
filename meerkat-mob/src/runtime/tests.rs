@@ -62481,6 +62481,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "host_capability_contract_violation".to_string()
         }
         MobError::Internal(reason) => format!("internal:{reason}"),
+        MobError::CommsParticipantNameOccupied { context, .. } => {
+            format!("comms_participant_name_occupied:{context}")
+        }
         MobError::ScopeDenied(denial) => format!("scope_denied:{:?}", denial.required),
         MobError::FlowStepDispatchRejected { kind, .. } => {
             format!("flow_step_dispatch_rejected:{kind}")
@@ -67969,6 +67972,7 @@ async fn test_finalization_failure_suppresses_buffered_success_terminal() {
             session_id: actual,
             reason,
             error,
+            abandon_reason,
         } => {
             assert_eq!(actual, &session_id);
             assert!(reason.contains("runtime session checkpoint failed after commit"));
@@ -67977,6 +67981,15 @@ async fn test_finalization_failure_suppresses_buffered_success_terminal() {
                     |detail| detail.contains("runtime session checkpoint failed after commit")
                 ),
                 "typed finalization failure must retain its machine cause: {error:?}"
+            );
+            // A post-commit finalization failure is NOT a lifecycle
+            // abandonment: the durable input was consumed by a run that
+            // executed. The typed abandon cause therefore stays absent, which
+            // is what lets a host tell "this attempt failed" from "this work
+            // will never run again".
+            assert_eq!(
+                abandon_reason, &None,
+                "a finalization failure must not claim a lifecycle abandon cause"
             );
         }
         other => panic!("expected typed finalization failure, got {other:?}"),

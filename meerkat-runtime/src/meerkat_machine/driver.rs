@@ -2358,6 +2358,36 @@ impl DriverEntry {
         Ok(batches)
     }
 
+    /// Typed lifecycle abandon cause shared by every recipient of one terminal
+    /// batch, read from the durable input rows instead of reconstructed from a
+    /// display string.
+    ///
+    /// `None` unless every recipient is durably `Abandoned` with the same
+    /// reason: a mixed batch carries no single lifecycle fact, and a
+    /// consumed/superseded/coalesced terminal is not an abandonment at all. A
+    /// waiter therefore never receives an abandon cause the durable ledger
+    /// does not agree on.
+    pub(crate) fn uniform_input_abandon_reason(
+        &self,
+        input_ids: &[InputId],
+    ) -> Option<crate::input_state::InputAbandonReason> {
+        let mut shared: Option<crate::input_state::InputAbandonReason> = None;
+        for input_id in input_ids {
+            let stored = self.as_driver().stored_input_state(input_id)?;
+            let crate::input_state::InputTerminalOutcome::Abandoned { reason } =
+                stored.seed.terminal_outcome?
+            else {
+                return None;
+            };
+            match shared.as_ref() {
+                Some(existing) if existing != &reason => return None,
+                Some(_) => {}
+                None => shared = Some(reason),
+            }
+        }
+        shared
+    }
+
     pub(crate) fn input_terminal_completion_authorization_witness(
         &self,
         input_ids: &[InputId],
@@ -4181,6 +4211,85 @@ impl DriverEntry {
             DriverEntry::Ephemeral(d) => d.resolve_unstageable_queued_inputs(input_ids),
             DriverEntry::Persistent(d) => d.resolve_unstageable_queued_inputs(input_ids).await,
         }
+    }
+
+    /// Materialize the durable publication obligation owed by directed inputs
+    /// the machine abandoned without ever running them.
+    ///
+    /// `input_state_payload_is_retirable` already classifies a terminal
+    /// directed row with no interaction outbox as an *unmaterialized
+    /// publication obligation* and refuses to retire its payload. Nothing ever
+    /// materialized that obligation for a staging refusal: the abandonment was
+    /// durable, the row stayed unretirable forever, and no host ever saw a
+    /// terminal - the mob's directed-turn watcher kept its tracked turn
+    /// Pending for the life of the process. Staging the exact `Run`-scoped
+    /// completion batch and interaction outboxes here hands the terminal to
+    /// the ordinary recovery drain, so the live path and the post-crash path
+    /// publish through one mechanism under one generated authority.
+    ///
+    /// Returns `false` when no abandoned input carries an interaction
+    /// identity: there is no durable event to publish and no obligation to
+    /// record, so the caller resolves waiters from generated authority alone.
+    pub(crate) async fn stage_abandoned_stage_refusal_terminals(
+        &mut self,
+        run_id: &RunId,
+        abandoned_input_ids: &[InputId],
+        error: meerkat_core::TurnErrorMetadata,
+    ) -> Result<bool, RuntimeDriverError> {
+        use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+
+        if abandoned_input_ids.is_empty() {
+            return Ok(false);
+        }
+        let candidate = crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(
+            Some(&CoreApplyTerminal::MachineTerminalFailure { error }),
+        );
+        let outboxes = authorized_staged_directed_terminal_outboxes(
+            self,
+            InteractionTerminalBatchScope::Run(run_id),
+            abandoned_input_ids,
+            candidate.clone(),
+        )?;
+        if outboxes.is_empty() {
+            return Ok(false);
+        }
+        let checkpoint = self.begin_terminal_transition("stage_refusal_terminal_preparation")?;
+        if let Err(error) = self.stage_input_terminal_completion_batch(
+            InteractionTerminalBatchScope::Run(run_id),
+            abandoned_input_ids,
+            candidate,
+            false,
+        ) {
+            return Err(self.fail_terminal_transition(
+                checkpoint,
+                "stage_refusal_completion_batch_stage",
+                error,
+            ));
+        }
+        if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
+            return Err(self.fail_terminal_transition(
+                checkpoint,
+                "stage_refusal_terminal_outbox_stage",
+                error,
+            ));
+        }
+        let persisted = match &*self {
+            DriverEntry::Persistent(persistent) => {
+                persistent
+                    .persist_terminal_publication_obligation(abandoned_input_ids)
+                    .await
+            }
+            DriverEntry::Ephemeral(_) => Ok(()),
+        };
+        if let Err(error) = persisted {
+            return Err(self.fail_terminal_transition(
+                checkpoint,
+                "stage_refusal_terminal_persist",
+                error,
+            ));
+        }
+        checkpoint.complete();
+        Ok(true)
     }
 
     pub(crate) async fn abandon_pending_inputs(
@@ -7230,7 +7339,79 @@ pub(crate) enum RuntimeLoopBatchStart {
     StageRefused {
         reason: String,
         abandoned_input_ids: Vec<InputId>,
+        /// How the machine's abandonment reaches a host. `None` means the
+        /// machine deferred every refused input behind the backlog, so there
+        /// is no terminal to deliver at all.
+        abandonment: Option<StageRefusalAbandonment>,
     },
+}
+
+/// The delivery the machine owes for inputs it terminalized at the staging
+/// retry cap.
+///
+/// A machine-terminalized input used to be reported to waiters as
+/// `CompletionWaitError::AuthorityUnavailable(String)` - the variant that
+/// means "mechanical/unknown loss" - which the mob's directed-turn watcher
+/// reads as explicitly non-terminal and answers by retaining Pending. Both
+/// shapes below are terminal facts instead, and the directed shape is durable.
+#[derive(Debug)]
+pub(crate) enum StageRefusalAbandonment {
+    /// Every abandoned directed input owns a durable, exact interaction
+    /// terminal carrier. The ordinary recovery drain publishes it into the
+    /// session event log and resolves waiters from the same authorized bundle,
+    /// so a crash between staging and publication converges rather than
+    /// stranding the terminal.
+    DurableInteractionTerminal,
+    /// No abandoned input carries an interaction identity, so no durable event
+    /// names it. Waiters still receive the typed terminal fact from generated
+    /// authority; a host with no waiter observes the durable `Abandoned` input
+    /// row (see `MeerkatMachine::input_terminal_status`).
+    ProcessLocalOnly {
+        authority: RuntimeCompletionResultAuthority,
+        error: meerkat_core::TurnErrorMetadata,
+        abandon_reason: Option<crate::input_state::InputAbandonReason>,
+    },
+}
+
+/// Turn a machine-terminalized staging refusal into a delivery a host can
+/// actually observe.
+///
+/// Runs while the refused run is still the machine's current run, so the
+/// generated completion authority can correlate. Directed inputs get the
+/// durable interaction-terminal carrier; everything else gets the typed
+/// process-local result class.
+async fn stage_refusal_abandonment(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+    abandoned_input_ids: &[InputId],
+    reason: &str,
+) -> Result<StageRefusalAbandonment, RuntimeDriverError> {
+    let error = meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
+        "input abandoned before execution: {reason}"
+    ));
+    if driver
+        .stage_abandoned_stage_refusal_terminals(run_id, abandoned_input_ids, error.clone())
+        .await?
+    {
+        return Ok(StageRefusalAbandonment::DurableInteractionTerminal);
+    }
+    // `NoResult` + `Failed` is the exact available encoding for "this attempt
+    // produced no result and never finalized". It resolves the same
+    // `AbandonedWithError` public class the durable carrier path re-derives
+    // after a crash, so a waiter cannot observe two different result classes
+    // for one abandonment depending on when the process died.
+    let authority = machine_resolve_runtime_completion_result(
+        driver,
+        Some(run_id),
+        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
+        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+    )?;
+    let abandon_reason = driver.uniform_input_abandon_reason(abandoned_input_ids);
+    Ok(StageRefusalAbandonment::ProcessLocalOnly {
+        authority,
+        error,
+        abandon_reason,
+    })
 }
 
 pub(crate) async fn prepare_runtime_loop_batch_start(
@@ -7279,6 +7460,43 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
                             "failed to resolve unstageable queued inputs: {resolve_err}; staging refusal: {reason}"
                         ))
                     })?;
+            // Bind the abandonment to a host-visible delivery BEFORE the run
+            // is returned: `RollbackRun` clears `current_run_id`, and a run
+            // that never produced a terminal has nothing else for the
+            // generated `run_correlated` guard to bind to.
+            //
+            // This step is fallible and writes durably, so it must NEVER be
+            // the reason the machine stays bound to a run that never ran.
+            // Returning early here would leave `lifecycle_phase = Running`
+            // with `current_run_id = Some(run_id)`, and the next lap would see
+            // a bound run forever. Return the run first, then surface the
+            // typed failure. The inputs are already durably abandoned by
+            // `resolve_unstageable_queued_inputs` above, so the worst case is
+            // the pre-lane behaviour (an abandonment with no publication
+            // obligation recorded) rather than a wedged lifecycle.
+            let abandonment = if abandoned_input_ids.is_empty() {
+                None
+            } else {
+                match stage_refusal_abandonment(&mut driver, &run_id, &abandoned_input_ids, &reason)
+                    .await
+                {
+                    Ok(abandonment) => Some(abandonment),
+                    Err(stage_err) => {
+                        return Err(
+                            match machine_apply_run_return_projection(
+                                &mut driver,
+                                &run_id,
+                                RunReturnDisposition::Rollback,
+                            ) {
+                                Ok(_) => stage_err,
+                                Err(rollback_err) => RuntimeDriverError::Internal(format!(
+                                    "failed to roll back runtime run after abandonment delivery failed: {rollback_err}; delivery failure: {stage_err}; staging refusal: {reason}"
+                                )),
+                            },
+                        );
+                    }
+                }
+            };
             if let Err(rollback_err) = machine_apply_run_return_projection(
                 &mut driver,
                 &run_id,
@@ -7291,6 +7509,7 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
             return Ok(RuntimeLoopBatchStart::StageRefused {
                 reason,
                 abandoned_input_ids,
+                abandonment,
             });
         }
     };

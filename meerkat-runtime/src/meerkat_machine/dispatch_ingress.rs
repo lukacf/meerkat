@@ -409,6 +409,7 @@ impl MeerkatMachine {
                 terminal_completion_witness,
                 finalization_error,
                 None,
+                None,
             )
             .map_err(|error| {
                 RuntimeDriverError::Internal(format!(

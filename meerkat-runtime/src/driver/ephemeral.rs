@@ -2881,13 +2881,16 @@ impl EphemeralRuntimeDriver {
                         InputLifecycleState::Abandoned,
                         "ResolveUnstageableQueuedInput->Abandon",
                     )?;
-                    self.events
-                        .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                            InputLifecycleEvent::Abandoned {
-                                input_id: input_id.clone(),
-                                reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
-                            },
-                        )));
+                    // No `RuntimeEvent` is minted here. `self.events` has no
+                    // production consumer anywhere in the workspace
+                    // (`drain_events` is called by one unit test and by the
+                    // persistent driver's uncalled delegate), so pushing the
+                    // abandonment there constructed a record that was dropped
+                    // with the driver - "typed and loud" on paper only. The
+                    // delivery a host observes is the caller's: a durable
+                    // interaction terminal for directed inputs, the typed
+                    // `AbandonedWithError` completion class for waiters, and
+                    // the durable `Abandoned` row underneath both.
                     abandoned.push(input_id.clone());
                 }
                 other => {

@@ -349,6 +349,29 @@ pub(crate) struct PreparedSupervisorBridgeRotation {
     prebuilt: Option<PreparedSupervisorRuntime>,
 }
 
+/// Preserve the comms layer's typed name-occupancy refusal across the mob
+/// boundary instead of flattening it into `MobError::Internal(String)`.
+///
+/// Two mobs sharing one mob id in a single process is an actionable
+/// configuration fact; collapsing it made that fact indistinguishable from any
+/// other publication fault and forced callers (including this module's own
+/// tests) to match on `to_string().contains(..)`. Returns `None` for every
+/// other publication failure so the caller keeps its existing context.
+fn supervisor_publication_error(
+    context: &str,
+    error: &meerkat_comms::CommsRuntimeError,
+) -> Option<MobError> {
+    match error {
+        meerkat_comms::CommsRuntimeError::InprocRegistrationRejected(
+            meerkat_comms::RegistrationRejection::NameOccupied { holder_pubkey },
+        ) => Some(MobError::CommsParticipantNameOccupied {
+            context: context.to_string(),
+            holder_pubkey: holder_pubkey.to_pubkey_string(),
+        }),
+        _ => None,
+    }
+}
+
 /// Fully configured supervisor runtime whose process-global inproc route is
 /// still dormant. Listener startup and generated DSL authority installation
 /// are allowed during preparation; only commit may publish the stable live
@@ -388,9 +411,11 @@ impl PreparedSupervisorRuntime {
         // `publish_replacing_recoverable` below. Both refusal shapes are pinned
         // by `supervisor_bridge_refuses_*` in this module's tests.
         let runtime = runtime.publish().map_err(|error| {
-            MobError::Internal(format!(
-                "failed to publish prepared mob supervisor comms runtime: {error}"
-            ))
+            supervisor_publication_error("the mob supervisor bridge", &error).unwrap_or_else(|| {
+                MobError::Internal(format!(
+                    "failed to publish prepared mob supervisor comms runtime: {error}"
+                ))
+            })
         })?;
         let runtime = Arc::new(runtime);
         runtime.install_peer_request_response_authority(request_response_authority);
@@ -421,9 +446,15 @@ impl PreparedSupervisorRuntime {
                         dsl,
                         request_response_authority,
                     }),
-                    MobError::Internal(format!(
-                        "failed to publish prepared mob supervisor runtime replacement: {error}"
-                    )),
+                    supervisor_publication_error(
+                        "the mob supervisor bridge replacement",
+                        &error,
+                    )
+                    .unwrap_or_else(|| {
+                        MobError::Internal(format!(
+                            "failed to publish prepared mob supervisor runtime replacement: {error}"
+                        ))
+                    }),
                 ));
             }
         };
@@ -3625,12 +3656,27 @@ mod tests {
             .await
             .err()
             .expect("a second live mob sharing this mob id must not take the supervisor name over");
-        assert!(
-            error
-                .to_string()
-                .contains("the participant name already has a live route"),
-            "the supervisor must fail closed with the typed name-occupancy refusal, got: {error}"
-        );
+        // Match the typed variant, not its display string: a refusal a caller
+        // can only recognize by substring is not a typed refusal.
+        match &error {
+            MobError::CommsParticipantNameOccupied {
+                context,
+                holder_pubkey,
+            } => {
+                assert_eq!(
+                    holder_pubkey,
+                    &incumbent_key.to_pubkey_string(),
+                    "the refusal must name the incumbent key that keeps the route"
+                );
+                assert!(
+                    context.contains("supervisor"),
+                    "the refusal must name what failed to publish, got: {context}"
+                );
+            }
+            other => panic!(
+                "the supervisor must fail closed with the typed name-occupancy refusal, got: {other:?}"
+            ),
+        }
 
         assert!(
             meerkat_comms::InprocRegistry::global()

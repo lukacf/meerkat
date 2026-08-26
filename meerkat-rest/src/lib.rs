@@ -4177,7 +4177,11 @@ fn completion_outcome_to_api_result(
                 Err(ApiError::Internal(message))
             }
         }
-        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+            reason,
+            error,
+            ..
+        } => {
             let message = format!("turn abandoned: {reason}");
             let details = json!({
                 "error": error,
@@ -14235,6 +14239,7 @@ mod tests {
                     meerkat_core::TurnTerminalOutcome::Failed,
                     "LLM failure terminal turn",
                 ),
+                abandon_reason: None,
             },
             &session_id,
             &realm,

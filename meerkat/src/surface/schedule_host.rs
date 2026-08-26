@@ -1691,7 +1691,7 @@ fn delivery_terminal_from_completion_outcome(
             )
         }
         CompletionOutcome::Abandoned { reason, error }
-        | CompletionOutcome::AbandonedWithError { reason, error } => {
+        | CompletionOutcome::AbandonedWithError { reason, error, .. } => {
             let error_detail =
                 serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string());
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {

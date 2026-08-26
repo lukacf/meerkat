@@ -10919,6 +10919,7 @@ fn completion_outcome_to_rpc_result(
         CompletionOutcome::AbandonedWithError {
             reason,
             error: turn_error,
+            ..
         } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("turn abandoned: {reason}"),

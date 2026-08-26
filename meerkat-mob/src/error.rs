@@ -709,6 +709,24 @@ pub enum MobError {
         kind: FlowStepDispatchRejectKind,
     },
 
+    /// A live inproc route already holds a comms participant name this mob
+    /// needs, under a different identity key.
+    ///
+    /// Typed because the two mobs sharing one mob id in a single process is a
+    /// configuration fact an operator can act on, and it must be
+    /// distinguishable from every other fault that used to arrive as
+    /// `Internal(String)`. Callers match the variant; they never parse the
+    /// display string.
+    #[error(
+        "comms participant name for {context} is already held by a live route under public key {holder_pubkey}"
+    )]
+    CommsParticipantNameOccupied {
+        /// What was being published (for example the mob supervisor bridge).
+        context: String,
+        /// The incumbent key that keeps the route.
+        holder_pubkey: String,
+    },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),

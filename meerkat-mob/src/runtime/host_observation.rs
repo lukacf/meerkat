@@ -4961,6 +4961,179 @@ mod tests {
         assert_eq!(state.next_seq, 4);
     }
 
+    /// D1, mob side. Scope of this test, stated exactly.
+    ///
+    /// COVERED BY EXECUTION: given a durable interaction terminal for the
+    /// abandonment, the watcher's decision surface (`select_completion_terminal`
+    /// -> `wire_outcome_from_terminal`) records a `Failed` terminal; and given
+    /// NO such durable terminal (the pre-lane state of the world, asserted by
+    /// the companion `..._retains_pending_when_the_runtime_published_nothing`),
+    /// it retains Pending. That pair is what makes this test sensitive to
+    /// publication actually happening.
+    ///
+    /// COVERED BY CONSTRUCTION: that the runtime publishes such an event at
+    /// all. That link is asserted in `meerkat-runtime` by
+    /// `stage_refusal_terminal_publishes_on_a_session_that_already_ran_a_turn`,
+    /// which drives the real staging refusal and the real publisher. This
+    /// crate cannot reach the runtime's `authorize_runtime_terminal_bundle`
+    /// (`pub(crate)`), so it reproduces the published shape via the public
+    /// `interaction_terminal_event` projection instead.
+    ///
+    /// Both the durable event and the watcher expectation are derived from one
+    /// `CompletionOutcome` deliberately: production does the same thing, since
+    /// `publish_authorized_runtime_terminal_batch` computes one authorized
+    /// outcome and uses it for both the waiter delivery and the published
+    /// event.
+    ///
+    /// Before this lane the abandonment arrived as
+    /// `CompletionWaitError::AuthorityUnavailable(String)`, which
+    /// `run_directed_turn_watcher` answers on an explicit no-op arm ("recording
+    /// no terminal and retaining Pending"), and no durable interaction terminal
+    /// existed for the selection below to find.
+    #[test]
+    fn abandoned_before_run_completion_records_a_failed_terminal_not_pending() {
+        let interaction_id = interaction(23);
+        let outcome = meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+            reason: "input abandoned before execution: generated machine did not authorize \
+                     StageForRun"
+                .to_string(),
+            error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                "input abandoned before execution",
+            ),
+            abandon_reason: Some(
+                meerkat_runtime::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                    attempts: 3,
+                },
+            ),
+        };
+
+        // The typed abandon cause is legible to this consumer without parsing
+        // the display reason.
+        assert_eq!(
+            outcome.abandon_reason(),
+            Some(
+                &meerkat_runtime::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                    attempts: 3
+                }
+            ),
+        );
+
+        // Exactly the durable event the runtime publishes for this
+        // abandonment, projected through the runtime's own canonical mapping.
+        let published = meerkat_runtime::completion::interaction_terminal_event(
+            interaction_id,
+            outcome.clone(),
+        );
+        let mut classifier = meerkat_core::turn_terminal::TurnTerminalClassifier::default();
+        let terminal = classifier
+            .observe(&published)
+            .expect("a published interaction failure is a durable terminal");
+
+        let scan = DurableTerminalScan {
+            terminals: vec![DurableTerminalCandidate {
+                terminal,
+                terminal_seq: 61,
+                run_started_in_window: false,
+                run_matches_expected_content: false,
+                interaction_id: Some(interaction_id),
+            }],
+            matching_run_starts: 0,
+            watermark: 61,
+        };
+        let expectation = CompletionTerminalExpectation::from_completion(outcome);
+        let attribution = DirectedTurnRuntimeAttribution {
+            terminal_outcome: Some(
+                meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+                    reason:
+                        meerkat_runtime::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                            attempts: 3,
+                        },
+                },
+            ),
+            phase: meerkat_runtime::input_state::InputLifecycleState::Abandoned,
+            ..peer_terminal_attribution(0)
+        };
+
+        let selected =
+            select_completion_terminal(&scan, &expectation, &attribution, interaction_id);
+        let TerminalSelection::Selected(candidate) = selected else {
+            panic!(
+                "an abandoned-before-run directed input must select its durable terminal instead \
+                 of retaining Pending"
+            );
+        };
+        assert_eq!(candidate.terminal_seq, 61);
+
+        let wire = wire_outcome_from_terminal(
+            attribution.tracking_kind,
+            candidate.terminal.kind,
+            &candidate.terminal.outcome,
+        )
+        .expect("the selected terminal belongs to the tracked interaction family");
+        match wire {
+            WireFlowTurnOutcome::InteractionFailed { detail } => {
+                assert!(
+                    detail.text.contains("abandoned before execution"),
+                    "the recorded terminal must carry the abandonment reason, got: {}",
+                    detail.text
+                );
+            }
+            other => panic!("an abandonment must record a failed terminal, got {other:?}"),
+        }
+    }
+
+    /// The companion that makes the test above bite. Identical inputs, except
+    /// the runtime published nothing - which is exactly the pre-lane state of
+    /// the world, where a directed abandonment left the durable session event
+    /// log with no interaction terminal in it at all.
+    ///
+    /// The selection surface must then decline to record anything, so a test
+    /// asserting a recorded `Failed` terminal cannot pass while the runtime
+    /// publishes nothing.
+    #[test]
+    fn abandoned_before_run_completion_retains_pending_when_the_runtime_published_nothing() {
+        let interaction_id = interaction(24);
+        let outcome = meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+            reason: "input abandoned before execution: generated machine did not authorize \
+                     StageForRun"
+                .to_string(),
+            error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                "input abandoned before execution",
+            ),
+            abandon_reason: Some(
+                meerkat_runtime::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                    attempts: 3,
+                },
+            ),
+        };
+        let scan = DurableTerminalScan {
+            terminals: Vec::new(),
+            matching_run_starts: 0,
+            watermark: 61,
+        };
+        let expectation = CompletionTerminalExpectation::from_completion(outcome);
+        let attribution = DirectedTurnRuntimeAttribution {
+            terminal_outcome: Some(
+                meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+                    reason:
+                        meerkat_runtime::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                            attempts: 3,
+                        },
+                },
+            ),
+            phase: meerkat_runtime::input_state::InputLifecycleState::Abandoned,
+            ..peer_terminal_attribution(0)
+        };
+
+        assert!(
+            matches!(
+                select_completion_terminal(&scan, &expectation, &attribution, interaction_id),
+                TerminalSelection::AwaitMore
+            ),
+            "with nothing published, the watcher must record no terminal and retain Pending"
+        );
+    }
+
     #[test]
     fn previous_same_kind_terminal_between_window_and_accept_cannot_steal_current_turn() {
         let interaction_id = interaction(1);

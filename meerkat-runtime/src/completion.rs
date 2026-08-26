@@ -111,6 +111,18 @@ pub enum CompletionOutcome {
     AbandonedWithError {
         reason: String,
         error: TurnErrorMetadata,
+        /// Typed lifecycle abandon cause when the durable input row itself is
+        /// `Abandoned`, sourced from
+        /// [`InputTerminalOutcome`](crate::input_state::InputTerminalOutcome)
+        /// rather than parsed out of `reason`.
+        ///
+        /// `None` means the attempt failed while the durable input remains
+        /// machine-owned (requeued, or terminalized by a non-abandon
+        /// outcome). A consumer that needs to distinguish "this input will
+        /// never run again, and here is why" from "this attempt failed" reads
+        /// this field, never the display string.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        abandon_reason: Option<crate::input_state::InputAbandonReason>,
     },
     /// The turn produced output, but a later runtime finalization step (the
     /// durable commit) failed, so the run is NOT durably terminal. The produced
@@ -546,7 +558,11 @@ impl CompletionHandle {
         error: TurnErrorMetadata,
     ) -> Result<Self, crate::RuntimeDriverError> {
         Self::already_resolved_with_generated_class(
-            CompletionOutcome::AbandonedWithError { reason, error },
+            CompletionOutcome::AbandonedWithError {
+                reason,
+                error,
+                abandon_reason: None,
+            },
             crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
@@ -645,6 +661,17 @@ impl CompletionOutcome {
         }
     }
 
+    /// Typed lifecycle abandon cause, when the durable input row is itself
+    /// `Abandoned`. Surfaces must key terminality off this instead of the
+    /// display reason.
+    #[must_use]
+    pub fn abandon_reason(&self) -> Option<&crate::input_state::InputAbandonReason> {
+        match self {
+            Self::AbandonedWithError { abandon_reason, .. } => abandon_reason.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn error_metadata(&self) -> Option<&TurnErrorMetadata> {
         match self {
             Self::Abandoned { error, .. }
@@ -661,6 +688,7 @@ fn authorized_completion_outcome(
     authority: RuntimeCompletionResultAuthority,
     finalization_error: Option<TurnErrorMetadata>,
     runtime_termination_reason: Option<&str>,
+    abandon_reason: Option<crate::input_state::InputAbandonReason>,
 ) -> Result<(CompletionOutcome, CompletionCleanupObservation), CompletionWaitError> {
     let attempt = authority.begin_surface_resolution();
     if runtime_termination_reason.is_some()
@@ -744,7 +772,11 @@ fn authorized_completion_outcome(
                 .detail
                 .clone()
                 .unwrap_or_else(|| "runtime finalization failed".to_string());
-            CompletionOutcome::AbandonedWithError { reason, error }
+            CompletionOutcome::AbandonedWithError {
+                reason,
+                error,
+                abandon_reason,
+            }
         }
         RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
             let Some(CoreApplyTerminal::RunResult(_)) = terminal else {
@@ -855,6 +887,7 @@ pub(crate) fn authorize_runtime_terminal_bundle(
         crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
     finalization_error: Option<TurnErrorMetadata>,
     runtime_termination_reason: Option<&str>,
+    abandon_reason: Option<crate::input_state::InputAbandonReason>,
 ) -> Result<AuthorizedRuntimeTerminalBundle, CompletionWaitError> {
     if !authority.completion_batch_matches(&terminal_completion_witness) {
         return Err(CompletionWaitError::AuthorityUnavailable(
@@ -918,6 +951,7 @@ pub(crate) fn authorize_runtime_terminal_bundle(
         authority,
         finalization_error,
         runtime_termination_reason,
+        abandon_reason,
     )?;
     let interaction_events = interaction_ids
         .iter()
@@ -942,7 +976,7 @@ pub(crate) fn authorized_interaction_terminal_events(
     finalization_error: Option<TurnErrorMetadata>,
 ) -> Result<Vec<meerkat_core::event::AgentEvent>, CompletionWaitError> {
     let (outcome, _) =
-        authorized_completion_outcome(terminal, authority, finalization_error, None)?;
+        authorized_completion_outcome(terminal, authority, finalization_error, None, None)?;
     Ok(interaction_ids
         .iter()
         .map(|interaction_id| interaction_terminal_event(*interaction_id, outcome.clone()))
@@ -1121,6 +1155,7 @@ impl CompletionRegistry {
         terminal: Option<&CoreApplyTerminal>,
         authority: RuntimeCompletionResultAuthority,
         finalization_error: Option<TurnErrorMetadata>,
+        abandon_reason: Option<crate::input_state::InputAbandonReason>,
     ) where
         I: IntoIterator<Item = InputId>,
     {
@@ -1135,14 +1170,19 @@ impl CompletionRegistry {
             attempt.abandon();
             return;
         }
-        let (outcome, cleanup_observation) =
-            match authorized_completion_outcome(terminal, authority, finalization_error, None) {
-                Ok(projected) => projected,
-                Err(error) => {
-                    self.fail_inputs(input_ids, error);
-                    return;
-                }
-            };
+        let (outcome, cleanup_observation) = match authorized_completion_outcome(
+            terminal,
+            authority,
+            finalization_error,
+            None,
+            abandon_reason,
+        ) {
+            Ok(projected) => projected,
+            Err(error) => {
+                self.fail_inputs(input_ids, error);
+                return;
+            }
+        };
         for input_id in input_ids {
             if let Some(senders) = self.take_waiters(&input_id) {
                 Self::send_outcome(senders, outcome.clone(), cleanup_observation.clone());
@@ -1287,7 +1327,11 @@ impl CompletionRegistry {
         if let Some(senders) = self.take_waiters(input_id) {
             Self::send_outcome(
                 senders,
-                CompletionOutcome::AbandonedWithError { reason, error },
+                CompletionOutcome::AbandonedWithError {
+                    reason,
+                    error,
+                    abandon_reason: None,
+                },
                 cleanup_observation,
             );
         }
@@ -1707,6 +1751,7 @@ mod tests {
             witness,
             None,
             Some(reason),
+            None,
         )
         .expect("generated runtime termination should authorize one exact terminal bundle");
 
@@ -1753,6 +1798,7 @@ mod tests {
             witness,
             None,
             Some("generated result reason"),
+            None,
         ) {
             Ok(_) => panic!("authority authorized a differently digested pending candidate"),
             Err(error) => error,

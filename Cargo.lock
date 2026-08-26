@@ -4146,7 +4146,7 @@ dependencies = [
 [[package]]
 name = "oai-rt-rs"
 version = "0.4.0"
-source = "git+https://github.com/lukacf/oai-rt-rs.git?rev=e715e2a157b1d359e60520f3bde67acf92725ac0#e715e2a157b1d359e60520f3bde67acf92725ac0"
+source = "git+https://github.com/lukacf/oai-rt-rs.git?rev=f308903654073bf7cdf0db154ae5cceb006934b6#f308903654073bf7cdf0db154ae5cceb006934b6"
 dependencies = [
  "async-trait",
  "base64",

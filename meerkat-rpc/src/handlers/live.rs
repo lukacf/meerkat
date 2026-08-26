@@ -849,11 +849,6 @@ fn experimental_live_channel_open_error_response(
             live_open_projection_error_code(&projection_error),
             format!("failed to build session config: {projection_error}"),
         ),
-        ExperimentalLiveChannelOpenError::ExecutionProfile(message) => RpcResponse::error(
-            id,
-            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            message,
-        ),
         ExperimentalLiveChannelOpenError::Open(open_error) => {
             live_open_error_response(id, open_error)
         }

@@ -185,7 +185,7 @@ meerkat-store = { version = "0.8.29", path = "meerkat-store", default-features =
 meerkat-store-conformance = { version = "0.8.29", path = "meerkat-store-conformance" }
 # Development-only immutable binding for the coordinated GPT Live feature.
 # Replace it with the published protocol crate during the follow-on release.
-oai-rt-rs = { version = "0.4.0", git = "https://github.com/lukacf/oai-rt-rs.git", rev = "e715e2a157b1d359e60520f3bde67acf92725ac0" }
+oai-rt-rs = { version = "0.4.0", git = "https://github.com/lukacf/oai-rt-rs.git", rev = "f308903654073bf7cdf0db154ae5cceb006934b6" }
 
 [profile.dev]
 split-debuginfo = "off"

@@ -8125,7 +8125,7 @@ impl MeerkatMachine {
                         "committed ambiguous live result has no replacement channel".to_string(),
                     )
                 })?;
-            let replacement_channel_id = meerkat_core::LiveChannelId::new(replacement.clone());
+            let replacement_channel_id = meerkat_core::LiveChannelId::new(replacement);
             let seed_cursor = *state
                 .live_result_recovery_seed_cursor_by_channel
                 .get(&channel)

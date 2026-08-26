@@ -514,38 +514,43 @@ mod experimental_realtime_admission_tests {
     const FACTORY_KIND: &str = "private-live";
     const FACTORY_VERSION: &str = "v1";
 
-    fn realm(value: &str) -> RealmId {
-        RealmId::parse(value).expect("valid test realm")
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn realm(value: &str) -> TestResult<RealmId> {
+        Ok(RealmId::parse(value)?)
     }
 
-    fn binding(realm_name: &str, binding_name: &str) -> AuthBindingRef {
-        AuthBindingRef {
-            realm: realm(realm_name),
-            binding: BindingId::parse(binding_name).expect("valid test binding"),
+    fn binding(realm_name: &str, binding_name: &str) -> TestResult<AuthBindingRef> {
+        Ok(AuthBindingRef {
+            realm: realm(realm_name)?,
+            binding: BindingId::parse(binding_name)?,
             profile: None,
             origin: BindingOrigin::Configured,
-        }
+        })
     }
 
-    fn authority(realm_name: &str, digest_byte: &str) -> ExperimentalRealtimeAdmissionAuthority {
-        ExperimentalRealtimeAdmissionAuthority {
+    fn authority(
+        realm_name: &str,
+        digest_byte: &str,
+    ) -> TestResult<ExperimentalRealtimeAdmissionAuthority> {
+        Ok(ExperimentalRealtimeAdmissionAuthority {
             inner: Arc::new(ExperimentalRealtimeAdmissionAuthorityInner),
             policy: ExperimentalRealtimeQualificationPolicy::new(
-                realm(realm_name),
+                realm(realm_name)?,
                 FACTORY_KIND,
                 FACTORY_VERSION,
                 "gate0-v1",
                 meerkat_core::LiveExecutionMode::ClientContext,
-            )
-            .expect("valid policy"),
+            )?,
             protocol_digest: digest_byte.repeat(32),
-        }
+        })
     }
 
-    fn binding_use_witness(auth_binding: AuthBindingRef) -> meerkat_core::AuthBindingUseWitness {
-        let principal = PrincipalRef::new(PrincipalKind::Human, "alice").expect("principal");
-        let target =
-            PrincipalRef::new(PrincipalKind::PersonalAgent, "agent").expect("durable target");
+    fn binding_use_witness(
+        auth_binding: AuthBindingRef,
+    ) -> TestResult<meerkat_core::AuthBindingUseWitness> {
+        let principal = PrincipalRef::new(PrincipalKind::Human, "alice")?;
+        let target = PrincipalRef::new(PrincipalKind::PersonalAgent, "agent")?;
         let request =
             AuthBindingUseRequest::new(principal.clone(), target.clone(), auth_binding.clone());
         let grant = AuthGrant {
@@ -558,17 +563,14 @@ mod experimental_realtime_admission_tests {
             actions: BTreeSet::from([GrantAction::UseAuthBinding]),
             acting_on_behalf_of: Some(ActingOnBehalfOf::new(principal, target)),
         };
-        authorize_explicit_auth_binding_use(&request, &[grant])
-            .into_result()
-            .expect("exact binding-use grant")
+        Ok(authorize_explicit_auth_binding_use(&request, &[grant]).into_result()?)
     }
 
-    fn target(model: &str, auth_binding: AuthBindingRef) -> ResolvedRealtimeTarget {
-        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
-            .expect("canonical registry");
+    fn target(model: &str, auth_binding: AuthBindingRef) -> TestResult<ResolvedRealtimeTarget> {
+        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())?;
         let profile = registry
             .profile_witness_for_provider(Provider::OpenAI, model)
-            .expect("canonical model profile");
+            .ok_or_else(|| std::io::Error::other("canonical model profile"))?;
         let identity = SessionLlmIdentity {
             model: model.to_string(),
             provider: Provider::OpenAI,
@@ -589,15 +591,16 @@ mod experimental_realtime_admission_tests {
             }),
             auth_lease: Arc::new(StaticLease::empty_lease(AuthMetadata::default(), "test")),
         };
-        ResolvedRealtimeTarget::new(identity, profile, connection).expect("exact target")
+        ResolvedRealtimeTarget::new(identity, profile, connection)
+            .ok_or_else(|| std::io::Error::other("exact target").into())
     }
 
     #[test]
-    fn qualification_rejects_wrong_realm_and_factory() {
-        let authority = authority("voice", "ab");
+    fn qualification_rejects_wrong_realm_and_factory() -> TestResult<()> {
+        let authority = authority("voice", "ab")?;
         assert!(matches!(
             authority.qualify(
-                &realm("other"),
+                &realm("other")?,
                 FACTORY_KIND,
                 FACTORY_VERSION,
                 meerkat_core::LiveExecutionMode::ClientContext,
@@ -606,7 +609,7 @@ mod experimental_realtime_admission_tests {
         ));
         assert!(matches!(
             authority.qualify(
-                &realm("voice"),
+                &realm("voice")?,
                 "other-live",
                 FACTORY_VERSION,
                 meerkat_core::LiveExecutionMode::ClientContext,
@@ -615,7 +618,7 @@ mod experimental_realtime_admission_tests {
         ));
         assert!(matches!(
             authority.qualify(
-                &realm("voice"),
+                &realm("voice")?,
                 FACTORY_KIND,
                 "v2",
                 meerkat_core::LiveExecutionMode::ClientContext,
@@ -624,29 +627,29 @@ mod experimental_realtime_admission_tests {
         ));
         assert!(matches!(
             authority.qualify(
-                &realm("voice"),
+                &realm("voice")?,
                 FACTORY_KIND,
                 FACTORY_VERSION,
                 meerkat_core::LiveExecutionMode::FunctionBridge,
             ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
+        Ok(())
     }
 
     #[test]
-    fn compiled_gate0_policy_qualifies_only_exact_client_context_evidence() {
+    fn compiled_gate0_policy_qualifies_only_exact_client_context_evidence() -> TestResult<()> {
         let client_policy = ExperimentalRealtimeQualificationPolicy::new(
-            realm("voice"),
+            realm("voice")?,
             GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND,
             GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
             GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION,
             meerkat_core::LiveExecutionMode::ClientContext,
-        )
-        .expect("valid policy");
+        )?;
         let client =
             ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(client_policy);
         if cfg!(feature = "experimental-gpt-live") {
-            let client = client.expect("compiled client-context evidence");
+            let client = client?;
             assert_eq!(
                 client.protocol_digest,
                 GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST
@@ -658,132 +661,121 @@ mod experimental_realtime_admission_tests {
             ));
         }
 
-        for mode in [meerkat_core::LiveExecutionMode::FunctionBridge] {
-            let policy = ExperimentalRealtimeQualificationPolicy::new(
-                realm("voice"),
-                GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND,
-                GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
-                GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION,
-                mode,
-            )
-            .expect("valid policy shape");
-            assert!(matches!(
-                ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(policy),
-                Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch)
-                    | Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
-            ));
-        }
+        let policy = ExperimentalRealtimeQualificationPolicy::new(
+            realm("voice")?,
+            GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND,
+            GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
+            GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION,
+            meerkat_core::LiveExecutionMode::FunctionBridge,
+        )?;
+        assert!(matches!(
+            ExperimentalRealtimeAdmissionAuthority::from_compiled_gate0_policy(policy),
+            Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch
+                | ExperimentalRealtimeAdmissionError::FeatureNotCompiled)
+        ));
+        Ok(())
     }
 
     #[test]
-    fn admission_rejects_foreign_authority_and_protocol_digest() {
-        let owner = authority("voice", "ab");
-        let foreign = authority("voice", "ab");
-        let binding = binding("voice", "chatgpt");
-        let foreign_witness = foreign
-            .qualify(
-                &realm("voice"),
-                FACTORY_KIND,
-                FACTORY_VERSION,
-                meerkat_core::LiveExecutionMode::ClientContext,
-            )
-            .expect("foreign qualification");
+    fn admission_rejects_foreign_authority_and_protocol_digest() -> TestResult<()> {
+        let owner = authority("voice", "ab")?;
+        let foreign = authority("voice", "ab")?;
+        let binding = binding("voice", "chatgpt")?;
+        let foreign_witness = foreign.qualify(
+            &realm("voice")?,
+            FACTORY_KIND,
+            FACTORY_VERSION,
+            meerkat_core::LiveExecutionMode::ClientContext,
+        )?;
         assert!(matches!(
             owner.admit_target(
                 foreign_witness,
-                target("gpt-live-1-codex", binding.clone()),
-                binding_use_witness(binding.clone()),
+                target("gpt-live-1-codex", binding.clone())?,
+                binding_use_witness(binding.clone())?,
             ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
 
-        let mut stale_digest = owner
-            .qualify(
-                &realm("voice"),
-                FACTORY_KIND,
-                FACTORY_VERSION,
-                meerkat_core::LiveExecutionMode::ClientContext,
-            )
-            .expect("owned qualification");
+        let mut stale_digest = owner.qualify(
+            &realm("voice")?,
+            FACTORY_KIND,
+            FACTORY_VERSION,
+            meerkat_core::LiveExecutionMode::ClientContext,
+        )?;
         stale_digest.protocol_digest = "cd".repeat(32);
         assert!(matches!(
             owner.admit_target(
                 stale_digest,
-                target("gpt-live-1-codex", binding.clone()),
-                binding_use_witness(binding),
+                target("gpt-live-1-codex", binding.clone())?,
+                binding_use_witness(binding)?,
             ),
             Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
         ));
+        Ok(())
     }
 
     #[test]
-    fn admission_rejects_binding_witness_mismatch() {
-        let owner = authority("voice", "ab");
-        let qualification = owner
-            .qualify(
-                &realm("voice"),
-                FACTORY_KIND,
-                FACTORY_VERSION,
-                meerkat_core::LiveExecutionMode::ClientContext,
-            )
-            .expect("qualification");
+    fn admission_rejects_binding_witness_mismatch() -> TestResult<()> {
+        let owner = authority("voice", "ab")?;
+        let qualification = owner.qualify(
+            &realm("voice")?,
+            FACTORY_KIND,
+            FACTORY_VERSION,
+            meerkat_core::LiveExecutionMode::ClientContext,
+        )?;
         assert!(matches!(
             owner.admit_target(
                 qualification,
-                target("gpt-live-1-codex", binding("voice", "chatgpt")),
-                binding_use_witness(binding("voice", "other")),
+                target("gpt-live-1-codex", binding("voice", "chatgpt")?)?,
+                binding_use_witness(binding("voice", "other")?)?,
             ),
             Err(ExperimentalRealtimeAdmissionError::BindingUseMismatch)
         ));
+        Ok(())
     }
 
     #[test]
-    fn admission_rejects_stable_and_nonrealtime_targets() {
+    fn admission_rejects_stable_and_nonrealtime_targets() -> TestResult<()> {
         for model in ["gpt-realtime-2", "gpt-5.3-codex"] {
-            let owner = authority("voice", "ab");
-            let qualification = owner
-                .qualify(
-                    &realm("voice"),
-                    FACTORY_KIND,
-                    FACTORY_VERSION,
-                    meerkat_core::LiveExecutionMode::ClientContext,
-                )
-                .expect("qualification");
-            let binding = binding("voice", "chatgpt");
+            let owner = authority("voice", "ab")?;
+            let qualification = owner.qualify(
+                &realm("voice")?,
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                meerkat_core::LiveExecutionMode::ClientContext,
+            )?;
+            let binding = binding("voice", "chatgpt")?;
             assert!(
                 matches!(
                     owner.admit_target(
                         qualification,
-                        target(model, binding.clone()),
-                        binding_use_witness(binding),
+                        target(model, binding.clone())?,
+                        binding_use_witness(binding)?,
                     ),
                     Err(ExperimentalRealtimeAdmissionError::TargetNotExperimentalRealtime)
                 ),
                 "model {model} must not cross experimental realtime admission"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn admitted_carrier_retains_lower_authority_until_provider_consumes_it() {
-        let owner = authority("voice", "ab");
+    fn admitted_carrier_retains_lower_authority_until_provider_consumes_it() -> TestResult<()> {
+        let owner = authority("voice", "ab")?;
         let authority_liveness = Arc::downgrade(&owner.inner);
-        let qualification = owner
-            .qualify(
-                &realm("voice"),
-                FACTORY_KIND,
-                FACTORY_VERSION,
-                meerkat_core::LiveExecutionMode::ClientContext,
-            )
-            .expect("qualification");
-        let binding = binding("voice", "chatgpt");
-        let admitted = owner
-            .admit_target(
-                qualification,
-                target("gpt-live-1-codex", binding.clone()),
-                binding_use_witness(binding),
-            )
-            .expect("admitted target");
+        let qualification = owner.qualify(
+            &realm("voice")?,
+            FACTORY_KIND,
+            FACTORY_VERSION,
+            meerkat_core::LiveExecutionMode::ClientContext,
+        )?;
+        let binding = binding("voice", "chatgpt")?;
+        let admitted = owner.admit_target(
+            qualification,
+            target("gpt-live-1-codex", binding.clone())?,
+            binding_use_witness(binding)?,
+        )?;
         drop(owner);
         assert!(authority_liveness.upgrade().is_some());
 
@@ -791,6 +783,7 @@ mod experimental_realtime_admission_tests {
         assert!(authority_liveness.upgrade().is_some());
         drop(retention);
         assert!(authority_liveness.upgrade().is_none());
+        Ok(())
     }
 }
 

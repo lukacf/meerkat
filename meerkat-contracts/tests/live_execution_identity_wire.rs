@@ -84,13 +84,13 @@ fn live_execution_identity_v1_rejects_all_caller_supplied_identity_authority() {
 
 #[cfg(feature = "schema")]
 #[test]
-fn live_execution_identity_v1_schema_advertises_only_version_and_profile() {
-    let schema = serde_json::to_value(schemars::schema_for!(WireLiveExecutionIdentityOverrideV1))
-        .expect("serialize live execution profile schema");
+fn live_execution_identity_v1_schema_advertises_only_version_and_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    let schema = serde_json::to_value(schemars::schema_for!(WireLiveExecutionIdentityOverrideV1))?;
     let properties = schema
         .pointer("/properties")
         .and_then(serde_json::Value::as_object)
-        .expect("profile selector schema properties");
+        .ok_or_else(|| std::io::Error::other("profile selector schema properties"))?;
 
     assert_eq!(properties.len(), 2);
     assert!(properties.contains_key("version"));
@@ -98,6 +98,7 @@ fn live_execution_identity_v1_schema_advertises_only_version_and_profile() {
     for forbidden in ["model", "provider", "self_hosted_server_id", "auth_binding"] {
         assert!(!properties.contains_key(forbidden));
     }
+    Ok(())
 }
 
 #[test]

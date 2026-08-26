@@ -734,7 +734,11 @@ impl LiveBridgeToolDispatchAdmission {
     }
 }
 
-#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[cfg(all(
+    meerkat_internal_generated_authority_bridge,
+    feature = "__meerkat-live-authority-bridge",
+    not(test)
+))]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
@@ -746,7 +750,11 @@ unsafe extern "Rust" {
     ) -> bool;
 }
 
-#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[cfg(all(
+    meerkat_internal_generated_authority_bridge,
+    feature = "__meerkat-live-authority-bridge",
+    not(test)
+))]
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
@@ -773,7 +781,11 @@ pub(crate) extern "Rust" fn runtime_generated_live_bridge_tool_dispatch_admissio
     ))
 }
 
-#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[cfg(all(
+    meerkat_internal_generated_authority_bridge,
+    feature = "__meerkat-live-authority-bridge",
+    not(test)
+))]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = concat!(
@@ -785,7 +797,11 @@ unsafe extern "Rust" {
     ) -> bool;
 }
 
-#[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
+#[cfg(all(
+    meerkat_internal_generated_authority_bridge,
+    feature = "__meerkat-live-authority-bridge",
+    not(test)
+))]
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(

@@ -35,6 +35,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -71,6 +72,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -118,6 +120,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -177,6 +180,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -242,6 +246,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -307,6 +312,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -374,6 +380,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -439,6 +446,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -506,6 +514,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -577,6 +586,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -642,6 +652,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -706,6 +717,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -771,6 +783,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -835,6 +848,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -902,6 +916,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -967,6 +982,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1032,6 +1048,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1097,6 +1114,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1162,6 +1180,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1227,6 +1246,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1292,6 +1312,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",
@@ -1357,6 +1378,7 @@ rust_test(
     crate_features = [
         "__meerkat-facade-agent-factory-build",
         "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
         "jsonschema",
         "schema",
         "test-support",

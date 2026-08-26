@@ -52,6 +52,7 @@ schema = []
 jsonschema = ["dep:jsonschema"]
 __meerkat-facade-agent-factory-build = []
 __meerkat-generated-authority-bridge = []
+__meerkat-live-authority-bridge = []
 test-support = []
 
 [dev-dependencies]

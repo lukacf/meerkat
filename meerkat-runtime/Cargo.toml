@@ -44,7 +44,11 @@ tokio_with_wasm = { workspace = true }
 
 [features]
 default = []
-live = ["dep:meerkat-live", "dep:meerkat-llm-core"]
+live = [
+    "dep:meerkat-live",
+    "dep:meerkat-llm-core",
+    "meerkat-core/__meerkat-live-authority-bridge",
+]
 sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
 test-support = []
 

@@ -42,10 +42,18 @@ const FUNCTION_BRIDGE_PROFILE: &str = "openai.gpt-live-1-codex.function-bridge.v
 const MIN_TTL_SECS: i64 = 5 * 60;
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
+    if let Some(root) = std::env::var_os("MEERKAT_WORKSPACE_ROOT") {
+        return PathBuf::from(root);
+    }
+
+    let current_dir = std::env::current_dir().expect("current directory");
+    current_dir
+        .ancestors()
+        .find(|candidate| {
+            candidate.join("Cargo.toml").is_file()
+                && candidate.join("tests/live_smoke/browser").is_dir()
+        })
+        .expect("Meerkat workspace root")
         .to_path_buf()
 }
 

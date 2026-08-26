@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.30] - 2026-08-26
+
 ### Breaking
 
 - **Rust public construction, trait, enum, and generated-machine surfaces changed.**
@@ -9196,7 +9198,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.29...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.30...HEAD
+[0.8.30]: https://github.com/lukacf/meerkat/compare/v0.8.29...v0.8.30
 [0.8.29]: https://github.com/lukacf/meerkat/compare/v0.8.28...v0.8.29
 [0.8.28]: https://github.com/lukacf/meerkat/compare/v0.8.27...v0.8.28
 [0.8.27]: https://github.com/lukacf/meerkat/compare/v0.8.26...v0.8.27

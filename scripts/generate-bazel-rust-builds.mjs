@@ -16,6 +16,17 @@ const metadata = JSON.parse(
     maxBuffer: 64 * 1024 * 1024,
   }),
 );
+// Cargo's default workspace resolve omits optional external dependencies whose
+// features are enabled only by a generated Bazel feature union. Keep the
+// default resolve below as the authority for `all_crate_deps`, but use an
+// all-features metadata view to resolve exact labels for those extra deps.
+const allFeaturesMetadata = JSON.parse(
+  execFileSync("./scripts/repo-cargo", ["metadata", "--format-version=1", "--all-features"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  }),
+);
 
 const workspaceMembers = new Set(metadata.workspace_members);
 const localPackages = new Map(
@@ -32,7 +43,7 @@ const byName = new Map(
   [...localPackages.values()].map((pkg) => [pkg.name, pkg]),
 );
 const externalByName = new Map();
-for (const pkg of metadata.packages.filter((pkg) => pkg.source !== null)) {
+for (const pkg of allFeaturesMetadata.packages.filter((pkg) => pkg.source !== null)) {
   if (!externalByName.has(pkg.name)) externalByName.set(pkg.name, []);
   externalByName.get(pkg.name).push(pkg);
 }
@@ -52,6 +63,13 @@ const generatedAuthorityBridgePackageKeys = new Set([
   "meerkat-live",
   "meerkat-runtime",
   "meerkat-mob",
+]);
+const bazelOnlyExternalRepositoryByPackage = new Map([
+  ["bytes", "meerkat_live_crates"],
+  ["opus", "meerkat_live_crates"],
+  ["rubato", "meerkat_live_crates"],
+  ["webrtc", "meerkat_live_crates"],
+  ["webrtc-media", "meerkat_live_crates"],
 ]);
 
 function defaultFeatures(pkg) {
@@ -298,12 +316,15 @@ function externalCrateLabel(dep) {
     }) ?? null;
   }
   if (!pkg) return null;
-  return `@crates//:${pkg.name}-${pkg.version}`;
+  const repository = bazelOnlyExternalRepositoryByPackage.get(pkg.name) ?? "crates";
+  return `@${repository}//:${pkg.name}-${pkg.version}`;
 }
 
-function optionalExternalDeps(pkg) {
+function optionalExternalDeps(
+  pkg,
+  features = requiredTargetFeatures.get(pkg.id) ?? new Set(),
+) {
   const labels = new Set();
-  const features = requiredTargetFeatures.get(pkg.id) ?? new Set();
   const alreadyResolved = resolvedFeatures.get(pkg.id) ?? new Set();
   for (const feature of features) {
     if (alreadyResolved.has(feature)) continue;
@@ -1422,7 +1443,10 @@ for (const pkg of localPackages.values()) {
       target.kind.includes("bin") && (target.name !== pkg.name || hasLibrary)
         ? `${crateName(target.name)}_bin`
         : crateName(pkg.name);
-    const optionalExternal = optionalExternalDeps(pkg);
+    const targetCrateFeatures = rule === "rust_library"
+      ? rustLibraryCrateFeaturesFor(key, pkg)
+      : crateFeaturesFor(key, pkg);
+    const optionalExternal = optionalExternalDeps(pkg, targetCrateFeatures);
     const selfLibraryLabel = packageLabel(pkg);
     const rawDeps = isTest
       ? [...new Set([...(libOrMacro ? [selfLibraryLabel] : []), ...localDeps(pkg, false, true)])].sort()
@@ -1494,7 +1518,7 @@ for (const pkg of localPackages.values()) {
       `    aliases = ${aliasesExpr},`,
       `    crate_name = ${q(crateName(target.name))},`,
       `    crate_root = ${q(relative(dir, target.src_path))},`,
-      `    crate_features = ${listExpr(rule === "rust_library" ? rustLibraryCrateFeaturesFor(key, pkg) : crateFeaturesFor(key, pkg))},`,
+      `    crate_features = ${listExpr(targetCrateFeatures)},`,
       `    edition = "2024",`,
       `    compile_data = ${compileDataExpr},`,
       `    srcs = ${srcsExpr},`,
@@ -1897,7 +1921,6 @@ for (const pkg of localPackages.values()) {
   if (packageSurfaceSpecs.length) {
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
     const externalProc = `all_crate_deps(\n        package_name = ${q(key)},\n        proc_macro = True,\n    )`;
-    const optionalExternal = optionalExternalDeps(pkg);
     const procMacroDeps = localDeps(pkg, true);
     const procExpr = procMacroDeps.length
       ? `${listExpr(procMacroDeps)} + ${externalProc}`
@@ -1910,6 +1933,7 @@ for (const pkg of localPackages.values()) {
         !target.kind.includes("example");
     });
     for (const spec of packageSurfaceSpecs) {
+      const optionalExternal = optionalExternalDeps(pkg, spec.features);
       const explicitNames = spec.targetNames ? new Set(spec.targetNames) : null;
       const selectedTargets = packageBuildTargets.filter((target) =>
         explicitNames ? explicitNames.has(target.name) : true

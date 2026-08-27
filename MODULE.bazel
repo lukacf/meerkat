@@ -80,6 +80,30 @@ http_archive(
     urls = ["https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz"],
 )
 
+# `audiopus_sys` builds its vendored libopus with CMake when pkg-config has no
+# system Opus installation. Hosted macOS RBE workers intentionally do not have
+# CMake on PATH, so provide a pinned universal tool to that build script.
+http_archive(
+    name = "cmake_macos_universal",
+    build_file_content = '''
+exports_files(
+    ["CMake.app/Contents/bin/cmake"],
+    visibility = ["//visibility:public"],
+)
+filegroup(
+    name = "runtime",
+    # `cmake` resolves its modules relative to the executable. Do not ship the
+    # GUI, docs, Qt frameworks, signatures, or auxiliary binaries into every
+    # remote native build action.
+    srcs = glob(["CMake.app/Contents/share/cmake-3.30/**"]),
+    visibility = ["//visibility:public"],
+)
+''',
+    sha256 = "572bf27e2e98d7513e0835525a2b9dc0f3947f6ad7494615e22b60369e87db11",
+    strip_prefix = "cmake-3.30.9-macos-universal",
+    urls = ["https://github.com/Kitware/CMake/releases/download/v3.30.9/cmake-3.30.9-macos-universal.tar.gz"],
+)
+
 http_archive(
     name = "python_darwin_arm64",
     build_file_content = '''
@@ -155,6 +179,32 @@ register_toolchains(
 )
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+# These crates are optional in Cargo and enabled only by the generated Bazel
+# feature union for `meerkat-live`. Resolve that union in a separate generated
+# repository so crate_universe never writes its synthetic direct-dependency
+# package into Cargo's authoritative workspace lockfile.
+crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.11.1")
+crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.3.1")
+crate.spec(package = "rubato", repositories = ["meerkat_live_crates"], version = "=2.0.0")
+crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.14.0")
+crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.11.0")
+crate.annotation_select(
+    crate = "audiopus_sys",
+    build_script_data = ["@@+http_archive+cmake_macos_universal//:runtime"],
+    build_script_env = {
+        "CMAKE": "$(execpath @@+http_archive+cmake_macos_universal//:CMake.app/Contents/bin/cmake)",
+        # rules_rust defaults Cargo build scripts to one job. libopus is a
+        # vendored native build, so let CMake use the hosted executor cores.
+        "NUM_JOBS": "8",
+    },
+    build_script_tools = ["@@+http_archive+cmake_macos_universal//:CMake.app/Contents/bin/cmake"],
+    triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+    ],
+    repositories = ["meerkat_live_crates"],
+    version = "0.2.2",
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
@@ -168,4 +218,15 @@ crate.from_cargo(
         "wasm32-unknown-unknown",
     ],
 )
-use_repo(crate, "crates")
+crate.from_specs(
+    name = "meerkat_live_crates",
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown",
+    ],
+)
+use_repo(crate, "crates", "meerkat_live_crates")

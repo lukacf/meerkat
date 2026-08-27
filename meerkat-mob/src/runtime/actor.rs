@@ -14624,7 +14624,20 @@ impl MobActor {
             && let (Some(adapter), Some(session_id)) =
                 (&self.runtime_adapter, member_ref.bridge_session_id())
         {
-            adapter.abort_comms_drain(session_id).await.map_err(|err| {
+            // `Abort` answers a session that is no longer registered with
+            // `NotReady { Destroyed }`. That is not a verdict on this stop: if
+            // the session left the map, no drain can still be running, so this
+            // abort's entire postcondition already holds. Failing on it is a
+            // refusal with no caller action - nothing can make a destroyed
+            // runtime less destroyed - and it converts an ordinary teardown
+            // into a hard `Internal` error. The disposal path's sibling abort
+            // below already degrades on exactly this condition, for exactly
+            // this reason; this is the same reasoning on the autonomous-stop
+            // path. Every other driver fault keeps its existing meaning.
+            converge_autonomous_stop_drain_abort_result(
+                adapter.abort_comms_drain(session_id).await,
+            )
+            .map_err(|err| {
                 MobError::Internal(format!(
                     "failed to abort comms drain for stopped member session {session_id}: {err}"
                 ))
@@ -52787,6 +52800,30 @@ fn converge_autonomous_stop_interrupt_result(result: Result<(), MobError>) -> Re
     }
 }
 
+/// A stopped member's comms-drain abort is level-triggered the same way. The
+/// `Abort` command answers a session that has already left the runtime
+/// registry with `NotReady { Destroyed }`, and a session that is gone cannot
+/// still be draining - the abort's whole objective already holds. Failing
+/// there would be a refusal with no caller action, since nothing can make a
+/// destroyed runtime less destroyed, and it turns an ordinary teardown into a
+/// hard `Internal` error.
+///
+/// Kept local to the autonomous-stop path for the same reason as its
+/// interrupt sibling: the command itself must keep surfacing the typed
+/// refusal to ordinary callers, which
+/// `abort_comms_drain_surfaces_typed_rejection_for_unknown_session` pins.
+/// Every other driver fault keeps its existing meaning.
+fn converge_autonomous_stop_drain_abort_result(
+    result: Result<(), meerkat_runtime::RuntimeDriverError>,
+) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+    match result {
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        }) => Ok(()),
+        result => result,
+    }
+}
+
 fn revival_error_means_session_already_live(
     error: &MobError,
     bridge_session_id: &SessionId,
@@ -52818,8 +52855,9 @@ fn recovered_single_target_failure(
 mod autonomous_stop_planning_tests {
     use super::{
         AutonomousStopPhase, MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS, advance_rotating_cursor,
-        autonomous_stop_phase, converge_autonomous_stop_interrupt_result,
-        disposal_uses_host_release_authority, lifecycle_origin_fenced, mob_dsl,
+        autonomous_stop_phase, converge_autonomous_stop_drain_abort_result,
+        converge_autonomous_stop_interrupt_result, disposal_uses_host_release_authority,
+        lifecycle_origin_fenced, mob_dsl,
     };
     use crate::MobError;
     use meerkat_core::service::SessionError;
@@ -52858,6 +52896,50 @@ mod autonomous_stop_planning_tests {
             autonomous_stop_phase(0, 0),
             AutonomousStopPhase::DriveInterrupts
         );
+    }
+
+    #[test]
+    fn shutdown_drain_abort_converges_only_the_destroyed_registry_answer() {
+        // The exact answer `Abort` gives a session that already left the
+        // runtime registry. A stopped member whose runtime is gone cannot
+        // still be draining, so the abort's objective already holds.
+        assert!(
+            converge_autonomous_stop_drain_abort_result(Err(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                }
+            ))
+            .is_ok(),
+            "an already-unregistered member session must not fail the stop"
+        );
+
+        // Deliberately narrow, like its interrupt sibling. These are live
+        // runtimes whose refusal still means something the caller can act on,
+        // and none of them is what the unregistered-session guard returns.
+        for live_state in [
+            meerkat_runtime::RuntimeState::Attached,
+            meerkat_runtime::RuntimeState::Running,
+            meerkat_runtime::RuntimeState::Initializing,
+        ] {
+            assert!(
+                converge_autonomous_stop_drain_abort_result(Err(
+                    meerkat_runtime::RuntimeDriverError::NotReady { state: live_state }
+                ))
+                .is_err(),
+                "{live_state:?} must keep its existing meaning"
+            );
+        }
+
+        // A non-readiness driver fault is untouched.
+        assert!(
+            converge_autonomous_stop_drain_abort_result(Err(
+                meerkat_runtime::RuntimeDriverError::Internal("boom".into())
+            ))
+            .is_err(),
+            "an internal driver fault must still fail the stop"
+        );
+
+        assert!(converge_autonomous_stop_drain_abort_result(Ok(())).is_ok());
     }
 
     #[test]

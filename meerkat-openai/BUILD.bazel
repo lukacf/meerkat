@@ -60,7 +60,6 @@ rust_library(
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-models:meerkat_models",
-        "@crates//:oai-rt-rs-0.4.1",
     ] + all_crate_deps(
         package_name = "meerkat-openai",
         normal = True,
@@ -101,7 +100,6 @@ rust_library(
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_llm_core_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
-        "@crates//:oai-rt-rs-0.4.1",
     ] + all_crate_deps(
         package_name = "meerkat-openai",
         normal = True,
@@ -159,7 +157,6 @@ rust_test(
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-models:meerkat_models",
         "//meerkat-runtime:meerkat_runtime_test_support",
-        "@crates//:oai-rt-rs-0.4.1",
     ] + all_crate_deps(
         package_name = "meerkat-openai",
         normal = True,
@@ -221,7 +218,6 @@ rust_test(
         "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
         "//meerkat-runtime:meerkat_runtime_test_support",
-        "@crates//:oai-rt-rs-0.4.1",
     ] + all_crate_deps(
         package_name = "meerkat-openai",
         normal = True,
@@ -281,7 +277,6 @@ rust_test(
         "//meerkat-models:meerkat_models",
         "//meerkat-openai:meerkat_openai",
         "//meerkat-runtime:meerkat_runtime_test_support",
-        "@crates//:oai-rt-rs-0.4.1",
     ] + all_crate_deps(
         package_name = "meerkat-openai",
         normal = True,

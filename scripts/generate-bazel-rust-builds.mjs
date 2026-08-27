@@ -85,6 +85,12 @@ const requiredTargetFeatures = new Map(
 const resolvedFeatures = new Map(
   (metadata.resolve?.nodes ?? []).map((node) => [node.id, new Set(node.features ?? [])]),
 );
+const resolvedDependencyPackageIds = new Map(
+  (metadata.resolve?.nodes ?? []).map((node) => [
+    node.id,
+    new Set((node.deps ?? []).map((dep) => dep.pkg)),
+  ]),
+);
 
 function addFeature(pkg, feature) {
   if (!feature || feature.startsWith("dep:")) return false;
@@ -302,7 +308,7 @@ function rewriteRuntimeTestSupportDeps(deps, useAgentFactoryDeps) {
   });
 }
 
-function externalCrateLabel(dep) {
+function externalCratePackage(dep) {
   const candidates = externalByName.get(dep.name) ?? [];
   let pkg = candidates.length === 1 ? candidates[0] : null;
   if (!pkg && dep.req?.startsWith("^")) {
@@ -315,6 +321,11 @@ function externalCrateLabel(dep) {
       return version[0] === requested[0];
     }) ?? null;
   }
+  return pkg;
+}
+
+function externalCrateLabel(dep) {
+  const pkg = externalCratePackage(dep);
   if (!pkg) return null;
   const repository = bazelOnlyExternalRepositoryByPackage.get(pkg.name) ?? "crates";
   return `@${repository}//:${pkg.name}-${pkg.version}`;
@@ -326,13 +337,20 @@ function optionalExternalDeps(
 ) {
   const labels = new Set();
   const alreadyResolved = resolvedFeatures.get(pkg.id) ?? new Set();
+  const alreadyResolvedDependencyIds = resolvedDependencyPackageIds.get(pkg.id) ?? new Set();
   for (const feature of features) {
     if (alreadyResolved.has(feature)) continue;
     for (const expansion of pkg.features?.[feature] ?? []) {
       const depName = expansion.startsWith("dep:") ? expansion.slice(4) : null;
       if (!depName) continue;
       const dep = pkg.dependencies.find((candidate) => candidate.name === depName && candidate.source !== null);
-      const label = dep ? externalCrateLabel(dep) : null;
+      const externalPkg = dep ? externalCratePackage(dep) : null;
+      // `all_crate_deps` already owns every dependency in Cargo's default
+      // resolved graph, even when a second feature also expands to it. Add an
+      // explicit label only for a package absent from that graph; otherwise
+      // the same label appears twice once the second feature is selected.
+      if (!dep || !externalPkg || alreadyResolvedDependencyIds.has(externalPkg.id)) continue;
+      const label = externalCrateLabel(dep);
       if (label) labels.add(label);
     }
   }

@@ -547,6 +547,14 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      # actions/checkout marks the workspace safe in the host user's Git
+      # config. Linux release builds run inside the Bullseye container as a
+      # different user, so repo-cargo's first git query otherwise fails with
+      # "detected dubious ownership" before Cargo starts.
+      - name: Trust workspace in Linux release container
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
       - name: Build surface binaries
         shell: bash
         env:

@@ -36,15 +36,25 @@ pub enum OAuthProviderIdentity {
     OpenAiChatGpt,
     #[serde(rename = "google_code_assist")]
     GoogleCodeAssist,
+    #[serde(rename = "github_copilot")]
+    GitHubCopilot,
 }
 
 impl OAuthProviderIdentity {
+    pub const INTERACTIVE: &'static [Self] = &[
+        Self::AnthropicClaudeAi,
+        Self::OpenAiChatGpt,
+        Self::GoogleCodeAssist,
+        Self::GitHubCopilot,
+    ];
+
     pub fn from_alias(alias: &str) -> Option<Self> {
         match alias {
             "anthropic" | "claude" | "claude.ai" => Some(Self::AnthropicClaudeAi),
             "anthropic_console_api_key" => Some(Self::AnthropicConsoleApiKey),
             "openai" | "chatgpt" => Some(Self::OpenAiChatGpt),
             "google" | "gemini" | "code_assist" => Some(Self::GoogleCodeAssist),
+            "copilot" | "github_copilot" => Some(Self::GitHubCopilot),
             _ => None,
         }
     }
@@ -55,15 +65,21 @@ impl OAuthProviderIdentity {
             Self::AnthropicConsoleApiKey => "anthropic_console_api_key",
             Self::OpenAiChatGpt => "openai",
             Self::GoogleCodeAssist => "google",
+            Self::GitHubCopilot => "copilot",
         }
     }
 
-    pub fn provider(self) -> Provider {
+    pub fn provider(self) -> Option<Provider> {
         match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => Provider::Anthropic,
-            Self::OpenAiChatGpt => Provider::OpenAI,
-            Self::GoogleCodeAssist => Provider::Gemini,
+            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => Some(Provider::Anthropic),
+            Self::OpenAiChatGpt => Some(Provider::OpenAI),
+            Self::GoogleCodeAssist => Some(Provider::Gemini),
+            Self::GitHubCopilot => None,
         }
+    }
+
+    pub const fn supports_browser_flow(self) -> bool {
+        !matches!(self, Self::GitHubCopilot)
     }
 
     pub fn auth_mode(self) -> PersistedAuthMode {
@@ -72,12 +88,16 @@ impl OAuthProviderIdentity {
             Self::AnthropicConsoleApiKey => PersistedAuthMode::OauthToApiKey,
             Self::OpenAiChatGpt => PersistedAuthMode::ChatgptOauth,
             Self::GoogleCodeAssist => PersistedAuthMode::GoogleOauth,
+            Self::GitHubCopilot => PersistedAuthMode::GithubCopilotOauth,
         }
     }
 
     pub fn client_secret(self) -> Option<&'static str> {
         match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey | Self::OpenAiChatGpt => None,
+            Self::AnthropicClaudeAi
+            | Self::AnthropicConsoleApiKey
+            | Self::OpenAiChatGpt
+            | Self::GitHubCopilot => None,
             Self::GoogleCodeAssist => Some(GOOGLE_CLIENT_SECRET),
         }
     }
@@ -101,6 +121,7 @@ mod tests {
             OAuthProviderIdentity::AnthropicConsoleApiKey,
             OAuthProviderIdentity::OpenAiChatGpt,
             OAuthProviderIdentity::GoogleCodeAssist,
+            OAuthProviderIdentity::GitHubCopilot,
         ] {
             let alias = identity.canonical_alias();
             assert_eq!(
@@ -129,6 +150,7 @@ mod tests {
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "google_code_assist",
             ),
+            (OAuthProviderIdentity::GitHubCopilot, "github_copilot"),
         ];
         for (identity, tag) in cases {
             let json = serde_json::to_string(&identity).expect("identity serializes");
@@ -137,5 +159,11 @@ mod tests {
                 serde_json::from_str(&json).expect("identity round-trips");
             assert_eq!(parsed, identity);
         }
+    }
+
+    #[test]
+    fn copilot_is_shared_and_device_only() {
+        assert_eq!(OAuthProviderIdentity::GitHubCopilot.provider(), None);
+        assert!(!OAuthProviderIdentity::GitHubCopilot.supports_browser_flow());
     }
 }

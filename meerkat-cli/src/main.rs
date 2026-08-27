@@ -5150,7 +5150,7 @@ async fn handle_auth_command(
                 .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
-            let registry = cli_provider_registry();
+            let registry = cli_provider_registry(scope);
             let persistence = TokenStoreBackend::default_auto()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                 .open_with_refresh_authority()
@@ -5208,6 +5208,11 @@ async fn handle_auth_command(
                 profile: None,
                 origin: meerkat_core::connection::BindingOrigin::Configured,
             };
+            let credential_identity = realm_set
+                .bindings
+                .get(binding_id)
+                .ok_or_else(|| anyhow::anyhow!("Binding '{realm}:{binding_id}' not found"))?
+                .credential_identity(&auth_binding);
             // A persisted-store backend that cannot be opened is a fault, not
             // an absence of credentials. Collapsing the open error to None would
             // launder a real store failure into a "no credentials"/Unknown
@@ -5227,7 +5232,7 @@ async fn handle_auth_command(
             let projection = project_cli_auth_status(
                 &scope.auth_lease,
                 token_store.as_deref(),
-                &auth_binding,
+                &credential_identity,
                 profile,
                 chrono::Utc::now(),
             )
@@ -5275,28 +5280,34 @@ async fn handle_auth_command(
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
                 let store = persistence.token_store();
                 let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
-                let key = TokenKey::parse(&realm, binding_id)
-                    .map_err(|e| anyhow::anyhow!("invalid token-key realm/binding: {e}"))?;
+                let auth_binding = AuthBindingRef {
+                    realm: meerkat_core::RealmId::parse(&realm)
+                        .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
+                    binding: meerkat_core::BindingId::parse(binding_id)
+                        .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                };
+                let credential_identity = realm_set
+                    .bindings
+                    .get(binding_id)
+                    .ok_or_else(|| anyhow::anyhow!("Binding '{realm}:{binding_id}' not found"))?
+                    .credential_identity(&auth_binding);
+                let key = TokenKey::from_credential_identity(&credential_identity);
                 let should_clear = match store.load(&key).await {
                     Ok(present) => present.is_some(),
                     Err(e) if token_store_load_error_allows_clear(&e) => true,
                     Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
                 };
                 if should_clear {
-                    let auth_binding = meerkat_core::AuthBindingRef {
-                        realm: key.realm.clone(),
-                        binding: key.binding.clone(),
-                        profile: key.profile.clone(),
-                        origin: meerkat_core::connection::BindingOrigin::Configured,
-                    };
-                    meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+                    meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
                         persistence.clone(),
                         scope.auth_lease.clone(),
-                        auth_binding,
+                        credential_identity,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
-                    println!("deleted: {}:{}", key.realm.as_str(), key.binding.as_str());
+                    println!("deleted: {key}");
                 } else {
                     println!(
                         "nothing to delete: no persisted credential for '{realm}:{binding_id}'"
@@ -5504,7 +5515,7 @@ async fn refresh_auth_profile(
         .with_provider_auth_persistence(persistence.clone())
         .with_auth_lease_handle(scope.auth_lease.clone())
         .with_force_refresh(true);
-    let registry = cli_provider_registry();
+    let registry = cli_provider_registry(scope);
     let auth_binding = meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse(realm)
             .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -5640,6 +5651,7 @@ enum LoginProvider {
     Anthropic,
     OpenAi,
     Google,
+    Copilot,
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -5654,6 +5666,16 @@ impl LoginProvider {
             OAuthProviderIdentity::AnthropicClaudeAi => Some(Self::Anthropic),
             OAuthProviderIdentity::OpenAiChatGpt => Some(Self::OpenAi),
             OAuthProviderIdentity::GoogleCodeAssist => Some(Self::Google),
+            OAuthProviderIdentity::GitHubCopilot => {
+                #[cfg(feature = "copilot")]
+                {
+                    Some(Self::Copilot)
+                }
+                #[cfg(not(feature = "copilot"))]
+                {
+                    None
+                }
+            }
             // The console API-key provisioning identity is not an interactive
             // `rkat auth login` provider.
             OAuthProviderIdentity::AnthropicConsoleApiKey => None,
@@ -5665,6 +5687,7 @@ impl LoginProvider {
             Self::Anthropic => "Anthropic (Claude.ai)",
             Self::OpenAi => "OpenAI (ChatGPT)",
             Self::Google => "Google (Gemini Code Assist)",
+            Self::Copilot => "GitHub Copilot",
         }
     }
 
@@ -5673,14 +5696,16 @@ impl LoginProvider {
             Self::Anthropic => "Sign in with your Claude Pro / Max subscription",
             Self::OpenAi => "Sign in with your ChatGPT Plus / Pro account",
             Self::Google => "Sign in with your Google account (Gemini Code Assist)",
+            Self::Copilot => "Use models available through your GitHub Copilot account",
         }
     }
 
-    fn env_var(self) -> &'static str {
+    fn env_var(self) -> Option<&'static str> {
         match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAi => "OPENAI_API_KEY",
-            Self::Google => "GEMINI_API_KEY",
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::OpenAi => Some("OPENAI_API_KEY"),
+            Self::Google => Some("GEMINI_API_KEY"),
+            Self::Copilot => None,
         }
     }
 
@@ -5689,6 +5714,7 @@ impl LoginProvider {
             Self::Anthropic => "anthropic_oauth",
             Self::OpenAi => "openai_oauth",
             Self::Google => "google_oauth",
+            Self::Copilot => "copilot_openai",
         }
     }
 
@@ -5697,6 +5723,7 @@ impl LoginProvider {
             Self::Anthropic => meerkat_core::Provider::Anthropic,
             Self::OpenAi => meerkat_core::Provider::OpenAI,
             Self::Google => meerkat_core::Provider::Gemini,
+            Self::Copilot => meerkat_core::Provider::OpenAI,
         }
     }
 
@@ -5709,6 +5736,7 @@ impl LoginProvider {
             Self::Anthropic => "anthropic_api",
             Self::OpenAi => "openai_chatgpt",
             Self::Google => "google_code_assist",
+            Self::Copilot => "copilot_openai",
         }
     }
 
@@ -5721,6 +5749,7 @@ impl LoginProvider {
             Self::Anthropic => NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
             Self::OpenAi => NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
             Self::Google => NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
+            Self::Copilot => NormalizedBackendKind::OpenAi(OpenAiBackendKind::Copilot),
         }
     }
 
@@ -5739,6 +5768,7 @@ impl LoginProvider {
                 meerkat_core::provider_matrix::google::GoogleBackendKind::GoogleCodeAssist
                     .default_base_url(),
             ),
+            Self::Copilot => None,
         }
     }
 
@@ -5751,6 +5781,7 @@ impl LoginProvider {
             Self::Anthropic => NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ClaudeAiOauth),
             Self::OpenAi => NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ManagedChatGptOauth),
             Self::Google => NormalizedAuthMethod::Google(GoogleAuthMethod::GoogleOauth),
+            Self::Copilot => NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotOauth),
         }
     }
 
@@ -5765,6 +5796,7 @@ impl LoginProvider {
             }
             Self::OpenAi => meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             Self::Google => meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            Self::Copilot => meerkat_providers::oauth_flow::OAuthProviderIdentity::GitHubCopilot,
         }
     }
 
@@ -5772,13 +5804,14 @@ impl LoginProvider {
         match self {
             Self::OpenAi => "/auth/callback",
             Self::Anthropic | Self::Google => "/callback",
+            Self::Copilot => "/callback",
         }
     }
 
     fn callback_redirect_host(self) -> &'static str {
         match self {
             Self::Anthropic | Self::OpenAi => "localhost",
-            Self::Google => "127.0.0.1",
+            Self::Google | Self::Copilot => "127.0.0.1",
         }
     }
 
@@ -5786,6 +5819,7 @@ impl LoginProvider {
         match self {
             Self::OpenAi => &[1455, 1457],
             Self::Anthropic | Self::Google => &[0],
+            Self::Copilot => &[0],
         }
     }
 
@@ -5818,6 +5852,7 @@ impl LoginProvider {
             Self::Anthropic => &["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"],
             Self::OpenAi => &["gpt-5.4"],
             Self::Google => &["gemini-3.1-flash-lite"],
+            Self::Copilot => &[],
         }
     }
 }
@@ -5827,6 +5862,8 @@ const ALL_LOGIN_PROVIDERS: &[LoginProvider] = &[
     LoginProvider::Anthropic,
     LoginProvider::OpenAi,
     LoginProvider::Google,
+    #[cfg(feature = "copilot")]
+    LoginProvider::Copilot,
 ];
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -5916,7 +5953,12 @@ fn prompt_line(label: &str) -> anyhow::Result<String> {
 fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
     if let Some(raw) = hint {
         return LoginProvider::parse(raw).ok_or_else(|| {
-            anyhow::anyhow!("Unknown provider '{raw}'. Supported: anthropic, openai, google.")
+            let supported = if cfg!(feature = "copilot") {
+                "anthropic, openai, google, copilot"
+            } else {
+                "anthropic, openai, google"
+            };
+            anyhow::anyhow!("Unknown provider '{raw}'. Supported: {supported}.")
         });
     }
     eprintln!();
@@ -5957,16 +5999,121 @@ fn resolve_login_provider(hint: Option<&str>) -> anyhow::Result<LoginProvider> {
 #[derive(Debug)]
 struct CliOAuthLoginTarget {
     auth_binding: AuthBindingRef,
+    credential_identity: meerkat_core::AuthCredentialIdentity,
     auth_profile: meerkat_core::AuthProfile,
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Config) -> bool {
+fn validate_reserved_copilot_route(
+    section: &meerkat_core::RealmConfigSection,
+    route_id: &str,
+    provider: meerkat_core::Provider,
+    backend_kind: &str,
+    auth_method: &str,
+    account: &meerkat_core::CredentialAccountId,
+    canonical_options: &serde_json::Value,
+) -> anyhow::Result<()> {
+    if let Some(backend) = section.backend.get(route_id)
+        && (backend.provider != provider.as_str()
+            || backend.backend_kind != backend_kind
+            || backend.base_url.is_some()
+            || backend.server.is_some()
+            || &backend.options != canonical_options)
+    {
+        anyhow::bail!(
+            "reserved Copilot backend '{route_id}' conflicts with the built-in {} route",
+            provider.as_str()
+        );
+    }
+    if let Some(auth) = section.auth.get(route_id)
+        && (auth.provider != provider.as_str()
+            || auth.auth_method != auth_method
+            || !matches!(
+                auth.source,
+                meerkat_core::CredentialSourceSpec::ManagedStore
+            )
+            || !auth.constraints.allow_interactive_login)
+    {
+        anyhow::bail!(
+            "reserved Copilot auth profile '{route_id}' conflicts with the built-in {} route",
+            provider.as_str()
+        );
+    }
+    if let Some(binding) = section.binding.get(route_id)
+        && (binding.backend_profile != route_id
+            || binding.auth_profile != route_id
+            || binding.credential_account.as_ref() != Some(account))
+    {
+        anyhow::bail!(
+            "reserved Copilot binding '{route_id}' must use its matching backend/auth profiles and shared account '{account}'"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn ensure_cli_interactive_oauth_config(
+    provider: LoginProvider,
+    config: &mut Config,
+) -> anyhow::Result<bool> {
     let realm_id = CLI_INTERACTIVE_OAUTH_REALM_ID;
     let binding_id = provider.binding_id();
     let backend_profile_id = provider.backend_profile_id();
     let auth_profile_id = binding_id;
+    let credential_account = if provider == LoginProvider::Copilot {
+        Some(
+            meerkat_core::CredentialAccountId::parse("github_copilot")
+                .map_err(|error| anyhow::anyhow!("invalid built-in Copilot account id: {error}"))?,
+        )
+    } else {
+        None
+    };
     let section = config.realm.entry(realm_id.to_string()).or_default();
+    let copilot_options = if provider == LoginProvider::Copilot {
+        let account = credential_account.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Copilot login target is missing its credential account")
+        })?;
+        let canonical_options = section
+            .backend
+            .get("copilot_openai")
+            .map_or(serde_json::Value::Null, |backend| backend.options.clone());
+        for (route_id, route_provider, backend_kind, auth_method) in [
+            (
+                "copilot_openai",
+                meerkat_core::Provider::OpenAI,
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+            (
+                "copilot_anthropic",
+                meerkat_core::Provider::Anthropic,
+                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+            (
+                "copilot_gemini",
+                meerkat_core::Provider::Gemini,
+                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+        ] {
+            validate_reserved_copilot_route(
+                section,
+                route_id,
+                route_provider,
+                backend_kind,
+                auth_method,
+                account,
+                &canonical_options,
+            )?;
+        }
+        Some(canonical_options)
+    } else {
+        None
+    };
     let mut changed = false;
 
     if let Some(backend) = section.backend.get_mut(backend_profile_id) {
@@ -5996,7 +6143,7 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
                 provider: provider.config_provider().to_string(),
                 backend_kind: provider.backend_kind().to_string(),
                 base_url: provider.backend_base_url().map(str::to_string),
-                options: serde_json::Value::Null,
+                options: copilot_options.clone().unwrap_or(serde_json::Value::Null),
                 server: None,
             },
         );
@@ -6026,6 +6173,7 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
             meerkat_core::ProviderBindingConfig {
                 backend_profile: backend_profile_id.to_string(),
                 auth_profile: auth_profile_id.to_string(),
+                credential_account: credential_account.clone(),
                 default_model: Some(provider.sample_model().to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
                 provider_default: false,
@@ -6044,12 +6192,135 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
         changed = true;
     }
 
+    if provider == LoginProvider::Copilot {
+        for (route_id, route_provider, default_model) in [
+            (
+                "copilot_anthropic",
+                meerkat_core::Provider::Anthropic,
+                meerkat_models::default_model(meerkat_core::Provider::Anthropic),
+            ),
+            (
+                "copilot_gemini",
+                meerkat_core::Provider::Gemini,
+                meerkat_models::default_model(meerkat_core::Provider::Gemini),
+            ),
+        ] {
+            let backend_kind = match route_provider {
+                meerkat_core::Provider::Anthropic => {
+                    meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str()
+                }
+                meerkat_core::Provider::Gemini => {
+                    meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str()
+                }
+                _ => continue,
+            };
+            let auth_method = match route_provider {
+                meerkat_core::Provider::Anthropic => {
+                    meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
+                        .as_str()
+                }
+                meerkat_core::Provider::Gemini => {
+                    meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
+                        .as_str()
+                }
+                _ => continue,
+            };
+            if !section.backend.contains_key(route_id) {
+                section.backend.insert(
+                    route_id.to_string(),
+                    meerkat_core::BackendProfileConfig {
+                        provider: route_provider.as_str().to_string(),
+                        backend_kind: backend_kind.to_string(),
+                        base_url: None,
+                        options: copilot_options.clone().ok_or_else(|| {
+                            anyhow::anyhow!("Copilot login target is missing backend options")
+                        })?,
+                        server: None,
+                    },
+                );
+                changed = true;
+            }
+            if !section.auth.contains_key(route_id) {
+                section.auth.insert(
+                    route_id.to_string(),
+                    meerkat_core::AuthProfileConfig {
+                        provider: route_provider.as_str().to_string(),
+                        auth_method: auth_method.to_string(),
+                        source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                        constraints: meerkat_core::AuthConstraints {
+                            allow_interactive_login: true,
+                            ..Default::default()
+                        },
+                        metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+                    },
+                );
+                changed = true;
+            }
+            if !section.binding.contains_key(route_id) {
+                section.binding.insert(
+                    route_id.to_string(),
+                    meerkat_core::ProviderBindingConfig {
+                        backend_profile: route_id.to_string(),
+                        auth_profile: route_id.to_string(),
+                        credential_account: credential_account.clone(),
+                        default_model: default_model.map(str::to_string),
+                        policy: meerkat_core::BindingPolicy::default(),
+                        provider_default: false,
+                    },
+                );
+                changed = true;
+            }
+        }
+    }
+
     if section.default_binding.is_none() {
         section.default_binding = Some(binding_id.to_string());
         changed = true;
     }
 
-    changed
+    if provider == LoginProvider::Copilot {
+        let account = credential_account.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Copilot login target is missing its credential account")
+        })?;
+        let canonical_options = copilot_options
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Copilot login target is missing backend options"))?;
+        for (route_id, route_provider, backend_kind, auth_method) in [
+            (
+                "copilot_openai",
+                meerkat_core::Provider::OpenAI,
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+            (
+                "copilot_anthropic",
+                meerkat_core::Provider::Anthropic,
+                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+            (
+                "copilot_gemini",
+                meerkat_core::Provider::Gemini,
+                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str(),
+                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
+                    .as_str(),
+            ),
+        ] {
+            validate_reserved_copilot_route(
+                section,
+                route_id,
+                route_provider,
+                backend_kind,
+                auth_method,
+                account,
+                canonical_options,
+            )?;
+        }
+    }
+
+    Ok(changed)
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -6076,23 +6347,32 @@ fn resolve_configured_cli_interactive_oauth_target(
         profile: None,
         origin: meerkat_core::connection::BindingOrigin::Configured,
     };
-    let (_, backend_profile, auth_profile) =
+    let (binding, backend_profile, auth_profile) =
         realm_set.lookup_auth_binding(&auth_binding).map_err(|e| {
             anyhow::anyhow!("OAuth login target '{realm_id}:{binding_id}' invalid: {e}")
         })?;
-    meerkat_providers::oauth_flow::validate_oauth_login_binding(
-        backend_profile,
-        auth_profile,
+    let credential_identity = binding.credential_identity(&auth_binding);
+    let resolved_target = meerkat_core::ResolvedConnectionTarget {
+        realm: realm_set.clone(),
+        auth_binding: auth_binding.clone(),
+        credential_identity: credential_identity.clone(),
+        binding: binding.clone(),
+        backend: backend_profile.clone(),
+        auth_profile: auth_profile.clone(),
+    };
+    meerkat_providers::oauth_flow::validate_oauth_login_connection_target(
+        &resolved_target,
         provider.oauth_identity(),
     )
-    .map_err(|e| {
+    .map_err(|error| {
         anyhow::anyhow!(
-            "OAuth login target '{realm_id}:{binding_id}' cannot accept {} OAuth credentials: {e}",
+            "OAuth login target '{realm_id}:{binding_id}' cannot accept {} credentials: {error}",
             provider.display_name(),
         )
     })?;
     Ok(CliOAuthLoginTarget {
         auth_binding,
+        credential_identity,
         auth_profile: auth_profile.clone(),
     })
 }
@@ -6113,20 +6393,24 @@ fn resolve_cli_interactive_oauth_target(
                 return Err(err);
             }
             let mut synthesized = config.clone();
-            ensure_cli_interactive_oauth_config(provider, &mut synthesized);
+            ensure_cli_interactive_oauth_config(provider, &mut synthesized)?;
             resolve_configured_cli_interactive_oauth_target(provider, &synthesized)
         }
     }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) -> AuthBindingRef {
-    AuthBindingRef {
-        realm: key.realm.clone(),
-        binding: key.binding.clone(),
-        profile: key.profile.clone(),
+fn auth_binding_from_token_key(
+    key: &meerkat_providers::auth_store::TokenKey,
+) -> anyhow::Result<AuthBindingRef> {
+    Ok(AuthBindingRef {
+        realm: key.realm().clone(),
+        binding: key.binding().cloned().ok_or_else(|| {
+            anyhow::anyhow!("credential account '{key}' is not a provider binding")
+        })?,
+        profile: key.profile().cloned(),
         origin: meerkat_core::connection::BindingOrigin::Configured,
-    }
+    })
 }
 
 /// The legacy realm slug that `auth login` persisted credentials under before
@@ -6208,7 +6492,7 @@ async fn migrate_legacy_login_credentials_to_global(
         .await
         .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
     {
-        if key.realm.as_str() != LEGACY_LOGIN_REALM_SLUG {
+        if key.realm().as_str() != LEGACY_LOGIN_REALM_SLUG || key.binding().is_none() {
             continue;
         }
         migrated +=
@@ -6233,11 +6517,14 @@ async fn migrate_one_legacy_login_credential(
     };
     let store = persistence.token_store();
     let refresh_coordinator = persistence.refresh_coordinator();
-    debug_assert_eq!(dev_key.realm.as_str(), LEGACY_LOGIN_REALM_SLUG);
+    debug_assert_eq!(dev_key.realm().as_str(), LEGACY_LOGIN_REALM_SLUG);
+    let Some(binding) = dev_key.binding().cloned() else {
+        return Ok(0);
+    };
     let global_key = TokenKey::new_with_profile(
         meerkat_core::connection::RealmId::global(),
-        dev_key.binding.clone(),
-        dev_key.profile.clone(),
+        binding,
+        dev_key.profile().cloned(),
     );
     let copied = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let copied_in_mutation = Arc::clone(&copied);
@@ -6263,12 +6550,8 @@ async fn migrate_one_legacy_login_credential(
                     };
                     let target_store = Arc::clone(&source_store);
                     let target_key = global_key.clone();
-                    let target_binding = AuthBindingRef {
-                        realm: target_key.realm.clone(),
-                        binding: target_key.binding.clone(),
-                        profile: target_key.profile.clone(),
-                        origin: meerkat_core::connection::BindingOrigin::Configured,
-                    };
+                    let target_binding = auth_binding_from_token_key(&target_key)
+                        .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
                     let target_auth_lease = auth_lease.clone();
                     target_coordinator
                         .with_exclusive_mutation(
@@ -6385,11 +6668,12 @@ async fn ensure_migrated_global_oauth_sections_provisioned(
         // `global` (migrated or freshly signed in). No token => nothing to
         // resolve, so don't synthesize a dangling section.
         match token_store.load(&key).await {
-            Ok(Some(_)) => {
-                if ensure_cli_interactive_oauth_config(provider, &mut config) {
-                    changed = true;
+            Ok(Some(_)) => match ensure_cli_interactive_oauth_config(provider, &mut config) {
+                Ok(provider_changed) => changed |= provider_changed,
+                Err(error) => {
+                    tracing::warn!(%error, "skipping invalid built-in OAuth config projection");
                 }
-            }
+            },
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(binding = %binding_id, error = %e, "skipping global OAuth section probe (token load failed)");
@@ -6774,16 +7058,19 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
     };
     let store = persistence.token_store();
     let refresh_coordinator = persistence.refresh_coordinator();
+    let credential_identity =
+        meerkat_core::AuthCredentialIdentity::from_auth_binding(&auth_binding);
     flow.authority
         .verify(
             &flow.state,
-            &auth_binding,
+            &credential_identity,
             flow.provider,
             &flow.redirect_uri,
         )
         .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
     let key = TokenKey::from_auth_binding(&auth_binding);
     let load_key = key.clone();
+    let mutation_credential_identity = credential_identity;
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
@@ -6802,7 +7089,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
                     flow.authority
                         .consume(
                             &flow.state,
-                            &auth_binding,
+                            &mutation_credential_identity,
                             flow.provider,
                             &flow.redirect_uri,
                         )
@@ -6942,7 +7229,7 @@ async fn noninteractive_login(
             "source": "rkat auth login --non-interactive",
         }),
     };
-    let auth_binding = auth_binding_from_token_key(&key);
+    let auth_binding = auth_binding_from_token_key(&key)?;
     save_cli_tokens_and_publish_lifecycle(
         persistence,
         scope.auth_lease.clone(),
@@ -6978,7 +7265,7 @@ async fn interactive_login(
     config
         .apply_env_overrides()
         .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
-    let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config);
+    let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config)?;
     let target = resolve_configured_cli_interactive_oauth_target(provider, &config)?;
     if config_changed {
         config_store
@@ -6994,7 +7281,7 @@ async fn interactive_login(
         config_provisioned = config_changed,
         "validated CLI OAuth login target"
     );
-    let auth_binding = target.auth_binding;
+    let auth_binding = target.auth_binding.clone();
     let identity = provider.oauth_identity();
     let key = TokenKey::from_auth_binding(&auth_binding);
     let host_target = meerkat::HostAuthTarget {
@@ -7015,6 +7302,9 @@ async fn interactive_login(
     {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
+    if provider == LoginProvider::Copilot {
+        return interactive_copilot_device_login(target, persistence, scope).await;
+    }
     let auth_service =
         meerkat::HostAuthService::new(persistence, scope.provider_auth_authority.clone());
     let cli_cmd = current_cli_command_name();
@@ -7027,16 +7317,14 @@ async fn interactive_login(
     eprintln!("{}", auth_dim(provider.one_line()));
 
     // --- Pre-flight: env-var conflict warning ----------------------
-    if std::env::var(provider.env_var())
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_some()
+    if let Some(env_var) = provider.env_var()
+        && std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
     {
         eprintln!();
-        print_warn(&format!(
-            "{} is set in your environment.",
-            provider.env_var(),
-        ));
+        print_warn(&format!("{env_var} is set in your environment."));
         print_hint(&format!(
             "The env-var auth path will continue to handle `{cli_cmd} run` without"
         ));
@@ -7047,6 +7335,110 @@ async fn interactive_login(
             "`--auth-binding global:{}`.",
             provider.binding_id(),
         ));
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    async fn interactive_copilot_device_login(
+        target: CliOAuthLoginTarget,
+        persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+        scope: &RuntimeScope,
+    ) -> anyhow::Result<()> {
+        use meerkat_providers::auth_oauth::{
+            DevicePollOutcome, poll_device_code, request_device_code,
+        };
+
+        let identity = meerkat_core::OAuthProviderIdentity::GitHubCopilot;
+        let endpoints = meerkat_providers::oauth_flow::oauth_provider_endpoints(identity, "");
+        let http = reqwest::Client::new();
+        let device = request_device_code(&http, &endpoints)
+            .await
+            .map_err(|error| anyhow::anyhow!("GitHub device authorization failed: {error}"))?;
+        let lease_key =
+            meerkat_core::handles::LeaseKey::from_credential_identity(&target.credential_identity);
+        {
+            let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+            scope
+                .provider_auth_authority
+                .oauth_flow_authority()
+                .admit_device_code(
+                    target.credential_identity.clone(),
+                    identity,
+                    device.device_code.clone(),
+                    std::time::Duration::from_secs(device.expires_in),
+                )
+                .map_err(|error| anyhow::anyhow!("OAuth flow admission failed: {error}"))?;
+        }
+
+        eprintln!();
+        eprintln!("{}", auth_bold("Signing in to GitHub Copilot"));
+        eprintln!();
+        eprintln!("  Open: {}", auth_cyan(&device.verification_uri));
+        eprintln!("  Code: {}", auth_bold(&device.user_code));
+        eprintln!();
+        print_hint("Waiting for GitHub authorization. Press Ctrl-C to cancel.");
+
+        let poll = scope
+            .provider_auth_authority
+            .oauth_flow_authority()
+            .begin_device_code_poll(&device.device_code, &target.credential_identity, identity)
+            .map_err(|error| anyhow::anyhow!("OAuth device poll admission failed: {error}"))?;
+        let mut interval = device.interval.max(1);
+        let result = loop {
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            match poll_device_code(&http, &endpoints, &device.device_code, None).await? {
+                DevicePollOutcome::Pending => {}
+                DevicePollOutcome::SlowDown => {
+                    interval = interval.saturating_add(5);
+                }
+                DevicePollOutcome::AccessDenied => {
+                    anyhow::bail!("GitHub device authorization was denied");
+                }
+                DevicePollOutcome::Expired => {
+                    anyhow::bail!("GitHub device authorization expired");
+                }
+                DevicePollOutcome::Ready(result) => break result,
+            }
+        };
+
+        let now = chrono::Utc::now();
+        let expires_at = result
+            .expires_at_from(now)
+            .map_err(|error| anyhow::anyhow!("GitHub token expiry is invalid: {error}"))?;
+        let tokens = meerkat_providers::auth_store::PersistedTokens {
+            auth_mode: meerkat_providers::auth_store::PersistedAuthMode::GithubCopilotOauth,
+            primary_secret: Some(result.access_token),
+            refresh_token: result.refresh_token,
+            id_token: result.id_token,
+            expires_at,
+            last_refresh: Some(now),
+            scopes: result
+                .scope
+                .as_deref()
+                .map(|scope| scope.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        let committed =
+            meerkat_providers::browser_login::save_oauth_tokens_and_consume_device_flow(
+                persistence,
+                scope.auth_lease.clone(),
+                target.credential_identity.clone(),
+                tokens,
+                poll,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("GitHub credential persistence failed: {error}"))?;
+
+        print_ok("GitHub Copilot credentials saved.");
+        eprintln!("  Credential account: {}", target.credential_identity);
+        if let Some(expires_at) = committed.expires_at {
+            eprintln!("  GitHub token expires: {expires_at}");
+        }
+        eprintln!(
+            "  OpenAI route:    --auth-binding global:copilot_openai\n  Anthropic route: --auth-binding global:copilot_anthropic\n  Gemini route:    --auth-binding global:copilot_gemini"
+        );
+        Ok(())
     }
 
     // --- Step 1: bind loopback callback ---------------------------
@@ -7161,12 +7553,7 @@ async fn interactive_login(
         auth_green(&format!("Signed in to {}.", provider.display_name())),
     );
     eprintln!();
-    eprintln!(
-        "  {} {}:{}",
-        auth_bold("Profile:"),
-        key.realm.as_str(),
-        key.binding.as_str(),
-    );
+    eprintln!("  {} {}", auth_bold("Profile:"), key,);
     eprintln!("  {} {}", auth_bold("Storage:"), storage_location);
     if let Some(expiry) = expires_at {
         let human_delta = (expiry - chrono::Utc::now()).num_minutes();
@@ -7239,15 +7626,22 @@ async fn interactive_logout(binding_key: &str, scope: &RuntimeScope) -> anyhow::
     // non-AuthBindingRef carve-out `split_once(':')` site explicitly
     // documented in `cli_parse.rs` — TokenKey shares the same flat
     // `realm:binding` grammar but has no profile component.
-    let keys = match binding_key.split_once(':') {
-        Some((realm, binding)) => vec![
-            TokenKey::parse(realm, binding)
-                .map_err(|e| anyhow::anyhow!("invalid token-key `{binding_key}`: {e}"))?,
-        ],
-        None => vec![
-            TokenKey::parse(meerkat_core::connection::GLOBAL_REALM_SLUG, binding_key)
-                .map_err(|e| anyhow::anyhow!("invalid token-key `global:{binding_key}`: {e}"))?,
-        ],
+    let (realm_raw, binding_raw) = binding_key
+        .split_once(':')
+        .unwrap_or((meerkat_core::connection::GLOBAL_REALM_SLUG, binding_key));
+    let fallback_key = TokenKey::parse(realm_raw, binding_raw)
+        .map_err(|e| anyhow::anyhow!("invalid token-key `{realm_raw}:{binding_raw}`: {e}"))?;
+    let keys = match load_config(scope).await {
+        Ok((config, _)) => {
+            let auth_binding = auth_binding_from_token_key(&fallback_key)?;
+            match meerkat_core::resolve_explicit_auth_binding_target(&config, &auth_binding) {
+                Ok(target) => vec![TokenKey::from_credential_identity(
+                    &target.credential_identity,
+                )],
+                Err(_) => vec![fallback_key],
+            }
+        }
+        Err(_) => vec![fallback_key],
     };
     let mut cleared = 0;
     for key in keys {
@@ -7257,33 +7651,17 @@ async fn interactive_logout(binding_key: &str, scope: &RuntimeScope) -> anyhow::
             Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
         };
         if should_clear {
-            let auth_binding = meerkat_core::AuthBindingRef {
-                realm: key.realm.clone(),
-                binding: key.binding.clone(),
-                profile: key.profile.clone(),
-                origin: meerkat_core::connection::BindingOrigin::Configured,
-            };
-            meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+            meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
                 persistence.clone(),
                 scope.auth_lease.clone(),
-                auth_binding,
+                key.credential_identity().clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
-            eprintln!(
-                "{} Cleared {}:{}",
-                auth_green("✓"),
-                key.realm.as_str(),
-                key.binding.as_str(),
-            );
+            eprintln!("{} Cleared {}", auth_green("✓"), key,);
             cleared += 1;
         } else {
-            eprintln!(
-                "{} No stored credentials for {}:{}",
-                auth_dim("·"),
-                key.realm.as_str(),
-                key.binding.as_str(),
-            );
+            eprintln!("{} No stored credentials for {}", auth_dim("·"), key,);
         }
     }
     if cleared == 0 {
@@ -7312,11 +7690,11 @@ struct CliAuthStatusProjection {
 async fn project_cli_auth_status(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
-    auth_binding: &AuthBindingRef,
+    credential_identity: &meerkat_core::AuthCredentialIdentity,
     auth_profile: &meerkat_core::AuthProfile,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<CliAuthStatusProjection> {
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
+    let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(credential_identity);
     auth_lease
         .observe_credential_freshness(
             &lease_key,
@@ -7340,10 +7718,10 @@ async fn project_cli_auth_status(
                 // A rehydration fault is a real error, not absent
                 // credentials. Propagate it rather than collapsing to None,
                 // which would report a store fault as "no credentials".
-                match meerkat_core::rehydrate_marked_tokens_for_status(
+                match meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
                     store,
                     auth_lease,
-                    auth_binding,
+                    credential_identity,
                     expected_mode,
                     now,
                 )
@@ -7364,9 +7742,11 @@ async fn project_cli_auth_status(
             // Propagate the typed TokenStoreError rather than collapsing it
             // to None, which would report a store fault as "no credentials".
             stored = store
-                .load(&meerkat_providers::auth_store::TokenKey::from_auth_binding(
-                    auth_binding,
-                ))
+                .load(
+                    &meerkat_providers::auth_store::TokenKey::from_credential_identity(
+                        credential_identity,
+                    ),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
         }
@@ -7434,23 +7814,10 @@ fn auth_status_binding_id<'a>(
     }
 }
 
-fn cli_provider_registry() -> meerkat_providers::ProviderRuntimeRegistry {
-    #[allow(unused_mut)]
-    let mut registry = meerkat_providers::ProviderRuntimeRegistry::empty();
-    #[cfg(feature = "anthropic")]
-    {
-        registry = registry.with_runtime(Arc::new(meerkat_anthropic::AnthropicProviderRuntime));
-    }
-    #[cfg(feature = "openai")]
-    {
-        registry = registry.with_runtime(Arc::new(meerkat_openai::OpenAiProviderRuntime));
-        registry = registry.with_runtime(Arc::new(meerkat_providers::SelfHostedProviderRuntime));
-    }
-    #[cfg(feature = "gemini")]
-    {
-        registry = registry.with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
-    }
-    registry
+fn cli_provider_registry(scope: &RuntimeScope) -> Arc<meerkat_providers::ProviderRuntimeRegistry> {
+    AgentFactory::new(scope.locator.state_root.clone())
+        .without_provider_auth_persistence()
+        .provider_runtime_registry()
 }
 
 struct DoctorSelfHostedProbeConnection {
@@ -18279,6 +18646,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_env".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: true,
@@ -18511,10 +18879,7 @@ mod tests {
     fn test_cli_interactive_login_synthesized_oauth_config_is_toml_serializable() {
         let mut config = Config::default();
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
         let rendered = toml::to_string_pretty(&config)
             .expect("first-time interactive OAuth config must serialize as TOML");
         let reparsed: Config =
@@ -18533,14 +18898,10 @@ mod tests {
     fn test_cli_interactive_oauth_config_uses_current_provider_default_models() {
         let mut config = Config::default();
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::Anthropic,
-            &mut config
-        ));
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(
+            ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config).unwrap()
+        );
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
 
         let realm = config.realm.get("global").expect("global realm");
         assert_eq!(
@@ -18561,17 +18922,63 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
+    fn test_cli_copilot_routes_share_one_credential_account() {
+        let mut config = Config::default();
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config).unwrap());
+        let realm = config.realm.get("global").expect("global realm");
+        let expected =
+            meerkat_core::CredentialAccountId::parse("github_copilot").expect("valid account");
+        for binding_id in ["copilot_openai", "copilot_anthropic", "copilot_gemini"] {
+            assert_eq!(
+                realm
+                    .binding
+                    .get(binding_id)
+                    .expect("Copilot route")
+                    .credential_account
+                    .as_ref(),
+                Some(&expected)
+            );
+        }
+        assert!(
+            !ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config).unwrap(),
+            "complete Copilot config should be idempotent"
+        );
+    }
+
+    #[cfg(all(
+        feature = "anthropic",
+        feature = "openai",
+        feature = "gemini",
+        feature = "copilot"
+    ))]
+    #[test]
+    fn test_cli_copilot_login_rejects_conflicting_reserved_route() {
+        let mut config = Config::default();
+        ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config).unwrap();
+        config
+            .realm
+            .get_mut("global")
+            .unwrap()
+            .binding
+            .get_mut("copilot_anthropic")
+            .unwrap()
+            .credential_account = None;
+
+        let error = ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config)
+            .expect_err("reserved Copilot route conflict must fail closed");
+
+        assert!(error.to_string().contains("copilot_anthropic"));
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
     fn test_cli_interactive_oauth_config_heals_legacy_provider_default_models() {
         let mut config = Config::default();
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::Anthropic,
-            &mut config
-        ));
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(
+            ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config).unwrap()
+        );
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
 
         let realm = config.realm.get_mut("global").expect("global realm");
         realm
@@ -18585,14 +18992,10 @@ mod tests {
             .expect("openai oauth binding")
             .default_model = Some("gpt-5.4".to_string());
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::Anthropic,
-            &mut config
-        ));
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(
+            ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config).unwrap()
+        );
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
 
         let realm = config.realm.get("global").expect("global realm");
         assert_eq!(
@@ -18615,10 +19018,7 @@ mod tests {
     #[test]
     fn test_cli_interactive_oauth_config_preserves_supported_explicit_openai_pin() {
         let mut config = Config::default();
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
 
         let realm = config.realm.get_mut("global").expect("global realm");
         realm
@@ -18627,10 +19027,7 @@ mod tests {
             .expect("openai oauth binding")
             .default_model = Some("gpt-5.5".to_string());
 
-        assert!(!ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(!ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
         let realm = config.realm.get("global").expect("global realm");
         assert_eq!(
             realm
@@ -18647,10 +19044,9 @@ mod tests {
         for legacy_model in ["claude-opus-4-6", "claude-opus-4-7"] {
             let mut config = Config::default();
 
-            assert!(ensure_cli_interactive_oauth_config(
-                LoginProvider::Anthropic,
-                &mut config
-            ));
+            assert!(
+                ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config).unwrap()
+            );
             let realm = config.realm.get_mut("global").expect("global realm");
             realm
                 .binding
@@ -18659,7 +19055,7 @@ mod tests {
                 .default_model = Some(legacy_model.to_string());
 
             assert!(
-                ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config),
+                ensure_cli_interactive_oauth_config(LoginProvider::Anthropic, &mut config).unwrap(),
                 "legacy model {legacy_model} should be healed to the current Anthropic default"
             );
 
@@ -18679,10 +19075,7 @@ mod tests {
     fn test_cli_interactive_google_oauth_config_includes_code_assist_base_url() {
         let mut config = Config::default();
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::Google,
-            &mut config
-        ));
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config).unwrap());
         let backend = config
             .realm
             .get("global")
@@ -18695,7 +19088,7 @@ mod tests {
             Some("https://cloudcode-pa.googleapis.com")
         );
         assert!(
-            !ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
+            !ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config).unwrap(),
             "complete synthesized config should not be rewritten"
         );
 
@@ -18709,7 +19102,7 @@ mod tests {
             .base_url = None;
 
         assert!(
-            ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
+            ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config).unwrap(),
             "legacy synthesized Google OAuth config without base_url should be healed"
         );
         let backend = config
@@ -18730,10 +19123,7 @@ mod tests {
     fn test_cli_interactive_openai_oauth_config_uses_codex_backend_base_url() {
         let mut config = Config::default();
 
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
+        assert!(ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap());
         let backend = config
             .realm
             .get("global")
@@ -18756,7 +19146,7 @@ mod tests {
             .base_url = Some("https://chatgpt.com/backend-api".into());
 
         assert!(
-            !ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config),
+            !ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config).unwrap(),
             "a configured base URL is never silently rewritten; the legacy \
              ChatGPT backend URL is rejected at runtime with InvalidBaseUrl"
         );
@@ -18814,6 +19204,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "openai_chatgpt".into(),
                 auth_profile: "openai_oauth".into(),
+                credential_account: None,
                 default_model: None,
                 policy: meerkat_core::BindingPolicy::default(),
                 provider_default: false,
@@ -19249,7 +19640,7 @@ mod tests {
         let projection = project_cli_auth_status(
             &auth_lease,
             Some(&store as &dyn TokenStore),
-            &auth_binding,
+            &meerkat_core::AuthCredentialIdentity::from_auth_binding(&auth_binding),
             auth_profile,
             chrono::Utc::now(),
         )
@@ -19264,6 +19655,48 @@ mod tests {
             Some(meerkat_core::handles::AuthLeasePhase::Valid)
         );
         assert!(snapshot.credential_present);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_copilot_status_reads_shared_account_credential() {
+        use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
+
+        let mut config = Config::default();
+        ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config).unwrap();
+        let target =
+            resolve_configured_cli_interactive_oauth_target(LoginProvider::Copilot, &config)
+                .expect("Copilot target");
+        let store = EphemeralTokenStore::new();
+        let auth_lease = new_cli_auth_handles().0;
+        let mut tokens = openai_oauth_tokens();
+        tokens.auth_mode = meerkat_providers::auth_store::PersistedAuthMode::GithubCopilotOauth;
+        let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+            &auth_lease,
+            &target.credential_identity,
+            &tokens,
+        )
+        .expect("account lifecycle acquisition");
+        let key = TokenKey::from_credential_identity(&target.credential_identity);
+        let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &key,
+            &tokens,
+            &transition,
+        )
+        .expect("account lifecycle marker");
+        store.save(&key, &marked).await.expect("save account token");
+
+        let projection = project_cli_auth_status(
+            &auth_lease,
+            Some(&store as &dyn TokenStore),
+            &target.credential_identity,
+            &target.auth_profile,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("account status");
+
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -19302,7 +19735,7 @@ mod tests {
         let projection = project_cli_auth_status(
             &auth_lease,
             None::<&dyn TokenStore>,
-            &auth_binding,
+            &meerkat_core::AuthCredentialIdentity::from_auth_binding(&auth_binding),
             auth_profile,
             chrono::Utc::now(),
         )
@@ -19334,11 +19767,13 @@ mod tests {
         );
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let auth_binding = openai_auth_binding();
+        let credential_identity =
+            meerkat_core::AuthCredentialIdentity::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1:12345/callback";
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let state = authority
             .start(
-                auth_binding.clone(),
+                credential_identity.clone(),
                 provider,
                 redirect_uri.to_string(),
                 "pkce-verifier".into(),
@@ -19360,7 +19795,8 @@ mod tests {
         .await
         .expect("CLI OAuth save consumes terminal flow");
 
-        let second_consume = authority.consume(&state, &auth_binding, provider, redirect_uri);
+        let second_consume =
+            authority.consume(&state, &credential_identity, provider, redirect_uri);
         assert!(
             second_consume.is_err(),
             "consumed runtime browser flow must not remain callable: {second_consume:?}"
@@ -19393,7 +19829,7 @@ mod tests {
     impl meerkat_providers::oauth_flow::OAuthFlowAuthority for RejectCliBrowserConsumeAuthority {
         fn start(
             &self,
-            _target: AuthBindingRef,
+            _target: meerkat_core::AuthCredentialIdentity,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _redirect_uri: String,
             _pkce_verifier: String,
@@ -19404,7 +19840,7 @@ mod tests {
         fn verify(
             &self,
             _state: &str,
-            target: &AuthBindingRef,
+            target: &meerkat_core::AuthCredentialIdentity,
             provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             redirect_uri: &str,
         ) -> Result<
@@ -19423,7 +19859,7 @@ mod tests {
         fn consume(
             &self,
             _state: &str,
-            _target: &AuthBindingRef,
+            _target: &meerkat_core::AuthCredentialIdentity,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _redirect_uri: &str,
         ) -> Result<
@@ -19440,7 +19876,7 @@ mod tests {
 
         fn admit_device_code(
             &self,
-            _target: AuthBindingRef,
+            _target: meerkat_core::AuthCredentialIdentity,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
             _device_code: String,
             _expires_in: std::time::Duration,
@@ -19451,7 +19887,7 @@ mod tests {
         fn verify_device_code(
             &self,
             _device_code: &str,
-            _target: &AuthBindingRef,
+            _target: &meerkat_core::AuthCredentialIdentity,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthDeviceFlowRecord,
@@ -19463,7 +19899,7 @@ mod tests {
         fn begin_device_code_poll(
             &self,
             _device_code: &str,
-            _target: &AuthBindingRef,
+            _target: &meerkat_core::AuthCredentialIdentity,
             _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
         ) -> Result<
             meerkat_providers::oauth_flow::OAuthDevicePollLease,
@@ -25883,12 +26319,14 @@ default_model = "gpt-5.4"
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
+        let credential_identity =
+            meerkat_core::AuthCredentialIdentity::from_auth_binding(&auth_binding);
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
         let redirect_uri = "http://127.0.0.1:1455/callback";
         let state = persistence_adapter
             .oauth_flow_authority()
             .start(
-                auth_binding.clone(),
+                credential_identity.clone(),
                 provider,
                 redirect_uri.to_string(),
                 "cli-persistence-verifier".to_string(),
@@ -25907,7 +26345,7 @@ default_model = "gpt-5.4"
         );
         let flow = runtime_adapter
             .oauth_flow_authority()
-            .consume(&state, &auth_binding, provider, redirect_uri)
+            .consume(&state, &credential_identity, provider, redirect_uri)
             .expect("CLI service construction must preserve PersistenceBundle OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "cli-persistence-verifier");
@@ -26884,6 +27322,7 @@ supports_reasoning = true
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "google_code_assist".to_string(),
                 auth_profile: "google_oauth".to_string(),
+                credential_account: None,
                 default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
                 policy: meerkat_core::BindingPolicy::default(),
                 provider_default: false,
@@ -26942,6 +27381,7 @@ supports_reasoning = true
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "google".to_string(),
                 auth_profile: "oauth".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: true,

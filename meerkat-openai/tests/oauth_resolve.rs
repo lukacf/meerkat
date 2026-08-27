@@ -74,6 +74,7 @@ fn openai_realm_no_refresh(backend_kind: &str, auth_method: &str) -> RealmConnec
         ProviderBindingConfig {
             backend_profile: backend_kind.into(),
             auth_profile: "chatgpt_auth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,
@@ -128,6 +129,7 @@ fn openai_realm_with_source(
         ProviderBindingConfig {
             backend_profile: backend_kind.into(),
             auth_profile: "chatgpt_auth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,

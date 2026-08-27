@@ -29,10 +29,11 @@ use meerkat_auth_core::resolver::{
 use meerkat_auth_core::{
     auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
-#[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
+#[cfg(all(not(target_arch = "wasm32"), any(feature = "adc", feature = "copilot")))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
-    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
+    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
+    StaticLease, ValidatedBinding,
 };
 use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
@@ -374,7 +375,34 @@ fn google_code_assist_oauth_refresh_error(
     ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
-pub struct GoogleProviderRuntime;
+#[derive(Default)]
+pub struct GoogleProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: Option<Arc<meerkat_copilot::CopilotRuntime>>,
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot_chat_completions: Option<Arc<dyn meerkat_copilot::CopilotChatCompletionsClientFactory>>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const GoogleProviderRuntime: GoogleProviderRuntime = GoogleProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: None,
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot_chat_completions: None,
+};
+
+impl GoogleProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    pub fn with_copilot(
+        copilot: Arc<meerkat_copilot::CopilotRuntime>,
+        chat_completions: Arc<dyn meerkat_copilot::CopilotChatCompletionsClientFactory>,
+    ) -> Self {
+        Self {
+            copilot: Some(copilot),
+            copilot_chat_completions: Some(chat_completions),
+        }
+    }
+}
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -427,6 +455,29 @@ impl ProviderRuntime for GoogleProviderRuntime {
             }
             GoogleAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
+            }
+            GoogleAuthMethod::GitHubCopilotOauth => {
+                #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+                {
+                    let runtime = self.copilot.as_ref().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "Gemini Copilot backend is not composed with CopilotRuntime"
+                                .to_string(),
+                        )
+                    })?;
+                    let resolved = runtime.resolve(binding, env).await?;
+                    Arc::new(DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ))
+                }
+                #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "Gemini Copilot backend is not compiled".to_string(),
+                    ));
+                }
             }
             GoogleAuthMethod::Adc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
@@ -662,6 +713,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(backend_kind),
             backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
             auth_lease: lease,
         })
     }
@@ -687,6 +739,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
         // directly.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(authorizer) = connection.resolved_authorizer() {
+            if matches!(backend_kind, GoogleBackendKind::Copilot) {
+                return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+            }
             let base_url =
                 configured_or_default_base_url(backend_kind, &connection.backend_profile)
                     .ok_or_else(|| {
@@ -793,6 +848,101 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     ))
                 }
             }
+            GoogleBackendKind::Copilot => {
+                Err(ProviderClientError::MissingFeature("copilot-text-target"))
+            }
+        }
+    }
+
+    fn build_text_client(
+        &self,
+        target: ResolvedTextTarget,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        if !matches!(
+            target.connection().backend,
+            NormalizedBackendKind::Google(GoogleBackendKind::Copilot)
+        ) {
+            let (_, _, connection) = target.into_parts();
+            return self.build_client(connection);
+        }
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        {
+            let runtime = self.copilot.as_ref().ok_or_else(|| {
+                ProviderClientError::ClientInit(
+                    "Gemini Copilot backend is not composed with CopilotRuntime".to_string(),
+                )
+            })?;
+            let (identity, profile, connection) = target.into_parts();
+            let chat_factory = self
+                .copilot_chat_completions
+                .as_ref()
+                .ok_or_else(|| {
+                    ProviderClientError::ClientInit(
+                        "Gemini Copilot backend is not composed with a Chat Completions client factory"
+                            .to_string(),
+                    )
+                })?
+                .clone();
+            let model = identity.model.clone();
+            let supports_temperature = profile.profile().supports_temperature;
+            let supports_image_tool_results = profile.profile().image_tool_results;
+            let factory: meerkat_copilot::CopilotRouteClientFactory =
+                Arc::new(move |route, connection| {
+                    let endpoint = match route.access {
+                        meerkat_copilot::CopilotModelAccess::Available { endpoint } => endpoint,
+                        meerkat_copilot::CopilotModelAccess::Unknown => {
+                            meerkat_copilot::CopilotEndpoint::optimistic_for_provider(
+                                Provider::Gemini,
+                            )
+                            .ok_or_else(|| {
+                                ProviderClientError::ClientInit(
+                                    "Copilot has no optimistic Gemini route".to_string(),
+                                )
+                            })?
+                        }
+                        meerkat_copilot::CopilotModelAccess::Unavailable => {
+                            return Err(ProviderClientError::ClientInit(
+                                route.unavailable_message(
+                                    Provider::Gemini,
+                                    &model,
+                                    meerkat_copilot::CopilotEndpoint::ChatCompletions,
+                                ),
+                            ));
+                        }
+                    };
+                    if endpoint != meerkat_copilot::CopilotEndpoint::ChatCompletions {
+                        return Err(ProviderClientError::ClientInit(route.unavailable_message(
+                            Provider::Gemini,
+                            &model,
+                            meerkat_copilot::CopilotEndpoint::ChatCompletions,
+                        )));
+                    }
+                    let authorizer = connection
+                        .resolved_authorizer()
+                        .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    chat_factory.build(meerkat_copilot::CopilotChatCompletionsClientSpec::new(
+                        Provider::Gemini,
+                        model.clone(),
+                        route.api_base.clone(),
+                        authorizer,
+                        supports_temperature,
+                        true,
+                        true,
+                        supports_image_tool_results,
+                    ))
+                });
+            meerkat_copilot::routed_client(
+                Arc::clone(runtime),
+                connection,
+                Provider::Gemini,
+                identity.model,
+                factory,
+            )
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        {
+            let _ = target;
+            Err(ProviderClientError::MissingFeature("copilot"))
         }
     }
 
@@ -807,6 +957,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                  — registry dispatch invariant violated"
             ),
         };
+        if matches!(backend_kind, GoogleBackendKind::Copilot) {
+            return Ok(None);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url =
@@ -861,6 +1014,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     client
                 }
             }
+            GoogleBackendKind::Copilot => return Ok(None),
         };
         Ok(Some(Arc::new(
             client.with_google_backend_kind(backend_kind),
@@ -978,6 +1132,14 @@ mod tests {
             provider: Provider::Gemini,
             backend: NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist),
             backend_profile: backend,
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &meerkat_core::AuthBindingRef {
+                    realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+                    binding: meerkat_core::BindingId::parse("google").expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                },
+            ),
             auth_lease: lease,
         };
 

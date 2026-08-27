@@ -98,6 +98,7 @@ rust_library(
         "//meerkat-auth-core:__pkg__",
         "//meerkat-cli:__pkg__",
         "//meerkat-comms:__pkg__",
+        "//meerkat-copilot:__pkg__",
         "//meerkat-gemini:__pkg__",
         "//meerkat-machine-codegen:__pkg__",
         "//meerkat-mcp:__pkg__",

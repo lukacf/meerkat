@@ -10,10 +10,20 @@ export const WIRE_AUTH_PROVIDERS = [
 
 export type WireAuthProvider = typeof WIRE_AUTH_PROVIDERS[number];
 
+export const WIRE_OAUTH_PROVIDERS = [
+  "anthropic",
+  "openai",
+  "google",
+  "copilot"
+] as const;
+
+export type WireOAuthProvider = typeof WIRE_OAUTH_PROVIDERS[number];
+
 export const WIRE_BACKEND_KINDS = [
   "openai_api",
   "chatgpt_backend",
   "azure_openai",
+  "copilot",
   "anthropic_api",
   "bedrock",
   "vertex",
@@ -34,6 +44,7 @@ export const WIRE_AUTH_METHODS = [
   "managed_chatgpt_oauth",
   "external_chatgpt_tokens",
   "external_authorizer",
+  "github_copilot_oauth",
   "claude_ai_oauth",
   "oauth_to_api_key",
   "bedrock_bearer",
@@ -57,16 +68,19 @@ export const WIRE_PROVIDER_BACKEND_KINDS = {
     "bedrock",
     "vertex",
     "foundry",
+    "copilot",
   ],
   openai: [
     "openai_api",
     "chatgpt_backend",
     "azure_openai",
+    "copilot",
   ],
   gemini: [
     "google_genai",
     "vertex_ai",
     "google_code_assist",
+    "copilot",
   ],
   self_hosted: [
     "self_hosted",
@@ -86,6 +100,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "vertex_google_auth",
     "foundry_api_key",
     "foundry_azure_ad",
+    "github_copilot_oauth",
   ],
   openai: [
     "api_key",
@@ -94,6 +109,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "managed_chatgpt_oauth",
     "external_chatgpt_tokens",
     "external_authorizer",
+    "github_copilot_oauth",
   ],
   gemini: [
     "api_key",
@@ -103,6 +119,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "api_key_express",
     "google_oauth",
     "compute_adc",
+    "github_copilot_oauth",
   ],
   self_hosted: [
     "api_key",
@@ -186,23 +203,23 @@ export interface CreateProfileParams extends BindingIdParams {
 }
 
 export interface LoginStartParams extends BindingIdParams {
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
   redirect_uri: string;
 }
 
 export interface LoginCompleteParams extends BindingIdParams {
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
   code: string;
   state: string;
   redirect_uri: string;
 }
 
 export interface DeviceStartParams extends BindingIdParams {
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
 }
 
 export interface DeviceCompleteParams extends BindingIdParams {
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
   device_code: string;
 }
 
@@ -275,13 +292,13 @@ export interface WireLoginStart {
   authorize_url: string;
   state: string;
   redirect_uri: string;
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
 }
 
 export interface WireLoginReady extends WireBindingIdentity {
   state?: typeof WIRE_LOGIN_READY_STATE | null;
   profile_id: string;
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
   expires_at?: string | null;
   has_refresh_token: boolean;
   scopes: string[];
@@ -294,7 +311,7 @@ export interface WireDeviceStart {
   verification_uri_complete?: string | null;
   expires_in: number;
   interval: number;
-  provider: WireAuthProvider;
+  provider: WireOAuthProvider;
 }
 
 export type WireDeviceCompletePending = { state: "pending" };
@@ -445,6 +462,10 @@ function expectRecordMap<T>(
 
 export function parseWireAuthProvider(value: unknown, path = 'provider'): WireAuthProvider {
   return parseLiteral(value, WIRE_AUTH_PROVIDERS, path, 'wire auth provider');
+}
+
+export function parseWireOAuthProvider(value: unknown, path = 'provider'): WireOAuthProvider {
+  return parseLiteral(value, WIRE_OAUTH_PROVIDERS, path, 'wire OAuth provider');
 }
 
 export function parseWireBackendKind(value: unknown, path = 'backend_kind'): WireBackendKind {
@@ -629,7 +650,7 @@ export function parseWireLoginStart(value: unknown, path = 'login_start'): WireL
   expectString(record.authorize_url, `${path}.authorize_url`);
   expectString(record.state, `${path}.state`);
   expectString(record.redirect_uri, `${path}.redirect_uri`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
+  parseWireOAuthProvider(record.provider, `${path}.provider`);
   return value as WireLoginStart;
 }
 
@@ -640,7 +661,7 @@ export function parseWireLoginReady(value: unknown, path = 'login_ready'): WireL
   }
   validateBindingIdentity(record, path);
   expectString(record.profile_id, `${path}.profile_id`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
+  parseWireOAuthProvider(record.provider, `${path}.provider`);
   optionalString(record, 'expires_at', `${path}.expires_at`);
   expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);
   expectStringArray(record.scopes, `${path}.scopes`);
@@ -655,7 +676,7 @@ export function parseWireDeviceStart(value: unknown, path = 'device_start'): Wir
   optionalString(record, 'verification_uri_complete', `${path}.verification_uri_complete`);
   expectNumber(record.expires_in, `${path}.expires_in`);
   expectNumber(record.interval, `${path}.interval`);
-  parseWireAuthProvider(record.provider, `${path}.provider`);
+  parseWireOAuthProvider(record.provider, `${path}.provider`);
   return value as WireDeviceStart;
 }
 
@@ -781,7 +802,7 @@ export function parseCreateProfileParams(params: CreateProfileParams): CreatePro
 
 export function parseLoginStartParams(params: LoginStartParams): LoginStartParams {
   const record = expectRecord(params, 'login_start.params');
-  parseWireAuthProvider(record.provider, 'login_start.params.provider');
+  parseWireOAuthProvider(record.provider, 'login_start.params.provider');
   expectString(record.redirect_uri, 'login_start.params.redirect_uri');
   expectString(record.realm_id, 'login_start.params.realm_id');
   expectString(record.binding_id, 'login_start.params.binding_id');
@@ -791,7 +812,7 @@ export function parseLoginStartParams(params: LoginStartParams): LoginStartParam
 
 export function parseLoginCompleteParams(params: LoginCompleteParams): LoginCompleteParams {
   const record = expectRecord(params, 'login_complete.params');
-  parseWireAuthProvider(record.provider, 'login_complete.params.provider');
+  parseWireOAuthProvider(record.provider, 'login_complete.params.provider');
   expectString(record.code, 'login_complete.params.code');
   expectString(record.state, 'login_complete.params.state');
   expectString(record.redirect_uri, 'login_complete.params.redirect_uri');
@@ -803,7 +824,7 @@ export function parseLoginCompleteParams(params: LoginCompleteParams): LoginComp
 
 export function parseDeviceStartParams(params: DeviceStartParams): DeviceStartParams {
   const record = expectRecord(params, 'device_start.params');
-  parseWireAuthProvider(record.provider, 'device_start.params.provider');
+  parseWireOAuthProvider(record.provider, 'device_start.params.provider');
   expectString(record.realm_id, 'device_start.params.realm_id');
   expectString(record.binding_id, 'device_start.params.binding_id');
   optionalString(record, 'profile_id', 'device_start.params.profile_id');
@@ -814,7 +835,7 @@ export function parseDeviceCompleteParams(
   params: DeviceCompleteParams,
 ): DeviceCompleteParams {
   const record = expectRecord(params, 'device_complete.params');
-  parseWireAuthProvider(record.provider, 'device_complete.params.provider');
+  parseWireOAuthProvider(record.provider, 'device_complete.params.provider');
   expectString(record.device_code, 'device_complete.params.device_code');
   expectString(record.realm_id, 'device_complete.params.realm_id');
   expectString(record.binding_id, 'device_complete.params.binding_id');

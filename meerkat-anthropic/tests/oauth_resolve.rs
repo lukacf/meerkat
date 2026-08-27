@@ -86,6 +86,7 @@ fn realm_with_oauth_binding_no_refresh(auth_method: &str) -> RealmConnectionSet 
         ProviderBindingConfig {
             backend_profile: "anthropic_api".into(),
             auth_profile: "claude_oauth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,
@@ -136,6 +137,7 @@ fn realm_with_oauth_binding_source(
         ProviderBindingConfig {
             backend_profile: "anthropic_api".into(),
             auth_profile: "claude_oauth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,

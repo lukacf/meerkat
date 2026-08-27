@@ -21,6 +21,7 @@ pub mod auth_store;
 pub mod authorizers;
 #[cfg(not(target_arch = "wasm32"))]
 mod browser_login;
+pub mod github_copilot;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
 pub mod mcp_oauth;
@@ -51,7 +52,10 @@ pub use auth_store::{
     FileTokenStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use browser_login::{BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow};
+pub use browser_login::{
+    BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow,
+    save_oauth_tokens_and_consume_device_flow,
+};
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]
 pub use mcp_oauth::{

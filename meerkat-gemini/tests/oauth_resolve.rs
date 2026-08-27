@@ -60,6 +60,7 @@ fn code_assist_realm_no_refresh() -> RealmConnectionSet {
         ProviderBindingConfig {
             backend_profile: "code_assist".into(),
             auth_profile: "google_oauth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,
@@ -110,6 +111,7 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
         ProviderBindingConfig {
             backend_profile: "code_assist".into(),
             auth_profile: "google_oauth".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,

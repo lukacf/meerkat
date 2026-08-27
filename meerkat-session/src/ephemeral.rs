@@ -10639,6 +10639,7 @@ mod inline_video_admission_tests {
                 target_identity.clone(),
                 meerkat_core::SessionLlmRequestPolicy {
                     model: target_identity.model.clone(),
+                    credential_identity: None,
                     provider_params: None,
                     provider_tool_defaults: None,
                     provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
@@ -10704,6 +10705,7 @@ mod inline_video_admission_tests {
                     target.clone(),
                     meerkat_core::SessionLlmRequestPolicy {
                         model: target.model,
+                        credential_identity: None,
                         provider_params: None,
                         provider_tool_defaults: None,
                         provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,

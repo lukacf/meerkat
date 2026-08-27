@@ -1054,9 +1054,9 @@ where
         // coordinator confirms the control-only RuntimeStore CAS plus the
         // synchronous generated-machine realization.
         self.activate_model_fallback_client(&switch.previous_identity, &switch.new_identity)?;
-        let auth_rotation = match self.stage_auth_lease_auth_binding(
-            switch.previous_identity.auth_binding.as_ref(),
-            switch.new_identity.auth_binding.as_ref(),
+        let auth_rotation = match self.stage_auth_lease_credential_identity(
+            self.auth_credential_identity.as_ref(),
+            switch.request_policy.credential_identity.as_ref(),
         ) {
             Ok(rotation) => rotation,
             Err(auth_error) => {
@@ -12753,6 +12753,7 @@ mod tests {
                 client.clone(),
                 crate::SessionLlmRequestPolicy {
                     model: "new-model".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(ProviderParamsOverride {
                         temperature: Some(0.2),
@@ -12824,6 +12825,7 @@ mod tests {
                 client.clone(),
                 crate::SessionLlmRequestPolicy {
                     model: "new-model".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: None,
                     provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
@@ -12867,6 +12869,7 @@ mod tests {
     fn explicit_hot_swap_policy(model: &str) -> crate::SessionLlmRequestPolicy {
         crate::SessionLlmRequestPolicy {
             model: model.to_string(),
+            credential_identity: None,
             provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
             provider_params: None,
             provider_tool_defaults: None,
@@ -18037,6 +18040,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: None,
                     provider_tool_defaults: None,
@@ -18301,6 +18305,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(
                         crate::lifecycle::run_primitive::ProviderParamsOverride {
@@ -18511,6 +18516,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: None,
                     provider_tool_defaults: None,
@@ -20372,6 +20378,7 @@ mod tests {
                 target_profile: self.target_profile.clone(),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "claude-backup".to_string(),
+                    credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(ProviderParamsOverride {
                         provider_tag: Some(if self.mismatched_fallback_tag {

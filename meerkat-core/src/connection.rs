@@ -140,6 +140,10 @@ slug_newtype!(
     ProfileId,
     "Opaque slug identifying an auth profile override on a connection."
 );
+slug_newtype!(
+    CredentialAccountId,
+    "Opaque slug identifying one shared credential account inside a realm."
+);
 
 /// The single owner of the synthetic env-var-default realm slug. The literal
 /// lives here once; `synthesize_env_default` mints it and [`RealmId::is_env_default`]
@@ -200,7 +204,9 @@ impl RealmId {
 /// the prior recovery-by-magic-slug (`realm == "env_default"`,
 /// `binding == "default"`). Identity slugs (`RealmId`/`BindingId`) are pure
 /// opaque identity again; origin is carried explicitly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BindingOrigin {
@@ -220,7 +226,7 @@ pub enum BindingOrigin {
 /// accidentally ferries the opaque join through the runtime. CLI input that
 /// arrives as `"realm:binding[:profile]"` must be split at the CLI boundary
 /// and constructed field-by-field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AuthBindingRef {
     pub realm: RealmId,
@@ -248,6 +254,149 @@ impl AuthBindingRef {
     /// discriminant; no slug-string comparison.
     pub fn is_env_default(&self) -> bool {
         matches!(self.origin, BindingOrigin::SyntheticEnvDefault)
+    }
+}
+
+/// Realm-scoped identity of credential material shared by one or more routes.
+///
+/// A provider binding remains the route selected by a session. This identity
+/// names the credential authority behind that route, allowing several routes
+/// (for example OpenAI-, Anthropic-, and Gemini-family Copilot backends) to
+/// share one token vault row and one AuthMachine lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CredentialAccountRef {
+    pub realm: RealmId,
+    pub account: CredentialAccountId,
+}
+
+/// Canonical identity used by token persistence and AuthMachine.
+///
+/// The untagged representation preserves the exact legacy serialized shape for
+/// binding-backed credentials. Account-backed credentials are disjoint because
+/// they carry `account` instead of `binding`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum AuthCredentialIdentity {
+    Binding(AuthBindingRef),
+    Account(CredentialAccountRef),
+}
+
+impl<'de> Deserialize<'de> for AuthCredentialIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct BindingIdentity {
+            realm: RealmId,
+            binding: BindingId,
+            #[serde(default)]
+            profile: Option<ProfileId>,
+            #[serde(default)]
+            origin: BindingOrigin,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AccountIdentity {
+            realm: RealmId,
+            account: CredentialAccountId,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Identity {
+            Binding(BindingIdentity),
+            Account(AccountIdentity),
+        }
+
+        match Identity::deserialize(deserializer)? {
+            Identity::Binding(binding) => Ok(Self::Binding(AuthBindingRef {
+                realm: binding.realm,
+                binding: binding.binding,
+                profile: binding.profile,
+                origin: binding.origin,
+            })),
+            Identity::Account(account) => Ok(Self::Account(CredentialAccountRef {
+                realm: account.realm,
+                account: account.account,
+            })),
+        }
+    }
+}
+
+impl AuthCredentialIdentity {
+    pub fn from_auth_binding(auth_binding: &AuthBindingRef) -> Self {
+        Self::Binding(AuthBindingRef {
+            realm: auth_binding.realm.clone(),
+            binding: auth_binding.binding.clone(),
+            profile: auth_binding.profile.clone(),
+            origin: BindingOrigin::Configured,
+        })
+    }
+
+    pub fn normalized_for_credential_storage(&self) -> Self {
+        match self {
+            Self::Binding(binding) => Self::from_auth_binding(binding),
+            Self::Account(account) => Self::Account(account.clone()),
+        }
+    }
+
+    pub fn realm(&self) -> &RealmId {
+        match self {
+            Self::Binding(binding) => &binding.realm,
+            Self::Account(account) => &account.realm,
+        }
+    }
+
+    pub fn binding(&self) -> Option<&BindingId> {
+        match self {
+            Self::Binding(binding) => Some(&binding.binding),
+            Self::Account(_) => None,
+        }
+    }
+
+    pub fn profile(&self) -> Option<&ProfileId> {
+        match self {
+            Self::Binding(binding) => binding.profile.as_ref(),
+            Self::Account(_) => None,
+        }
+    }
+
+    pub fn account(&self) -> Option<&CredentialAccountId> {
+        match self {
+            Self::Binding(_) => None,
+            Self::Account(account) => Some(&account.account),
+        }
+    }
+}
+
+impl From<AuthBindingRef> for AuthCredentialIdentity {
+    fn from(value: AuthBindingRef) -> Self {
+        Self::from_auth_binding(&value)
+    }
+}
+
+impl From<&AuthBindingRef> for AuthCredentialIdentity {
+    fn from(value: &AuthBindingRef) -> Self {
+        Self::from_auth_binding(value)
+    }
+}
+
+impl std::fmt::Display for AuthCredentialIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Binding(binding) => match &binding.profile {
+                Some(profile) => {
+                    write!(f, "{}:{}:{}", binding.realm, binding.binding, profile)
+                }
+                None => write!(f, "{}:{}", binding.realm, binding.binding),
+            },
+            Self::Account(account) => write!(f, "{}:account:{}", account.realm, account.account),
+        }
     }
 }
 
@@ -620,6 +769,12 @@ pub struct ProviderBinding {
     pub id: String,
     pub backend_profile: String,
     pub auth_profile: String,
+    /// Shared credential authority used by this route.
+    ///
+    /// Absent preserves the historical behavior: the route's
+    /// [`AuthBindingRef`] is also its credential identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_account: Option<CredentialAccountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -631,6 +786,20 @@ pub struct ProviderBinding {
     /// default; this flag expresses the per-provider default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub provider_default: bool,
+}
+
+impl ProviderBinding {
+    pub fn credential_identity(&self, auth_binding: &AuthBindingRef) -> AuthCredentialIdentity {
+        self.credential_account.as_ref().map_or_else(
+            || AuthCredentialIdentity::from_auth_binding(auth_binding),
+            |account| {
+                AuthCredentialIdentity::Account(CredentialAccountRef {
+                    realm: auth_binding.realm.clone(),
+                    account: account.clone(),
+                })
+            },
+        )
+    }
 }
 
 /// Realm-scoped set of backends, auth profiles, and bindings.
@@ -655,6 +824,7 @@ pub struct RealmConnectionSet {
 pub struct ResolvedConnectionTarget {
     pub realm: RealmConnectionSet,
     pub auth_binding: AuthBindingRef,
+    pub credential_identity: AuthCredentialIdentity,
     pub binding: ProviderBinding,
     pub backend: BackendProfile,
     pub auth_profile: AuthProfile,
@@ -698,6 +868,16 @@ pub enum ConnectionTargetError {
         expected: Provider,
         backend: Provider,
         auth: Provider,
+    },
+    #[error(
+        "credential account '{realm}:{account}' has multiple bindings for provider {provider:?}: {}",
+        .bindings.join(", ")
+    )]
+    AmbiguousCredentialAccountBindings {
+        realm: String,
+        account: String,
+        provider: Provider,
+        bindings: Vec<String>,
     },
     #[error(transparent)]
     RealmChain(#[from] RealmChainError),
@@ -1242,6 +1422,75 @@ pub fn resolve_auth_binding_candidates_for_provider(
     Ok(candidates)
 }
 
+/// Resolve the unique route for `provider` backed by an exact credential
+/// account. Account affinity is stronger than a realm/provider default: this
+/// is used when a live session switches provider families while retaining the
+/// same signed-in account.
+pub fn resolve_credential_account_binding_for_provider(
+    config: &Config,
+    provider: Provider,
+    account: &CredentialAccountRef,
+) -> Result<Option<ResolvedConnectionTarget>, ConnectionTargetError> {
+    let section = config
+        .realm
+        .get(account.realm.as_str())
+        .ok_or_else(|| ConnectionTargetError::UnknownRealm(account.realm.to_string()))?;
+    let realm =
+        RealmConnectionSet::from_config(account.realm.as_str(), section).map_err(|source| {
+            ConnectionTargetError::RealmConfigInvalid {
+                realm: account.realm.to_string(),
+                source,
+            }
+        })?;
+    let mut matching = Vec::new();
+    for (binding_id, binding) in &realm.bindings {
+        if binding.credential_account.as_ref() != Some(&account.account) {
+            continue;
+        }
+        let auth_binding = AuthBindingRef {
+            realm: account.realm.clone(),
+            binding: BindingId::parse(binding_id).map_err(|source| {
+                ConnectionTargetError::InvalidBindingId {
+                    binding: binding_id.clone(),
+                    source,
+                }
+            })?,
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let (_, backend, auth) = realm.lookup_auth_binding(&auth_binding).map_err(|source| {
+            ConnectionTargetError::BindingInvalid {
+                realm: account.realm.to_string(),
+                binding: binding_id.clone(),
+                source,
+            }
+        })?;
+        if backend.provider == provider && auth.provider == provider {
+            matching.push(auth_binding.binding);
+        }
+    }
+    match matching.as_slice() {
+        [] => Ok(None),
+        [binding] => materialize_connection_target(
+            realm,
+            Some(provider),
+            binding.clone(),
+            None,
+            BindingOrigin::Configured,
+        )
+        .map(Some),
+        _ => Err(ConnectionTargetError::AmbiguousCredentialAccountBindings {
+            realm: account.realm.to_string(),
+            account: account.account.to_string(),
+            provider,
+            bindings: matching
+                .into_iter()
+                .map(|binding| binding.to_string())
+                .collect(),
+        }),
+    }
+}
+
 /// Outcome of classifying where a credential WRITE may land for `(head, binding)`.
 ///
 /// Strict-owner write (decision 5): credential reads inherit down the chain, but
@@ -1340,11 +1589,13 @@ pub(crate) fn materialize_connection_target(
         });
     }
     let binding = binding.clone();
+    let credential_identity = binding.credential_identity(&auth_binding);
     let backend = backend.clone();
     let auth_profile = auth_profile.clone();
     Ok(ResolvedConnectionTarget {
         realm,
         auth_binding,
+        credential_identity,
         binding,
         backend,
         auth_profile,
@@ -1414,6 +1665,10 @@ impl RealmConnectionSet {
         }
 
         let mut bindings: BTreeMap<String, ProviderBinding> = BTreeMap::new();
+        let mut account_contracts: BTreeMap<
+            CredentialAccountId,
+            (AccountCredentialContract, String),
+        > = BTreeMap::new();
         for (id, cfg) in &section.binding {
             let backend = backends
                 .get(&cfg.backend_profile)
@@ -1428,15 +1683,97 @@ impl RealmConnectionSet {
                     auth: auth.provider,
                 });
             }
+            if let Some(account) = cfg.credential_account.as_ref() {
+                let contract = account_credential_contract(auth).ok_or_else(|| {
+                    ProviderBindingError::CredentialAccountRequiresPersistedAuth {
+                        binding: id.clone().into_boxed_str(),
+                        account: account.as_str().into(),
+                        provider: auth.provider,
+                        auth_method: auth.auth_method.clone().into_boxed_str(),
+                    }
+                })?;
+                if let Some((existing, existing_binding)) = account_contracts.get(account) {
+                    if existing != &contract {
+                        return Err(ProviderBindingError::CredentialAccountContractMismatch {
+                            account: account.as_str().into(),
+                            first_binding: existing_binding.clone().into_boxed_str(),
+                            conflicting_binding: id.clone().into_boxed_str(),
+                        });
+                    }
+                } else {
+                    account_contracts.insert(account.clone(), (contract, id.clone()));
+                }
+            }
             let binding = ProviderBinding {
                 id: id.clone(),
                 backend_profile: cfg.backend_profile.clone(),
                 auth_profile: cfg.auth_profile.clone(),
+                credential_account: cfg.credential_account.clone(),
                 default_model: cfg.default_model.clone(),
                 policy: cfg.policy.clone(),
                 provider_default: cfg.provider_default,
             };
             bindings.insert(id.clone(), binding);
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum AccountCredentialIssuer {
+            GitHubCopilot,
+            ProviderMethod {
+                provider: Provider,
+                auth_method: &'static str,
+            },
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AccountCredentialContract {
+            issuer: AccountCredentialIssuer,
+            persisted_mode: crate::auth::PersistedAuthMode,
+        }
+
+        fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialContract> {
+            let (auth_method, persisted_mode, github_copilot) = match auth.provider {
+                Provider::OpenAI => {
+                    let method = OpenAiAuthMethod::parse(&auth.auth_method)?;
+                    (
+                        method.as_str(),
+                        method.persisted_auth_mode()?,
+                        method == OpenAiAuthMethod::GitHubCopilotOauth,
+                    )
+                }
+                Provider::Anthropic => {
+                    let method = AnthropicAuthMethod::parse(&auth.auth_method)?;
+                    (
+                        method.as_str(),
+                        method.persisted_auth_mode()?,
+                        method == AnthropicAuthMethod::GitHubCopilotOauth,
+                    )
+                }
+                Provider::Gemini => {
+                    let method = GoogleAuthMethod::parse(&auth.auth_method)?;
+                    (
+                        method.as_str(),
+                        method.persisted_auth_mode()?,
+                        method == GoogleAuthMethod::GitHubCopilotOauth,
+                    )
+                }
+                Provider::SelfHosted => {
+                    let method = SelfHostedAuthMethod::parse(&auth.auth_method)?;
+                    (method.as_str(), method.persisted_auth_mode()?, false)
+                }
+                Provider::Other => return None,
+            };
+            Some(AccountCredentialContract {
+                issuer: if github_copilot {
+                    AccountCredentialIssuer::GitHubCopilot
+                } else {
+                    AccountCredentialIssuer::ProviderMethod {
+                        provider: auth.provider,
+                        auth_method,
+                    }
+                },
+                persisted_mode,
+            })
         }
 
         Ok(Self {
@@ -1516,6 +1853,7 @@ impl RealmConnectionSet {
             id: "default".to_string(),
             backend_profile: "default".to_string(),
             auth_profile: "default".to_string(),
+            credential_account: None,
             default_model: None,
             policy: BindingPolicy::default(),
             provider_default: true,
@@ -1610,6 +1948,23 @@ pub enum ProviderBindingError {
         binding: String,
         backend: Provider,
         auth: Provider,
+    },
+    #[error(
+        "binding '{binding}' assigns credential account '{account}' to non-persisted or unknown auth method '{auth_method}' for {provider:?}"
+    )]
+    CredentialAccountRequiresPersistedAuth {
+        binding: Box<str>,
+        account: Box<str>,
+        provider: Provider,
+        auth_method: Box<str>,
+    },
+    #[error(
+        "credential account '{account}' has incompatible contracts on bindings '{first_binding}' and '{conflicting_binding}'"
+    )]
+    CredentialAccountContractMismatch {
+        account: Box<str>,
+        first_binding: Box<str>,
+        conflicting_binding: Box<str>,
     },
     #[error("unknown provider name: {0}")]
     UnknownProviderName(String),
@@ -1739,6 +2094,7 @@ impl RealmConfigSection {
                 ProviderBindingConfig {
                     backend_profile: id.clone(),
                     auth_profile: id.clone(),
+                    credential_account: None,
                     default_model: None,
                     policy: BindingPolicy::default(),
                     // Every minted binding is the per-provider default; the
@@ -1920,6 +2276,8 @@ pub struct ProviderBindingConfig {
     pub backend_profile: String,
     pub auth_profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_account: Option<CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     #[serde(default)]
     pub policy: BindingPolicy,
@@ -1927,6 +2285,20 @@ pub struct ProviderBindingConfig {
     /// [`ProviderBinding::provider_default`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub provider_default: bool,
+}
+
+impl ProviderBindingConfig {
+    pub fn credential_identity(&self, auth_binding: &AuthBindingRef) -> AuthCredentialIdentity {
+        self.credential_account.as_ref().map_or_else(
+            || AuthCredentialIdentity::from_auth_binding(auth_binding),
+            |account| {
+                AuthCredentialIdentity::Account(CredentialAccountRef {
+                    realm: auth_binding.realm.clone(),
+                    account: account.clone(),
+                })
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -3147,5 +3519,133 @@ default_model = "test-openai-other"
             section.backend["openai_default"].base_url.as_deref(),
             Some("https://api.openai.com"),
         );
+    }
+
+    #[test]
+    fn credential_account_resolves_cross_provider_route_without_default_selection() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+        let account = CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        };
+
+        let target =
+            resolve_credential_account_binding_for_provider(&config, Provider::Anthropic, &account)
+                .unwrap()
+                .expect("account route");
+
+        assert_eq!(target.auth_binding.binding.as_str(), "copilot_anthropic");
+        assert_eq!(
+            target.credential_identity,
+            AuthCredentialIdentity::Account(account)
+        );
+    }
+
+    #[test]
+    fn credential_identity_rejects_mixed_binding_and_account_shape() {
+        let value = serde_json::json!({
+            "realm": "global",
+            "binding": "copilot_openai",
+            "account": "github_copilot"
+        });
+
+        assert!(serde_json::from_value::<AuthCredentialIdentity>(value).is_err());
+    }
+
+    #[test]
+    fn credential_account_rejects_incompatible_auth_contracts() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.chatgpt]
+provider = "openai"
+backend_kind = "chatgpt_backend"
+
+[realm.global.auth.chatgpt]
+provider = "openai"
+auth_method = "managed_chatgpt_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.chatgpt]
+backend_profile = "chatgpt"
+auth_profile = "chatgpt"
+credential_account = "shared"
+
+[realm.global.backend.copilot]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot]
+provider = "anthropic"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot]
+backend_profile = "copilot"
+auth_profile = "copilot"
+credential_account = "shared"
+"#,
+        )
+        .unwrap();
+
+        let error = RealmConnectionSet::from_config("global", &config.realm["global"])
+            .expect_err("one credential account cannot mix OAuth issuers");
+
+        assert!(matches!(
+            error,
+            ProviderBindingError::CredentialAccountContractMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn credential_account_route_is_ambiguous_when_two_provider_routes_share_it() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.a]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.auth.a]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.a]
+backend_profile = "a"
+auth_profile = "a"
+credential_account = "github_copilot"
+
+[realm.global.binding.b]
+backend_profile = "a"
+auth_profile = "a"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+        let account = CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        };
+
+        assert!(matches!(
+            resolve_credential_account_binding_for_provider(&config, Provider::OpenAI, &account),
+            Err(ConnectionTargetError::AmbiguousCredentialAccountBindings { .. })
+        ));
     }
 }

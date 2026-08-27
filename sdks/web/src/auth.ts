@@ -57,6 +57,7 @@ import type {
   WireAuthProfileDetail,
   WireAuthProfilesList,
   WireAuthProvider,
+  WireOAuthProvider,
   WireAuthStatusDetail,
   WireBackendKind,
   WireBindingIdentity,
@@ -71,6 +72,7 @@ import type { AuthBindingRef, SessionConfig } from './types.js';
 export type {
   WireAuthMethod,
   WireAuthProvider,
+  WireOAuthProvider,
   WireBackendKind,
   WireCredentialSourceKind,
   WireAuthStatusState,

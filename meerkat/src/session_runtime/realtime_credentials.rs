@@ -337,6 +337,7 @@ mod tests {
                 ProviderBindingConfig {
                     backend_profile: "openai-backend".to_string(),
                     auth_profile: "openai-auth".to_string(),
+                    credential_account: None,
                     default_model: None,
                     policy: Default::default(),
                     provider_default: false,

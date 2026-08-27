@@ -72,6 +72,7 @@ meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini"
 meerkat-anthropic = { workspace = true, features = ["oauth"] }
 meerkat-openai = { workspace = true, features = ["oauth"] }
 meerkat-gemini = { workspace = true, features = ["oauth"] }
+meerkat-copilot = { workspace = true, optional = true, features = ["oauth"] }
 meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }
 webbrowser = "1"
 meerkat-store = { workspace = true }
@@ -105,7 +106,7 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "memory-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob", "rpc-surface"]
+default = ["anthropic", "openai", "openai-realtime", "gemini", "copilot", "jsonl-store", "memory-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob", "rpc-surface"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
@@ -118,6 +119,13 @@ openai-realtime = [
     "meerkat-rpc?/openai-realtime",
 ]
 gemini = ["meerkat/gemini"]
+copilot = [
+    "anthropic",
+    "openai",
+    "gemini",
+    "meerkat/copilot",
+    "dep:meerkat-copilot",
+]
 
 # Storage backends (forwarded to facade)
 jsonl-store = ["meerkat/jsonl-store"]

@@ -7,18 +7,25 @@ pub enum OpenAiBackendKind {
     OpenAiApi,
     ChatGptBackend,
     AzureOpenAi,
+    Copilot,
 }
 
 pub const CHATGPT_CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 impl OpenAiBackendKind {
-    pub const ALL: &'static [Self] = &[Self::OpenAiApi, Self::ChatGptBackend, Self::AzureOpenAi];
+    pub const ALL: &'static [Self] = &[
+        Self::OpenAiApi,
+        Self::ChatGptBackend,
+        Self::AzureOpenAi,
+        Self::Copilot,
+    ];
 
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "openai_api" => Some(Self::OpenAiApi),
             "chatgpt_backend" => Some(Self::ChatGptBackend),
             "azure_openai" => Some(Self::AzureOpenAi),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -28,6 +35,7 @@ impl OpenAiBackendKind {
             Self::OpenAiApi => "openai_api",
             Self::ChatGptBackend => "chatgpt_backend",
             Self::AzureOpenAi => "azure_openai",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -48,6 +56,7 @@ impl OpenAiBackendKind {
                 OpenAiAuthMethod::ExternalChatGptTokens,
             ],
             Self::AzureOpenAi => &[OpenAiAuthMethod::AzureApiKey],
+            Self::Copilot => &[OpenAiAuthMethod::GitHubCopilotOauth],
         }
     }
 
@@ -56,6 +65,7 @@ impl OpenAiBackendKind {
             Self::OpenAiApi => "https://api.openai.com",
             Self::ChatGptBackend => CHATGPT_CODEX_DEFAULT_BASE_URL,
             Self::AzureOpenAi => "",
+            Self::Copilot => "",
         }
     }
 }

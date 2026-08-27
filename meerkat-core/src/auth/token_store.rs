@@ -12,22 +12,30 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::connection::{AuthBindingRef, BindingId, IdentityError, ProfileId, RealmId};
+use crate::connection::{
+    AuthBindingRef, AuthCredentialIdentity, BindingId, CredentialAccountId, IdentityError,
+    ProfileId, RealmId,
+};
 
-/// Key for a persisted token bundle: realm + binding + optional auth profile override.
+/// Key for a persisted token bundle.
 ///
-/// Wave-c C-12 / C-1 follow-up: `realm_id: String` / `binding_id: String`
-/// retyped to `realm: RealmId` / `binding: BindingId` to match the typed-atom
-/// rename C-1 did on `AuthBindingRef`. Consumers that need the flat string
-/// form use `.realm.as_str()` / `.binding.as_str()` at the exact site that
-/// needs it (path segments, log lines, keyring account keys).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
-pub struct TokenKey {
-    pub realm: RealmId,
-    pub binding: BindingId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<ProfileId>,
+/// Binding-backed keys retain their historical serialized representation.
+/// Account-backed keys let several provider routes share one durable
+/// credential without duplicating lifecycle authority.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Ord, PartialOrd)]
+#[serde(transparent)]
+pub struct TokenKey(AuthCredentialIdentity);
+
+impl<'de> Deserialize<'de> for TokenKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let identity = AuthCredentialIdentity::deserialize(deserializer)?;
+        Ok(Self::from_credential_identity(&identity))
+    }
 }
 
 impl TokenKey {
@@ -39,11 +47,12 @@ impl TokenKey {
     /// fold the resulting `Result<TokenKey, IdentityError>` into their
     /// ambient error handling.
     pub fn new(realm: RealmId, binding: BindingId) -> Self {
-        Self {
+        Self(AuthCredentialIdentity::Binding(AuthBindingRef {
             realm,
             binding,
             profile: None,
-        }
+            origin: crate::connection::BindingOrigin::Configured,
+        }))
     }
 
     pub fn new_with_profile(
@@ -51,19 +60,40 @@ impl TokenKey {
         binding: BindingId,
         profile: Option<ProfileId>,
     ) -> Self {
-        Self {
+        Self(AuthCredentialIdentity::Binding(AuthBindingRef {
             realm,
             binding,
             profile,
-        }
+            origin: crate::connection::BindingOrigin::Configured,
+        }))
     }
 
     pub fn from_auth_binding(auth_binding: &AuthBindingRef) -> Self {
-        Self::new_with_profile(
-            auth_binding.realm.clone(),
-            auth_binding.binding.clone(),
-            auth_binding.profile.clone(),
-        )
+        Self(AuthCredentialIdentity::from_auth_binding(auth_binding))
+    }
+
+    pub fn from_credential_identity(identity: &AuthCredentialIdentity) -> Self {
+        Self(identity.normalized_for_credential_storage())
+    }
+
+    pub fn credential_identity(&self) -> &AuthCredentialIdentity {
+        &self.0
+    }
+
+    pub fn realm(&self) -> &RealmId {
+        self.0.realm()
+    }
+
+    pub fn binding(&self) -> Option<&BindingId> {
+        self.0.binding()
+    }
+
+    pub fn profile(&self) -> Option<&ProfileId> {
+        self.0.profile()
+    }
+
+    pub fn account(&self) -> Option<&CredentialAccountId> {
+        self.0.account()
     }
 
     /// Construct a token key from raw strings, validating each component
@@ -81,30 +111,56 @@ impl TokenKey {
         binding: impl AsRef<str>,
         profile: Option<impl AsRef<str>>,
     ) -> Result<Self, IdentityError> {
-        Ok(Self {
-            realm: RealmId::parse(realm.as_ref())?,
-            binding: BindingId::parse(binding.as_ref())?,
-            profile: profile
+        Ok(Self::new_with_profile(
+            RealmId::parse(realm.as_ref())?,
+            BindingId::parse(binding.as_ref())?,
+            profile
                 .map(|profile| ProfileId::parse(profile.as_ref()))
                 .transpose()?,
-        })
+        ))
     }
 
     /// The flat account identifier used by OS keyrings.
     ///
     /// Default binding credentials preserve the legacy format:
     /// `<realm>:<binding>`. Profile override credentials include the
-    /// canonical override atom: `<realm>:<binding>:<profile>`.
+    /// canonical override atom: `<realm>:<binding>:<profile>`. Shared accounts
+    /// use `<realm>:account~<account>`, where `~` is outside the binding/profile
+    /// slug grammar and therefore cannot collide with a legacy key.
     ///
     /// The default credential format stays identical to the pre-profile-key
     /// output; this method is the source of truth for the keyring
     /// `service:account` convention, so the default branch must preserve that
     /// output byte-for-byte to keep existing OAuth credentials reachable.
     pub fn keyring_account(&self) -> String {
-        match &self.profile {
-            Some(profile) => format!("{}:{}:{}", self.realm, self.binding, profile),
-            None => format!("{}:{}", self.realm, self.binding),
+        match self.credential_identity() {
+            AuthCredentialIdentity::Binding(binding) => match &binding.profile {
+                Some(profile) => {
+                    format!("{}:{}:{}", binding.realm, binding.binding, profile)
+                }
+                None => format!("{}:{}", binding.realm, binding.binding),
+            },
+            AuthCredentialIdentity::Account(account) => {
+                format!("{}:account~{}", account.realm, account.account)
+            }
         }
+    }
+
+    /// Path-safe stable component below the owning realm directory.
+    pub fn storage_stem(&self) -> String {
+        match self.credential_identity() {
+            AuthCredentialIdentity::Binding(binding) => match &binding.profile {
+                Some(profile) => format!("{}@{}", binding.binding, profile),
+                None => binding.binding.to_string(),
+            },
+            AuthCredentialIdentity::Account(account) => format!("account~{}", account.account),
+        }
+    }
+}
+
+impl std::fmt::Display for TokenKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
     }
 }
 
@@ -118,6 +174,7 @@ pub enum PersistedAuthMode {
     ClaudeAiOauth,
     OauthToApiKey,
     GoogleOauth,
+    GithubCopilotOauth,
     Adc,
     ComputeAdc,
     Bedrock,
@@ -450,6 +507,62 @@ pub trait RefreshCoordinator: Send + Sync {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::{CredentialAccountRef, connection::BindingOrigin};
+
+    #[test]
+    fn binding_key_serialization_remains_legacy_compatible() {
+        let key = TokenKey::from_auth_binding(&AuthBindingRef {
+            realm: RealmId::parse("global").expect("valid realm"),
+            binding: BindingId::parse("openai").expect("valid binding"),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        });
+        assert_eq!(
+            serde_json::to_value(&key).expect("serialize"),
+            serde_json::json!({"realm": "global", "binding": "openai"})
+        );
+        assert_eq!(
+            serde_json::from_value::<TokenKey>(
+                serde_json::json!({"realm": "global", "binding": "openai"})
+            )
+            .expect("deserialize legacy key"),
+            key
+        );
+        let synthetic = TokenKey::from_auth_binding(&AuthBindingRef {
+            realm: RealmId::parse("global").expect("valid realm"),
+            binding: BindingId::parse("openai").expect("valid binding"),
+            profile: None,
+            origin: BindingOrigin::SyntheticEnvDefault,
+        });
+        assert_eq!(
+            synthetic, key,
+            "route provenance is not credential identity"
+        );
+    }
+
+    #[test]
+    fn account_keys_have_disjoint_storage_names() {
+        let identity = AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::parse("global").expect("valid realm"),
+            account: CredentialAccountId::parse("github_copilot").expect("valid account"),
+        });
+        let key = TokenKey::from_credential_identity(&identity);
+        assert_eq!(key.storage_stem(), "account~github_copilot");
+        assert_eq!(key.keyring_account(), "global:account~github_copilot");
+        assert_eq!(
+            serde_json::from_value::<TokenKey>(
+                serde_json::to_value(&key).expect("serialize account key")
+            )
+            .expect("deserialize account key"),
+            key
+        );
+    }
+}
+
 /// Complete provider-auth persistence capability.
 ///
 /// Rotating provider credentials are only safe when their vault and mutation
@@ -459,8 +572,25 @@ pub trait RefreshCoordinator: Send + Sync {
 /// Native persisted backends construct this value from one backend decision;
 /// ephemeral hosts and tests must pair their process-local store and
 /// coordinator explicitly through [`Self::new`].
+static NEXT_PROVIDER_AUTH_PERSISTENCE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-local identity of one token-vault and mutation-authority pairing.
+///
+/// Clones retain the same identity. Independently constructed persistence
+/// capabilities never share derived credential caches, even when they contain
+/// the same logical token key and lifecycle generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProviderAuthPersistenceId(u64);
+
+impl ProviderAuthPersistenceId {
+    fn next() -> Self {
+        Self(NEXT_PROVIDER_AUTH_PERSISTENCE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Clone)]
 pub struct ProviderAuthPersistence {
+    authority_id: ProviderAuthPersistenceId,
     token_store: Arc<dyn TokenStore>,
     refresh_coordinator: Arc<dyn RefreshCoordinator>,
 }
@@ -472,9 +602,14 @@ impl ProviderAuthPersistence {
         refresh_coordinator: Arc<dyn RefreshCoordinator>,
     ) -> Self {
         Self {
+            authority_id: ProviderAuthPersistenceId::next(),
             token_store,
             refresh_coordinator,
         }
+    }
+
+    pub fn authority_id(&self) -> ProviderAuthPersistenceId {
+        self.authority_id
     }
 
     pub fn token_store(&self) -> Arc<dyn TokenStore> {

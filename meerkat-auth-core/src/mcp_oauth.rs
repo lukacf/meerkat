@@ -1962,7 +1962,7 @@ mod tests {
             .unwrap();
         assert_eq!(a, b);
         assert_ne!(a, c);
-        assert_eq!(a.realm.as_str(), MCP_TOKEN_REALM);
+        assert_eq!(a.realm().as_str(), MCP_TOKEN_REALM);
     }
 
     #[test]
@@ -1974,19 +1974,19 @@ mod tests {
             McpServerIdentity::from_server_config("glean", "https://king-be.glean.com/mcp/default");
         let token_key = identity.token_key().unwrap();
         let lease_key = identity.lease_key().unwrap();
-        assert_eq!(token_key.realm.as_str(), MCP_TOKEN_REALM);
-        assert_eq!(lease_key.realm.as_str(), MCP_TOKEN_REALM);
+        assert_eq!(token_key.realm().as_str(), MCP_TOKEN_REALM);
+        assert_eq!(lease_key.realm().as_str(), MCP_TOKEN_REALM);
         assert_eq!(
-            token_key.binding.as_str(),
-            lease_key.binding.as_str(),
+            token_key.binding().unwrap().as_str(),
+            lease_key.binding().unwrap().as_str(),
             "token key and lease key must share one typed identity binding"
         );
         // Distinct server URL yields a distinct identity binding.
         let other =
             McpServerIdentity::from_server_config("glean", "https://other.example/mcp/default");
         assert_ne!(
-            other.token_key().unwrap().binding.as_str(),
-            token_key.binding.as_str()
+            other.token_key().unwrap().binding().unwrap().as_str(),
+            token_key.binding().unwrap().as_str()
         );
     }
 

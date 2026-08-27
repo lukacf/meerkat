@@ -10,7 +10,9 @@ use meerkat_core::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
     OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
 };
-use meerkat_core::{AuthBindingRef, AuthProfile, BackendProfile, BindingPolicy, Provider};
+use meerkat_core::{
+    AuthBindingRef, AuthCredentialIdentity, AuthProfile, BackendProfile, BindingPolicy, Provider,
+};
 
 use crate::provider_runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind};
 use crate::provider_runtime::errors::ProviderBindingError;
@@ -30,6 +32,7 @@ use crate::provider_runtime::errors::ProviderBindingError;
 #[derive(Clone)]
 pub struct ValidatedBinding {
     auth_binding: AuthBindingRef,
+    credential_identity: AuthCredentialIdentity,
     provider: Provider,
     backend: NormalizedBackendKind,
     auth: NormalizedAuthMethod,
@@ -39,8 +42,10 @@ pub struct ValidatedBinding {
 }
 
 impl ValidatedBinding {
+    #[allow(clippy::too_many_arguments)]
     fn from_catalog(
         auth_binding: AuthBindingRef,
+        credential_identity: AuthCredentialIdentity,
         provider: Provider,
         backend: NormalizedBackendKind,
         auth: NormalizedAuthMethod,
@@ -50,6 +55,7 @@ impl ValidatedBinding {
     ) -> Self {
         Self {
             auth_binding,
+            credential_identity,
             provider,
             backend,
             auth,
@@ -61,6 +67,10 @@ impl ValidatedBinding {
 
     pub fn auth_binding_ref(&self) -> &AuthBindingRef {
         &self.auth_binding
+    }
+
+    pub fn credential_identity(&self) -> &AuthCredentialIdentity {
+        &self.credential_identity
     }
 
     pub fn provider(&self) -> Provider {
@@ -92,6 +102,7 @@ impl std::fmt::Debug for ValidatedBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ValidatedBinding")
             .field("auth_binding", &self.auth_binding)
+            .field("credential_identity", &self.credential_identity)
             .field("provider", &self.provider)
             .field("backend", &self.backend)
             .field("auth", &self.auth)
@@ -117,15 +128,56 @@ impl ProviderRuntimeCatalog {
         auth: &AuthProfile,
         policy: &BindingPolicy,
     ) -> Result<ValidatedBinding, ProviderBindingError> {
+        Self::validate_binding_with_credential_identity(
+            auth_binding,
+            AuthCredentialIdentity::from_auth_binding(auth_binding),
+            backend,
+            auth,
+            policy,
+        )
+    }
+
+    pub(crate) fn validate_binding_with_credential_identity(
+        auth_binding: &AuthBindingRef,
+        credential_identity: AuthCredentialIdentity,
+        backend: &BackendProfile,
+        auth: &AuthProfile,
+        policy: &BindingPolicy,
+    ) -> Result<ValidatedBinding, ProviderBindingError> {
         if backend.provider != auth.provider {
             return Err(ProviderBindingError::ProviderMismatch);
         }
-        Self::validate_binding_for_provider(backend.provider, auth_binding, backend, auth, policy)
+        Self::validate_binding_for_provider_with_credential_identity(
+            backend.provider,
+            auth_binding,
+            credential_identity,
+            backend,
+            auth,
+            policy,
+        )
     }
 
     pub fn validate_binding_for_provider(
         provider: Provider,
         auth_binding: &AuthBindingRef,
+        backend: &BackendProfile,
+        auth: &AuthProfile,
+        policy: &BindingPolicy,
+    ) -> Result<ValidatedBinding, ProviderBindingError> {
+        Self::validate_binding_for_provider_with_credential_identity(
+            provider,
+            auth_binding,
+            AuthCredentialIdentity::from_auth_binding(auth_binding),
+            backend,
+            auth,
+            policy,
+        )
+    }
+
+    fn validate_binding_for_provider_with_credential_identity(
+        provider: Provider,
+        auth_binding: &AuthBindingRef,
+        credential_identity: AuthCredentialIdentity,
         backend: &BackendProfile,
         auth: &AuthProfile,
         policy: &BindingPolicy,
@@ -145,6 +197,7 @@ impl ProviderRuntimeCatalog {
 
         Ok(ValidatedBinding::from_catalog(
             auth_binding.clone(),
+            credential_identity,
             provider,
             backend_kind,
             auth_method,

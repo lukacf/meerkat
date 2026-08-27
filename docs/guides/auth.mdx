@@ -157,6 +157,37 @@ The non-interactive API-key example provisions the public OpenAI API backend.
 They can expose different model sets because they use different account
 systems.
 
+GitHub Copilot uses device authorization and provisions three routes over one
+shared credential account:
+
+```bash
+rkat auth login copilot
+
+COPILOT_MODEL="<model id enabled for your Copilot account>"
+rkat run --model "$COPILOT_MODEL" \
+  --auth-binding global:copilot_openai \
+  "Summarize this change"
+```
+
+The generated routes are `global:copilot_openai`,
+`global:copilot_anthropic`, and `global:copilot_gemini`. They remain ordinary
+OpenAI, Anthropic, and Gemini provider identities; `credential_account =
+"github_copilot"` only makes their GitHub token, derived Copilot token cache,
+AuthMachine lifecycle, status, and logout shared. Meerkat queries the signed-in
+account's `/models` endpoint and rejects a known-unavailable model/dialect
+before dispatch. If discovery is temporarily unavailable, auth still succeeds
+and the request is attempted normally. A known-unavailable error includes the
+compatible model IDs observed for that account; IDs outside Meerkat's built-in
+catalog also require a normal `[models.<id>]` configuration entry.
+
+<Warning>
+GitHub does not currently publish a stable third-party Copilot inference
+contract. This native integration uses the observed GitHub device client
+identity and CAPI headers provisionally, without linking the Copilot SDK or
+CLI. GitHub may change or restrict that contract. Use it only with an account
+entitled to GitHub Copilot and review GitHub's current terms before deployment.
+</Warning>
+
 `rkat auth login` persists credentials and the matching `[realm.global]`
 binding section into the home-rooted `global` realm doc (`~/.rkat/config.toml`),
 so the sign-in is inherited by every workspace realm via the chain tail. To use
@@ -242,13 +273,16 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` | AWS SigV4, bearer, or host auth |
 | Anthropic | `vertex`            | `vertex_google_auth`, `external_authorizer` | Google auth or host auth |
 | Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` | Azure AI Foundry |
+| Anthropic | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Anthropic Messages dialect |
 | OpenAI    | `openai_api`        | `api_key`, `static_bearer`, `external_authorizer` | Direct to api.openai.com or host-resolved auth |
 | OpenAI    | `azure_openai`      | `azure_api_key`       | Azure OpenAI Responses API; `base_url` required; session model is the Azure deployment name |
 | OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
 | OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
+| OpenAI    | `copilot`           | `github_copilot_oauth` | GitHub Copilot account; Responses or Chat Completions selected from account metadata |
 | Google    | `google_genai`      | `api_key`, `bearer_api_key`, `external_authorizer` | Direct to Google GenAI or host-resolved auth |
 | Google    | `vertex_ai`         | `api_key_express`, `adc`, `external_authorizer` | Vertex API Express, ADC, or host auth |
 | Google    | `google_code_assist` | `google_oauth`, `compute_adc`, `external_authorizer` | Code Assist OAuth, compute metadata, or host auth |
+| Google    | `copilot`             | `github_copilot_oauth` | GitHub Copilot account; OpenAI-compatible Chat Completions dialect |
 | Self-hosted | `self_hosted`, `openai_compatible` | `none`, `api_key`, `static_bearer` | Realm-bound credentials for configured `self_hosted` servers |
 
 External commands (`CredentialSourceSpec::Command`) and file
@@ -264,7 +298,7 @@ come from.
 |------|-------------|
 | `inline_secret` | Secret stored inline in TOML (local development only) |
 | `env` | Read the primary and ordered fallback variables at resolve time |
-| `managed_store` | Resolve through TokenStore by typed `realm` + `binding` identity |
+| `managed_store` | Resolve through TokenStore by typed route binding or shared credential-account identity |
 | `platform_default` | Use a supported cloud/platform default credential chain |
 | `external_resolver` | Call a host-registered JavaScript or Rust resolver |
 | `command` | Run an external binary and optionally cache stdout for `refresh_interval_ms` |

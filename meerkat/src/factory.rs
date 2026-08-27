@@ -1370,6 +1370,10 @@ impl CreateSessionModelResolutionError {
                     meerkat_core::ProviderBindingError::UnknownBackend(_)
                     | meerkat_core::ProviderBindingError::UnknownAuth(_)
                     | meerkat_core::ProviderBindingError::ProviderMismatch { .. }
+                    | meerkat_core::ProviderBindingError::CredentialAccountRequiresPersistedAuth {
+                        ..
+                    }
+                    | meerkat_core::ProviderBindingError::CredentialAccountContractMismatch { .. }
                     | meerkat_core::ProviderBindingError::UnknownProviderName(_)
                     | meerkat_core::ProviderBindingError::InvalidRealmId { .. }
                     | meerkat_core::ProviderBindingError::ServerRequiresSelfHostedProvider { .. }
@@ -1377,6 +1381,7 @@ impl CreateSessionModelResolutionError {
                 ..
             }
             | meerkat_core::ConnectionTargetError::ProviderMismatch { .. }
+            | meerkat_core::ConnectionTargetError::AmbiguousCredentialAccountBindings { .. }
             | meerkat_core::ConnectionTargetError::RealmChain(_) => true,
         }
     }
@@ -1647,18 +1652,36 @@ fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
 fn build_provider_registry() -> meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry {
     #[allow(unused_mut)]
     let mut r = meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty();
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
     #[cfg(feature = "anthropic")]
     {
-        r = r.with_runtime(Arc::new(meerkat_anthropic::AnthropicProviderRuntime));
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        let runtime =
+            meerkat_anthropic::AnthropicProviderRuntime::with_copilot(Arc::clone(&copilot));
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let runtime = meerkat_anthropic::AnthropicProviderRuntime::default();
+        r = r.with_runtime(Arc::new(runtime));
     }
     #[cfg(feature = "openai")]
     {
-        r = r.with_runtime(Arc::new(meerkat_openai::OpenAiProviderRuntime));
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        let runtime = meerkat_openai::OpenAiProviderRuntime::with_copilot(Arc::clone(&copilot));
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let runtime = meerkat_openai::OpenAiProviderRuntime::default();
+        r = r.with_runtime(Arc::new(runtime));
         r = r.with_runtime(Arc::new(meerkat_providers::SelfHostedProviderRuntime));
     }
     #[cfg(feature = "gemini")]
     {
-        r = r.with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        let runtime = meerkat_gemini::GoogleProviderRuntime::with_copilot(
+            copilot,
+            Arc::new(meerkat_openai::OpenAiCopilotChatCompletionsClientFactory),
+        );
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let runtime = meerkat_gemini::GoogleProviderRuntime::default();
+        r = r.with_runtime(Arc::new(runtime));
     }
     r
 }
@@ -1702,6 +1725,7 @@ struct SelfHostedClientSpec {
 struct SelfHostedClientBuild {
     client: Arc<dyn LlmClient>,
     durable_auth_binding: Option<AuthBindingRef>,
+    credential_identity: meerkat_core::AuthCredentialIdentity,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2191,6 +2215,7 @@ impl std::fmt::Debug for AgentFactory {
 /// Output of `AgentFactory::resolve_llm_client_phase` (build_agent phase 3).
 struct ResolvedLlmClientPhase {
     llm_client: Option<Arc<dyn LlmClient>>,
+    credential_identity: Option<meerkat_core::AuthCredentialIdentity>,
     #[cfg(not(target_arch = "wasm32"))]
     auto_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
 }
@@ -3816,6 +3841,113 @@ impl AgentFactory {
             .await
     }
 
+    async fn build_hosted_llm_client_for_identity_from_registry(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        identity: &SessionLlmIdentity,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+        preferred_realm: Option<&RealmId>,
+    ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+        let text_profile = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "model profile '{}:{}' is unavailable",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+            return Ok(Arc::new(meerkat_client::TestClient::for_provider(
+                identity.provider,
+            )));
+        }
+
+        let explicit_auth_binding = identity.auth_binding.is_some();
+        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            preferred_realm,
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+
+        #[allow(unused_mut)]
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(persistence) = self.resolution_provider_auth_persistence()? {
+                env = env.with_provider_auth_persistence(persistence);
+            }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        let provider_registry = Arc::clone(&self.provider_registry);
+        let mut first_resolution_error = None;
+        for target in candidates {
+            let lease_auth_binding = (!target.auth_binding.is_env_default()
+                || explicit_auth_binding)
+                .then_some(target.auth_binding.clone());
+            let mut candidate_env = env.clone();
+            if lease_auth_binding.is_some()
+                && let Some(handle) = auth_lease_handle.clone()
+            {
+                candidate_env = candidate_env.with_auth_lease_handle(handle);
+            }
+            match provider_registry
+                .resolve(&target.realm, &target.auth_binding, &candidate_env)
+                .await
+            {
+                Ok(connection) => {
+                    if connection.provider != identity.provider {
+                        return Err(FactoryError::ProviderAuth(
+                            meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
+                                expected: identity.provider,
+                                resolved: connection.provider,
+                            },
+                        ));
+                    }
+                    if let (Some(handle), Some(lease_auth_binding)) =
+                        (auth_lease_handle.as_ref(), lease_auth_binding.as_ref())
+                    {
+                        Self::publish_auth_lease(handle, lease_auth_binding, &connection)?;
+                    }
+                    let text_target = meerkat_llm_core::provider_runtime::ResolvedTextTarget::new(
+                        identity.clone(),
+                        text_profile.clone(),
+                        connection,
+                    )
+                    .ok_or_else(|| {
+                        FactoryError::ClientCreationFailed(
+                            "resolved text target identity mismatch".to_string(),
+                        )
+                    })?;
+                    return provider_registry
+                        .build_text_client(text_target)
+                        .map_err(FactoryError::ClientBuild);
+                }
+                Err(error) => {
+                    first_resolution_error.get_or_insert(error);
+                    if explicit_auth_binding {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(FactoryError::ProviderAuth(
+            first_resolution_error.unwrap_or_else(|| {
+                meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                    format!(
+                        "no auth binding candidates resolved for provider '{}'",
+                        identity.provider.as_str()
+                    ),
+                )
+            }),
+        ))
+    }
+
     /// Validate one exact model/provider/binding tuple through the same model
     /// registry and provider-runtime resolver used by [`Self::build_agent`].
     ///
@@ -3885,89 +4017,17 @@ impl AgentFactory {
                 });
         }
 
-        // Match build_agent's test-only client override exactly: model
-        // registry validation above still runs, while credential material is
-        // intentionally unnecessary in this mode.
-        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
-            return Ok(());
-        }
-
-        #[allow(unused_mut)]
-        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(persistence) =
-                self.resolution_provider_auth_persistence()
-                    .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
-                        detail: error.to_string(),
-                    })?
-            {
-                env = env.with_provider_auth_persistence(persistence);
-            }
-        }
-        for (handle, resolver) in &self.external_auth_resolvers {
-            env = env.with_external_resolver(handle.clone(), resolver.clone());
-        }
-
-        let explicit_auth_binding = identity.auth_binding.is_some();
-        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+        self.build_hosted_llm_client_for_identity_from_registry(
             config,
-            identity.provider,
-            identity.auth_binding.as_ref(),
+            &registry,
+            identity,
+            auth_lease_handle,
             preferred_realm,
         )
+        .await
+        .map(|_| ())
         .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
             detail: error.to_string(),
-        })?;
-        let mut first_error = None;
-        for target in candidates {
-            let mut candidate_env = env.clone();
-            if (!target.auth_binding.is_env_default() || explicit_auth_binding)
-                && let Some(handle) = auth_lease_handle.clone()
-            {
-                candidate_env = candidate_env.with_auth_lease_handle(handle);
-            }
-            match self
-                .provider_registry
-                .resolve(&target.realm, &target.auth_binding, &candidate_env)
-                .await
-            {
-                Ok(connection) => {
-                    if connection.provider != identity.provider {
-                        return Err(LlmIdentityPreflightError::BindingUnresolvable {
-                            detail: format!(
-                                "resolved provider '{}' does not match requested provider '{}'",
-                                connection.provider.as_str(),
-                                identity.provider.as_str()
-                            ),
-                        });
-                    }
-                    return self
-                        .provider_registry
-                        .build_client(connection)
-                        .map(|_| ())
-                        .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
-                            detail: error.to_string(),
-                        });
-                }
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                    if explicit_auth_binding {
-                        break;
-                    }
-                }
-            }
-        }
-        Err(LlmIdentityPreflightError::BindingUnresolvable {
-            detail: first_error.map_or_else(
-                || {
-                    format!(
-                        "no auth binding candidates resolved for provider '{}'",
-                        identity.provider.as_str()
-                    )
-                },
-                |error| error.to_string(),
-            ),
         })
     }
 
@@ -4026,86 +4086,14 @@ impl AgentFactory {
                 .map(|resolved| resolved.client);
         }
 
-        // Test-mode shim: hot-swap never needs real credentials under
-        // RKAT_TEST_CLIENT=1.
-        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
-            return Ok(Arc::new(meerkat_client::TestClient::for_provider(
-                identity.provider,
-            )));
-        }
-
-        let explicit_auth_binding = identity.auth_binding.is_some();
-        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+        self.build_hosted_llm_client_for_identity_from_registry(
             config,
-            identity.provider,
-            identity.auth_binding.as_ref(),
+            &registry,
+            identity,
+            auth_lease_handle,
             preferred_realm,
         )
-        .map_err(FactoryError::ConnectionTarget)?;
-
-        #[allow(unused_mut)]
-        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(persistence) = self.resolution_provider_auth_persistence()? {
-                env = env.with_provider_auth_persistence(persistence);
-            }
-        }
-        for (handle, resolver) in &self.external_auth_resolvers {
-            env = env.with_external_resolver(handle.clone(), resolver.clone());
-        }
-        let provider_registry = Arc::clone(&self.provider_registry);
-        let mut first_resolution_error = None;
-        for target in candidates {
-            let lease_auth_binding = (!target.auth_binding.is_env_default()
-                || explicit_auth_binding)
-                .then_some(target.auth_binding.clone());
-            let mut candidate_env = env.clone();
-            if lease_auth_binding.is_some()
-                && let Some(handle) = auth_lease_handle.clone()
-            {
-                candidate_env = candidate_env.with_auth_lease_handle(handle);
-            }
-            match provider_registry
-                .resolve(&target.realm, &target.auth_binding, &candidate_env)
-                .await
-            {
-                Ok(connection) => {
-                    if connection.provider != identity.provider {
-                        return Err(FactoryError::ProviderAuth(
-                            meerkat_llm_core::provider_runtime::ProviderAuthError::ResolvedProviderMismatch {
-                                expected: identity.provider,
-                                resolved: connection.provider,
-                            },
-                        ));
-                    }
-                    if let (Some(handle), Some(lease_auth_binding)) =
-                        (auth_lease_handle.as_ref(), lease_auth_binding.as_ref())
-                    {
-                        Self::publish_auth_lease(handle, lease_auth_binding, &connection)?;
-                    }
-                    return provider_registry
-                        .build_client(connection)
-                        .map_err(FactoryError::ClientBuild);
-                }
-                Err(error) => {
-                    first_resolution_error.get_or_insert(error);
-                    if explicit_auth_binding {
-                        break;
-                    }
-                }
-            }
-        }
-        Err(FactoryError::ProviderAuth(
-            first_resolution_error.unwrap_or_else(|| {
-                meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
-                    format!(
-                        "no auth binding candidates resolved for provider '{}'",
-                        identity.provider.as_str()
-                    ),
-                )
-            }),
-        ))
+        .await
     }
 
     /// Build the per-request LLM policy for a (re)configured identity.
@@ -4147,8 +4135,11 @@ impl AgentFactory {
             .model_registry(meerkat_models::canonical())
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         let model_profile = registry.profile_for_provider(identity.provider, &identity.model);
+        let credential_identity = Self::credential_identity_for_llm_identity(config, identity)?;
+        let copilot_route = Self::llm_identity_uses_copilot(config, identity)?;
         Ok(meerkat_core::SessionLlmRequestPolicy {
             model: identity.model.clone(),
+            credential_identity,
             provider_params: identity.provider_params.clone(),
             provider_tool_defaults: provider_request_defaults_for(
                 identity.provider,
@@ -4160,8 +4151,84 @@ impl AgentFactory {
                 identity.provider != Provider::OpenAI
                     || openai_cache_defaults_supported(config, identity.auth_binding.as_ref()),
             ),
-            provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
+            provider_native_tools: if copilot_route {
+                meerkat_core::ProviderNativeToolPolicy::DisableAll
+            } else {
+                meerkat_core::ProviderNativeToolPolicy::Inherit
+            },
         })
+    }
+
+    fn configured_binding_for_llm_identity<'a>(
+        config: &'a Config,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Option<&'a meerkat_core::ProviderBindingConfig>, FactoryError> {
+        let Some(auth_binding) = identity.auth_binding.as_ref() else {
+            return Ok(None);
+        };
+        let binding = config
+            .realm
+            .get(auth_binding.realm.as_str())
+            .and_then(|section| section.binding.get(auth_binding.binding.as_str()));
+        if binding.is_none() && !auth_binding.is_env_default() {
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "auth binding '{}:{}' is absent while resolving live LLM request policy",
+                auth_binding.realm, auth_binding.binding
+            )));
+        }
+        Ok(binding)
+    }
+
+    pub(crate) fn credential_identity_for_llm_identity(
+        config: &Config,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Option<meerkat_core::AuthCredentialIdentity>, FactoryError> {
+        let Some(auth_binding) = identity.auth_binding.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            Self::configured_binding_for_llm_identity(config, identity)?.map_or_else(
+                || meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
+                |binding| binding.credential_identity(auth_binding),
+            ),
+        ))
+    }
+
+    fn llm_identity_uses_copilot(
+        config: &Config,
+        identity: &SessionLlmIdentity,
+    ) -> Result<bool, FactoryError> {
+        let Some(binding) = Self::configured_binding_for_llm_identity(config, identity)? else {
+            return Ok(false);
+        };
+        let backend = config
+            .realm
+            .get(
+                identity
+                    .auth_binding
+                    .as_ref()
+                    .map_or("", |auth_binding| auth_binding.realm.as_str()),
+            )
+            .and_then(|section| section.backend.get(&binding.backend_profile))
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "backend profile '{}' is absent while resolving live LLM request policy",
+                    binding.backend_profile
+                ))
+            })?;
+        Ok(matches!(
+            meerkat_providers::ProviderRuntimeCatalog::normalize_backend(
+                identity.provider,
+                &backend.backend_kind,
+            ),
+            Ok(meerkat_providers::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot,
+            ) | meerkat_providers::NormalizedBackendKind::Anthropic(
+                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot,
+            ) | meerkat_providers::NormalizedBackendKind::Google(
+                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot,
+            ))
+        ))
     }
 
     fn model_registry(&self, config: &Config) -> Result<ModelRegistry, BuildAgentError> {
@@ -4262,6 +4329,9 @@ impl AgentFactory {
             .as_ref()
             .filter(|auth_binding| !auth_binding.is_env_default())
             .map(|auth_binding| auth_binding.realm.clone());
+        let current_credential_identity =
+            Self::credential_identity_for_llm_identity(config, current)
+                .map_err(BuildAgentError::LlmClient)?;
         let mut targets: Vec<(String, Option<Provider>, Option<AuthBindingRef>)> =
             if catalog_default_chain {
                 let mut defaults = Vec::new();
@@ -4330,34 +4400,60 @@ impl AgentFactory {
             let auth_binding = match (auth_binding, preferred_realm.as_ref()) {
                 (Some(auth_binding), _) => Some(auth_binding),
                 (None, Some(realm)) => {
-                    let resolved = Self::resolve_realm_binding_candidates_for_provider(
-                        config,
-                        provider,
-                        None,
-                        Some(realm),
-                    )
-                    .ok()
-                    .and_then(|candidates| {
-                        candidates
-                            .into_iter()
-                            .find(|target| {
-                                if catalog_default_chain {
-                                    // Candidates are already chain-scoped
-                                    // (head -> ancestors -> global), in
-                                    // nearest-child-wins order. Accept the first
-                                    // configured one — an inherited binding is
-                                    // owner-stamped (owner != preferred realm),
-                                    // so a realm-equality filter would wrongly
-                                    // drop it.
-                                    !target.auth_binding.is_env_default()
-                                } else {
-                                    true
-                                }
-                            })
+                    let resolved =
+                        if let Some(meerkat_core::AuthCredentialIdentity::Account(account)) =
+                            current_credential_identity.as_ref()
+                        {
+                            meerkat_core::resolve_credential_account_binding_for_provider(
+                                config, provider, account,
+                            )
+                            .map_err(|error| {
+                                BuildAgentError::LlmClient(FactoryError::ConnectionTarget(error))
+                            })?
                             .map(|target| target.auth_binding)
-                    });
+                        } else {
+                            let candidates = Self::resolve_realm_binding_candidates_for_provider(
+                                config,
+                                provider,
+                                None,
+                                Some(realm),
+                            )
+                            .map_err(|error| {
+                                BuildAgentError::LlmClient(FactoryError::ConnectionTarget(error))
+                            })?;
+                            candidates
+                                .into_iter()
+                                .find(|target| {
+                                    if catalog_default_chain {
+                                        // Candidates are already chain-scoped
+                                        // (head -> ancestors -> global), in
+                                        // nearest-child-wins order. Accept the first
+                                        // configured one — an inherited binding is
+                                        // owner-stamped (owner != preferred realm),
+                                        // so a realm-equality filter would wrongly
+                                        // drop it.
+                                        !target.auth_binding.is_env_default()
+                                    } else {
+                                        true
+                                    }
+                                })
+                                .map(|target| target.auth_binding)
+                        };
                     if catalog_default_chain && resolved.is_none() {
                         continue;
+                    }
+                    if current_credential_identity
+                        .as_ref()
+                        .is_some_and(|identity| {
+                            matches!(identity, meerkat_core::AuthCredentialIdentity::Account(_))
+                        })
+                        && resolved.is_none()
+                    {
+                        return Err(BuildAgentError::Config(format!(
+                            "model fallback target '{}:{}' has no route sharing the active credential account; configure an explicit auth_binding to change accounts",
+                            provider.as_str(),
+                            model
+                        )));
                     }
                     resolved
                 }
@@ -4528,6 +4624,7 @@ impl AgentFactory {
                     },
                 )),
                 durable_auth_binding,
+                credential_identity: connection.credential_identity,
             })
         }
     }
@@ -4599,7 +4696,7 @@ impl AgentFactory {
 
     fn publish_auth_lease(
         handle: &meerkat_core::handles::GeneratedAuthLeaseHandle,
-        auth_binding: &AuthBindingRef,
+        _auth_binding: &AuthBindingRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) -> Result<(), FactoryError> {
         if matches!(
@@ -4608,7 +4705,9 @@ impl AgentFactory {
         ) {
             return Ok(());
         }
-        let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
+        let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(
+            &connection.credential_identity,
+        );
         let expires_at = connection
             .auth_lease
             .expires_at()
@@ -5058,6 +5157,7 @@ impl AgentFactory {
             )
             .await?;
         let llm_client = resolved_llm_client_phase.llm_client;
+        let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
         #[cfg(not(target_arch = "wasm32"))]
         let auto_image_generation_executor =
             resolved_llm_client_phase.auto_image_generation_executor;
@@ -5075,6 +5175,10 @@ impl AgentFactory {
             provider_params: build_config.provider_params.clone(),
             auth_binding: build_config.auth_binding.clone(),
         };
+        let auth_credential_identity =
+            Self::credential_identity_for_llm_identity(config, &resolved_llm_identity)
+                .map_err(BuildAgentError::LlmClient)?
+                .or(resolved_auth_credential_identity);
         #[cfg(not(target_arch = "wasm32"))]
         let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
             let active_model_has_native_search = model_profile
@@ -6362,6 +6466,8 @@ impl AgentFactory {
             || tool_execution_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.is_unrestricted())
+            || Self::llm_identity_uses_copilot(config, &resolved_llm_identity)
+                .map_err(BuildAgentError::LlmClient)?
         {
             meerkat_core::ProviderNativeToolPolicy::DisableAll
         } else {
@@ -6471,6 +6577,7 @@ impl AgentFactory {
 
         let mut builder = AgentBuilder::new()
             .model(model.clone())
+            .with_auth_credential_identity(auth_credential_identity)
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
             .structured_output_retries(resolved_structured_output_retries)
@@ -6839,6 +6946,10 @@ impl AgentFactory {
         let mut auto_image_generation_executor: Option<
             Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
         > = None;
+        let mut credential_identity = build_config
+            .auth_binding
+            .as_ref()
+            .map(meerkat_core::AuthCredentialIdentity::from_auth_binding);
         let llm_client: Option<Arc<dyn LlmClient>> = if build_config
             .agent_llm_client_override
             .is_some()
@@ -6879,6 +6990,7 @@ impl AgentFactory {
                             .await
                             .map_err(BuildAgentError::LlmClient)?;
                         build_config.auth_binding = resolved.durable_auth_binding;
+                        credential_identity = Some(resolved.credential_identity);
                         resolved.client
                     } else {
                         // Provider-runtime registry needs the OAuth-backed
@@ -7021,8 +7133,10 @@ impl AgentFactory {
 
                         if lease_auth_binding.is_some() {
                             build_config.auth_binding = Some(resolved_auth_binding);
+                            credential_identity = Some(connection.credential_identity.clone());
                         } else {
                             build_config.auth_binding = None;
+                            credential_identity = None;
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
@@ -7033,6 +7147,37 @@ impl AgentFactory {
                         // composition seam (dogma §9).
                         let realtime_route = matches!(provider, Provider::OpenAI)
                             && is_openai_realtime_capable(&build_config.model);
+                        let text_identity = SessionLlmIdentity {
+                            model: build_config.model.clone(),
+                            provider,
+                            self_hosted_server_id: None,
+                            provider_params: build_config.provider_params.clone(),
+                            auth_binding: build_config.auth_binding.clone(),
+                        };
+                        let text_profile = registry
+                            .profile_witness_for_provider(provider, &build_config.model)
+                            .ok_or_else(|| {
+                                BuildAgentError::Config(format!(
+                                    "model '{}:{}' is absent from the effective model registry",
+                                    provider.as_str(),
+                                    build_config.model
+                                ))
+                            })?;
+                        #[cfg(feature = "openai-realtime")]
+                        let text_connection = connection.clone();
+                        #[cfg(not(feature = "openai-realtime"))]
+                        let text_connection = connection;
+                        let text_target =
+                            meerkat_llm_core::provider_runtime::ResolvedTextTarget::new(
+                                text_identity,
+                                text_profile,
+                                text_connection,
+                            )
+                            .ok_or_else(|| {
+                                BuildAgentError::Config(
+                                    "resolved text target identity mismatch".to_string(),
+                                )
+                            })?;
                         #[cfg(not(feature = "openai-realtime"))]
                         if realtime_route {
                             return Err(BuildAgentError::LlmClient(FactoryError::ClientBuild(
@@ -7049,15 +7194,19 @@ impl AgentFactory {
                                     BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
                                 })?
                         } else {
-                            provider_registry.build_client(connection).map_err(|e| {
-                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                            })?
+                            provider_registry
+                                .build_text_client(text_target)
+                                .map_err(|e| {
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                                })?
                         }
                         #[cfg(not(feature = "openai-realtime"))]
                         {
-                            provider_registry.build_client(connection).map_err(|e| {
-                                BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
-                            })?
+                            provider_registry
+                                .build_text_client(text_target)
+                                .map_err(|e| {
+                                    BuildAgentError::LlmClient(FactoryError::ClientBuild(e))
+                                })?
                         }
                     }
                 }
@@ -7134,6 +7283,7 @@ impl AgentFactory {
         }
         Ok(ResolvedLlmClientPhase {
             llm_client,
+            credential_identity,
             #[cfg(not(target_arch = "wasm32"))]
             auto_image_generation_executor,
         })
@@ -7851,6 +8001,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "backend".to_string(),
                 auth_profile: "auth".to_string(),
+                credential_account: None,
                 default_model: default_model.map(str::to_string),
                 policy: Default::default(),
                 provider_default: true,
@@ -8437,6 +8588,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "command_token".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: true,
@@ -8537,6 +8689,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "managed_token".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: true,
@@ -9151,6 +9304,7 @@ mod tests {
                 provider: self.provider,
                 backend: binding.backend(),
                 backend_profile: Arc::clone(binding.backend_profile()),
+                credential_identity: binding.credential_identity().clone(),
                 auth_lease: Arc::new(
                     meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
                         format!("test-{}-key", self.provider.as_str()),
@@ -10055,6 +10209,7 @@ mod tests {
                 ProviderBindingConfig {
                     backend_profile: "openai_api".to_string(),
                     auth_profile: auth_id,
+                    credential_account: None,
                     default_model: None,
                     policy: Default::default(),
                     provider_default: false,
@@ -10125,6 +10280,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         secret,
                         meerkat_core::AuthMetadata::default(),
@@ -10451,6 +10607,7 @@ mod tests {
                 ProviderBindingConfig {
                     backend_profile: "azure".to_string(),
                     auth_profile: "azure_auth".to_string(),
+                    credential_account: None,
                     default_model: None,
                     policy: Default::default(),
                     provider_default: false,
@@ -10489,6 +10646,13 @@ mod tests {
         let mut config = Config::default();
         let primary = configured_auth_binding("dev", "primary_openai");
         let secondary = configured_auth_binding("dev", "secondary_openai");
+        config.realm.insert(
+            "dev".to_string(),
+            openai_realm_with_bindings(&[
+                ("primary_openai", "sk-primary"),
+                ("secondary_openai", "sk-secondary"),
+            ]),
+        );
         config.model_fallback.chain = vec![ModelFallbackTarget {
             model: "gpt-5.5".to_string(),
             provider: Some(Provider::OpenAI),
@@ -10589,6 +10753,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 backend: binding.backend(),
                 backend_profile: Arc::clone(binding.backend_profile()),
+                credential_identity: binding.credential_identity().clone(),
                 auth_lease: Arc::new(
                     meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
                         "sk-test-openai".to_string(),
@@ -10743,6 +10908,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -10846,6 +11012,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -10955,6 +11122,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "env-fallback-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -11240,6 +11408,9 @@ mod tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &auth_binding,
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "managed-oauth-access".into(),
                 meerkat_core::AuthMetadata::default(),
@@ -11298,6 +11469,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "anthropic_backend".to_string(),
                 auth_profile: "anthropic_env".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,
@@ -11357,6 +11529,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_key".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
                 provider_default: false,
@@ -11428,6 +11601,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_key".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
                 provider_default: true,
@@ -11545,6 +11719,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_key".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
                 provider_default: false,
@@ -11636,6 +11811,7 @@ mod tests {
                     provider: Provider::Anthropic,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-ant-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -11689,6 +11865,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "anthropic_api".to_string(),
                 auth_profile: "anthropic_key".to_string(),
+                credential_account: None,
                 default_model: Some("claude-opus-4-8".to_string()),
                 policy: Default::default(),
                 provider_default: false,
@@ -11750,6 +11927,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "anthropic_backend".to_string(),
                 auth_profile: "anthropic_env".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,
@@ -11791,6 +11969,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_backend".to_string(),
                 auth_profile: "openai_env".to_string(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,
@@ -11964,6 +12143,7 @@ mod tests {
                 provider: Provider::SelfHosted,
                 backend: binding.backend(),
                 backend_profile: Arc::clone(binding.backend_profile()),
+                credential_identity: binding.credential_identity().clone(),
                 auth_lease,
             })
         }
@@ -12086,6 +12266,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: backend_id,
                 auth_profile: auth_id,
+                credential_account: None,
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
                 provider_default: false,
@@ -12238,6 +12419,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: backend_id,
                 auth_profile: auth_id,
+                credential_account: None,
                 default_model: default_model.map(str::to_string),
                 policy: Default::default(),
                 provider_default: false,
@@ -13251,6 +13433,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "local_backend".to_string(),
                 auth_profile: "local_auth".to_string(),
+                credential_account: None,
                 default_model: Some("gemma4:e2b".to_string()),
                 policy: Default::default(),
                 provider_default: false,
@@ -13567,6 +13750,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "test-openai-key".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -13710,6 +13894,7 @@ mod tests {
                     provider: Provider::Anthropic,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-ant-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -13751,6 +13936,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-image-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -13876,6 +14062,7 @@ mod tests {
                     provider: Provider::OpenAI,
                     backend: binding.backend(),
                     backend_profile: Arc::clone(binding.backend_profile()),
+                    credential_identity: binding.credential_identity().clone(),
                     auth_lease: Arc::new(StaticLease::inline_secret(
                         "sk-openai-test".to_string(),
                         meerkat_core::AuthMetadata::default(),
@@ -15660,5 +15847,129 @@ mod host_prompt_sections_tests {
             meerkat_core::service::HostPromptSections::Full,
             "local builds default to Full"
         );
+    }
+
+    #[cfg(test)]
+    mod copilot_account_routing_tests {
+        use super::*;
+
+        fn copilot_config() -> Config {
+            let mut config = Config::default();
+            let mut realm = meerkat_core::RealmConfigSection::default();
+            let account =
+                meerkat_core::CredentialAccountId::parse("github_copilot").expect("valid account");
+            for (id, provider, backend_kind, auth_method, model) in [
+                (
+                    "copilot_openai",
+                    Provider::OpenAI,
+                    meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str(),
+                    meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth
+                        .as_str(),
+                    meerkat_models::default_model(Provider::OpenAI).expect("OpenAI default"),
+                ),
+                (
+                    "copilot_anthropic",
+                    Provider::Anthropic,
+                    meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str(),
+                    meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
+                        .as_str(),
+                    meerkat_models::default_model(Provider::Anthropic).expect("Anthropic default"),
+                ),
+            ] {
+                realm.backend.insert(
+                    id.to_string(),
+                    meerkat_core::BackendProfileConfig {
+                        provider: provider.as_str().to_string(),
+                        backend_kind: backend_kind.to_string(),
+                        base_url: None,
+                        options: serde_json::Value::Null,
+                        server: None,
+                    },
+                );
+                realm.auth.insert(
+                    id.to_string(),
+                    meerkat_core::AuthProfileConfig {
+                        provider: provider.as_str().to_string(),
+                        auth_method: auth_method.to_string(),
+                        source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                        constraints: Default::default(),
+                        metadata_defaults: Default::default(),
+                    },
+                );
+                realm.binding.insert(
+                    id.to_string(),
+                    meerkat_core::ProviderBindingConfig {
+                        backend_profile: id.to_string(),
+                        auth_profile: id.to_string(),
+                        credential_account: Some(account.clone()),
+                        default_model: Some(model.to_string()),
+                        policy: Default::default(),
+                        provider_default: false,
+                    },
+                );
+            }
+            config.realm.insert("global".to_string(), realm);
+            config.model_fallback.chain = vec![meerkat_core::config::ModelFallbackTarget {
+                model: meerkat_models::default_model(Provider::Anthropic)
+                    .expect("Anthropic default")
+                    .to_string(),
+                provider: Some(Provider::Anthropic),
+                auth_binding: None,
+            }];
+            config
+        }
+
+        #[test]
+        fn fallback_preserves_shared_copilot_account_and_disables_native_tools() {
+            let config = copilot_config();
+            let factory = AgentFactory::minimal();
+            let current = SessionLlmIdentity {
+                model: meerkat_models::default_model(Provider::OpenAI)
+                    .expect("OpenAI default")
+                    .to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: Some(AuthBindingRef {
+                    realm: RealmId::global(),
+                    binding: meerkat_core::BindingId::parse("copilot_openai")
+                        .expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                }),
+            };
+            let registry = config
+                .model_registry(meerkat_models::canonical())
+                .expect("registry");
+            let candidates = factory
+                .model_fallback_identities(&config, &registry, &current)
+                .expect("fallback identities");
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates[0]
+                    .auth_binding
+                    .as_ref()
+                    .expect("configured route")
+                    .binding
+                    .as_str(),
+                "copilot_anthropic"
+            );
+
+            let current_credential =
+                AgentFactory::credential_identity_for_llm_identity(&config, &current)
+                    .expect("current credential");
+            let fallback_policy = factory
+                .request_policy_for_llm_identity(
+                    &config,
+                    &candidates[0],
+                    ToolCategoryOverride::Inherit,
+                )
+                .expect("fallback policy");
+            assert_eq!(fallback_policy.credential_identity, current_credential);
+            assert_eq!(
+                fallback_policy.provider_native_tools,
+                meerkat_core::ProviderNativeToolPolicy::DisableAll
+            );
+        }
     }
 }

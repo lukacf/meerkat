@@ -9,6 +9,7 @@ pub enum GoogleAuthMethod {
     ApiKeyExpress,
     GoogleOauth,
     ComputeAdc,
+    GitHubCopilotOauth,
 }
 
 impl GoogleAuthMethod {
@@ -20,6 +21,7 @@ impl GoogleAuthMethod {
         Self::ApiKeyExpress,
         Self::GoogleOauth,
         Self::ComputeAdc,
+        Self::GitHubCopilotOauth,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -31,6 +33,7 @@ impl GoogleAuthMethod {
             "api_key_express" => Some(Self::ApiKeyExpress),
             "google_oauth" => Some(Self::GoogleOauth),
             "compute_adc" => Some(Self::ComputeAdc),
+            "github_copilot_oauth" => Some(Self::GitHubCopilotOauth),
             _ => None,
         }
     }
@@ -43,6 +46,7 @@ impl GoogleAuthMethod {
             Self::ApiKeyExpress => "api_key_express",
             Self::GoogleOauth => "google_oauth",
             Self::ComputeAdc => "compute_adc",
+            Self::GitHubCopilotOauth => "github_copilot_oauth",
         }
     }
 
@@ -57,6 +61,7 @@ impl GoogleAuthMethod {
             Self::BearerApiKey => Some(PersistedAuthMode::StaticBearer),
             Self::GoogleOauth => Some(PersistedAuthMode::GoogleOauth),
             Self::ExternalAuthorizer | Self::Adc | Self::ComputeAdc => None,
+            Self::GitHubCopilotOauth => Some(PersistedAuthMode::GithubCopilotOauth),
         }
     }
 }

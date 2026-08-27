@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use meerkat_core::{ImageGenerationProviderProfile, Provider};
 
 use crate::provider_runtime::binding::{
-    ResolvedConnection, ResolvedRealtimeTarget, ValidatedBinding,
+    ResolvedConnection, ResolvedRealtimeTarget, ResolvedTextTarget, ValidatedBinding,
 };
 use crate::provider_runtime::errors::{ProviderAuthError, ProviderClientError};
 use crate::provider_runtime::registry::ResolverEnvironment;
@@ -43,6 +43,14 @@ pub trait ProviderRuntime: Send + Sync {
         &self,
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError>;
+
+    fn build_text_client(
+        &self,
+        target: ResolvedTextTarget,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let (_, _, connection) = target.into_parts();
+        self.build_client(connection)
+    }
 
     /// Construct a realtime-capable text-turn client from a resolved
     /// provider connection. Provider runtimes own the backend/auth mechanics
@@ -157,6 +165,14 @@ mod tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &meerkat_core::AuthBindingRef {
+                    realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+                    binding: meerkat_core::BindingId::parse("openai").expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                },
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "secret".into(),
                 AuthMetadata::default(),

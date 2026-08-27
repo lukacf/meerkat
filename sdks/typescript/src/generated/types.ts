@@ -453,7 +453,7 @@ export interface WireDeviceCompleteResultReady {
   expires_at?: string | null;
   has_refresh_token: boolean;
   profile_id: string;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
   scopes: string[];
   state: "ready";
@@ -606,14 +606,14 @@ export interface DeviceCompleteParams {
   binding_id: string;
   device_code: string;
   profile_id?: string | null;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
 }
 
 export interface DeviceStartParams {
   binding_id: string;
   profile_id?: string | null;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
 }
 
@@ -774,7 +774,7 @@ export interface LoginCompleteParams {
   binding_id: string;
   code: string;
   profile_id?: string | null;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
   redirect_uri: string;
   state: string;
@@ -783,7 +783,7 @@ export interface LoginCompleteParams {
 export interface LoginStartParams {
   binding_id: string;
   profile_id?: string | null;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
   redirect_uri: string;
 }
@@ -5698,6 +5698,7 @@ export interface WireProviderBinding {
   allow_auth_override?: boolean;
   auth_profile: string;
   backend_profile: string;
+  credential_account?: string | null;
   default_model?: string | null;
   id: string;
   require_metadata_account?: boolean;
@@ -5745,7 +5746,7 @@ export interface WireAuthProfileCleared {
 
 export interface WireLoginStart {
   authorize_url: string;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   redirect_uri: string;
   state: string;
 }
@@ -5756,7 +5757,7 @@ export interface WireLoginReady {
   expires_at?: string | null;
   has_refresh_token: boolean;
   profile_id: string;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   realm_id: string;
   scopes: string[];
   state?: string | null;
@@ -5766,7 +5767,7 @@ export interface WireDeviceStart {
   device_code: string;
   expires_in: number;
   interval: number;
-  provider: string;
+  provider: "anthropic" | "openai" | "google" | "copilot";
   user_code: string;
   verification_uri: string;
   verification_uri_complete?: string | null;

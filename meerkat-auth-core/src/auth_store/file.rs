@@ -2,7 +2,8 @@
 //!
 //! Layout: default binding credentials live at
 //! `<root>/<realm_id>/<binding_id>.json`; profile override credentials live at
-//! `<root>/<realm_id>/<binding_id>@<profile_id>.json`.
+//! `<root>/<realm_id>/<binding_id>@<profile_id>.json`; shared account
+//! credentials live at `<root>/<realm_id>/account~<account_id>.json`.
 //! Permissions: 0o600 on Unix; atomic rename (`.tmp` → target) on save.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
@@ -31,11 +32,8 @@ impl FileTokenStore {
     }
 
     fn path_for(&self, key: &TokenKey) -> PathBuf {
-        let stem = match &key.profile {
-            Some(profile) => format!("{}@{}", key.binding.as_str(), profile.as_str()),
-            None => key.binding.as_str().to_string(),
-        };
-        self.realm_dir(key.realm.as_str())
+        let stem = key.storage_stem();
+        self.realm_dir(key.realm().as_str())
             .join(format!("{stem}.json"))
     }
 }
@@ -54,7 +52,7 @@ impl TokenStore for FileTokenStore {
     }
 
     async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        let dir = self.realm_dir(key.realm.as_str());
+        let dir = self.realm_dir(key.realm().as_str());
         tokio::fs::create_dir_all(&dir).await?;
         let final_path = self.path_for(key);
         let tmp_path = final_path.with_extension("json.tmp");
@@ -112,6 +110,22 @@ impl TokenStore for FileTokenStore {
                     Some(s) => s,
                     None => continue,
                 };
+                if let Some(account_raw) = stem.strip_prefix("account~") {
+                    let account =
+                        match meerkat_core::connection::CredentialAccountId::parse(account_raw) {
+                            Ok(account) => account,
+                            Err(_) => continue,
+                        };
+                    out.push(TokenKey::from_credential_identity(
+                        &meerkat_core::AuthCredentialIdentity::Account(
+                            meerkat_core::CredentialAccountRef {
+                                realm: realm.clone(),
+                                account,
+                            },
+                        ),
+                    ));
+                    continue;
+                }
                 let (binding_raw, profile_raw) = match stem.split_once('@') {
                     Some((binding, profile)) => (binding, Some(profile)),
                     None => (stem, None),
@@ -173,7 +187,10 @@ async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStor
 mod tests {
     use super::*;
     use crate::auth_store::PersistedAuthMode;
-    use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
+    use meerkat_core::connection::{
+        AuthBindingRef, AuthCredentialIdentity, BindingId, BindingOrigin, CredentialAccountId,
+        CredentialAccountRef, RealmId,
+    };
 
     fn token(secret: &str) -> PersistedTokens {
         PersistedTokens {
@@ -206,6 +223,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn account_credential_round_trips_and_lists_without_binding_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTokenStore::new(dir.path());
+        let identity = AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::parse("global").unwrap(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        });
+        let account_key = TokenKey::from_credential_identity(&identity);
+        let binding_key = TokenKey::new(
+            RealmId::parse("global").unwrap(),
+            BindingId::parse("account").unwrap(),
+        );
+
+        store.save(&account_key, &token("github")).await.unwrap();
+        store.save(&binding_key, &token("binding")).await.unwrap();
+
+        assert_eq!(
+            store
+                .load(&account_key)
+                .await
+                .unwrap()
+                .and_then(|tokens| tokens.primary_secret),
+            Some("github".to_string())
+        );
+        let listed = store.list().await.unwrap();
+        assert!(listed.contains(&account_key));
+        assert!(listed.contains(&binding_key));
+        assert!(
+            dir.path()
+                .join("global")
+                .join("account~github_copilot.json")
+                .exists()
+        );
+    }
+
     // RCT-17: an inherited binding (owner = the defining realm, stamped by the
     // chain walk) resolves its credential at the OWNING realm's namespace; a
     // different (consuming) realm does not see it.
@@ -221,7 +274,7 @@ mod tests {
             origin: BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&owner);
-        assert_eq!(key.realm.as_str(), "global");
+        assert_eq!(key.realm().as_str(), "global");
 
         store.save(&key, &token("owner-secret")).await.unwrap();
         let loaded = store.load(&key).await.unwrap().expect("found at owner");

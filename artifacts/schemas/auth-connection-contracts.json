@@ -6,6 +6,7 @@
     "managed_chatgpt_oauth",
     "external_chatgpt_tokens",
     "external_authorizer",
+    "github_copilot_oauth",
     "claude_ai_oauth",
     "oauth_to_api_key",
     "bedrock_bearer",
@@ -34,6 +35,7 @@
     "openai_api",
     "chatgpt_backend",
     "azure_openai",
+    "copilot",
     "anthropic_api",
     "bedrock",
     "vertex",
@@ -61,6 +63,12 @@
     "ready"
   ],
   "login_ready_state": "ready",
+  "oauth_providers": [
+    "anthropic",
+    "openai",
+    "google",
+    "copilot"
+  ],
   "provider_auth_methods": {
     "anthropic": [
       "api_key",
@@ -72,7 +80,8 @@
       "bedrock_aws_sigv4",
       "vertex_google_auth",
       "foundry_api_key",
-      "foundry_azure_ad"
+      "foundry_azure_ad",
+      "github_copilot_oauth"
     ],
     "gemini": [
       "api_key",
@@ -81,7 +90,8 @@
       "adc",
       "api_key_express",
       "google_oauth",
-      "compute_adc"
+      "compute_adc",
+      "github_copilot_oauth"
     ],
     "openai": [
       "api_key",
@@ -89,7 +99,8 @@
       "static_bearer",
       "managed_chatgpt_oauth",
       "external_chatgpt_tokens",
-      "external_authorizer"
+      "external_authorizer",
+      "github_copilot_oauth"
     ],
     "self_hosted": [
       "api_key",
@@ -102,17 +113,20 @@
       "anthropic_api",
       "bedrock",
       "vertex",
-      "foundry"
+      "foundry",
+      "copilot"
     ],
     "gemini": [
       "google_genai",
       "vertex_ai",
-      "google_code_assist"
+      "google_code_assist",
+      "copilot"
     ],
     "openai": [
       "openai_api",
       "chatgpt_backend",
-      "azure_openai"
+      "azure_openai",
+      "copilot"
     ],
     "self_hosted": [
       "self_hosted",

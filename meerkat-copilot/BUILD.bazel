@@ -29,12 +29,11 @@ filegroup(
 
 
 rust_library(
-    name = "meerkat_anthropic",
-    aliases = aliases(package_name = "meerkat-anthropic"),
-    crate_name = "meerkat_anthropic",
+    name = "meerkat_copilot",
+    aliases = aliases(package_name = "meerkat-copilot"),
+    crate_name = "meerkat_copilot",
     crate_root = "src/lib.rs",
     crate_features = [
-        "copilot",
         "oauth",
     ],
     edition = "2024",
@@ -45,31 +44,28 @@ rust_library(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
-        "CARGO_MANIFEST_DIR": "./meerkat-anthropic",
+        "CARGO_MANIFEST_DIR": "./meerkat-copilot",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         proc_macro = True,
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-copilot:meerkat_copilot",
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
-        "//meerkat-models:meerkat_models",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         normal = True,
     ),
 )
 
 rust_library(
-    name = "meerkat_anthropic_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-anthropic"),
-    crate_name = "meerkat_anthropic",
+    name = "meerkat_copilot_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-copilot"),
+    crate_name = "meerkat_copilot",
     crate_root = "src/lib.rs",
     crate_features = [
-        "copilot",
         "oauth",
     ],
     edition = "2024",
@@ -82,37 +78,34 @@ rust_library(
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
-        "CARGO_MANIFEST_DIR": "./meerkat-anthropic",
+        "CARGO_MANIFEST_DIR": "./meerkat-copilot",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         proc_macro = True,
     ),
     deps = [
         "//meerkat:meerkat_auth_core_agent_factory_build",
-        "//meerkat:meerkat_copilot_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_llm_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         normal = True,
     ),
 )
 
 rust_test(
-    name = "meerkat_anthropic_unit_test",
+    name = "meerkat_copilot_unit_test",
     aliases = aliases(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         normal = True,
         normal_dev = True,
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "meerkat_anthropic",
+    crate_name = "meerkat_copilot",
     crate_root = "src/lib.rs",
     crate_features = [
-        "copilot",
         "oauth",
     ],
     edition = "2024",
@@ -123,7 +116,7 @@ rust_test(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
-        "CARGO_MANIFEST_DIR": "./meerkat-anthropic",
+        "CARGO_MANIFEST_DIR": "./meerkat-copilot",
     },
     tags = [
         "fast",
@@ -137,75 +130,17 @@ rust_test(
         "RUST_MIN_STACK": "33554432",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         proc_macro = True,
         proc_macro_dev = True,
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-copilot:meerkat_copilot",
         "//meerkat-core:meerkat_core",
         "//meerkat-llm-core:meerkat_llm_core",
-        "//meerkat-models:meerkat_models",
         "//meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "oauth_resolve_test",
-    aliases = aliases(
-        package_name = "meerkat-anthropic",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "oauth_resolve",
-    crate_root = "tests/oauth_resolve.rs",
-    crate_features = [
-        "copilot",
-        "oauth",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-    ],
-    srcs = [
-        "tests/oauth_resolve.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
-        "CARGO_BIN_NAME": "oauth_resolve",
-        "CARGO_MANIFEST_DIR": "./meerkat-anthropic",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "33554432",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-anthropic:meerkat_anthropic",
-        "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-copilot:meerkat_copilot",
-        "//meerkat-core:meerkat_core",
-        "//meerkat-llm-core:meerkat_llm_core",
-        "//meerkat-models:meerkat_models",
-        "//meerkat-runtime:meerkat_runtime_test_support",
-    ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "meerkat-copilot",
         normal = True,
         normal_dev = True,
     ),
@@ -214,7 +149,6 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
-        ":meerkat_anthropic_unit_test",
-        ":oauth_resolve_test",
+        ":meerkat_copilot_unit_test",
     ],
 )

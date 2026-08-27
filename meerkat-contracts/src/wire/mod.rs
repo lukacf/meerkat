@@ -63,7 +63,7 @@ pub use connection::{
     WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthProfileCleared,
     WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus,
     WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding,
+    WireDeviceStart, WireLoginReady, WireLoginStart, WireOAuthProvider, WireProviderBinding,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 pub use rpc_surface::{

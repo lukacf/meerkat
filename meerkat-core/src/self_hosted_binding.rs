@@ -519,6 +519,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: backend_id,
                 auth_profile: auth_id,
+                credential_account: None,
                 default_model: default_model.map(str::to_string),
                 policy: Default::default(),
                 provider_default: false,

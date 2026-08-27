@@ -16306,6 +16306,18 @@
     "type": "object"
   },
   "DeviceCompleteParams": {
+    "$defs": {
+      "WireOAuthProvider": {
+        "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "google",
+          "copilot"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_complete`.",
     "properties": {
@@ -16322,7 +16334,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/WireOAuthProvider"
       },
       "realm_id": {
         "type": "string"
@@ -16338,6 +16350,18 @@
     "type": "object"
   },
   "DeviceStartParams": {
+    "$defs": {
+      "WireOAuthProvider": {
+        "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "google",
+          "copilot"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_start`.",
     "properties": {
@@ -16351,7 +16375,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/WireOAuthProvider"
       },
       "realm_id": {
         "type": "string"
@@ -20771,6 +20795,18 @@
     "type": "object"
   },
   "LoginCompleteParams": {
+    "$defs": {
+      "WireOAuthProvider": {
+        "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "google",
+          "copilot"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/complete`.",
     "properties": {
@@ -20787,7 +20823,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/WireOAuthProvider"
       },
       "realm_id": {
         "type": "string"
@@ -20811,6 +20847,18 @@
     "type": "object"
   },
   "LoginStartParams": {
+    "$defs": {
+      "WireOAuthProvider": {
+        "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "google",
+          "copilot"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/start`.",
     "properties": {
@@ -20824,7 +20872,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/WireOAuthProvider"
       },
       "realm_id": {
         "type": "string"

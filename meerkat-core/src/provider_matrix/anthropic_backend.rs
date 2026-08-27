@@ -12,6 +12,7 @@ pub enum AnthropicBackendKind {
     Vertex,
     /// Azure Foundry (Anthropic-on-Foundry), Bearer auth via Azure AD.
     Foundry,
+    Copilot,
 }
 
 impl AnthropicBackendKind {
@@ -20,6 +21,7 @@ impl AnthropicBackendKind {
         Self::Bedrock,
         Self::Vertex,
         Self::Foundry,
+        Self::Copilot,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -28,6 +30,7 @@ impl AnthropicBackendKind {
             "bedrock" => Some(Self::Bedrock),
             "vertex" => Some(Self::Vertex),
             "foundry" => Some(Self::Foundry),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -37,6 +40,7 @@ impl AnthropicBackendKind {
             Self::Bedrock => "bedrock",
             Self::Vertex => "vertex",
             Self::Foundry => "foundry",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -66,6 +70,7 @@ impl AnthropicBackendKind {
                 AnthropicAuthMethod::FoundryAzureAd,
                 AnthropicAuthMethod::ExternalAuthorizer,
             ],
+            Self::Copilot => &[AnthropicAuthMethod::GitHubCopilotOauth],
         }
     }
     pub fn default_base_url(self) -> &'static str {
@@ -78,6 +83,7 @@ impl AnthropicBackendKind {
             Self::Vertex => "",
             // Foundry uses a per-deployment base URL from binding options.
             Self::Foundry => "",
+            Self::Copilot => "",
         }
     }
 }

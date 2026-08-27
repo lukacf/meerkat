@@ -5,7 +5,8 @@ icon: "table-cells"
 ---
 
 Meerkat is modular. The `meerkat` facade defaults to the three provider
-features (`anthropic`, `openai`, `gemini`); realm persistence, compaction,
+features (`anthropic`, `openai`, `gemini`) plus the shared `copilot` backend;
+realm persistence, compaction,
 comms, MCP, skills, semantic memory, ATIF facade export, and live-channel
 orchestration are compile-time options. Schedule, WorkGraph, and durable-job
 substrates are always linked by the facade. Their runtime services and tools
@@ -25,7 +26,7 @@ authority.
 | Profile | Cargo Features | Use Case |
 |---------|---------------|----------|
 | **Minimal** | `--no-default-features` | Ephemeral agent core for a host that supplies its own provider path; no persistence or compaction |
-| **Provider default** | default features | Anthropic + OpenAI + Gemini providers; no session persistence, compaction, live transport, comms, MCP, skills, or semantic memory |
+| **Provider default** | default features | Anthropic + OpenAI + Gemini providers with the shared Copilot backend; no session persistence, compaction, live transport, comms, MCP, skills, or semantic memory |
 | **Persistent SQLite** | `session-store` | Persistent session service with the built-in SQLite backend; the feature also compiles the explicitly ephemeral `memory` backend |
 | **Persistent JSONL** | `session-store,jsonl-store` | Persistent session service with the separately enabled JSONL backend |
 | **Compacting** | `session-compaction` | Auto-compact long conversations |

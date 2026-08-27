@@ -842,6 +842,11 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         .iter()
         .map(meerkat_core::Provider::as_str)
         .collect();
+    let oauth_providers: Vec<&'static str> = meerkat_core::OAuthProviderIdentity::INTERACTIVE
+        .iter()
+        .copied()
+        .map(meerkat_core::OAuthProviderIdentity::canonical_alias)
+        .collect();
     let auth_status_states: Vec<&'static str> = meerkat_core::AuthStatusPhase::ALL
         .iter()
         .copied()
@@ -849,6 +854,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         .collect();
     let auth_connection_contracts = serde_json::json!({
         "providers": providers,
+        "oauth_providers": oauth_providers,
         "backend_kinds": backend_kinds,
         "auth_methods": auth_methods,
         "credential_source_kinds": meerkat_core::CredentialSourceSpec::ALL_KIND_LABELS,
@@ -1727,7 +1733,11 @@ mod tests {
         );
         assert_eq!(
             contracts["provider_backend_kinds"]["openai"],
-            serde_json::json!(["openai_api", "chatgpt_backend", "azure_openai"])
+            serde_json::json!(["openai_api", "chatgpt_backend", "azure_openai", "copilot"])
+        );
+        assert_eq!(
+            contracts["oauth_providers"],
+            serde_json::json!(["anthropic", "openai", "google", "copilot"])
         );
         assert!(
             contracts["provider_auth_methods"]["openai"]

@@ -104,6 +104,7 @@ fn config_with_realm() -> Config {
             ProviderBindingConfig {
                 backend_profile: backend_id.into(),
                 auth_profile: auth_id.into(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { Auth } from '../dist/auth.js';
 import {
+  parseDeviceStartParams,
   parseWireAuthError,
   parseWireAuthProfile,
   parseWireBackendProfile,
@@ -214,6 +215,30 @@ test('generated auth parsers reject provider-specific auth and backend mismatche
         bindings: [binding],
       }).auth.listProfiles('dev'),
     /backend_kind/,
+  );
+});
+
+test('Copilot is an OAuth issuer, not a concrete backend provider', () => {
+  assert.deepEqual(
+    parseDeviceStartParams({
+      provider: 'copilot',
+      realm_id: 'global',
+      binding_id: 'copilot_openai',
+    }),
+    {
+      provider: 'copilot',
+      realm_id: 'global',
+      binding_id: 'copilot_openai',
+    },
+  );
+  assert.throws(
+    () =>
+      parseWireBackendProfile({
+        ...backendProfile,
+        provider: 'copilot',
+        backend_kind: 'copilot',
+      }),
+    /provider/,
   );
 });
 

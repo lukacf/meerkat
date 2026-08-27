@@ -196,6 +196,7 @@ fn from_config_rejects_binding_pointing_at_missing_backend() {
         meerkat_core::ProviderBindingConfig {
             backend_profile: "does_not_exist".into(),
             auth_profile: "openai_api_key".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,
@@ -230,6 +231,7 @@ fn from_config_rejects_binding_pointing_at_missing_auth() {
         meerkat_core::ProviderBindingConfig {
             backend_profile: "openai_default".into(),
             auth_profile: "does_not_exist".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,
@@ -276,6 +278,7 @@ fn from_config_detects_provider_mismatch() {
         meerkat_core::ProviderBindingConfig {
             backend_profile: "openai_default".into(),
             auth_profile: "anthropic_api_key".into(),
+            credential_account: None,
             default_model: None,
             policy: Default::default(),
             provider_default: false,

@@ -7520,6 +7520,10 @@
         "title": "CreateScheduleRequest",
         "type": "object"
       },
+      "CredentialAccountId": {
+        "description": "Opaque slug identifying one shared credential account inside a realm.",
+        "type": "string"
+      },
       "CumulativeUsage": {
         "$ref": "#/components/schemas/Usage",
         "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
@@ -7714,7 +7718,7 @@
             ]
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "realm_id": {
             "type": "string"
@@ -7742,7 +7746,7 @@
             ]
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "realm_id": {
             "type": "string"
@@ -9247,7 +9251,7 @@
             ]
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "realm_id": {
             "type": "string"
@@ -9283,7 +9287,7 @@
             ]
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "realm_id": {
             "type": "string"
@@ -17956,7 +17960,7 @@
                 "type": "string"
               },
               "provider": {
-                "type": "string"
+                "$ref": "#/components/schemas/WireOAuthProvider"
               },
               "realm_id": {
                 "type": "string"
@@ -18004,7 +18008,7 @@
             "type": "integer"
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "user_code": {
             "type": "string"
@@ -19185,7 +19189,7 @@
             "type": "string"
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "realm_id": {
             "type": "string"
@@ -19222,7 +19226,7 @@
             "type": "string"
           },
           "provider": {
-            "type": "string"
+            "$ref": "#/components/schemas/WireOAuthProvider"
           },
           "redirect_uri": {
             "type": "string"
@@ -19829,6 +19833,16 @@
         ],
         "type": "string"
       },
+      "WireOAuthProvider": {
+        "description": "Canonical OAuth issuer identity carried by login request/response contracts.\n\nDeserialization accepts the CLI-compatible aliases owned by\n[`meerkat_core::OAuthProviderIdentity`], while serialization always emits\none canonical wire value.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "google",
+          "copilot"
+        ],
+        "type": "string"
+      },
       "WireOpaqueJson": {
         "description": "Opaque JSON carried as its serialized string form (the\n`OpaqueProviderBody` precedent, transparent flavor).\n\nUsed where the wire must ferry surface JSON through the bridge `Eq`\nchain: `serde_json::Value` is not `Eq`, and `RawValue` cannot decode\nthrough `serde_json::from_value` (which [`decode_bridge_command`] and\nevery Value-based consumer rely on). Equality is byte equality of the\nstored string — producers serialize exactly once via\n[`WireOpaqueJson::from_value`].",
         "type": "string"
@@ -19922,6 +19936,16 @@
           },
           "backend_profile": {
             "type": "string"
+          },
+          "credential_account": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CredentialAccountId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "default_model": {
             "type": [

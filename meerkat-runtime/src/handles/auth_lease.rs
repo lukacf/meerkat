@@ -1,6 +1,6 @@
 //! Runtime impl of [`meerkat_core::handles::AuthLeaseHandle`].
 //!
-//! Per-binding [`AuthMachine`](crate::auth_machine) instances, keyed by
+//! Per-credential [`AuthMachine`](crate::auth_machine) instances, keyed by
 //! typed [`LeaseKey`](meerkat_core::handles::LeaseKey). Each trait
 //! method looks up or creates the corresponding machine, then fires
 //! the matching DSL input. `snapshot` projects the machine's phase
@@ -10,8 +10,8 @@
 //! MeerkatMachine as Sets+Maps keyed by binding. Post-review that was
 //! rejected: auth lifecycle is orthogonal to MeerkatMachine's
 //! lifecycle, and carrying it there grew the TLC state space without
-//! unifying any semantics (dogma §19). Splitting it out per-binding
-//! keeps each machine small, aligns the fact "this binding's lease
+//! unifying any semantics (dogma §19). Splitting it out per credential
+//! keeps each machine small, aligns the fact "this credential's lease
 //! state" with one canonical owner per dogma §1, and decouples auth
 //! evolution from core-runtime evolution.
 
@@ -21,8 +21,8 @@ use std::sync::Weak;
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::AuthBindingRef;
-use meerkat_core::auth::{RefreshFailureDisposition, RefreshFailureObservation, TokenKey};
+use meerkat_core::AuthCredentialIdentity;
+use meerkat_core::auth::{RefreshFailureDisposition, RefreshFailureObservation};
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
@@ -59,9 +59,10 @@ fn emit_audit(
     tracing::info!(
         target: "meerkat::auth::audit",
         lease_key = %lease_key,
-        realm = %lease_key.realm,
-        binding = %lease_key.binding,
-        profile = lease_key.profile.as_ref().map(meerkat_core::ProfileId::as_str),
+        realm = %lease_key.realm(),
+        binding = ?lease_key.binding().map(meerkat_core::BindingId::as_str),
+        account = ?lease_key.account().map(meerkat_core::CredentialAccountId::as_str),
+        profile = ?lease_key.profile().map(meerkat_core::ProfileId::as_str),
         action = %action,
         from_phase = ?from_phase,
         to_phase = ?to_phase,
@@ -71,7 +72,7 @@ fn emit_audit(
 
 /// Runtime-backed [`AuthLeaseHandle`] impl.
 ///
-/// Holds a mutex-guarded registry of per-binding [`auth_dsl::AuthMachineAuthority`]
+/// Holds a mutex-guarded registry of per-credential [`auth_dsl::AuthMachineAuthority`]
 /// instances. Lookup-or-insert happens on first `acquire_lease`; release is
 /// also allowed before acquire so token-clear surfaces remain idempotent after
 /// process restart.
@@ -738,12 +739,12 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_oauth_input(
         &self,
-        target: &AuthBindingRef,
+        target: &AuthCredentialIdentity,
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
     ) -> Result<(), DslTransitionError> {
-        let lease_key = LeaseKey::from_auth_binding(target);
+        let lease_key = LeaseKey::from_credential_identity(target);
         let mut guard = self
             .machines
             .lock()
@@ -797,12 +798,12 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn confirm_oauth_durable_admission(
         &self,
-        target: &AuthBindingRef,
+        target: &AuthCredentialIdentity,
         observed_global_outstanding_flows: u64,
         max_outstanding_flows: u64,
         context: &'static str,
     ) -> Result<(), DslTransitionError> {
-        let lease_key = LeaseKey::from_auth_binding(target);
+        let lease_key = LeaseKey::from_credential_identity(target);
         let input = auth_dsl::AuthMachineInput::ConfirmOAuthDurableAdmission {
             observed_global_outstanding_flows,
             max_outstanding_flows,
@@ -843,8 +844,12 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn has_oauth_browser_flow(&self, target: &AuthBindingRef, flow_id: &str) -> bool {
-        let lease_key = LeaseKey::from_auth_binding(target);
+    pub(crate) fn has_oauth_browser_flow(
+        &self,
+        target: &AuthCredentialIdentity,
+        flow_id: &str,
+    ) -> bool {
+        let lease_key = LeaseKey::from_credential_identity(target);
         self.machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -854,8 +859,12 @@ impl RuntimeAuthLeaseHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn has_oauth_device_flow(&self, target: &AuthBindingRef, flow_id: &str) -> bool {
-        let lease_key = LeaseKey::from_auth_binding(target);
+    pub(crate) fn has_oauth_device_flow(
+        &self,
+        target: &AuthCredentialIdentity,
+        flow_id: &str,
+    ) -> bool {
+        let lease_key = LeaseKey::from_credential_identity(target);
         self.machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -867,7 +876,7 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(test)]
     pub(crate) fn has_oauth_browser_flow_for_test(
         &self,
-        target: &AuthBindingRef,
+        target: &AuthCredentialIdentity,
         flow_id: &str,
     ) -> bool {
         self.has_oauth_browser_flow(target, flow_id)
@@ -876,7 +885,7 @@ impl RuntimeAuthLeaseHandle {
     #[cfg(test)]
     pub(crate) fn has_oauth_device_flow_for_test(
         &self,
-        target: &AuthBindingRef,
+        target: &AuthCredentialIdentity,
         flow_id: &str,
     ) -> bool {
         self.has_oauth_device_flow(target, flow_id)
@@ -1415,11 +1424,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         publication: &AuthLeaseDurableRestorePublication,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let context = "AuthLeaseHandle::restore_published_credential_lifecycle";
-        let lease_token_key = TokenKey::new_with_profile(
-            lease_key.realm.clone(),
-            lease_key.binding.clone(),
-            lease_key.profile.clone(),
-        );
+        let lease_token_key = lease_key.to_token_key();
         if publication.token_key() != &lease_token_key {
             return Err(DslTransitionError::no_matching(
                 context,
@@ -1660,7 +1665,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::connection::{BindingId, BindingOrigin, RealmId};
+    use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
 
     fn lease(realm: &str, binding: &str) -> LeaseKey {
         LeaseKey::new(
@@ -2184,8 +2189,8 @@ mod tests {
     #[test]
     fn oauth_global_capacity_rejection_comes_from_generated_authority() {
         let h = RuntimeAuthLeaseHandle::new();
-        let first = auth_binding("dev", "oauth_a");
-        let second = auth_binding("dev", "oauth_b");
+        let first = AuthCredentialIdentity::from_auth_binding(&auth_binding("dev", "oauth_a"));
+        let second = AuthCredentialIdentity::from_auth_binding(&auth_binding("dev", "oauth_b"));
 
         h.apply_oauth_input(
             &first,
@@ -2479,11 +2484,7 @@ mod tests {
         let published_at = transition
             .credential_published_at_millis()
             .expect("acquire transition carries publication time");
-        let key_for_tokens = meerkat_core::auth::TokenKey::new_with_profile(
-            key.realm.clone(),
-            key.binding.clone(),
-            key.profile.clone(),
-        );
+        let key_for_tokens = key.to_token_key();
         let tokens = meerkat_core::auth::PersistedTokens {
             auth_mode: meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
             primary_secret: Some("access-token".into()),
@@ -2505,11 +2506,9 @@ mod tests {
         )
         .expect("generated transition marks durable publication");
 
-        let auth_binding = AuthBindingRef {
-            realm: key.realm.clone(),
-            binding: key.binding.clone(),
-            profile: key.profile.clone(),
-            origin: BindingOrigin::Configured,
+        let auth_binding = match key.credential_identity() {
+            AuthCredentialIdentity::Binding(binding) => binding.clone(),
+            AuthCredentialIdentity::Account(_) => panic!("test fixture must be binding-backed"),
         };
         let store = SingleTokenStore {
             key: key_for_tokens,

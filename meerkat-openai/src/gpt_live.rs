@@ -1218,6 +1218,14 @@ mod tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &meerkat_core::AuthBindingRef {
+                    realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+                    binding: meerkat_core::BindingId::parse("openai").expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                },
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "credential-secret".to_string(),
                 AuthMetadata::default(),

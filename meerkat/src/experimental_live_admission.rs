@@ -1037,6 +1037,7 @@ mod tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(&binding()),
             auth_lease: Arc::new(StaticLease::empty_lease(AuthMetadata::default(), "test")),
         };
         (identity, profile, connection)
@@ -1282,6 +1283,7 @@ mod tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(&binding()),
             auth_lease: Arc::new(StaticLease::empty_lease(AuthMetadata::default(), "test")),
         };
         assert_eq!(

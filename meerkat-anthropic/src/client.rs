@@ -27,6 +27,34 @@ use std::time::Duration;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default request timeout
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn json_contains_type(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str) == Some(expected)
+                || object
+                    .values()
+                    .any(|value| json_contains_type(value, expected))
+        }
+
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_type(value, expected)),
+        _ => false,
+    }
+}
+
+fn authorizer_is_github_copilot(authorizer: &dyn meerkat_core::HttpAuthorizer) -> bool {
+    #[cfg(feature = "copilot")]
+    {
+        authorizer.label() == meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+    }
+    #[cfg(not(feature = "copilot"))]
+    {
+        let _ = authorizer;
+        false
+    }
+}
 /// Default pool idle timeout
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// SSE buffer capacity to reduce reallocations
@@ -1094,6 +1122,81 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
+    async fn send_messages_request(
+        &self,
+        url: &str,
+        body: &Value,
+        betas: &[String],
+    ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut request_betas = betas.to_vec();
+        #[cfg(target_arch = "wasm32")]
+        let request_betas = betas.to_vec();
+        let mut request = self
+            .http
+            .post(url)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json");
+        if self
+            .authorizer
+            .as_ref()
+            .is_some_and(|authorizer| authorizer_is_github_copilot(authorizer.as_ref()))
+            && json_contains_type(body, "image")
+        {
+            request = request.header("Copilot-Vision-Request", "true");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let receipt = if let Some(authorizer) = &self.authorizer {
+            let mut extra = Vec::new();
+            let receipt = authorizer
+                .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
+                    method: "POST",
+                    url,
+                    headers: &mut extra,
+                })
+                .await
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: format!("authorizer failed: {error}"),
+                })?;
+            for (name, value) in extra {
+                if name.eq_ignore_ascii_case("anthropic-beta") {
+                    for beta in value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|beta| !beta.is_empty())
+                    {
+                        if !request_betas.iter().any(|existing| existing == beta) {
+                            request_betas.push(beta.to_string());
+                        }
+                    }
+                } else {
+                    request = request.header(name, value);
+                }
+            }
+            receipt
+        } else {
+            request = request.header("x-api-key", &self.api_key);
+            meerkat_core::HttpAuthorizationReceipt::untracked()
+        };
+        #[cfg(target_arch = "wasm32")]
+        {
+            request = request
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-dangerous-direct-browser-access", "true");
+        }
+        #[cfg(target_arch = "wasm32")]
+        let receipt = meerkat_core::HttpAuthorizationReceipt::untracked();
+        if !request_betas.is_empty() {
+            request = request.header("anthropic-beta", request_betas.join(","));
+        }
+        let response = request
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })?;
+        Ok((response, receipt))
+    }
+
     /// Parse an SSE event from the response.
     ///
     /// Returns `Ok(None)` when the line is not a `data:` event, and
@@ -1410,66 +1513,52 @@ impl LlmClient for AnthropicClient {
             }
 
             let url = format!("{}/v1/messages", self.base_url);
-            let mut req = self.http
-                .post(&url)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json");
-
-            // Auth: dynamic authorizer takes precedence over x-api-key.
-            // Authorizer headers that match `anthropic-beta` are merged into
-            // the betas list so only a single `anthropic-beta` header is sent.
+            let response_with_receipt =
+                self.send_messages_request(&url, &body, &betas).await?;
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(authorizer) = &self.authorizer {
-                let mut extra: Vec<(String, String)> = Vec::new();
-                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-                    method: "POST",
-                    url: &url,
-                    headers: &mut extra,
-                };
-                authorizer.authorize(&mut auth_req).await.map_err(|e| {
-                    LlmError::AuthenticationFailed {
-                        message: format!("authorizer failed: {e}"),
-                    }
-                })?;
-                for (k, v) in extra {
-                    if k.eq_ignore_ascii_case("anthropic-beta") {
-                        for beta in v.split(',') {
-                            let beta = beta.trim();
-                            if !beta.is_empty() && !betas.iter().any(|b| b == beta) {
-                                betas.push(beta.to_string());
-                            }
-                        }
-                    } else {
-                        req = req.header(k, v);
-                    }
-                }
-            } else {
-                req = req.header("x-api-key", &self.api_key);
-            }
+            let (mut response, receipt) = response_with_receipt;
             #[cfg(target_arch = "wasm32")]
-            {
-                req = req.header("x-api-key", &self.api_key);
-            }
-
-            if !betas.is_empty() {
-                req = req.header("anthropic-beta", betas.join(","));
-            }
-
-            // On wasm32 (browser), Anthropic requires this header for CORS
+            let (response, _receipt) = response_with_receipt;
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut status_code = response.status().as_u16();
             #[cfg(target_arch = "wasm32")]
-            {
-                req = req.header("anthropic-dangerous-direct-browser-access", "true");
-            }
-
-            let response = req
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
-
             let status_code = response.status().as_u16();
+            #[cfg(not(target_arch = "wasm32"))]
+            if !(200..=299).contains(&status_code)
+                && let Some(authorizer) = &self.authorizer
+                && authorizer
+                    .observe_response_with_receipt(
+                        receipt,
+                        &meerkat_core::HttpAuthorizationResponse {
+                            method: "POST",
+                            url: &url,
+                            status: status_code,
+                        },
+                    )
+                    .await
+                    .map_err(|error| LlmError::AuthenticationFailed {
+                        message: error.to_string(),
+                    })?
+                    == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            {
+                let retried = self.send_messages_request(&url, &body, &betas).await?;
+                response = retried.0;
+                let retry_receipt = retried.1;
+                status_code = response.status().as_u16();
+                authorizer
+                    .observe_response_with_receipt(
+                        retry_receipt,
+                        &meerkat_core::HttpAuthorizationResponse {
+                            method: "POST",
+                            url: &url,
+                            status: status_code,
+                        },
+                    )
+                    .await
+                    .map_err(|error| LlmError::AuthenticationFailed {
+                        message: error.to_string(),
+                    })?;
+            }
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
             } else {
@@ -2129,6 +2218,7 @@ mod tests {
         ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
         SystemMessage, ToolResult, UserMessage,
     };
+    use std::sync::Arc;
 
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
@@ -3642,7 +3732,7 @@ mod tests {
     // SSE stream regression tests
     // =========================================================================
 
-    use axum::{Router, extract::State, response::IntoResponse, routing::post};
+    use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
     use tokio::net::TcpListener;
 
     async fn messages_sse(State(payload): State<String>) -> impl IntoResponse {
@@ -3661,6 +3751,115 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[derive(Clone)]
+    struct AnthropicAuthRetryState {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        payload: String,
+    }
+
+    async fn anthropic_auth_retry(
+        State(state): State<AnthropicAuthRetryState>,
+    ) -> impl IntoResponse {
+        if state
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        ([("content-type", "text/event-stream")], state.payload).into_response()
+    }
+
+    struct AnthropicRetryAuthorizer {
+        authorizations: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for AnthropicRetryAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            let generation = self
+                .authorizations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer token-{generation}"),
+            ));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "anthropic-retry-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_reauthorizes_before_reading_stream() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/messages", post(anthropic_auth_retry))
+            .with_state(AnthropicAuthRetryState {
+                calls: Arc::clone(&calls),
+                payload,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        let authorizer = Arc::new(AnthropicRetryAuthorizer {
+            authorizations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = AnthropicClient::builder(String::new())
+            .base_url(format!("http://{addr}"))
+            .authorizer(authorizer.clone())
+            .build()
+            .expect("client");
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            event.expect("reauthorized stream should succeed");
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            authorizer
+                .authorizations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        server.abort();
     }
 
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so

@@ -7046,6 +7046,11 @@ pub fn resolve_session_llm_identity_override(
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmRequestPolicy {
     pub model: String,
+    /// Credential authority selected for this resolved route. This is live
+    /// request policy, not model identity: several provider routes may share
+    /// one account-scoped credential lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_identity: Option<crate::AuthCredentialIdentity>,
     /// Typed explicit provider parameter overrides for the next LLM call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,

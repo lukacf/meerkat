@@ -7,18 +7,25 @@ pub enum GoogleBackendKind {
     GoogleGenAi,
     VertexAi,
     GoogleCodeAssist,
+    Copilot,
 }
 
 pub const GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 
 impl GoogleBackendKind {
-    pub const ALL: &'static [Self] = &[Self::GoogleGenAi, Self::VertexAi, Self::GoogleCodeAssist];
+    pub const ALL: &'static [Self] = &[
+        Self::GoogleGenAi,
+        Self::VertexAi,
+        Self::GoogleCodeAssist,
+        Self::Copilot,
+    ];
 
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "google_genai" => Some(Self::GoogleGenAi),
             "vertex_ai" => Some(Self::VertexAi),
             "google_code_assist" => Some(Self::GoogleCodeAssist),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -27,6 +34,7 @@ impl GoogleBackendKind {
             Self::GoogleGenAi => "google_genai",
             Self::VertexAi => "vertex_ai",
             Self::GoogleCodeAssist => "google_code_assist",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -50,6 +58,7 @@ impl GoogleBackendKind {
                 GoogleAuthMethod::ComputeAdc,
                 GoogleAuthMethod::ExternalAuthorizer,
             ],
+            Self::Copilot => &[GoogleAuthMethod::GitHubCopilotOauth],
         }
     }
     pub fn default_base_url(self) -> &'static str {
@@ -59,6 +68,7 @@ impl GoogleBackendKind {
             // Phase 3 populates per-region overlay.
             Self::VertexAi => "",
             Self::GoogleCodeAssist => GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL,
+            Self::Copilot => "",
         }
     }
 }

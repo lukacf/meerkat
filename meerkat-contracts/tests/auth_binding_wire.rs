@@ -58,6 +58,7 @@ fn sample_provider_binding() -> meerkat_core::ProviderBinding {
         id: "default".to_string(),
         backend_profile: "openai_api".to_string(),
         auth_profile: "prod_env_key".to_string(),
+        credential_account: None,
         default_model: Some("gpt-5.2".to_string()),
         policy: Default::default(),
         provider_default: false,

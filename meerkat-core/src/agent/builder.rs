@@ -104,6 +104,7 @@ pub struct AgentBuilder {
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
+    pub(super) auth_credential_identity: Option<crate::AuthCredentialIdentity>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
@@ -267,6 +268,7 @@ impl AgentBuilder {
             runtime_execution_kind: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
+            auth_credential_identity: None,
             mcp_server_lifecycle_handle: None,
         }
     }
@@ -731,6 +733,7 @@ impl AgentBuilder {
             active_model_profile,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
+            auth_credential_identity: self.auth_credential_identity,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
             cancel_after_boundary_tx,
             cancel_after_boundary_rx,
@@ -1084,6 +1087,15 @@ impl AgentBuilder {
         handle: crate::handles::GeneratedAuthLeaseHandle,
     ) -> Self {
         self.auth_lease_handle = Some(handle);
+        self
+    }
+
+    /// Set the credential authority paired with the initially resolved LLM route.
+    pub fn with_auth_credential_identity(
+        mut self,
+        identity: Option<crate::AuthCredentialIdentity>,
+    ) -> Self {
+        self.auth_credential_identity = identity;
         self
     }
 

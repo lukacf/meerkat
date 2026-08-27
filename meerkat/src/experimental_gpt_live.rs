@@ -5141,6 +5141,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "chatgpt".to_string(),
                 auth_profile: "chatgpt".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-live-1-codex".to_string()),
                 policy: Default::default(),
                 provider_default: true,
@@ -5268,6 +5269,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "chatgpt".to_string(),
                 auth_profile: "chatgpt".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-live-1-codex".to_string()),
                 policy: Default::default(),
                 provider_default: true,

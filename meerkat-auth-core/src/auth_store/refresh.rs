@@ -183,7 +183,7 @@ mod file_lock {
 
         fn lock_path_for(&self, key: &TokenKey) -> PathBuf {
             self.lock_dir
-                .join(format!("{}--{}.lock", key.realm, key.binding))
+                .join(format!("{}--{}.lock", key.realm(), key.storage_stem()))
         }
 
         fn with_locking_refresh(&self, key: &TokenKey, refresh_fn: RefreshFn) -> RefreshFn {

@@ -20,6 +20,7 @@ meerkat-models = { workspace = true }
 # provider runtime can resolve inline-secret bindings in the browser
 # (Cluster C in the smoke-fix track).
 meerkat-auth-core = { workspace = true }
+meerkat-copilot = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -47,9 +48,10 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 axum = { workspace = true }
 
 [features]
-default = ["oauth", "adc"]
+default = ["oauth", "adc", "copilot"]
 oauth = ["meerkat-auth-core/oauth"]
 adc = ["meerkat-auth-core/gcp-auth"]
+copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "base64", "indexmap", "tempfile"]

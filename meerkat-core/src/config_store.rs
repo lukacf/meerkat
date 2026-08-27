@@ -704,6 +704,7 @@ mod tests {
             crate::ProviderBindingConfig {
                 backend_profile: "openai_chatgpt".to_string(),
                 auth_profile: "openai_oauth".to_string(),
+                credential_account: None,
                 default_model: Some("test-openai-default".to_string()),
                 policy: Default::default(),
                 provider_default: false,

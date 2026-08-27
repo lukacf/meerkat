@@ -166,7 +166,8 @@ async fn resolve_command_credential_via_lease(
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()));
     };
 
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     let now = (env.now)();
     // Project the runner's cache age onto the lease as a synthetic expiry:
     // `last_run + refresh_interval`. Express it in epoch seconds relative to
@@ -579,7 +580,8 @@ pub fn resolve_oauth_login_credential_disposition(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     let facts = meerkat_core::handles::OAuthLoginCredentialFacts {
         credential_present,
         force_refresh: env.force_refresh,
@@ -632,10 +634,10 @@ async fn restore_marked_token_lifecycle_if_absent(
     {
         return Ok(());
     }
-    meerkat_core::rehydrate_marked_tokens_for_status(
+    meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
         store,
         auth_lease,
-        binding.auth_binding_ref(),
+        binding.credential_identity(),
         expected_mode,
         now,
     )
@@ -657,8 +659,9 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .provider_auth_persistence()
         .map(ProviderAuthPersistence::token_store)
         .ok_or_else(|| interactive_login_error(binding))?;
-    let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let key = TokenKey::from_credential_identity(binding.credential_identity());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     let lifecycle_guard = if binding
         .auth()
         .persisted_auth_mode()
@@ -828,7 +831,8 @@ fn begin_managed_store_oauth_refresh_lifecycle(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, (env.now)())?;
     let current_restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let current_snapshot = current_restore_snapshot.snapshot().clone();
@@ -909,7 +913,8 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
                 .into(),
         ));
     }
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     previous.lifecycle_guard =
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await);
 
@@ -1029,7 +1034,8 @@ pub fn mark_managed_store_oauth_refresh_failed(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     if auth_lease.snapshot(&lease_key).phase
         != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
     {
@@ -1215,7 +1221,8 @@ fn publish_managed_store_tokens_refresh_lifecycle(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, (env.now)())?;
     let snapshot = auth_lease.snapshot(&lease_key);
     let began_here = if snapshot.phase == Some(meerkat_core::handles::AuthLeasePhase::Refreshing) {
@@ -1255,7 +1262,8 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     let _guard = if previous.lifecycle_guard.is_none() {
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
     } else {
@@ -1378,7 +1386,8 @@ pub fn require_credential_lifecycle_authority(
         .auth_lease_handle
         .as_ref()
         .ok_or_else(lease_absent_error)?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    let lease_key =
+        meerkat_core::handles::LeaseKey::from_credential_identity(binding.credential_identity());
     // The post-publish lifecycle-authority disposition is owned by the
     // per-binding AuthMachine: we feed only the typed `HoldAuthority` intent and
     // mirror the verdict. Authorized -> authority held, RefreshRequired -> the
@@ -1935,8 +1944,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn default_test_token_key() -> TokenKey {
-        let lease_key = default_test_lease_key();
-        TokenKey::new_with_profile(lease_key.realm, lease_key.binding, lease_key.profile)
+        default_test_lease_key().to_token_key()
     }
 
     #[cfg(not(target_arch = "wasm32"))]

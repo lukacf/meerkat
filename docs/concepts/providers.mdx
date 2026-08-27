@@ -162,11 +162,18 @@ OpenAI has separate backend/auth pairs:
 | `openai_api` | `api_key`, `static_bearer`, or host authorizer | Public OpenAI API organization/project |
 | `chatgpt_backend` | `managed_chatgpt_oauth` or host-supplied ChatGPT tokens | ChatGPT/Codex subscription and workspace |
 | `azure_openai` | `azure_api_key` | Azure deployment |
+| `copilot` | `github_copilot_oauth` | GitHub Copilot account |
 
 These are not interchangeable credential paths. A model ID available to an API
 organization may be unavailable to a ChatGPT workspace, and vice versa.
 `rkat models` reports the Meerkat catalog, not account entitlement. Keep a
 binding's backend, auth method, and default model aligned.
+
+Copilot is also available beneath the Anthropic and Gemini provider families.
+Those routes share one account-scoped credential while preserving the model's
+provider identity and selecting the account-advertised wire dialect. Model
+entitlement is therefore an account observation, never a fixed property of the
+Meerkat model registry.
 
 See [Auth](/guides/auth) for the full backend/auth compatibility matrix.
 

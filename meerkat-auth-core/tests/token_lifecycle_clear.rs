@@ -21,9 +21,11 @@ use meerkat_auth_core::auth_store::{
 };
 use meerkat_core::handles::{AuthLeasePhase, GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{
-    AuthBindingRef, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
+    AuthBindingRef, AuthCredentialIdentity, CredentialAccountId, CredentialAccountRef,
+    TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
+    clear_tokens_and_publish_lifecycle_released_for_identity,
     mark_tokens_lifecycle_published_for_transition, publish_token_lifecycle_acquired,
-    rehydrate_marked_tokens_for_status,
+    publish_token_lifecycle_acquired_for_identity, rehydrate_marked_tokens_for_status,
 };
 
 fn test_auth_lease() -> GeneratedAuthLeaseHandle {
@@ -139,6 +141,32 @@ async fn clear_destroys_durable_record_and_releases_lease() {
         !credential_present || phase == Some(AuthLeasePhase::Released),
         "lease projection must not keep a live credential after clear, got {phase:?}"
     );
+}
+
+#[tokio::test]
+async fn account_clear_destroys_the_shared_credential_and_lease() {
+    let store = EphemeralTokenStore::new();
+    let handle = test_auth_lease();
+    let identity = AuthCredentialIdentity::Account(CredentialAccountRef {
+        realm: meerkat_core::RealmId::global(),
+        account: CredentialAccountId::parse("github_copilot").expect("valid account"),
+    });
+    let mut tokens = oauth_tokens();
+    tokens.auth_mode = PersistedAuthMode::GithubCopilotOauth;
+    let key = TokenKey::from_credential_identity(&identity);
+    let transition = publish_token_lifecycle_acquired_for_identity(&handle, &identity, &tokens)
+        .expect("acquire account lease");
+    let marked = mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
+        .expect("mark account token");
+    store.save(&key, &marked).await.expect("save account token");
+
+    clear_tokens_and_publish_lifecycle_released_for_identity(&store, &handle, &identity)
+        .await
+        .expect("clear account credential");
+
+    assert!(store.load(&key).await.unwrap().is_none());
+    let snapshot = handle.snapshot(&LeaseKey::from_credential_identity(&identity));
+    assert!(!snapshot.credential_present || snapshot.phase == Some(AuthLeasePhase::Released));
 }
 
 #[tokio::test]

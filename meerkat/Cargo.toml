@@ -25,6 +25,7 @@ meerkat-client = { workspace = true, default-features = false }
 meerkat-anthropic = { workspace = true, optional = true, default-features = false }
 meerkat-openai = { workspace = true, optional = true, default-features = false }
 meerkat-gemini = { workspace = true, optional = true, default-features = false }
+meerkat-copilot = { workspace = true, optional = true, default-features = false }
 meerkat-schedule = { workspace = true }
 meerkat-workgraph = { workspace = true }
 meerkat-store = { workspace = true }
@@ -126,7 +127,7 @@ meerkat = { path = ".", features = [
 nix = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini"]
+default = ["anthropic", "openai", "gemini", "copilot"]
 integration-real-tests = []
 
 # LLM providers
@@ -155,7 +156,17 @@ experimental-gpt-live-gate0-harness = [
     "meerkat-openai/experimental-gpt-live-gate0-harness",
 ]
 gemini = ["meerkat-client/gemini", "dep:meerkat-gemini", "meerkat-providers/gemini"]
-all-providers = ["anthropic", "openai", "gemini"]
+copilot = [
+    "anthropic",
+    "openai",
+    "gemini",
+    "dep:meerkat-copilot",
+    "meerkat-copilot/oauth",
+    "meerkat-anthropic/copilot",
+    "meerkat-openai/copilot",
+    "meerkat-gemini/copilot",
+]
+all-providers = ["anthropic", "openai", "gemini", "copilot"]
 native-keyring = ["meerkat-providers/native-keyring"]
 
 # Storage backends

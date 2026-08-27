@@ -116,6 +116,11 @@ workspace realms inherit. Interactive OpenAI login uses the ChatGPT OAuth
 backend; `openai_api` API keys and ChatGPT/Codex subscription credentials are
 separate account surfaces and can expose different model sets.
 
+`rkat auth login copilot` uses GitHub device authorization and creates
+OpenAI-, Anthropic-, and Gemini-family Copilot routes backed by one shared
+`github_copilot` credential account. Account model availability is discovered
+dynamically; the Meerkat catalog remains provider/model authority.
+
 See the [quickstart](https://docs.rkat.ai/quickstart), [auth
 guide](https://docs.rkat.ai/guides/auth), and [realm
 guide](https://docs.rkat.ai/guides/realms) for the full setup path.

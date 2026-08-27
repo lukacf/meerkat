@@ -21,7 +21,7 @@ pub use binding::{
     GPT_LIVE_CLIENT_CONTEXT_FACTORY_KIND, GPT_LIVE_CLIENT_CONTEXT_FACTORY_VERSION,
     GPT_LIVE_CLIENT_CONTEXT_GATE0_VERSION, GPT_LIVE_CLIENT_CONTEXT_PROTOCOL_DIGEST,
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedRealtimeTarget,
-    StaticLease,
+    ResolvedTextTarget, StaticLease,
 };
 pub use catalog::{ProviderRuntimeCatalog, ValidatedBinding};
 pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};

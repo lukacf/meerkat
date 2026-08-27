@@ -502,6 +502,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
         meerkat_core::ProviderBindingConfig {
             backend_profile: "local_backend".to_string(),
             auth_profile: "local_auth".to_string(),
+            credential_account: None,
             default_model: Some("gemma4:e2b".to_string()),
             policy: Default::default(),
             provider_default: false,

@@ -1,0 +1,44 @@
+[package]
+name = "meerkat-copilot"
+description = "Native GitHub Copilot authentication, token exchange, account model discovery, and shared backend runtime for Meerkat."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+meerkat-llm-core = { workspace = true }
+meerkat-auth-core = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }
+meerkat-runtime = { workspace = true, features = ["test-support"] }
+
+[features]
+default = ["oauth"]
+oauth = ["meerkat-auth-core/oauth"]
+
+[lints]
+workspace = true

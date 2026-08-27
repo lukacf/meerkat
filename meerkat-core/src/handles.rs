@@ -1822,9 +1822,7 @@ pub trait SessionAdmissionHandle: Send + Sync {
 /// Typed key for one auth lease machine.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeaseKey {
-    pub realm: crate::connection::RealmId,
-    pub binding: crate::connection::BindingId,
-    pub profile: Option<crate::connection::ProfileId>,
+    identity: crate::connection::AuthCredentialIdentity,
 }
 
 impl LeaseKey {
@@ -1834,27 +1832,69 @@ impl LeaseKey {
         profile: Option<crate::connection::ProfileId>,
     ) -> Self {
         Self {
-            realm,
-            binding,
-            profile,
+            identity: crate::connection::AuthCredentialIdentity::Binding(
+                crate::connection::AuthBindingRef {
+                    realm,
+                    binding,
+                    profile,
+                    origin: crate::connection::BindingOrigin::Configured,
+                },
+            ),
         }
+    }
+
+    pub fn from_credential_identity(identity: &crate::connection::AuthCredentialIdentity) -> Self {
+        Self {
+            identity: identity.normalized_for_credential_storage(),
+        }
+    }
+
+    pub fn credential_identity(&self) -> &crate::connection::AuthCredentialIdentity {
+        &self.identity
+    }
+
+    pub fn realm(&self) -> &crate::connection::RealmId {
+        self.identity.realm()
+    }
+
+    pub fn binding(&self) -> Option<&crate::connection::BindingId> {
+        self.identity.binding()
+    }
+
+    pub fn profile(&self) -> Option<&crate::connection::ProfileId> {
+        self.identity.profile()
+    }
+
+    pub fn account(&self) -> Option<&crate::connection::CredentialAccountId> {
+        self.identity.account()
+    }
+
+    pub fn to_token_key(&self) -> crate::auth::TokenKey {
+        crate::auth::TokenKey::from_credential_identity(&self.identity)
     }
 
     pub fn from_auth_binding(auth_binding: &crate::connection::AuthBindingRef) -> Self {
         Self {
-            realm: auth_binding.realm.clone(),
-            binding: auth_binding.binding.clone(),
-            profile: auth_binding.profile.clone(),
+            identity: crate::connection::AuthCredentialIdentity::from_auth_binding(auth_binding),
         }
+    }
+}
+
+impl From<&crate::connection::AuthCredentialIdentity> for LeaseKey {
+    fn from(identity: &crate::connection::AuthCredentialIdentity) -> Self {
+        Self::from_credential_identity(identity)
+    }
+}
+
+impl From<&crate::connection::AuthBindingRef> for LeaseKey {
+    fn from(auth_binding: &crate::connection::AuthBindingRef) -> Self {
+        Self::from_auth_binding(auth_binding)
     }
 }
 
 impl std::fmt::Display for LeaseKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.profile {
-            Some(profile) => write!(f, "{}:{}:{}", self.realm, self.binding, profile),
-            None => write!(f, "{}:{}", self.realm, self.binding),
-        }
+        self.identity.fmt(f)
     }
 }
 
@@ -2271,7 +2311,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
 
     /// Classify the credential-use disposition for a binding under `intent`.
     ///
-    /// Drives the per-binding AuthMachine's `ResolveCredentialUseAdmission`
+    /// Drives the per-credential AuthMachine's `ResolveCredentialUseAdmission`
     /// read-only classifier over the live machine and mirrors the emitted
     /// `CredentialUseAdmissionResolved` disposition. The AuthMachine owns the
     /// complete `(lifecycle_phase, credential_present, intent)` -> disposition
@@ -2295,7 +2335,7 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
 
     /// Classify the OAuth-login cached-vs-refresh disposition for a binding.
     ///
-    /// Drives the per-binding AuthMachine's
+    /// Drives the per-credential AuthMachine's
     /// `ResolveOAuthLoginCredentialDisposition` read-only classifier over the
     /// live machine and mirrors the emitted `CredentialUseAdmissionResolved`
     /// disposition. The AuthMachine owns the complete `(lifecycle_phase,

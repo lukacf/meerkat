@@ -365,6 +365,7 @@ mod tests {
         ModelFallbackCandidate {
             request_policy: SessionLlmRequestPolicy {
                 model: model.to_string(),
+                credential_identity: None,
                 provider_params: None,
                 provider_tool_defaults: None,
                 provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,

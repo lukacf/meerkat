@@ -582,7 +582,7 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
     expires_at: NotRequired[Optional[str]]
     has_refresh_token: Required[bool]
     profile_id: Required[str]
-    provider: Required[str]
+    provider: Required[Literal['anthropic', 'openai', 'google', 'copilot']]
     realm_id: Required[str]
     scopes: Required[list[str]]
     state: Required[Literal['ready']]
@@ -775,7 +775,7 @@ class DeviceCompleteParams:
     """Request payload for `auth/login/device_complete`."""
     binding_id: str
     device_code: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     realm_id: str
     profile_id: Optional[str] = None
 
@@ -784,7 +784,7 @@ class DeviceCompleteParams:
 class DeviceStartParams:
     """Request payload for `auth/login/device_start`."""
     binding_id: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     realm_id: str
     profile_id: Optional[str] = None
 
@@ -1012,7 +1012,7 @@ class LoginCompleteParams:
     """Request payload for `auth/login/complete`."""
     binding_id: str
     code: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     realm_id: str
     redirect_uri: str
     state: str
@@ -1023,7 +1023,7 @@ class LoginCompleteParams:
 class LoginStartParams:
     """Request payload for `auth/login/start`."""
     binding_id: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     realm_id: str
     redirect_uri: str
     profile_id: Optional[str] = None
@@ -5570,6 +5570,7 @@ class WireProviderBinding:
     backend_profile: str
     id: str
     allow_auth_override: Optional[bool] = None
+    credential_account: Optional[str] = None
     default_model: Optional[str] = None
     require_metadata_account: Optional[bool] = None
     require_metadata_workspace: Optional[bool] = None
@@ -5634,7 +5635,7 @@ class WireAuthProfileCleared:
 class WireLoginStart:
     """`POST /auth/login/start` success body."""
     authorize_url: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     redirect_uri: str
     state: str
 
@@ -5651,7 +5652,7 @@ access_denied/expired/ready tagged protocol."""
     binding_id: str
     has_refresh_token: bool
     profile_id: str
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     realm_id: str
     scopes: list[str]
     expires_at: Optional[str] = None
@@ -5664,7 +5665,7 @@ class WireDeviceStart:
     device_code: str
     expires_in: int
     interval: int
-    provider: str
+    provider: Literal['anthropic', 'openai', 'google', 'copilot']
     user_code: str
     verification_uri: str
     verification_uri_complete: Optional[str] = None

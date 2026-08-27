@@ -21,6 +21,7 @@ meerkat-llm-core = { workspace = true }
 # needs it on wasm32 so `populate_realm_from_api_keys` can resolve
 # `CredentialSourceSpec::InlineSecret` in the browser.
 meerkat-auth-core = { workspace = true }
+meerkat-copilot = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -46,8 +47,9 @@ meerkat-auth-core = { workspace = true, features = ["oauth"] }
 axum = { workspace = true }
 
 [features]
-default = ["oauth"]
+default = ["oauth", "copilot"]
 oauth = ["meerkat-auth-core/oauth"]
+copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 bedrock = ["meerkat-auth-core/aws-sigv4"]
 vertex = ["meerkat-auth-core/gcp-auth"]
 foundry = ["meerkat-auth-core/azure-ad"]

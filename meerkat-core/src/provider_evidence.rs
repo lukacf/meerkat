@@ -130,8 +130,16 @@ impl ProviderTokenAccounting {
     }
 
     pub fn openai_compatible(model: impl Into<String>, prompt_tokens: u64) -> Self {
+        Self::openai_compatible_for(Provider::SelfHosted, model, prompt_tokens)
+    }
+
+    pub fn openai_compatible_for(
+        provider: Provider,
+        model: impl Into<String>,
+        prompt_tokens: u64,
+    ) -> Self {
         Self {
-            provider: Provider::SelfHosted,
+            provider,
             model: model.into(),
             presented_tokens: prompt_tokens,
             convention: PresentedTokenConvention::OpenAiCompatiblePromptIncludesCacheDetails,

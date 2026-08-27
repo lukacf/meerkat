@@ -35,6 +35,34 @@ use crate::image_generation::{
     OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiImagesApiRequestShape,
     OpenAiResponsesImagePlan,
 };
+
+fn json_contains_type(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str) == Some(expected)
+                || object
+                    .values()
+                    .any(|value| json_contains_type(value, expected))
+        }
+
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_type(value, expected)),
+        _ => false,
+    }
+}
+
+fn authorizer_is_github_copilot(authorizer: &dyn meerkat_core::HttpAuthorizer) -> bool {
+    #[cfg(feature = "copilot")]
+    {
+        authorizer.label() == meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+    }
+    #[cfg(not(feature = "copilot"))]
+    {
+        let _ = authorizer;
+        false
+    }
+}
 use meerkat_core::image_generation::ImageGenerationProviderProfile;
 
 /// Extract the typed OpenAI provider tag from a request.
@@ -559,27 +587,35 @@ impl OpenAiClient {
         }
     }
 
-    async fn apply_request_headers(
+    async fn apply_request_headers_with_receipt(
         &self,
         mut request_builder: reqwest::RequestBuilder,
         endpoint: &str,
         request_extra_headers: &[(String, String)],
-    ) -> Result<reqwest::RequestBuilder, LlmError> {
-        if let Some(authorizer) = &self.authorizer {
+    ) -> Result<
+        (
+            reqwest::RequestBuilder,
+            meerkat_core::HttpAuthorizationReceipt,
+        ),
+        LlmError,
+    > {
+        let receipt = if let Some(authorizer) = &self.authorizer {
             let mut extra: Vec<(String, String)> = Vec::new();
             let mut auth_req = meerkat_core::HttpAuthorizationRequest {
                 method: "POST",
                 url: endpoint,
                 headers: &mut extra,
             };
-            authorizer.authorize(&mut auth_req).await.map_err(|e| {
-                LlmError::AuthenticationFailed {
+            let receipt = authorizer
+                .authorize_with_receipt(&mut auth_req)
+                .await
+                .map_err(|e| LlmError::AuthenticationFailed {
                     message: format!("openai authorizer failed: {e}"),
-                }
-            })?;
+                })?;
             for (name, value) in extra {
                 request_builder = request_builder.header(name, value);
             }
+            receipt
         } else if let Some(api_key) = &self.api_key {
             if self.azure_openai_wire_config().is_some() {
                 request_builder = request_builder.header("api-key", api_key);
@@ -587,14 +623,28 @@ impl OpenAiClient {
                 request_builder =
                     request_builder.header("Authorization", format!("Bearer {api_key}"));
             }
-        }
+            meerkat_core::HttpAuthorizationReceipt::untracked()
+        } else {
+            meerkat_core::HttpAuthorizationReceipt::untracked()
+        };
         for (name, value) in &self.extra_headers {
             request_builder = request_builder.header(name, value);
         }
         for (name, value) in request_extra_headers {
             request_builder = request_builder.header(name, value);
         }
-        Ok(request_builder)
+        Ok((request_builder, receipt))
+    }
+
+    async fn apply_request_headers(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        endpoint: &str,
+        request_extra_headers: &[(String, String)],
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        self.apply_request_headers_with_receipt(request_builder, endpoint, request_extra_headers)
+            .await
+            .map(|(request, _)| request)
     }
 
     fn responses_endpoint(&self) -> String {
@@ -984,15 +1034,23 @@ impl OpenAiClient {
         &self,
         endpoint: &str,
         body: &Value,
-    ) -> Result<reqwest::Response, LlmError> {
+    ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
         let mut request_builder = self
             .http
             .post(endpoint)
             .header("Content-Type", "application/json");
-        request_builder = self
-            .apply_request_headers(request_builder, endpoint, &[])
+        if self
+            .authorizer
+            .as_ref()
+            .is_some_and(|authorizer| authorizer_is_github_copilot(authorizer.as_ref()))
+            && json_contains_type(body, "input_image")
+        {
+            request_builder = request_builder.header("Copilot-Vision-Request", "true");
+        }
+        let (request_builder, receipt) = self
+            .apply_request_headers_with_receipt(request_builder, endpoint, &[])
             .await?;
-        request_builder.json(body).send().await.map_err(|e| {
+        let response = request_builder.json(body).send().await.map_err(|e| {
             if e.is_timeout() {
                 LlmError::NetworkTimeout { duration_ms: 30000 }
             } else {
@@ -1000,11 +1058,13 @@ impl OpenAiClient {
                 if e.is_connect() {
                     return LlmError::ConnectionReset;
                 }
+
                 LlmError::Unknown {
                     message: e.to_string(),
                 }
             }
-        })
+        })?;
+        Ok((response, receipt))
     }
 
     async fn responses_response_with_fallback(
@@ -1013,10 +1073,47 @@ impl OpenAiClient {
         body: &Value,
         fallback_body: Option<Value>,
     ) -> Result<reqwest::Response, LlmError> {
-        let response = self.send_responses_request(endpoint, body).await?;
-        let status_code = response.status().as_u16();
+        let (mut response, receipt) = self.send_responses_request(endpoint, body).await?;
+        let mut status_code = response.status().as_u16();
         if (200..=299).contains(&status_code) {
             return Ok(response);
+        }
+        if let Some(authorizer) = &self.authorizer
+            && authorizer
+                .observe_response_with_receipt(
+                    receipt,
+                    &meerkat_core::HttpAuthorizationResponse {
+                        method: "POST",
+                        url: endpoint,
+                        status: status_code,
+                    },
+                )
+                .await
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: error.to_string(),
+                })?
+                == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+        {
+            let retried = self.send_responses_request(endpoint, body).await?;
+            response = retried.0;
+            let retry_receipt = retried.1;
+            status_code = response.status().as_u16();
+            if (200..=299).contains(&status_code) {
+                return Ok(response);
+            }
+            authorizer
+                .observe_response_with_receipt(
+                    retry_receipt,
+                    &meerkat_core::HttpAuthorizationResponse {
+                        method: "POST",
+                        url: endpoint,
+                        status: status_code,
+                    },
+                )
+                .await
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: error.to_string(),
+                })?;
         }
 
         let headers = response.headers().clone();
@@ -1024,12 +1121,51 @@ impl OpenAiClient {
         if let Some(fallback_body) = fallback_body
             && Self::previous_response_id_retriable_error(status_code, &text)
         {
-            let retry = self
+            let (mut retry, fallback_receipt) = self
                 .send_responses_request(endpoint, &fallback_body)
                 .await?;
-            let retry_status = retry.status().as_u16();
+            let mut retry_status = retry.status().as_u16();
             if (200..=299).contains(&retry_status) {
                 return Ok(retry);
+            }
+            if let Some(authorizer) = &self.authorizer
+                && authorizer
+                    .observe_response_with_receipt(
+                        fallback_receipt,
+                        &meerkat_core::HttpAuthorizationResponse {
+                            method: "POST",
+                            url: endpoint,
+                            status: retry_status,
+                        },
+                    )
+                    .await
+                    .map_err(|error| LlmError::AuthenticationFailed {
+                        message: error.to_string(),
+                    })?
+                    == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            {
+                let retried = self
+                    .send_responses_request(endpoint, &fallback_body)
+                    .await?;
+                retry = retried.0;
+                let retry_receipt = retried.1;
+                retry_status = retry.status().as_u16();
+                if (200..=299).contains(&retry_status) {
+                    return Ok(retry);
+                }
+                authorizer
+                    .observe_response_with_receipt(
+                        retry_receipt,
+                        &meerkat_core::HttpAuthorizationResponse {
+                            method: "POST",
+                            url: endpoint,
+                            status: retry_status,
+                        },
+                    )
+                    .await
+                    .map_err(|error| LlmError::AuthenticationFailed {
+                        message: error.to_string(),
+                    })?;
             }
             let retry_headers = retry.headers().clone();
             let retry_text = retry.text().await.unwrap_or_default();
@@ -3421,6 +3557,7 @@ mod tests {
         payload: String,
         seen: Arc<Mutex<Vec<Value>>>,
         calls: Arc<Mutex<usize>>,
+        unauthorized_fallback_once: bool,
     }
 
     async fn responses_sse_with_previous_response_fallback(
@@ -3440,6 +3577,9 @@ mod tests {
                 })),
             )
                 .into_response();
+        }
+        if *calls == 2 && state.unauthorized_fallback_once {
+            return StatusCode::UNAUTHORIZED.into_response();
         }
         ([("content-type", "text/event-stream")], state.payload).into_response()
     }
@@ -3500,6 +3640,136 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    #[derive(Clone)]
+    struct AuthRetryStubState {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        always_unauthorized: bool,
+    }
+
+    async fn auth_retry_responses(State(state): State<AuthRetryStubState>) -> impl IntoResponse {
+        let call = state
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 || state.always_unauthorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        ([("content-type", "text/event-stream")], "data: [DONE]\n\n").into_response()
+    }
+
+    struct RetryAuthorizer {
+        authorizations: std::sync::atomic::AtomicUsize,
+        observations: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for RetryAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            let generation = self
+                .authorizations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer token-{generation}"),
+            ));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            self.observations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "retry-test"
+        }
+    }
+
+    async fn spawn_auth_retry_server(
+        always_unauthorized: bool,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/responses", post(auth_retry_responses))
+            .with_state(AuthRetryStubState {
+                calls: Arc::clone(&calls),
+                always_unauthorized,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), calls, handle)
+    }
+
+    #[tokio::test]
+    async fn responses_reauthorizes_once_before_streaming() {
+        let (base_url, calls, server) = spawn_auth_retry_server(false).await;
+        let authorizer = Arc::new(RetryAuthorizer {
+            authorizations: std::sync::atomic::AtomicUsize::new(0),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+            .with_authorizer(authorizer.clone());
+        let endpoint = client.responses_endpoint();
+        let response = client
+            .responses_response_with_fallback(&endpoint, &serde_json::json!({"stream": true}), None)
+            .await
+            .expect("second authorization succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            authorizer
+                .authorizations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_never_retries_unauthorized_more_than_once() {
+        let (base_url, calls, server) = spawn_auth_retry_server(true).await;
+        let authorizer = Arc::new(RetryAuthorizer {
+            authorizations: std::sync::atomic::AtomicUsize::new(0),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+            .with_authorizer(authorizer.clone());
+        let endpoint = client.responses_endpoint();
+        client
+            .responses_response_with_fallback(&endpoint, &serde_json::json!({"stream": true}), None)
+            .await
+            .expect_err("second unauthorized response propagates");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            authorizer
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        server.abort();
+    }
+
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (lifecycle-only chunks etc.).
     async fn paced_responses_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {
@@ -3551,6 +3821,7 @@ mod tests {
     async fn spawn_openai_fallback_stub_server(
         payload: String,
         seen: Arc<Mutex<Vec<Value>>>,
+        unauthorized_fallback_once: bool,
     ) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new()
             .route(
@@ -3561,6 +3832,7 @@ mod tests {
                 payload,
                 seen,
                 calls: Arc::new(Mutex::new(0)),
+                unauthorized_fallback_once,
             });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -4847,7 +5119,8 @@ mod tests {
         ]
         .join("\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (base_url, server) = spawn_openai_fallback_stub_server(payload, seen.clone()).await;
+        let (base_url, server) =
+            spawn_openai_fallback_stub_server(payload, seen.clone(), false).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
             "gpt-5.4",
@@ -4892,6 +5165,61 @@ mod tests {
         assert_eq!(bodies[0]["input"].as_array().expect("input array").len(), 1);
         assert!(bodies[1].get("previous_response_id").is_none());
         assert_eq!(bodies[1]["input"].as_array().expect("input array").len(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn semantic_fallback_reauthorizes_once_before_streaming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = [
+            r#"data: {"type":"response.output_text.delta","delta":"Recovered"}"#,
+            r#"data: {"type":"response.done","response":{"id":"resp_retry","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_openai_fallback_stub_server(payload, seen, true).await;
+        let authorizer = Arc::new(RetryAuthorizer {
+            authorizations: std::sync::atomic::AtomicUsize::new(0),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+            .with_authorizer(authorizer.clone());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::User(UserMessage::text("old question".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "old answer".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                            response_id: "resp_missing".to_string(),
+                        })),
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        )
+        .with_openai_tag_merge(|tag| tag.store = Some(true));
+
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(
+            authorizer
+                .authorizations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+        assert_eq!(
+            authorizer
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
         Ok(())
     }
 

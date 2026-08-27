@@ -565,6 +565,7 @@ rust_test(
         "//meerkat-client:package_runfiles",
         "//meerkat-comms:package_runfiles",
         "//meerkat-contracts:package_runfiles",
+        "//meerkat-copilot:package_runfiles",
         "//meerkat-core:cargo_manifest",
         "//meerkat-core:package_runfiles",
         "//meerkat-gemini:package_runfiles",

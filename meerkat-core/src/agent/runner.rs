@@ -784,6 +784,7 @@ where
 
     /// Apply the live LLM request policy paired with an identity hot-swap.
     pub fn apply_llm_request_policy(&mut self, policy: crate::SessionLlmRequestPolicy) {
+        self.auth_credential_identity = policy.credential_identity;
         self.config.model = policy.model;
         self.config.provider_native_tools = self
             .config
@@ -863,8 +864,6 @@ where
                     "live LLM hot-swap requires durable session metadata".to_string(),
                 )
             })?;
-        let previous_identity = current_metadata.llm_identity();
-
         let mut next_metadata = current_metadata;
         next_metadata.apply_llm_identity(&identity);
         let mut next_session = self.session.clone();
@@ -885,10 +884,11 @@ where
             .config
             .provider_native_tools
             .narrow(request_policy.provider_native_tools);
+        let next_auth_credential_identity = request_policy.credential_identity;
 
-        let _auth_rotation = self.stage_auth_lease_auth_binding(
-            previous_identity.auth_binding.as_ref(),
-            identity.auth_binding.as_ref(),
+        let _auth_rotation = self.stage_auth_lease_credential_identity(
+            self.auth_credential_identity.as_ref(),
+            next_auth_credential_identity.as_ref(),
         )?;
 
         // Infallible publication boundary: no validation, serialization, auth
@@ -898,6 +898,7 @@ where
         self.config.model = next_model;
         self.config.provider_params = next_provider_params;
         self.config.provider_native_tools = next_provider_native_tools;
+        self.auth_credential_identity = next_auth_credential_identity;
         self.session = next_session;
         self.active_model_profile = Some(target_profile);
         Ok(())
@@ -909,16 +910,19 @@ where
         previous: Option<&crate::AuthBindingRef>,
         target: Option<&crate::AuthBindingRef>,
     ) -> Result<(), AgentError> {
-        self.stage_auth_lease_auth_binding(previous, target)
+        let previous = previous.map(crate::AuthCredentialIdentity::from_auth_binding);
+        let target = target.map(crate::AuthCredentialIdentity::from_auth_binding);
+        self.stage_auth_lease_credential_identity(previous.as_ref(), target.as_ref())
             .map(|_| ())
     }
 
-    /// Stage an auth-binding rotation and retain exact generated lifecycle
-    /// snapshots so a later model-routing rejection can restore both bindings.
-    pub(crate) fn stage_auth_lease_auth_binding(
+    /// Stage a credential-authority rotation and retain exact generated
+    /// lifecycle snapshots so a later model-routing rejection can restore both
+    /// credentials.
+    pub(crate) fn stage_auth_lease_credential_identity(
         &self,
-        previous: Option<&crate::AuthBindingRef>,
-        target: Option<&crate::AuthBindingRef>,
+        previous: Option<&crate::AuthCredentialIdentity>,
+        target: Option<&crate::AuthCredentialIdentity>,
     ) -> Result<StagedAuthLeaseRotation, AgentError> {
         let Some(generated_handle) = self.auth_lease_handle.as_ref() else {
             return Ok(StagedAuthLeaseRotation {
@@ -933,8 +937,8 @@ where
                 snapshots: Vec::new(),
             });
         }
-        let previous_key = previous.map(crate::handles::LeaseKey::from_auth_binding);
-        let target_key = target.map(crate::handles::LeaseKey::from_auth_binding);
+        let previous_key = previous.map(crate::handles::LeaseKey::from_credential_identity);
+        let target_key = target.map(crate::handles::LeaseKey::from_credential_identity);
         let mut snapshots = Vec::new();
         if let Some(target_key) = target_key.as_ref() {
             snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(target_key));
@@ -949,8 +953,8 @@ where
             snapshots,
         };
 
-        if let Some(target_binding) = target {
-            let target_key = crate::handles::LeaseKey::from_auth_binding(target_binding);
+        if let Some(target_identity) = target {
+            let target_key = crate::handles::LeaseKey::from_credential_identity(target_identity);
             let target_snapshot = handle.snapshot(&target_key);
             if !(target_snapshot.credential_present && target_snapshot.phase.is_some())
                 && let Err(error) = handle.acquire_lease(&target_key, u64::MAX)
@@ -958,17 +962,18 @@ where
                 let rollback = staged.rollback();
                 return Err(match rollback {
                     Ok(()) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to auth_binding {target_key}: {error}"
+                        "failed to rotate auth lease to credential {target_key}: {error}"
                     )),
                     Err(rollback_error) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to auth_binding {target_key}: {error}; \
+                        "failed to rotate auth lease to credential {target_key}: {error}; \
                          additionally failed to restore staged auth state: {rollback_error}"
                     )),
                 });
             }
         }
-        if let Some(previous_binding) = previous {
-            let previous_key = crate::handles::LeaseKey::from_auth_binding(previous_binding);
+        if let Some(previous_identity) = previous {
+            let previous_key =
+                crate::handles::LeaseKey::from_credential_identity(previous_identity);
             if let Err(error) = handle.release_lease(&previous_key) {
                 let rollback = staged.rollback();
                 return Err(AgentError::ConfigError(match rollback {
@@ -2649,6 +2654,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             active_turn_request_contexts: Vec::new(),
             external_tool_surface_handle: None,
             auth_lease_handle: None,
+            auth_credential_identity: self.auth_credential_identity.clone(),
             mcp_server_lifecycle_handle: None,
             cancel_after_boundary_tx,
             cancel_after_boundary_rx,

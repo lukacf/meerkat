@@ -25,8 +25,14 @@ use meerkat_auth_core::resolver::{
 use meerkat_auth_core::{
     auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "oauth", feature = "copilot")
+))]
+use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
-    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
+    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
+    StaticLease, ValidatedBinding,
 };
 use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
@@ -165,6 +171,11 @@ fn gate_realtime_connection(
                 "openai-realtime-azure-openai",
             ));
         }
+        OpenAiBackendKind::Copilot => {
+            return Err(ProviderClientError::MissingFeature(
+                "openai-realtime-copilot",
+            ));
+        }
     }
     if connection.resolved_authorizer().is_some() {
         return Err(ProviderClientError::MissingFeature(
@@ -208,7 +219,67 @@ fn chatgpt_backend_extra_headers(connection: &ResolvedConnection) -> Vec<(String
     headers
 }
 
-pub struct OpenAiProviderRuntime;
+#[derive(Default)]
+pub struct OpenAiProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: Option<Arc<meerkat_copilot::CopilotRuntime>>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const OpenAiProviderRuntime: OpenAiProviderRuntime = OpenAiProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: None,
+};
+
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+#[derive(Default)]
+pub struct OpenAiCopilotChatCompletionsClientFactory;
+
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+impl meerkat_copilot::CopilotChatCompletionsClientFactory
+    for OpenAiCopilotChatCompletionsClientFactory
+{
+    fn build(
+        &self,
+        spec: meerkat_copilot::CopilotChatCompletionsClientSpec,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let (
+            provider,
+            model,
+            api_base,
+            authorizer,
+            supports_temperature,
+            supports_thinking,
+            supports_reasoning,
+            supports_image_tool_results,
+        ) = spec.into_parts();
+        Ok(Arc::new(
+            crate::OpenAiCompatibleClient::new_with_options(
+                crate::client_compatible::OpenAiCompatibleMode::ChatCompletions,
+                model,
+                api_base,
+                None,
+                crate::OpenAiCompatibleClientOptions {
+                    supports_temperature,
+                    supports_thinking,
+                    supports_reasoning,
+                    supports_image_tool_results,
+                },
+            )
+            .with_authorizer(authorizer)
+            .with_provider(provider),
+        ))
+    }
+}
+
+impl OpenAiProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    pub fn with_copilot(copilot: Arc<meerkat_copilot::CopilotRuntime>) -> Self {
+        Self {
+            copilot: Some(copilot),
+        }
+    }
+}
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -261,6 +332,29 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             }
             OpenAiAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
+            }
+            OpenAiAuthMethod::GitHubCopilotOauth => {
+                #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+                {
+                    let runtime = self.copilot.as_ref().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "OpenAI Copilot backend is not composed with CopilotRuntime"
+                                .to_string(),
+                        )
+                    })?;
+                    let resolved = runtime.resolve(binding, env).await?;
+                    Arc::new(DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ))
+                }
+                #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "OpenAI Copilot backend is not compiled".to_string(),
+                    ));
+                }
             }
             OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -415,6 +509,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(backend_kind),
             backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
             auth_lease: lease,
         })
     }
@@ -452,6 +547,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .base_url
                     .clone()
                     .unwrap_or_else(|| backend_kind.default_base_url().into()),
+                OpenAiBackendKind::Copilot => {
+                    return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+                }
             };
             let mut client =
                 crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
@@ -503,6 +601,109 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .with_azure_openai_wire(azure_openai_wire_config(&connection));
                 Ok(Arc::new(client))
             }
+            OpenAiBackendKind::Copilot => {
+                Err(ProviderClientError::MissingFeature("copilot-text-target"))
+            }
+        }
+    }
+
+    fn build_text_client(
+        &self,
+        target: ResolvedTextTarget,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        if !matches!(
+            target.connection().backend,
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::Copilot)
+        ) {
+            let (_, _, connection) = target.into_parts();
+            return self.build_client(connection);
+        }
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        {
+            let runtime = self.copilot.as_ref().ok_or_else(|| {
+                ProviderClientError::ClientInit(
+                    "OpenAI Copilot backend is not composed with CopilotRuntime".to_string(),
+                )
+            })?;
+            let (identity, profile, connection) = target.into_parts();
+            let model = identity.model.clone();
+            let supports_temperature = profile.profile().supports_temperature;
+            let supports_image_tool_results = profile.profile().image_tool_results;
+            let factory: meerkat_copilot::CopilotRouteClientFactory =
+                Arc::new(move |route, connection| {
+                    let endpoint = match route.access {
+                        meerkat_copilot::CopilotModelAccess::Available { endpoint } => endpoint,
+                        meerkat_copilot::CopilotModelAccess::Unavailable => {
+                            return Err(ProviderClientError::ClientInit(
+                                route.unavailable_message(
+                                    Provider::OpenAI,
+                                    &model,
+                                    meerkat_copilot::CopilotEndpoint::Responses,
+                                ),
+                            ));
+                        }
+                        meerkat_copilot::CopilotModelAccess::Unknown => {
+                            meerkat_copilot::CopilotEndpoint::optimistic_for_provider(
+                                Provider::OpenAI,
+                            )
+                            .ok_or_else(|| {
+                                ProviderClientError::ClientInit(
+                                    "Copilot has no optimistic OpenAI route".to_string(),
+                                )
+                            })?
+                        }
+                    };
+                    let authorizer = connection
+                        .resolved_authorizer()
+                        .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    match endpoint {
+                        meerkat_copilot::CopilotEndpoint::Responses => Ok(Arc::new(
+                            crate::OpenAiClient::new_with_optional_api_key_and_base_url(
+                                None,
+                                route.api_base.clone(),
+                            )
+                            .with_authorizer(authorizer)
+                            .with_responses_path("responses"),
+                        )
+                            as Arc<dyn LlmClient>),
+                        meerkat_copilot::CopilotEndpoint::ChatCompletions => Ok(Arc::new(
+                            crate::OpenAiCompatibleClient::new_with_options(
+                                crate::client_compatible::OpenAiCompatibleMode::ChatCompletions,
+                                model.clone(),
+                                route.api_base.clone(),
+                                None,
+                                crate::OpenAiCompatibleClientOptions {
+                                    supports_temperature,
+                                    supports_thinking: true,
+                                    supports_reasoning: true,
+                                    supports_image_tool_results,
+                                },
+                            )
+                            .with_authorizer(authorizer)
+                            .with_provider(Provider::OpenAI),
+                        )
+                            as Arc<dyn LlmClient>),
+                        meerkat_copilot::CopilotEndpoint::Messages
+                        | meerkat_copilot::CopilotEndpoint::Unknown => {
+                            Err(ProviderClientError::ClientInit(
+                                "Copilot advertised an incompatible endpoint for an OpenAI model"
+                                    .to_string(),
+                            ))
+                        }
+                    }
+                });
+            meerkat_copilot::routed_client(
+                Arc::clone(runtime),
+                connection,
+                Provider::OpenAI,
+                identity.model,
+                factory,
+            )
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        {
+            let _ = target;
+            Err(ProviderClientError::MissingFeature("copilot"))
         }
     }
 
@@ -574,6 +775,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         {
             return Ok(None);
         }
+        if matches!(backend_kind, OpenAiBackendKind::Copilot) {
+            return Ok(None);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url = match backend_kind {
@@ -588,6 +792,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .base_url
                     .clone()
                     .unwrap_or_else(|| backend_kind.default_base_url().into()),
+                OpenAiBackendKind::Copilot => return Ok(None),
             };
             let mut client =
                 crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
@@ -627,6 +832,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 crate::OpenAiClient::new_with_base_url(secret, base_url)
                     .with_azure_openai_wire(azure_openai_wire_config(&connection))
             }
+            OpenAiBackendKind::Copilot => return Ok(None),
         };
         Ok(Some(Arc::new(client)))
     }
@@ -762,6 +968,9 @@ mod tests {
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
             backend_profile: Arc::new(backend("openai_api")),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &auth_binding(),
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "sk-test".into(),
                 AuthMetadata::default(),
@@ -815,6 +1024,9 @@ mod tests {
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
             backend_profile: Arc::new(backend),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &auth_binding(),
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "oauth-access-token".into(),
                 metadata,
@@ -832,6 +1044,9 @@ mod tests {
             provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
             backend_profile: Arc::new(backend),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &auth_binding(),
+            ),
             auth_lease: Arc::new(StaticLease::inline_secret(
                 "azure-api-key".into(),
                 AuthMetadata::default(),

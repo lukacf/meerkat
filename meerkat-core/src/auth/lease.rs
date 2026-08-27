@@ -114,13 +114,79 @@ pub struct HttpAuthorizationRequest<'a> {
     pub headers: &'a mut Vec<(String, String)>,
 }
 
+pub struct HttpAuthorizationResponse<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub status: u16,
+}
+
+/// Opaque correlation receipt for one concrete authorization attempt.
+///
+/// Provider clients return this receipt to the same authorizer when observing
+/// the HTTP response. Dynamic authorizers can then invalidate only credential
+/// material that actually signed the failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpAuthorizationReceipt(Option<u64>);
+
+impl HttpAuthorizationReceipt {
+    pub const fn untracked() -> Self {
+        Self(None)
+    }
+
+    pub const fn tracked(generation: u64) -> Self {
+        Self(Some(generation))
+    }
+
+    pub const fn generation(self) -> Option<u64> {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpAuthorizationResponseAction {
+    Propagate,
+    RetryWithFreshAuthorization,
+}
+
 /// Dynamic authorizer trait. Used when auth artifacts need to be computed
 /// per request (ADC, refreshed OAuth bearer, etc.).
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait HttpAuthorizer: Send + Sync {
+    /// Refresh any derived credential/routing metadata required before a
+    /// provider selects its concrete request endpoint.
+    async fn prepare_request(&self) -> Result<(), AuthError> {
+        Ok(())
+    }
+
     async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError>;
+    async fn authorize_with_receipt(
+        &self,
+        req: &mut HttpAuthorizationRequest<'_>,
+    ) -> Result<HttpAuthorizationReceipt, AuthError> {
+        self.authorize(req).await?;
+        Ok(HttpAuthorizationReceipt::untracked())
+    }
+    async fn observe_response(
+        &self,
+        _response: &HttpAuthorizationResponse<'_>,
+    ) -> Result<HttpAuthorizationResponseAction, AuthError> {
+        Ok(HttpAuthorizationResponseAction::Propagate)
+    }
+    async fn observe_response_with_receipt(
+        &self,
+        _receipt: HttpAuthorizationReceipt,
+        response: &HttpAuthorizationResponse<'_>,
+    ) -> Result<HttpAuthorizationResponseAction, AuthError> {
+        self.observe_response(response).await
+    }
     fn label(&self) -> &str;
+
+    /// Process-local persistence authority that scopes any derived credential
+    /// cache owned by this authorizer.
+    fn persistence_authority_id(&self) -> Option<super::ProviderAuthPersistenceId> {
+        None
+    }
 
     /// Non-secret freshness projection for authorizers that cache expiring
     /// token material internally. Implementations that never observe an

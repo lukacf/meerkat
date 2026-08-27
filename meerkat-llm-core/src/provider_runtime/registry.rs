@@ -209,9 +209,14 @@ impl ProviderRuntimeRegistry {
                 auth_binding.realm, realm.realm_id
             )));
         }
-        let validated =
-            ProviderRuntimeCatalog::validate_binding(auth_binding, backend, auth, &binding.policy)
-                .map_err(ProviderAuthError::Binding)?;
+        let validated = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+            auth_binding,
+            binding.credential_identity(auth_binding),
+            backend,
+            auth,
+            &binding.policy,
+        )
+        .map_err(ProviderAuthError::Binding)?;
         let runtime = self
             .runtimes
             .get(&validated.provider())
@@ -232,6 +237,16 @@ impl ProviderRuntimeRegistry {
                     "runtime-not-registered",
                 ))?;
         runtime.build_client(connection)
+    }
+
+    pub fn build_text_client(
+        &self,
+        target: crate::provider_runtime::binding::ResolvedTextTarget,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let runtime = self.runtimes.get(&target.identity().provider).ok_or(
+            ProviderClientError::MissingFeature("runtime-not-registered"),
+        )?;
+        runtime.build_text_client(target)
     }
 
     /// Build a realtime-capable text client through the owning provider
@@ -379,6 +394,7 @@ mod tests {
                 id: "default".into(),
                 backend_profile: "backend".into(),
                 auth_profile: "auth".into(),
+                credential_account: None,
                 default_model: None,
                 policy: BindingPolicy::default(),
                 provider_default: false,

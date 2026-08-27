@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, SystemNoticeBlock,
-    SystemNoticeMessage, Usage,
+    AssistantBlock, ContentBlock, HttpAuthorizationRequest, HttpAuthorizer, ImageData, Message,
+    OutputSchema, Provider, StopReason, SystemNoticeBlock, SystemNoticeMessage, Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -20,6 +20,7 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages_for_capabilities};
@@ -64,6 +65,34 @@ use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages_f
 /// Per-client override: [`OpenAiCompatibleClient::with_post_finish_trailer_window`].
 pub const DEFAULT_POST_FINISH_TRAILER_WINDOW: Duration = Duration::from_secs(30);
 
+fn json_contains_type(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str) == Some(expected)
+                || object
+                    .values()
+                    .any(|value| json_contains_type(value, expected))
+        }
+
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_type(value, expected)),
+        _ => false,
+    }
+}
+
+fn authorizer_is_github_copilot(authorizer: &dyn HttpAuthorizer) -> bool {
+    #[cfg(feature = "copilot")]
+    {
+        authorizer.label() == meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+    }
+    #[cfg(not(feature = "copilot"))]
+    {
+        let _ = authorizer;
+        false
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiCompatibleMode {
     Responses,
@@ -83,6 +112,8 @@ pub struct OpenAiCompatibleClient {
     mode: OpenAiCompatibleMode,
     remote_model: String,
     bearer_token: Option<String>,
+    authorizer: Option<Arc<dyn HttpAuthorizer>>,
+    provider: Provider,
     base_url: String,
     http: reqwest::Client,
     responses_delegate: Option<crate::OpenAiClient>,
@@ -136,6 +167,8 @@ impl OpenAiCompatibleClient {
             mode,
             remote_model,
             bearer_token,
+            authorizer: None,
+            provider: Provider::SelfHosted,
             base_url,
             http,
             responses_delegate,
@@ -145,6 +178,20 @@ impl OpenAiCompatibleClient {
             supports_image_tool_results: options.supports_image_tool_results,
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
         }
+    }
+
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn HttpAuthorizer>) -> Self {
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.with_authorizer(authorizer.clone()));
+        self.authorizer = Some(authorizer);
+        self
+    }
+
+    pub fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// Override how long the chat-completions stream is read after a finish
@@ -529,6 +576,54 @@ impl OpenAiCompatibleClient {
         }
     }
 
+    async fn apply_dynamic_auth_with_receipt(
+        &self,
+        request: reqwest::RequestBuilder,
+        method: &'static str,
+        url: &str,
+        content_type: &'static str,
+    ) -> Result<
+        (
+            reqwest::RequestBuilder,
+            meerkat_core::HttpAuthorizationReceipt,
+        ),
+        LlmError,
+    > {
+        let mut request = self.apply_auth(request, content_type);
+        let receipt = if let Some(authorizer) = &self.authorizer {
+            let mut headers = Vec::new();
+            let receipt = authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method,
+                    url,
+                    headers: &mut headers,
+                })
+                .await
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: error.to_string(),
+                })?;
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            receipt
+        } else {
+            meerkat_core::HttpAuthorizationReceipt::untracked()
+        };
+        Ok((request, receipt))
+    }
+
+    async fn apply_dynamic_auth(
+        &self,
+        request: reqwest::RequestBuilder,
+        method: &'static str,
+        url: &str,
+        content_type: &'static str,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        self.apply_dynamic_auth_with_receipt(request, method, url, content_type)
+            .await
+            .map(|(request, _)| request)
+    }
+
     fn parse_chat_completions_line(line: &str) -> Result<ChatCompletionsLine, LlmError> {
         if let Some(data) = line
             .strip_prefix("data: ")
@@ -618,11 +713,9 @@ impl LlmClient for OpenAiCompatibleClient {
                 let Some(mut pressure) = delegate.request_pressure(&translated)? else {
                     return Ok(None);
                 };
-                pressure.max_bytes = meerkat_models::approximate_request_byte_cap(
-                    meerkat_core::Provider::SelfHosted,
-                );
+                pressure.max_bytes = meerkat_models::approximate_request_byte_cap(self.provider);
                 if let Some(provenance) = pressure.lowered_request_provenance.as_mut() {
-                    provenance.provider = meerkat_core::Provider::SelfHosted;
+                    provenance.provider = self.provider;
                 }
                 Ok(Some(pressure))
             }
@@ -637,13 +730,11 @@ impl LlmClient for OpenAiCompatibleClient {
                 Ok(Some(
                     meerkat_core::ProviderRequestPressure::new(
                         encoded_body.len() as u64,
-                        meerkat_models::approximate_request_byte_cap(
-                            meerkat_core::Provider::SelfHosted,
-                        ),
+                        meerkat_models::approximate_request_byte_cap(self.provider),
                     )
                     .with_lowered_request_provenance(
                         meerkat_core::LoweredRequestProvenance::from_body(
-                            meerkat_core::Provider::SelfHosted,
+                            self.provider,
                             meerkat_core::LoweredRequestEncoding::OpenAiChatCompletionsJson,
                             &encoded_body,
                         ),
@@ -674,7 +765,8 @@ impl LlmClient for OpenAiCompatibleClient {
                             LlmEvent::UsageUpdate { usage } => {
                                 let raw = usage.as_usage().clone();
                                 let accounting =
-                                    meerkat_core::ProviderTokenAccounting::openai_compatible(
+                                    meerkat_core::ProviderTokenAccounting::openai_compatible_for(
+                                        self.provider,
                                         &request.model,
                                         raw.input_tokens,
                                     );
@@ -693,17 +785,84 @@ impl LlmClient for OpenAiCompatibleClient {
                     let mut projected_request = request.clone();
                     projected_request.messages = self.project_replay_messages(&request.messages)?;
                     let body = self.build_chat_completions_body(&projected_request)?;
-                    let response = self
-                        .apply_auth(
-                            self.http.post(format!("{}/chat/completions", self.base_url)),
+                    let url = format!("{}/chat/completions", self.base_url);
+                    let mut request_builder = self.http.post(&url);
+                    if self
+                        .authorizer
+                        .as_ref()
+                        .is_some_and(|authorizer| authorizer_is_github_copilot(authorizer.as_ref()))
+                        && json_contains_type(&body, "image_url")
+                    {
+                        request_builder =
+                            request_builder.header("Copilot-Vision-Request", "true");
+                    }
+                    let (request_builder, receipt) = self
+                        .apply_dynamic_auth_with_receipt(
+                            request_builder,
+                            "POST",
+                            &url,
                             "application/json",
                         )
+                        .await?;
+                    let mut response = request_builder
                         .json(&body)
                         .send()
                         .await
                         .map_err(Self::map_send_error)?;
 
-                    let status_code = response.status().as_u16();
+                    let mut status_code = response.status().as_u16();
+                    if !(200..=299).contains(&status_code)
+                        && let Some(authorizer) = &self.authorizer
+                        && authorizer
+                            .observe_response_with_receipt(
+                                receipt,
+                                &meerkat_core::HttpAuthorizationResponse {
+                                    method: "POST",
+                                    url: &url,
+                                    status: status_code,
+                                },
+                            )
+                            .await
+                            .map_err(|error| LlmError::AuthenticationFailed {
+                                message: error.to_string(),
+                            })?
+                            == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+                    {
+                        let mut request_builder = self.http.post(&url);
+                        if authorizer_is_github_copilot(authorizer.as_ref())
+                            && json_contains_type(&body, "image_url")
+                        {
+                            request_builder =
+                                request_builder.header("Copilot-Vision-Request", "true");
+                        }
+                        let (request_builder, retry_receipt) = self
+                            .apply_dynamic_auth_with_receipt(
+                                request_builder,
+                                "POST",
+                                &url,
+                                "application/json",
+                            )
+                            .await?;
+                        response = request_builder
+                            .json(&body)
+                            .send()
+                            .await
+                            .map_err(Self::map_send_error)?;
+                        status_code = response.status().as_u16();
+                        authorizer
+                            .observe_response_with_receipt(
+                                retry_receipt,
+                                &meerkat_core::HttpAuthorizationResponse {
+                                    method: "POST",
+                                    url: &url,
+                                    status: status_code,
+                                },
+                            )
+                            .await
+                            .map_err(|error| LlmError::AuthenticationFailed {
+                                message: error.to_string(),
+                            })?;
+                    }
                     let stream_result = if (200..=299).contains(&status_code) {
                         Ok(response.bytes_stream())
                     } else {
@@ -873,7 +1032,8 @@ impl LlmClient for OpenAiCompatibleClient {
                                         .as_ref()
                                         .and_then(|details| details.cached_tokens),
                                     provider_accounting: Some(
-                                        meerkat_core::ProviderTokenAccounting::openai_compatible(
+                                        meerkat_core::ProviderTokenAccounting::openai_compatible_for(
+                                            self.provider,
                                             &request.model,
                                             event_usage.prompt_tokens.unwrap_or(0),
                                         ),
@@ -1053,15 +1213,14 @@ impl LlmClient for OpenAiCompatibleClient {
     }
 
     fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::SelfHosted
+        self.provider
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
+        let url = format!("{}/models", self.base_url);
         let response = self
-            .apply_auth(
-                self.http.get(format!("{}/models", self.base_url)),
-                "application/json",
-            )
+            .apply_dynamic_auth(self.http.get(&url), "GET", &url, "application/json")
+            .await?
             .send()
             .await
             .map_err(|e| LlmError::Unknown {
@@ -1303,6 +1462,104 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}/v1"), handle)
+    }
+
+    #[derive(Clone)]
+    struct ChatAuthRetryState {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn chat_auth_retry(State(state): State<ChatAuthRetryState>) -> impl IntoResponse {
+        if state
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        ([("content-type", "text/event-stream")], "data: [DONE]\n\n").into_response()
+    }
+
+    struct ChatRetryAuthorizer {
+        authorizations: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for ChatRetryAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            let generation = self
+                .authorizations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer token-{generation}"),
+            ));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "chat-retry-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_completions_reauthorizes_before_reading_stream() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/chat/completions", post(chat_auth_retry))
+            .with_state(ChatAuthRetryState {
+                calls: Arc::clone(&calls),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        let authorizer = Arc::new(ChatRetryAuthorizer {
+            authorizations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            format!("http://{addr}"),
+            None,
+            options(true, true, true, true),
+        )
+        .with_authorizer(authorizer.clone());
+        let request = LlmRequest::new(
+            "catalog-model",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            event.expect("reauthorized stream should succeed");
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            authorizer
+                .authorizations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        server.abort();
     }
 
     /// What the raw stub does after the scripted head bytes are on the wire.

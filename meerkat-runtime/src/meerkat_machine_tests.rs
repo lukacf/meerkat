@@ -1097,13 +1097,13 @@ fn named_type_id(name: &str) -> NamedTypeId {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn oauth_target() -> meerkat_core::AuthBindingRef {
-    meerkat_core::AuthBindingRef {
+fn oauth_target() -> meerkat_core::AuthCredentialIdentity {
+    meerkat_core::AuthCredentialIdentity::from_auth_binding(&meerkat_core::AuthBindingRef {
         realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
         binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
         profile: None,
         origin: meerkat_core::connection::BindingOrigin::Configured,
-    }
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1429,7 +1429,9 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
         .expect("persistent runtime authority admits device OAuth state");
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_credential_identity(
+            &target,
+        ))
         .expect("auth lease release clears OAuth lifecycle authority");
     drop(machine);
     drop(store);
@@ -1527,7 +1529,9 @@ fn oauth_lifecycle_shares_auth_machine_release_authority() {
 
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_credential_identity(
+            &target,
+        ))
         .expect("auth lease release clears the shared AuthMachine authority");
 
     assert!(matches!(
@@ -1566,7 +1570,9 @@ fn oauth_lifecycle_release_stays_paired_after_runtime_auth_handle_install() {
 
     machine
         .auth_lease_handle()
-        .release_lease(&meerkat_core::handles::LeaseKey::from_auth_binding(&target))
+        .release_lease(&meerkat_core::handles::LeaseKey::from_credential_identity(
+            &target,
+        ))
         .expect("runtime auth handle release clears paired OAuth lifecycle");
 
     assert!(matches!(

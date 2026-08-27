@@ -21,6 +21,7 @@ meerkat-contracts = { workspace = true }
 # provider runtime can resolve inline-secret bindings in the browser
 # (closes Cluster C in the smoke-fix track).
 meerkat-auth-core = { workspace = true }
+meerkat-copilot = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -57,8 +58,9 @@ meerkat-auth-core = { workspace = true, features = ["oauth"] }
 axum = { workspace = true, features = ["ws"] }
 
 [features]
-default = ["oauth"]
+default = ["oauth", "copilot"]
 oauth = ["meerkat-auth-core/oauth"]
+copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 realtime = ["dep:oai-rt-rs", "dep:sha2", "dep:tokio-tungstenite"]
 experimental-gpt-live = [
     "dep:oai-rt-rs",

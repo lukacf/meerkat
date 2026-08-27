@@ -46,6 +46,8 @@ pub use image_generation::{
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use live::OpenAiLiveClient;
+#[cfg(all(not(target_arch = "wasm32"), feature = "copilot"))]
+pub use runtime::OpenAiCopilotChatCompletionsClientFactory;
 pub use runtime::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use text_adapter::OpenAiRealtimeTextAdapter;

@@ -77,6 +77,7 @@ impl ProviderRuntime for SelfHostedProviderRuntime {
             provider: Provider::SelfHosted,
             backend: binding.backend(),
             backend_profile: Arc::clone(binding.backend_profile()),
+            credential_identity: binding.credential_identity().clone(),
             auth_lease: lease,
         })
     }

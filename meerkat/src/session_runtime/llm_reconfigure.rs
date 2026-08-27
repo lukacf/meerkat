@@ -123,6 +123,47 @@ fn resolve_reconfigure_target_llm_identity(
     })
 }
 
+fn preserve_credential_account_affinity(
+    config: &Config,
+    current: &SessionLlmIdentity,
+    request: &SessionLlmReconfigureRequest,
+    target: &mut SessionLlmIdentity,
+) -> Result<(), RuntimeDriverError> {
+    if request.auth_binding.is_some()
+        || target.auth_binding.is_some()
+        || target.provider == current.provider
+    {
+        return Ok(());
+    }
+    let Some(meerkat_core::AuthCredentialIdentity::Account(account)) =
+        AgentFactory::credential_identity_for_llm_identity(config, current).map_err(|error| {
+            RuntimeDriverError::ValidationFailed {
+                reason: error.to_string(),
+            }
+        })?
+    else {
+        return Ok(());
+    };
+    let route = meerkat_core::resolve_credential_account_binding_for_provider(
+        config,
+        target.provider,
+        &account,
+    )
+    .map_err(|error| RuntimeDriverError::ValidationFailed {
+        reason: error.to_string(),
+    })?
+    .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+        reason: format!(
+            "provider switch to '{}' has no route sharing credential account '{}:{}'; set auth_binding explicitly to change accounts",
+            target.provider.as_str(),
+            account.realm,
+            account.account
+        ),
+    })?;
+    target.auth_binding = Some(route.auth_binding);
+    Ok(())
+}
+
 /// Live-session operations required by the runtime-owned LLM reconfigure
 /// transaction.
 ///
@@ -783,7 +824,10 @@ impl SessionRuntimeLlmReconfigureHost {
         request: &SessionLlmReconfigureRequest,
     ) -> Result<SessionLlmIdentity, RuntimeDriverError> {
         let registry = self.model_registry().await?;
-        resolve_reconfigure_target_llm_identity(&registry, current, request)
+        let mut target = resolve_reconfigure_target_llm_identity(&registry, current, request)?;
+        let config = self.load_config_for_hot_swap().await?;
+        preserve_credential_account_affinity(&config, current, request, &mut target)?;
+        Ok(target)
     }
 }
 
@@ -1183,6 +1227,91 @@ mod tests {
         assert!(
             resolved.auth_binding.is_none(),
             "provider switches must not inherit a binding from the previous provider"
+        );
+    }
+
+    #[test]
+    fn provider_switch_preserves_shared_credential_account_route() {
+        let account =
+            meerkat_core::CredentialAccountId::parse("github_copilot").expect("valid account");
+        let mut section = meerkat_core::RealmConfigSection::default();
+        for (route, provider, backend_kind, auth_method) in [
+            (
+                "copilot_anthropic",
+                Provider::Anthropic,
+                "copilot",
+                "github_copilot_oauth",
+            ),
+            (
+                "copilot_openai",
+                Provider::OpenAI,
+                "copilot",
+                "github_copilot_oauth",
+            ),
+        ] {
+            section.backend.insert(
+                route.to_string(),
+                meerkat_core::BackendProfileConfig {
+                    provider: provider.as_str().to_string(),
+                    backend_kind: backend_kind.to_string(),
+                    base_url: None,
+                    options: serde_json::Value::Null,
+                    server: None,
+                },
+            );
+            section.auth.insert(
+                route.to_string(),
+                meerkat_core::AuthProfileConfig {
+                    provider: provider.as_str().to_string(),
+                    auth_method: auth_method.to_string(),
+                    source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                    constraints: meerkat_core::AuthConstraints {
+                        allow_interactive_login: true,
+                        ..Default::default()
+                    },
+                    metadata_defaults: Default::default(),
+                },
+            );
+            section.binding.insert(
+                route.to_string(),
+                meerkat_core::ProviderBindingConfig {
+                    backend_profile: route.to_string(),
+                    auth_profile: route.to_string(),
+                    credential_account: Some(account.clone()),
+                    default_model: None,
+                    policy: Default::default(),
+                    provider_default: false,
+                },
+            );
+        }
+        let mut config = Config::default();
+        config.realm.insert("global".to_string(), section);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse("copilot_anthropic").unwrap(),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            }),
+        };
+        let request = reconfigure_request(Some("gpt-5.5"), None, None);
+        let mut target =
+            resolve_reconfigure_target_llm_identity(&model_registry(), &current, &request)
+                .expect("catalog provider switch");
+
+        preserve_credential_account_affinity(&config, &current, &request, &mut target)
+            .expect("shared account route");
+
+        assert_eq!(
+            target
+                .auth_binding
+                .as_ref()
+                .map(|binding| binding.binding.as_str()),
+            Some("copilot_openai")
         );
     }
 

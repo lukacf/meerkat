@@ -515,6 +515,7 @@ pub use wire::{
     WireModelReleaseStage,
     WireModelRoutingApprovalPhase,
     WireModelTier,
+    WireOAuthProvider,
     WirePeerConnectivity,
     WirePeerConnectivitySnapshot,
     WirePendingToolCall,

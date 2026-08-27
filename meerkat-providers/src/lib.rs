@@ -52,6 +52,7 @@ pub mod auth_store {
 pub mod browser_login {
     pub use meerkat_auth_core::{
         BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow,
+        save_oauth_tokens_and_consume_device_flow,
     };
 }
 #[cfg(not(target_arch = "wasm32"))]

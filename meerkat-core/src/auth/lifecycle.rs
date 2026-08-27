@@ -22,7 +22,7 @@ use super::token_store::{
 use super::token_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
 };
-use crate::connection::AuthBindingRef;
+use crate::connection::{AuthBindingRef, AuthCredentialIdentity};
 use crate::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use crate::handles::{
     AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot, AuthLeaseTransition,
@@ -75,15 +75,24 @@ pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
 }
 
 pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -> bool {
-    matches!(
-        mode,
+    match mode {
         PersistedAuthMode::ChatgptOauth
-            | PersistedAuthMode::ExternalTokens
-            | PersistedAuthMode::ClaudeAiOauth
-            | PersistedAuthMode::OauthToApiKey
-            | PersistedAuthMode::GoogleOauth
-            | PersistedAuthMode::McpOauth
-    )
+        | PersistedAuthMode::ExternalTokens
+        | PersistedAuthMode::ClaudeAiOauth
+        | PersistedAuthMode::OauthToApiKey
+        | PersistedAuthMode::GoogleOauth
+        | PersistedAuthMode::GithubCopilotOauth
+        | PersistedAuthMode::McpOauth => true,
+        PersistedAuthMode::ApiKey
+        | PersistedAuthMode::StaticBearer
+        | PersistedAuthMode::Adc
+        | PersistedAuthMode::ComputeAdc
+        | PersistedAuthMode::Bedrock
+        | PersistedAuthMode::Vertex
+        | PersistedAuthMode::Foundry
+        | PersistedAuthMode::ExternalAuthorizer
+        | PersistedAuthMode::Command => false,
+    }
 }
 
 /// Whether a credential of this mode can be created directly by writing a
@@ -156,8 +165,7 @@ pub fn mark_tokens_lifecycle_published_for_transition(
     tokens: &PersistedTokens,
     transition: &AuthLeaseTransition,
 ) -> Result<PersistedTokens, TokenLifecycleMarkerError> {
-    let token_lease_key =
-        LeaseKey::new(key.realm.clone(), key.binding.clone(), key.profile.clone());
+    let token_lease_key = LeaseKey::from_credential_identity(key.credential_identity());
     if transition.lease_key() != &token_lease_key {
         return Err(TokenLifecycleMarkerError::LeaseKeyMismatch {
             token_key: token_lease_key.to_string(),
@@ -238,7 +246,19 @@ pub fn publish_token_lifecycle_acquired(
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<AuthLeaseTransition, DslTransitionError> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    publish_token_lifecycle_acquired_for_identity(
+        handle,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+        tokens,
+    )
+}
+
+pub fn publish_token_lifecycle_acquired_for_identity(
+    handle: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+    tokens: &PersistedTokens,
+) -> Result<AuthLeaseTransition, DslTransitionError> {
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
     handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
 }
 
@@ -246,7 +266,17 @@ pub fn publish_token_lifecycle_released(
     handle: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> Result<(), DslTransitionError> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    publish_token_lifecycle_released_for_identity(
+        handle,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+    )
+}
+
+pub fn publish_token_lifecycle_released_for_identity(
+    handle: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+) -> Result<(), DslTransitionError> {
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
     handle.release_lease(&lease_key)
 }
 
@@ -292,13 +322,26 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
     handle: &GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> Result<(), TokenLifecycleClearError> {
-    let key = TokenKey::from_auth_binding(auth_binding);
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    clear_tokens_and_publish_lifecycle_released_for_identity(
+        store,
+        handle,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+    )
+    .await
+}
+
+pub async fn clear_tokens_and_publish_lifecycle_released_for_identity(
+    store: &dyn TokenStore,
+    handle: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+) -> Result<(), TokenLifecycleClearError> {
+    let key = TokenKey::from_credential_identity(credential_identity);
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
 
     // Stage: release the lease BEFORE the durable commit, capturing the
     // pre-stage snapshot for rollback if the commit fails.
     let staged = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
-    publish_token_lifecycle_released(handle, auth_binding)
+    publish_token_lifecycle_released_for_identity(handle, credential_identity)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
 
     // Commit: one durable mutation destroys the credential and its lifecycle
@@ -330,7 +373,21 @@ pub async fn clear_tokens_and_publish_lifecycle_released_coordinated(
     handle: GeneratedAuthLeaseHandle,
     auth_binding: AuthBindingRef,
 ) -> Result<(), CredentialMutationError> {
-    let key = TokenKey::from_auth_binding(&auth_binding);
+    clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+        persistence,
+        handle,
+        AuthCredentialIdentity::from_auth_binding(&auth_binding),
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+    persistence: ProviderAuthPersistence,
+    handle: GeneratedAuthLeaseHandle,
+    credential_identity: AuthCredentialIdentity,
+) -> Result<(), CredentialMutationError> {
+    let key = TokenKey::from_credential_identity(&credential_identity);
     let store = persistence.token_store();
     let refresh_coordinator = persistence.refresh_coordinator();
     let outcome = refresh_coordinator
@@ -338,22 +395,22 @@ pub async fn clear_tokens_and_publish_lifecycle_released_coordinated(
             key,
             Box::new(move || {
                 Box::pin(async move {
-                    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
+                    let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let _guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
-                    rehydrate_durable_predecessor_for_mutation(
+                    rehydrate_durable_predecessor_for_mutation_for_identity(
                         store.as_ref(),
                         &handle,
-                        &auth_binding,
+                        &credential_identity,
                         Utc::now(),
                     )
                     .await
                     .map_err(|error| {
                         CredentialMutationError::AuthLifecycle(error.to_string())
                     })?;
-                    clear_tokens_and_publish_lifecycle_released(
+                    clear_tokens_and_publish_lifecycle_released_for_identity(
                         store.as_ref(),
                         &handle,
-                        &auth_binding,
+                        &credential_identity,
                     )
                     .await
                     .map_err(|error| match error {
@@ -437,12 +494,12 @@ pub enum AuthStatusRehydrateError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn restore_marked_token_lifecycle(
+pub(crate) fn restore_marked_token_lifecycle_for_identity(
     auth_lease: &GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
+    credential_identity: &AuthCredentialIdentity,
     tokens: &PersistedTokens,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    let key = TokenKey::from_auth_binding(auth_binding);
+    let key = TokenKey::from_credential_identity(credential_identity);
     let Some(publication) =
         durable_marker::restore_publication_from_metadata(&tokens.metadata, &key)
     else {
@@ -451,7 +508,7 @@ pub(crate) fn restore_marked_token_lifecycle(
     if publication.expires_at() != persisted_token_expires_at_epoch_secs(tokens) {
         return Ok(None);
     }
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
     auth_lease
         .restore_published_credential_lifecycle(&lease_key, &publication)
         .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
@@ -466,14 +523,32 @@ pub async fn rehydrate_marked_tokens_for_status(
     expected_mode: PersistedAuthMode,
     now: DateTime<Utc>,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    let key = TokenKey::from_auth_binding(auth_binding);
+    rehydrate_marked_tokens_for_status_for_identity(
+        token_store,
+        auth_lease,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+        expected_mode,
+        now,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_marked_tokens_for_status_for_identity(
+    token_store: &dyn TokenStore,
+    auth_lease: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+    expected_mode: PersistedAuthMode,
+    now: DateTime<Utc>,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    let key = TokenKey::from_credential_identity(credential_identity);
     let Some(tokens) = token_store.load(&key).await? else {
         // Durable truth holds no credential for this binding. The in-process
         // lease is a projection of durable truth: a credential-bearing lease
         // that outlived its durable record (e.g. a clear whose release
         // transition was rejected) is released here so public status cannot
         // keep projecting a credential the store no longer holds.
-        let lease_key = LeaseKey::from_auth_binding(auth_binding);
+        let lease_key = LeaseKey::from_credential_identity(credential_identity);
         let captured = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
         let snapshot = captured.snapshot();
         let lease_is_live = snapshot.credential_present
@@ -490,9 +565,10 @@ pub async fn rehydrate_marked_tokens_for_status(
     if tokens.auth_mode != expected_mode {
         return Ok(None);
     }
-    let restored = restore_marked_token_lifecycle(auth_lease, auth_binding, &tokens)?;
+    let restored =
+        restore_marked_token_lifecycle_for_identity(auth_lease, credential_identity, &tokens)?;
     if restored.is_some() {
-        let lease_key = LeaseKey::from_auth_binding(auth_binding);
+        let lease_key = LeaseKey::from_credential_identity(credential_identity);
         auth_lease
             .observe_credential_freshness(
                 &lease_key,
@@ -522,15 +598,33 @@ pub async fn rehydrate_durable_predecessor_for_mutation(
     auth_binding: &AuthBindingRef,
     now: DateTime<Utc>,
 ) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
-    let key = TokenKey::from_auth_binding(auth_binding);
+    rehydrate_durable_predecessor_for_mutation_for_identity(
+        token_store,
+        auth_lease,
+        &AuthCredentialIdentity::from_auth_binding(auth_binding),
+        now,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_durable_predecessor_for_mutation_for_identity(
+    token_store: &dyn TokenStore,
+    auth_lease: &GeneratedAuthLeaseHandle,
+    credential_identity: &AuthCredentialIdentity,
+    now: DateTime<Utc>,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    let key = TokenKey::from_credential_identity(credential_identity);
     let tokens = match token_store.load(&key).await {
         Ok(tokens) => tokens,
         Err(TokenStoreError::Serde(_)) => None,
         Err(error) => return Err(AuthStatusRehydrateError::TokenStore(error)),
     };
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    let lease_key = LeaseKey::from_credential_identity(credential_identity);
     let restored = match tokens.as_ref() {
-        Some(tokens) => restore_marked_token_lifecycle(auth_lease, auth_binding, tokens)?,
+        Some(tokens) => {
+            restore_marked_token_lifecycle_for_identity(auth_lease, credential_identity, tokens)?
+        }
         None => None,
     };
     if restored.is_some() {
@@ -627,6 +721,7 @@ mod tests {
             PersistedAuthMode::ClaudeAiOauth,
             PersistedAuthMode::OauthToApiKey,
             PersistedAuthMode::GoogleOauth,
+            PersistedAuthMode::GithubCopilotOauth,
             PersistedAuthMode::McpOauth,
         ] {
             assert!(
@@ -701,6 +796,61 @@ mod tests {
         assert!(
             durable_marker::restore_publication_from_metadata(&marked.metadata, &wrong_key)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn account_lifecycle_marker_round_trips_without_route_binding() {
+        let key = TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(
+            crate::CredentialAccountRef {
+                realm: crate::RealmId::global(),
+                account: crate::CredentialAccountId::parse("github_copilot").unwrap(),
+            },
+        ));
+        let marked = mark_tokens_lifecycle_published(
+            &key,
+            &oauth_tokens_with_metadata(serde_json::Value::Null),
+        );
+        assert_eq!(
+            marked.metadata["meerkat_auth_lifecycle"]["credential_kind"],
+            "account"
+        );
+        assert_eq!(
+            marked.metadata["meerkat_auth_lifecycle"]["account"],
+            "github_copilot"
+        );
+        assert!(
+            durable_marker::restore_publication_from_metadata(&marked.metadata, &key).is_some()
+        );
+        assert!(
+            durable_marker::restore_publication_from_metadata(
+                &marked.metadata,
+                &TokenKey::parse("global", "copilot_openai").unwrap(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn version_four_binding_marker_remains_readable() {
+        let key = marker_test_key();
+        let tokens = oauth_tokens_with_metadata(serde_json::json!({
+            "meerkat_auth_lifecycle": {
+                "published": true,
+                "version": 4,
+                "authority": "auth_machine",
+                "protocol": "auth_lease_lifecycle_publication",
+                "realm": "dev",
+                "binding": "default_openai",
+                "profile": null,
+                "phase": "valid",
+                "generation": 7,
+                "expires_at": u64::MAX,
+                "credential_published_at_millis": 1
+            }
+        }));
+        assert!(
+            durable_marker::restore_publication_from_metadata(&tokens.metadata, &key).is_some()
         );
     }
 

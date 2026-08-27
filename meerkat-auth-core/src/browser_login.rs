@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use meerkat_core::AuthBindingRef;
 use meerkat_core::auth::token_store::{
     CredentialMutationError, CredentialMutationOutcome, PersistedTokens, ProviderAuthPersistence,
     TokenKey, TokenStore,
@@ -15,9 +17,9 @@ use meerkat_core::handles::{
     AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot, AuthLeaseTransition,
     GeneratedAuthLeaseHandle, LeaseKey,
 };
-use meerkat_core::{AuthBindingRef, OAuthProviderIdentity};
+use meerkat_core::{AuthCredentialIdentity, OAuthProviderIdentity};
 
-use crate::oauth_flow::{OAuthFlowAuthority, OAuthFlowError};
+use crate::oauth_flow::{OAuthDevicePollLease, OAuthFlowAuthority, OAuthFlowError};
 
 /// One verified browser-flow terminal consume request.
 #[derive(Clone)]
@@ -50,7 +52,7 @@ struct PreparedCommit {
 pub async fn save_oauth_tokens_and_consume_browser_flow(
     persistence: ProviderAuthPersistence,
     auth_lease: GeneratedAuthLeaseHandle,
-    auth_binding: AuthBindingRef,
+    credential_identity: AuthCredentialIdentity,
     tokens: PersistedTokens,
     flow: BrowserOAuthFlowCommit,
 ) -> Result<PersistedTokens, CredentialMutationError> {
@@ -59,10 +61,11 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
             "browser OAuth terminal state is not AuthMachine-owned".to_string(),
         ));
     }
+
     flow.authority
         .verify(
             &flow.state,
-            &auth_binding,
+            &credential_identity,
             flow.provider,
             &flow.redirect_uri,
         )
@@ -70,20 +73,21 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
 
     let store = persistence.token_store();
     let coordinator = persistence.refresh_coordinator();
-    let key = TokenKey::from_auth_binding(&auth_binding);
+    let key = TokenKey::from_credential_identity(&credential_identity);
     let load_key = key.clone();
     let outcome = coordinator
         .with_exclusive_mutation(
             key,
             Box::new(move || {
                 Box::pin(async move {
-                    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
+                    let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let _guard =
                         meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-                    let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+                    let previous =
+                        meerkat_core::rehydrate_durable_predecessor_for_mutation_for_identity(
                         store.as_ref(),
                         &auth_lease,
-                        &auth_binding,
+                        &credential_identity,
                         chrono::Utc::now(),
                     )
                     .await
@@ -95,7 +99,7 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                     flow.authority
                         .consume(
                             &flow.state,
-                            &auth_binding,
+                            &credential_identity,
                             flow.provider,
                             &flow.redirect_uri,
                         )
@@ -105,9 +109,9 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                         auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
                     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
                     let lifecycle_transition =
-                        match meerkat_core::publish_token_lifecycle_acquired(
+                        match meerkat_core::publish_token_lifecycle_acquired_for_identity(
                             &auth_lease,
-                            &auth_binding,
+                            &credential_identity,
                             &tokens,
                         ) {
                             Ok(transition) => transition,
@@ -175,6 +179,135 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
         CredentialMutationOutcome::Persisted(tokens) => Ok(tokens),
         CredentialMutationOutcome::Cleared => Err(CredentialMutationError::Operation(
             "browser-login transaction returned cleared outcome".to_string(),
+        )),
+    }
+}
+
+/// Consume one AuthMachine-owned device flow and durably publish its credential.
+///
+/// The terminal device response is consumed before lifecycle publication. If a
+/// later durable step fails, credential and lease state are compensated to the
+/// predecessor; the terminal OAuth response itself is never made replayable.
+pub async fn save_oauth_tokens_and_consume_device_flow(
+    persistence: ProviderAuthPersistence,
+    auth_lease: GeneratedAuthLeaseHandle,
+    credential_identity: AuthCredentialIdentity,
+    tokens: PersistedTokens,
+    poll: OAuthDevicePollLease,
+) -> Result<PersistedTokens, CredentialMutationError> {
+    if !poll.terminal_flow_state_is_authmachine_owned() {
+        return Err(CredentialMutationError::AuthLifecycle(
+            "device OAuth terminal state is not AuthMachine-owned".to_string(),
+        ));
+    }
+    let record = poll.verify().map_err(flow_error)?;
+    if record.target != credential_identity {
+        return Err(CredentialMutationError::AuthLifecycle(
+            "device OAuth credential identity mismatch".to_string(),
+        ));
+    }
+
+    let store = persistence.token_store();
+    let coordinator = persistence.refresh_coordinator();
+    let key = TokenKey::from_credential_identity(&credential_identity);
+    let load_key = key.clone();
+    let outcome = coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_credential_identity(&credential_identity);
+                    let _guard =
+                        meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let previous =
+                        meerkat_core::rehydrate_durable_predecessor_for_mutation_for_identity(
+                            store.as_ref(),
+                            &auth_lease,
+                            &credential_identity,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            CredentialMutationError::AuthLifecycle(format!(
+                                "durable credential predecessor rehydrate failed: {error}"
+                            ))
+                        })?;
+                    poll.consume().map_err(flow_error)?;
+
+                    let previous_lifecycle_restore =
+                        auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+                    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
+                    let lifecycle_transition =
+                        match meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                            &auth_lease,
+                            &credential_identity,
+                            &tokens,
+                        ) {
+                            Ok(transition) => transition,
+                            Err(error) => {
+                                let cleanup = if previous.is_none() {
+                                    auth_lease
+                                        .release_credential_lifecycle(&lease_key)
+                                        .err()
+                                        .map(|cleanup| {
+                                            format!(
+                                                "; uncredentialed terminal lifecycle cleanup failed: {cleanup}"
+                                            )
+                                        })
+                                        .unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                return Err(CredentialMutationError::AuthLifecycle(format!(
+                                    "AuthMachine lifecycle acquire failed after OAuth consume: {error}{cleanup}"
+                                )));
+                            }
+                        };
+                    let commit = PreparedCommit {
+                        key: load_key.clone(),
+                        lease_key,
+                        previous,
+                        previous_lifecycle,
+                        previous_lifecycle_restore,
+                        lifecycle_transition,
+                    };
+                    let marked =
+                        match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                            &commit.key,
+                            &tokens,
+                            &commit.lifecycle_transition,
+                        ) {
+                            Ok(marked) => marked,
+                            Err(error) => {
+                                return Err(compensated_error(
+                                    store.as_ref(),
+                                    &auth_lease,
+                                    &commit,
+                                    format!(
+                                        "AuthMachine lifecycle marker handoff failed after OAuth consume: {error}"
+                                    ),
+                                )
+                                .await);
+                            }
+                        };
+                    if let Err(error) = store.save(&commit.key, &marked).await {
+                        return Err(compensated_error(
+                            store.as_ref(),
+                            &auth_lease,
+                            &commit,
+                            format!("TokenStore save failed after OAuth consume: {error}"),
+                        )
+                        .await);
+                    }
+                    Ok(CredentialMutationOutcome::Persisted(marked))
+                })
+            }),
+        )
+        .await?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(tokens) => Ok(tokens),
+        CredentialMutationOutcome::Cleared => Err(CredentialMutationError::Operation(
+            "device-login transaction returned cleared outcome".to_string(),
         )),
     }
 }
@@ -273,7 +406,7 @@ mod tests {
 
         fn start(
             &self,
-            target: AuthBindingRef,
+            target: AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
             redirect_uri: String,
             pkce_verifier: String,
@@ -285,7 +418,7 @@ mod tests {
         fn verify(
             &self,
             state: &str,
-            target: &AuthBindingRef,
+            target: &AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
             redirect_uri: &str,
         ) -> Result<crate::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
@@ -295,7 +428,7 @@ mod tests {
         fn consume(
             &self,
             state: &str,
-            target: &AuthBindingRef,
+            target: &AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
             redirect_uri: &str,
         ) -> Result<crate::oauth_flow::OAuthFlowRecord, OAuthFlowError> {
@@ -304,7 +437,7 @@ mod tests {
 
         fn admit_device_code(
             &self,
-            target: AuthBindingRef,
+            target: AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
             device_code: String,
             expires_in: StdDuration,
@@ -316,7 +449,7 @@ mod tests {
         fn verify_device_code(
             &self,
             device_code: &str,
-            target: &AuthBindingRef,
+            target: &AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
         ) -> Result<crate::oauth_flow::OAuthDeviceFlowRecord, OAuthFlowError> {
             self.inner.verify_device_code(device_code, target, provider)
@@ -325,7 +458,7 @@ mod tests {
         fn begin_device_code_poll(
             &self,
             device_code: &str,
-            target: &AuthBindingRef,
+            target: &AuthCredentialIdentity,
             provider: OAuthProviderIdentity,
         ) -> Result<crate::oauth_flow::OAuthDevicePollLease, OAuthFlowError> {
             self.inner
@@ -369,9 +502,10 @@ mod tests {
             Arc::new(crate::auth_store::InMemoryCoordinator::new()),
         );
         let binding = binding();
+        let credential_identity = AuthCredentialIdentity::from_auth_binding(&binding);
         let state = authority
             .start(
-                binding.clone(),
+                credential_identity.clone(),
                 OAuthProviderIdentity::OpenAiChatGpt,
                 "http://127.0.0.1/callback".to_string(),
                 "pkce-verifier".to_string(),
@@ -381,7 +515,7 @@ mod tests {
         let committed = save_oauth_tokens_and_consume_browser_flow(
             persistence,
             auth_lease.clone(),
-            binding.clone(),
+            credential_identity.clone(),
             tokens(),
             BrowserOAuthFlowCommit {
                 authority: Arc::clone(&authority),
@@ -404,7 +538,7 @@ mod tests {
         assert!(matches!(
             authority.verify(
                 &state,
-                &binding,
+                &credential_identity,
                 OAuthProviderIdentity::OpenAiChatGpt,
                 "http://127.0.0.1/callback"
             ),
@@ -458,9 +592,10 @@ mod tests {
             Arc::new(crate::auth_store::InMemoryCoordinator::new()),
         );
         let binding = binding();
+        let credential_identity = AuthCredentialIdentity::from_auth_binding(&binding);
         let state = authority
             .start(
-                binding.clone(),
+                credential_identity.clone(),
                 OAuthProviderIdentity::OpenAiChatGpt,
                 "http://127.0.0.1/callback".to_string(),
                 "pkce-verifier".to_string(),
@@ -470,7 +605,7 @@ mod tests {
         let error = save_oauth_tokens_and_consume_browser_flow(
             persistence,
             auth_lease.clone(),
-            binding.clone(),
+            credential_identity.clone(),
             tokens(),
             BrowserOAuthFlowCommit {
                 authority: Arc::clone(&authority),
@@ -486,7 +621,7 @@ mod tests {
         assert!(matches!(
             authority.verify(
                 &state,
-                &binding,
+                &credential_identity,
                 OAuthProviderIdentity::OpenAiChatGpt,
                 "http://127.0.0.1/callback"
             ),

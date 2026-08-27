@@ -19,7 +19,6 @@ use meerkat_providers::auth_store::{
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_endpoints,
-    validate_oauth_login_binding,
 };
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +93,8 @@ pub enum HostAuthError {
     StatusRehydrate(String),
     #[error("OAuth token expiry is invalid: {0}")]
     InvalidExpiry(String),
+    #[error("provider '{0}' requires the device-code login flow")]
+    BrowserFlowUnsupported(OAuthProviderIdentity),
 }
 
 /// Injectable native-host authentication facade.
@@ -140,9 +141,9 @@ impl HostAuthService {
         target: &HostAuthTarget,
     ) -> Result<HostAuthStatus, HostAuthError> {
         let resolved = resolve_target(config, target)?;
-        validate_oauth_login_binding(&resolved.backend, &resolved.auth_profile, target.provider)?;
+        validate_resolved_oauth_target(&resolved, target.provider)?;
         let auth_binding = resolved.auth_binding;
-        let lease_key = LeaseKey::from_auth_binding(&auth_binding);
+        let lease_key = LeaseKey::from_credential_identity(&resolved.credential_identity);
         let now = Utc::now();
         let auth_lease = self.authority.generated_auth_lease_handle();
         auth_lease
@@ -167,10 +168,10 @@ impl HostAuthService {
             let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
             if phase.is_no_live_lease() {
                 if let Some(expected_mode) = expected_mode {
-                    stored = meerkat_core::rehydrate_marked_tokens_for_status(
+                    stored = meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
                         store.as_ref(),
                         &auth_lease,
-                        &auth_binding,
+                        &resolved.credential_identity,
                         expected_mode,
                         now,
                     )
@@ -180,9 +181,11 @@ impl HostAuthService {
                 }
             } else {
                 stored = store
-                    .load(&meerkat_providers::auth_store::TokenKey::from_auth_binding(
-                        &auth_binding,
-                    ))
+                    .load(
+                        &meerkat_providers::auth_store::TokenKey::from_credential_identity(
+                            &resolved.credential_identity,
+                        ),
+                    )
                     .await?;
             }
         }
@@ -205,7 +208,7 @@ impl HostAuthService {
             meerkat_core::project_published_auth_status(now, stored.as_ref(), projection_snapshot);
         Ok(HostAuthStatus {
             auth_binding,
-            provider: target.provider.provider(),
+            provider: resolved.backend.provider,
             profile_id: resolved.auth_profile.id,
             phase: projection.phase,
             expires_at: projection.expires_at,
@@ -222,12 +225,15 @@ impl HostAuthService {
         redirect_uri: impl Into<String>,
     ) -> Result<HostAuthLoginStart, HostAuthError> {
         let redirect_uri = redirect_uri.into();
+        if !target.provider.supports_browser_flow() {
+            return Err(HostAuthError::BrowserFlowUnsupported(target.provider));
+        }
         let resolved = resolve_writable_oauth_target(config, target)?;
         let pkce = PkcePair::generate_s256();
-        let lease_key = LeaseKey::from_auth_binding(&resolved.auth_binding);
+        let lease_key = LeaseKey::from_credential_identity(&resolved.credential_identity);
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         let state = self.authority.oauth_flow_authority().start(
-            resolved.auth_binding.clone(),
+            resolved.credential_identity.clone(),
             target.provider,
             redirect_uri.clone(),
             pkce.verifier.secret().clone(),
@@ -253,11 +259,14 @@ impl HostAuthService {
     ) -> Result<HostAuthLoginComplete, HostAuthError> {
         let redirect_uri = redirect_uri.into();
         let state = state.into();
+        if !target.provider.supports_browser_flow() {
+            return Err(HostAuthError::BrowserFlowUnsupported(target.provider));
+        }
         let resolved = resolve_writable_oauth_target(config, target)?;
         let oauth_flow_authority = self.authority.oauth_flow_authority();
         let flow = oauth_flow_authority.verify(
             &state,
-            &resolved.auth_binding,
+            &resolved.credential_identity,
             target.provider,
             &redirect_uri,
         )?;
@@ -294,7 +303,7 @@ impl HostAuthService {
             meerkat_providers::browser_login::save_oauth_tokens_and_consume_browser_flow(
                 self.persistence.clone(),
                 self.authority.generated_auth_lease_handle(),
-                resolved.auth_binding.clone(),
+                resolved.credential_identity.clone(),
                 tokens,
                 meerkat_providers::browser_login::BrowserOAuthFlowCommit {
                     authority: oauth_flow_authority,
@@ -306,7 +315,7 @@ impl HostAuthService {
             .await?;
         Ok(HostAuthLoginComplete {
             auth_binding: resolved.auth_binding,
-            provider: target.provider.provider(),
+            provider: resolved.backend.provider,
             profile_id: resolved.auth_profile.id,
             expires_at: committed.expires_at,
             has_refresh_token: committed.refresh_token.is_some(),
@@ -320,10 +329,10 @@ impl HostAuthService {
         target: &HostAuthTarget,
     ) -> Result<AuthBindingRef, HostAuthError> {
         let resolved = resolve_writable_oauth_target(config, target)?;
-        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
             self.persistence.clone(),
             self.authority.generated_auth_lease_handle(),
-            resolved.auth_binding.clone(),
+            resolved.credential_identity,
         )
         .await?;
         Ok(resolved.auth_binding)
@@ -334,14 +343,25 @@ fn resolve_target(
     config: &Config,
     target: &HostAuthTarget,
 ) -> Result<ResolvedConnectionTarget, HostAuthError> {
-    Ok(meerkat_core::resolve_realm_binding_target_for_provider(
+    if let Some(provider) = target.provider.provider() {
+        return Ok(meerkat_core::resolve_realm_binding_target_for_provider(
+            config,
+            provider,
+            Some(&target.realm_id),
+            Some(&target.binding_id),
+            target.profile_id.as_ref(),
+            None,
+            false,
+        )?);
+    }
+    Ok(meerkat_core::resolve_explicit_auth_binding_target(
         config,
-        target.provider.provider(),
-        Some(&target.realm_id),
-        Some(&target.binding_id),
-        target.profile_id.as_ref(),
-        None,
-        false,
+        &AuthBindingRef {
+            realm: target.realm_id.clone(),
+            binding: target.binding_id.clone(),
+            profile: target.profile_id.clone(),
+            origin: meerkat_core::BindingOrigin::Configured,
+        },
     )?)
 }
 
@@ -359,8 +379,16 @@ fn resolve_writable_oauth_target(
     target: &HostAuthTarget,
 ) -> Result<ResolvedConnectionTarget, HostAuthError> {
     let resolved = resolve_writable_target(config, target)?;
-    validate_oauth_login_binding(&resolved.backend, &resolved.auth_profile, target.provider)?;
+    validate_resolved_oauth_target(&resolved, target.provider)?;
     Ok(resolved)
+}
+
+fn validate_resolved_oauth_target(
+    resolved: &ResolvedConnectionTarget,
+    provider: OAuthProviderIdentity,
+) -> Result<(), HostAuthError> {
+    meerkat_providers::oauth_flow::validate_oauth_login_connection_target(resolved, provider)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -400,6 +428,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai".to_string(),
                 auth_profile: "openai".to_string(),
+                credential_account: None,
                 default_model: Some("gpt-5.4".to_string()),
                 policy: Default::default(),
                 provider_default: true,

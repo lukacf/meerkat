@@ -5232,6 +5232,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "google".to_string(),
                 auth_profile: "oauth".to_string(),
+                credential_account: None,
                 default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
                 policy: Default::default(),
                 provider_default: true,

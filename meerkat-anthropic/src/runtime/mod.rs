@@ -37,11 +37,13 @@ use meerkat_llm_core::LlmClient;
     all(not(target_arch = "wasm32"), feature = "oauth"),
     all(not(target_arch = "wasm32"), feature = "bedrock"),
     all(not(target_arch = "wasm32"), feature = "vertex"),
-    all(not(target_arch = "wasm32"), feature = "foundry")
+    all(not(target_arch = "wasm32"), feature = "foundry"),
+    all(not(target_arch = "wasm32"), feature = "copilot")
 ))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
-    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease, ValidatedBinding,
+    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
+    StaticLease, ValidatedBinding,
 };
 use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
@@ -127,7 +129,26 @@ fn anthropic_oauth_refresh_error(
     ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
-pub struct AnthropicProviderRuntime;
+#[derive(Default)]
+pub struct AnthropicProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: Option<Arc<meerkat_copilot::CopilotRuntime>>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const AnthropicProviderRuntime: AnthropicProviderRuntime = AnthropicProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    copilot: None,
+};
+
+impl AnthropicProviderRuntime {
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    pub fn with_copilot(copilot: Arc<meerkat_copilot::CopilotRuntime>) -> Self {
+        Self {
+            copilot: Some(copilot),
+        }
+    }
+}
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -181,6 +202,29 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             }
             AnthropicAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
+            }
+            AnthropicAuthMethod::GitHubCopilotOauth => {
+                #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+                {
+                    let runtime = self.copilot.as_ref().ok_or_else(|| {
+                        ProviderAuthError::SourceResolutionFailed(
+                            "Anthropic Copilot backend is not composed with CopilotRuntime"
+                                .to_string(),
+                        )
+                    })?;
+                    let resolved = runtime.resolve(binding, env).await?;
+                    Arc::new(DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ))
+                }
+                #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+                {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "Anthropic Copilot backend is not compiled".to_string(),
+                    ));
+                }
             }
             AnthropicAuthMethod::BedrockAwsSigv4 => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
@@ -483,6 +527,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             provider: Provider::Anthropic,
             backend: NormalizedBackendKind::Anthropic(backend_kind),
             backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
             auth_lease: lease,
         })
     }
@@ -541,6 +586,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     .unwrap_or_else(|| {
                         AnthropicBackendKind::AnthropicApi.default_base_url().into()
                     }),
+                AnthropicBackendKind::Copilot => {
+                    return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+                }
             };
             let client = crate::AnthropicClient::builder(String::new())
                 .authorizer(authorizer)
@@ -648,6 +696,87 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicBackendKind::Vertex => Err(ProviderClientError::MissingFeature(
                 "vertex-backend with authorizer-backed auth not available on wasm32",
             )),
+            AnthropicBackendKind::Copilot => {
+                Err(ProviderClientError::MissingFeature("copilot-text-target"))
+            }
+        }
+    }
+
+    fn build_text_client(
+        &self,
+        target: ResolvedTextTarget,
+    ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        if !matches!(
+            target.connection().backend,
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::Copilot)
+        ) {
+            let (_, _, connection) = target.into_parts();
+            return self.build_client(connection);
+        }
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        {
+            let runtime = self.copilot.as_ref().ok_or_else(|| {
+                ProviderClientError::ClientInit(
+                    "Anthropic Copilot backend is not composed with CopilotRuntime".to_string(),
+                )
+            })?;
+            let (identity, _, connection) = target.into_parts();
+            let model = identity.model.clone();
+            let factory: meerkat_copilot::CopilotRouteClientFactory =
+                Arc::new(move |route, connection| {
+                    let endpoint = match route.access {
+                        meerkat_copilot::CopilotModelAccess::Available { endpoint } => endpoint,
+                        meerkat_copilot::CopilotModelAccess::Unknown => {
+                            meerkat_copilot::CopilotEndpoint::optimistic_for_provider(
+                                Provider::Anthropic,
+                            )
+                            .ok_or_else(|| {
+                                ProviderClientError::ClientInit(
+                                    "Copilot has no optimistic Anthropic route".to_string(),
+                                )
+                            })?
+                        }
+                        meerkat_copilot::CopilotModelAccess::Unavailable => {
+                            return Err(ProviderClientError::ClientInit(
+                                route.unavailable_message(
+                                    Provider::Anthropic,
+                                    &model,
+                                    meerkat_copilot::CopilotEndpoint::Messages,
+                                ),
+                            ));
+                        }
+                    };
+                    if endpoint != meerkat_copilot::CopilotEndpoint::Messages {
+                        return Err(ProviderClientError::ClientInit(route.unavailable_message(
+                            Provider::Anthropic,
+                            &model,
+                            meerkat_copilot::CopilotEndpoint::Messages,
+                        )));
+                    }
+                    let authorizer = connection
+                        .resolved_authorizer()
+                        .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    let client = crate::AnthropicClient::builder(String::new())
+                        .authorizer(authorizer)
+                        .base_url(route.api_base.clone())
+                        .default_cache_control(AnthropicCacheControlPolicy::Disabled)
+                        .automatic_cache_control_supported(false)
+                        .build()
+                        .map_err(ProviderClientError::from)?;
+                    Ok(Arc::new(client) as Arc<dyn LlmClient>)
+                });
+            meerkat_copilot::routed_client(
+                Arc::clone(runtime),
+                connection,
+                Provider::Anthropic,
+                identity.model,
+                factory,
+            )
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        {
+            let _ = target;
+            Err(ProviderClientError::MissingFeature("copilot"))
         }
     }
 }

@@ -12,7 +12,8 @@ profile to one auth profile.
 realm
   backend profile -> provider + backend kind + endpoint
   auth profile    -> provider + auth method + credential source
-  binding         -> backend profile + auth profile + model/policy defaults
+  binding         -> backend profile + auth profile + optional credential account
+                     + model/policy defaults
 
 session, turn, or mob member
   auth_binding    -> realm + binding (+ optional profile)
@@ -22,7 +23,7 @@ This lets one process use several provider accounts or tenants, give mob
 members different credentials, and re-resolve credentials on resume without
 putting secret material in the session transcript or metadata.
 
-## The Four Identities
+## The Five Identities
 
 | Identity | Owns |
 |----------|------|
@@ -30,10 +31,15 @@ putting secret material in the session transcript or metadata.
 | Backend profile | Provider, wire backend, endpoint, and backend options |
 | Auth profile | Auth method, credential source, constraints, and metadata defaults |
 | Binding | Compatible backend/auth pair, optional default model, and binding policy |
+| Credential account | Optional shared token/AuthMachine identity used by multiple route bindings |
 
 The backend profile and auth profile must name the same provider, and that
 provider must support the selected `backend_kind` and `auth_method` pair.
 Meerkat validates the combination before constructing the provider client.
+Without `credential_account`, the binding itself remains the credential
+identity. With it, route selection still uses the binding while token storage,
+refresh locking, login state, status, and logout use the realm-scoped account.
+This is how the three GitHub Copilot provider-family routes share one sign-in.
 
 For self-hosted models, the backend profile can also identify the specific
 `self_hosted.servers.<id>` entry it authenticates. This prevents a credential

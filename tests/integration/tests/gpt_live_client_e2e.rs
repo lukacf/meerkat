@@ -171,6 +171,7 @@ fn scenario_config() -> Config {
         ProviderBindingConfig {
             backend_profile: "chatgpt_backend".to_string(),
             auth_profile: BINDING.to_string(),
+            credential_account: None,
             default_model: Some(executor_model),
             policy: BindingPolicy::default(),
             provider_default: false,

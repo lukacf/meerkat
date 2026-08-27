@@ -14,6 +14,71 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Canonical OAuth issuer identity carried by login request/response contracts.
+///
+/// Deserialization accepts the CLI-compatible aliases owned by
+/// [`meerkat_core::OAuthProviderIdentity`], while serialization always emits
+/// one canonical wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WireOAuthProvider {
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "google")]
+    Google,
+    #[serde(rename = "copilot")]
+    Copilot,
+}
+
+impl WireOAuthProvider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Google => "google",
+            Self::Copilot => "copilot",
+        }
+    }
+
+    pub const fn identity(self) -> meerkat_core::OAuthProviderIdentity {
+        match self {
+            Self::Anthropic => meerkat_core::OAuthProviderIdentity::AnthropicClaudeAi,
+            Self::OpenAi => meerkat_core::OAuthProviderIdentity::OpenAiChatGpt,
+            Self::Google => meerkat_core::OAuthProviderIdentity::GoogleCodeAssist,
+            Self::Copilot => meerkat_core::OAuthProviderIdentity::GitHubCopilot,
+        }
+    }
+}
+
+impl std::fmt::Display for WireOAuthProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for WireOAuthProvider {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match meerkat_core::OAuthProviderIdentity::from_alias(&value) {
+            Some(meerkat_core::OAuthProviderIdentity::AnthropicClaudeAi) => Ok(Self::Anthropic),
+            Some(meerkat_core::OAuthProviderIdentity::OpenAiChatGpt) => Ok(Self::OpenAi),
+            Some(meerkat_core::OAuthProviderIdentity::GoogleCodeAssist) => Ok(Self::Google),
+            Some(meerkat_core::OAuthProviderIdentity::GitHubCopilot) => Ok(Self::Copilot),
+            Some(meerkat_core::OAuthProviderIdentity::AnthropicConsoleApiKey) | None => {
+                Err(serde::de::Error::unknown_variant(
+                    &value,
+                    &["anthropic", "openai", "google", "copilot"],
+                ))
+            }
+        }
+    }
+}
+
 /// Wire projection of [`meerkat_core::AuthBindingRef`].
 ///
 /// Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
@@ -82,7 +147,7 @@ pub struct CreateProfileParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginStartParams {
-    pub provider: String,
+    pub provider: WireOAuthProvider,
     pub redirect_uri: String,
     pub realm_id: String,
     pub binding_id: String,
@@ -94,7 +159,7 @@ pub struct LoginStartParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginCompleteParams {
-    pub provider: String,
+    pub provider: WireOAuthProvider,
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
@@ -108,7 +173,7 @@ pub struct LoginCompleteParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceStartParams {
-    pub provider: String,
+    pub provider: WireOAuthProvider,
     pub realm_id: String,
     pub binding_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,7 +184,7 @@ pub struct DeviceStartParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceCompleteParams {
-    pub provider: String,
+    pub provider: WireOAuthProvider,
     pub device_code: String,
     pub realm_id: String,
     pub binding_id: String,
@@ -207,6 +272,8 @@ pub struct WireProviderBinding {
     pub backend_profile: String,
     pub auth_profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_account: Option<meerkat_core::CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     #[serde(default)]
     pub allow_auth_override: bool,
@@ -222,6 +289,7 @@ impl From<&meerkat_core::ProviderBinding> for WireProviderBinding {
             id: value.id.clone(),
             backend_profile: value.backend_profile.clone(),
             auth_profile: value.auth_profile.clone(),
+            credential_account: value.credential_account.clone(),
             default_model: value.default_model.clone(),
             allow_auth_override: value.policy.allow_auth_override,
             require_metadata_account: value.policy.require_metadata_account,
@@ -406,7 +474,7 @@ pub struct WireLoginStart {
     pub authorize_url: String,
     pub state: String,
     pub redirect_uri: String,
-    pub provider: String,
+    pub provider: WireOAuthProvider,
 }
 
 /// `POST /auth/login/complete` / ready leg of device-code success body.
@@ -423,7 +491,7 @@ pub struct WireLoginReady {
     #[serde(flatten)]
     pub identity: WireBindingIdentity,
     pub profile_id: String,
-    pub provider: String,
+    pub provider: WireOAuthProvider,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     pub has_refresh_token: bool,
@@ -441,7 +509,7 @@ pub struct WireDeviceStart {
     pub verification_uri_complete: Option<String>,
     pub expires_in: u64,
     pub interval: u64,
-    pub provider: String,
+    pub provider: WireOAuthProvider,
 }
 
 /// `auth/login/device_complete` success body.
@@ -457,7 +525,7 @@ pub enum WireDeviceCompleteResult {
         #[serde(flatten)]
         identity: Box<WireBindingIdentity>,
         profile_id: String,
-        provider: String,
+        provider: WireOAuthProvider,
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<String>,
         has_refresh_token: bool,
@@ -534,6 +602,14 @@ pub struct WireAuthStatusDetail {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_provider_aliases_serialize_canonically() {
+        let provider: WireOAuthProvider = serde_json::from_str("\"chatgpt\"").expect("known alias");
+        assert_eq!(provider, WireOAuthProvider::OpenAi);
+        assert_eq!(serde_json::to_string(&provider).unwrap(), "\"openai\"");
+        assert!(serde_json::from_str::<WireOAuthProvider>("\"future_oauth\"").is_err());
+    }
 
     #[test]
     fn auth_binding_roundtrip() {
@@ -622,7 +698,7 @@ mod tests {
         let ready = serde_json::to_value(WireDeviceCompleteResult::Ready {
             identity: Box::new(WireBindingIdentity::from(&cref)),
             profile_id: "console".to_string(),
-            provider: "anthropic".to_string(),
+            provider: WireOAuthProvider::Anthropic,
             expires_at: Some("2026-04-29T00:00:00Z".to_string()),
             has_refresh_token: true,
             scopes: vec!["org:create_api_key".to_string()],

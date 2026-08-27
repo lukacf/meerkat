@@ -13780,6 +13780,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "openai_backend".into(),
                 auth_profile: "openai_managed".into(),
+                credential_account: None,
                 default_model: None,
                 policy: Default::default(),
                 provider_default: false,
@@ -15690,7 +15691,7 @@ mod tests {
         let state = adapter
             .oauth_flow_authority()
             .start(
-                target.clone(),
+                meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
                 provider,
                 redirect_uri.to_string(),
                 "rpc-persistent-verifier".to_string(),
@@ -15706,7 +15707,12 @@ mod tests {
         );
         let flow = runtime
             .oauth_flow_authority()
-            .consume(&state, &target, provider, redirect_uri)
+            .consume(
+                &state,
+                &meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
+                provider,
+                redirect_uri,
+            )
             .expect("surface construction must preserve PersistenceBundle OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "rpc-persistent-verifier");

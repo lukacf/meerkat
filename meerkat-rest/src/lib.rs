@@ -9305,7 +9305,7 @@ mod tests {
             state
                 .oauth_flow_authority()
                 .start(
-                    target.clone(),
+                    meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
                     provider,
                     redirect_uri.to_string(),
                     "rest-persistent-verifier".to_string(),
@@ -9319,7 +9319,12 @@ mod tests {
                 .unwrap();
         let flow = reopened
             .oauth_flow_authority()
-            .consume(&state_token, &target, provider, redirect_uri)
+            .consume(
+                &state_token,
+                &meerkat_core::AuthCredentialIdentity::from_auth_binding(&target),
+                provider,
+                redirect_uri,
+            )
             .expect("reopened REST state must preserve persistent OAuth authority");
 
         assert_eq!(flow.pkce_verifier, "rest-persistent-verifier");
@@ -11190,6 +11195,7 @@ mod tests {
             meerkat_core::ProviderBindingConfig {
                 backend_profile: "google".to_string(),
                 auth_profile: "oauth".to_string(),
+                credential_account: None,
                 default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
                 policy: Default::default(),
                 provider_default: true,

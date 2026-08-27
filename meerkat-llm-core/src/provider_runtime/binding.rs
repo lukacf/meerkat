@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use meerkat_core::{
-    AuthError, AuthLease, AuthMetadata, AuthRefreshReason, BackendProfile, HttpAuthorizer,
-    ModelProfileWitness, Provider, ResolvedAuthKind, SessionLlmIdentity,
+    AuthCredentialIdentity, AuthError, AuthLease, AuthMetadata, AuthRefreshReason, BackendProfile,
+    HttpAuthorizer, ModelProfileWitness, Provider, ResolvedAuthKind, SessionLlmIdentity,
 };
 
 use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
@@ -86,19 +86,20 @@ impl NormalizedBackendKind {
 /// mapping.
 pub fn oauth_provider_backend_kind(
     id: meerkat_core::OAuthProviderIdentity,
-) -> NormalizedBackendKind {
+) -> Option<NormalizedBackendKind> {
     use meerkat_core::OAuthProviderIdentity;
     match id {
         OAuthProviderIdentity::AnthropicClaudeAi
-        | OAuthProviderIdentity::AnthropicConsoleApiKey => {
-            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi)
-        }
-        OAuthProviderIdentity::OpenAiChatGpt => {
-            NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend)
-        }
-        OAuthProviderIdentity::GoogleCodeAssist => {
-            NormalizedBackendKind::Google(GoogleBackendKind::GoogleCodeAssist)
-        }
+        | OAuthProviderIdentity::AnthropicConsoleApiKey => Some(NormalizedBackendKind::Anthropic(
+            AnthropicBackendKind::AnthropicApi,
+        )),
+        OAuthProviderIdentity::OpenAiChatGpt => Some(NormalizedBackendKind::OpenAi(
+            OpenAiBackendKind::ChatGptBackend,
+        )),
+        OAuthProviderIdentity::GoogleCodeAssist => Some(NormalizedBackendKind::Google(
+            GoogleBackendKind::GoogleCodeAssist,
+        )),
+        OAuthProviderIdentity::GitHubCopilot => None,
     }
 }
 
@@ -186,6 +187,7 @@ pub struct ResolvedConnection {
     pub provider: Provider,
     pub backend: NormalizedBackendKind,
     pub backend_profile: Arc<BackendProfile>,
+    pub credential_identity: AuthCredentialIdentity,
     pub auth_lease: Arc<dyn AuthLease>,
 }
 
@@ -200,6 +202,51 @@ pub struct ResolvedRealtimeTarget {
     identity: SessionLlmIdentity,
     profile: ModelProfileWitness,
     connection: ResolvedConnection,
+}
+
+/// Factory-resolved text-client construction target.
+///
+/// Unlike a bare [`ResolvedConnection`], this carries the exact model identity
+/// and registry-minted capability witness needed by account-scoped backends
+/// whose wire endpoint varies by model.
+#[derive(Clone)]
+pub struct ResolvedTextTarget {
+    identity: SessionLlmIdentity,
+    profile: ModelProfileWitness,
+    connection: ResolvedConnection,
+}
+
+impl ResolvedTextTarget {
+    pub fn new(
+        identity: SessionLlmIdentity,
+        profile: ModelProfileWitness,
+        connection: ResolvedConnection,
+    ) -> Option<Self> {
+        if !profile.matches_identity(&identity) || connection.provider != identity.provider {
+            return None;
+        }
+        Some(Self {
+            identity,
+            profile,
+            connection,
+        })
+    }
+
+    pub fn identity(&self) -> &SessionLlmIdentity {
+        &self.identity
+    }
+
+    pub fn profile(&self) -> &ModelProfileWitness {
+        &self.profile
+    }
+
+    pub fn connection(&self) -> &ResolvedConnection {
+        &self.connection
+    }
+
+    pub fn into_parts(self) -> (SessionLlmIdentity, ModelProfileWitness, ResolvedConnection) {
+        (self.identity, self.profile, self.connection)
+    }
 }
 
 impl ResolvedRealtimeTarget {
@@ -567,6 +614,7 @@ mod experimental_realtime_admission_tests {
     }
 
     fn target(model: &str, auth_binding: AuthBindingRef) -> TestResult<ResolvedRealtimeTarget> {
+        let credential_identity = AuthCredentialIdentity::from_auth_binding(&auth_binding);
         let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())?;
         let profile = registry
             .profile_witness_for_provider(Provider::OpenAI, model)
@@ -589,6 +637,7 @@ mod experimental_realtime_admission_tests {
                 options: serde_json::Value::Null,
                 server: None,
             }),
+            credential_identity,
             auth_lease: Arc::new(StaticLease::empty_lease(AuthMetadata::default(), "test")),
         };
         ResolvedRealtimeTarget::new(identity, profile, connection)

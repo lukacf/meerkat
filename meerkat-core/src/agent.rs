@@ -2517,6 +2517,8 @@ where
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     /// Runtime-backed auth lease handle (Phase 1.5-rev).
     pub(crate) auth_lease_handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
+    /// Credential authority paired with the currently active LLM route.
+    pub(crate) auth_credential_identity: Option<crate::AuthCredentialIdentity>,
     /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
     /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary
     /// to decide whether to emit the `[MCP_PENDING]` system notice.

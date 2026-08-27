@@ -29,10 +29,11 @@ printf '%s\n' \
   meerkat-hooks \
   meerkat-comms \
   meerkat-runtime \
+  meerkat-copilot \
   meerkat-anthropic \
+  meerkat-openai \
   meerkat-gemini \
   meerkat-providers \
-  meerkat-openai \
   meerkat-tools \
   meerkat-session \
   meerkat-client \

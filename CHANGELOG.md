@@ -28,6 +28,27 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Rust auth/provider construction surfaces gained account-aware fields and
+  variants.** Exact-pinned downstreams must update exhaustive matches and
+  struct literals for `AuthCredentialIdentity`, `CredentialAccountId`,
+  `CredentialAccountRef`, `TokenKey`, `ProviderAuthPersistence`,
+  `HttpAuthorizationReceipt`, `HttpAuthorizer::prepare_request`,
+  `HttpAuthorizer::authorize_with_receipt`,
+  `HttpAuthorizer::observe_response_with_receipt`, `ProviderBinding`, `ProviderBindingConfig`,
+  `ResolvedConnection`, `SessionLlmRequestPolicy`, `OAuthProviderIdentity`,
+  `PersistedAuthMode`, `LoginStartParams`, `LoginCompleteParams`,
+  `DeviceStartParams`, `DeviceCompleteParams`, `WireLoginStart`,
+  `WireLoginReady`, `WireDeviceStart`, `WireDeviceCompleteResult`, and
+  generated Web SDK `WireOAuthProvider`.
+
+### Added
+
+- Added native GitHub Copilot device authentication and account-scoped CAPI
+  routing for OpenAI Responses/Chat Completions, Anthropic Messages, and
+  Gemini Chat Completions, without a Copilot SDK or CLI dependency.
+
 ## [0.8.30] - 2026-08-26
 
 ### Breaking

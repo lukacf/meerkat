@@ -3231,7 +3231,7 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
-        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}, identity fields: {}, {}, {}",
+        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}, identity fields: {}, {}, {}, {}, {}",
         contract.phase.marker_field,
         contract.phase.obligation_field,
         contract.expires_at.marker_field,
@@ -3240,9 +3240,11 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         contract.generation.obligation_field,
         contract.credential_published_at_millis.marker_field,
         contract.credential_published_at_millis.obligation_field,
+        contract.credential_kind_field,
         contract.realm_field,
         contract.binding_field,
         contract.profile_field,
+        contract.account_field,
     )?;
     writeln!(&mut out, "// Durable marker relation: {relation_label}")?;
     writeln!(&mut out, "#![allow(clippy::bool_comparison)]")?;
@@ -3285,6 +3287,11 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
     )?;
     writeln!(
         &mut out,
+        "const FIELD_CREDENTIAL_KIND: &str = {:?};",
+        contract.credential_kind_field
+    )?;
+    writeln!(
+        &mut out,
         "const FIELD_REALM: &str = {:?};",
         contract.realm_field
     )?;
@@ -3297,6 +3304,11 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         &mut out,
         "const FIELD_PROFILE: &str = {:?};",
         contract.profile_field
+    )?;
+    writeln!(
+        &mut out,
+        "const FIELD_ACCOUNT: &str = {:?};",
+        contract.account_field
     )?;
     writeln!(
         &mut out,
@@ -3458,12 +3470,25 @@ pub(crate) fn encode_marker_value(marker: DurableAuthLifecycleMarker) -> serde_j
     map.insert(FIELD_VERSION.to_string(), serde_json::Value::from(SCHEMA_VERSION));
     map.insert(FIELD_AUTHORITY.to_string(), serde_json::Value::String(AUTHORITY.to_string()));
     map.insert(FIELD_PROTOCOL.to_string(), serde_json::Value::String(PROTOCOL.to_string()));
-    map.insert(FIELD_REALM.to_string(), serde_json::Value::String(marker.token_key.realm.as_str().to_string()));
-    map.insert(FIELD_BINDING.to_string(), serde_json::Value::String(marker.token_key.binding.as_str().to_string()));
-    if let Some(profile) = marker.token_key.profile.as_ref() {
-        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::String(profile.as_str().to_string()));
-    } else {
-        map.insert(FIELD_PROFILE.to_string(), serde_json::Value::Null);
+    map.insert(FIELD_REALM.to_string(), serde_json::Value::String(marker.token_key.realm().as_str().to_string()));
+    match marker.token_key.credential_identity() {
+        crate::AuthCredentialIdentity::Binding(binding) => {
+            map.insert(FIELD_CREDENTIAL_KIND.to_string(), serde_json::Value::String("binding".to_string()));
+            map.insert(FIELD_BINDING.to_string(), serde_json::Value::String(binding.binding.as_str().to_string()));
+            map.insert(
+                FIELD_PROFILE.to_string(),
+                binding.profile.as_ref().map_or(serde_json::Value::Null, |profile| {
+                    serde_json::Value::String(profile.as_str().to_string())
+                }),
+            );
+            map.insert(FIELD_ACCOUNT.to_string(), serde_json::Value::Null);
+        }
+        crate::AuthCredentialIdentity::Account(account) => {
+            map.insert(FIELD_CREDENTIAL_KIND.to_string(), serde_json::Value::String("account".to_string()));
+            map.insert(FIELD_BINDING.to_string(), serde_json::Value::Null);
+            map.insert(FIELD_PROFILE.to_string(), serde_json::Value::Null);
+            map.insert(FIELD_ACCOUNT.to_string(), serde_json::Value::String(account.account.as_str().to_string()));
+        }
     }
     map.insert(FIELD_PHASE.to_string(), serde_json::Value::String(phase_to_wire(marker.phase).to_string()));
     map.insert(FIELD_GENERATION.to_string(), serde_json::Value::from(marker.generation));
@@ -3474,14 +3499,35 @@ pub(crate) fn encode_marker_value(marker: DurableAuthLifecycleMarker) -> serde_j
 
 pub(crate) fn decode_marker_value(value: &serde_json::Value) -> Option<DurableAuthLifecycleMarker> {
     (value.get(FIELD_PUBLISHED)?.as_bool()? == true).then_some(())?;
-    (value.get(FIELD_VERSION)?.as_u64()? == SCHEMA_VERSION).then_some(())?;
+    let version = value.get(FIELD_VERSION)?.as_u64()?;
+    matches!(version, 4 | SCHEMA_VERSION).then_some(())?;
     (value.get(FIELD_AUTHORITY)?.as_str()? == AUTHORITY).then_some(())?;
     (value.get(FIELD_PROTOCOL)?.as_str()? == PROTOCOL).then_some(())?;
-    let token_key = TokenKey::parse_with_profile(
-        value.get(FIELD_REALM)?.as_str()?,
-        value.get(FIELD_BINDING)?.as_str()?,
-        value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),
-    ).ok()?;
+    let realm = crate::RealmId::parse(value.get(FIELD_REALM)?.as_str()?).ok()?;
+    let token_key = if version == 4 {
+        TokenKey::parse_with_profile(
+            realm.as_str(),
+            value.get(FIELD_BINDING)?.as_str()?,
+            value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),
+        ).ok()?
+    } else {
+        match value.get(FIELD_CREDENTIAL_KIND)?.as_str()? {
+            "binding" => TokenKey::parse_with_profile(
+                realm.as_str(),
+                value.get(FIELD_BINDING)?.as_str()?,
+                value.get(FIELD_PROFILE).and_then(serde_json::Value::as_str),
+            ).ok()?,
+            "account" => TokenKey::from_credential_identity(
+                &crate::AuthCredentialIdentity::Account(crate::CredentialAccountRef {
+                    realm,
+                    account: crate::CredentialAccountId::parse(
+                        value.get(FIELD_ACCOUNT)?.as_str()?,
+                    ).ok()?,
+                }),
+            ),
+            _ => return None,
+        }
+    };
     Some(DurableAuthLifecycleMarker {
         token_key,
         phase: phase_from_wire(value.get(FIELD_PHASE)?)?,

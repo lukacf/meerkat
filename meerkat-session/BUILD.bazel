@@ -48,6 +48,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-session",
@@ -97,6 +98,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-session",
@@ -138,6 +140,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-session",
@@ -179,6 +182,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-session",
@@ -224,6 +228,7 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -285,6 +290,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_BIN_NAME": "ephemeral_contract",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -344,6 +350,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_BIN_NAME": "persistence_compat",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -403,6 +410,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_BIN_NAME": "regression_lifecycle",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "fast",
@@ -462,6 +470,7 @@ rust_test(
         "CARGO_PKG_VERSION": "0.8.30",
         "CARGO_BIN_NAME": "session_store_append_only_trybuild",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
         "trybuild",

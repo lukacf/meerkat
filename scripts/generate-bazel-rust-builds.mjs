@@ -61,6 +61,7 @@ const generatedAuthorityBridgeSymbolSuffix = "bazel_private_generated_authority_
 const generatedAuthorityBridgePackageKeys = new Set([
   "meerkat-core",
   "meerkat-live",
+  "meerkat-session",
   "meerkat-runtime",
   "meerkat-mob",
 ]);

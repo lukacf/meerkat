@@ -226,6 +226,20 @@ prepend_python_runtime() {
   fi
 }
 
+configure_executor_cargo_home() {
+  local test_tmpdir="${TEST_TMPDIR:-}"
+  if [[ -z "${test_tmpdir}" ]]; then
+    echo "error: TEST_TMPDIR is required to derive executor-owned CARGO_HOME" >&2
+    exit 1
+  fi
+
+  export CARGO_HOME="${test_tmpdir}/cargo-home"
+  if ! mkdir -p "${CARGO_HOME}" || [[ ! -d "${CARGO_HOME}" || ! -w "${CARGO_HOME}" ]]; then
+    echo "error: executor-owned CARGO_HOME is not writable: ${CARGO_HOME}" >&2
+    exit 1
+  fi
+}
+
 install_wasm_rust_sysroot_overlay() {
   if ! command -v rustc >/dev/null 2>&1; then
     return 0
@@ -354,6 +368,7 @@ if [[ "${MEERKAT_E2E_SMOKE_TURBO_DEFAULTS:-}" == "1" ]]; then
 fi
 
 workspace_root="$(workspace_root_from_runfiles)"
+configure_executor_cargo_home
 prepend_runfile_tool_dir npm
 prepend_runfile_tool_dir node
 prepend_runfile_tool_dir cargo

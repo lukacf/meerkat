@@ -32,12 +32,14 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON: ${{ secrets.MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON }}
         run: |
           for key in \
             BUILDBUDDY_API_KEY \
             ANTHROPIC_API_KEY \
             OPENAI_API_KEY \
+            GEMINI_API_KEY \
             MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON; do
             if [[ -z "${!key}" ]]; then
               echo "::error::Required repository secret ${key} is not configured."
@@ -58,16 +60,17 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON: ${{ secrets.MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON }}
         run: |
-          provider_overrides="ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY}"
+          provider_overrides="ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY},GEMINI_API_KEY=${GEMINI_API_KEY}"
           oauth_override_base64="$(
             printf 'MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON=%s' \
               "${MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON}" | base64 | tr -d '\n'
           )"
           echo "::add-mask::${provider_overrides}"
           echo "::add-mask::${oauth_override_base64}"
-          unset ANTHROPIC_API_KEY OPENAI_API_KEY MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON
+          unset ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON
           MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES="${provider_overrides}" \
             MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64="${oauth_override_base64}" \
             scripts/buildbuddy-dev e2e-smoke-turbo-s

@@ -674,6 +674,8 @@ rust_test(
         ":package_runfiles",
         "//:github_workflows",
         "//:repo_governance_files",
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
@@ -685,6 +687,7 @@ rust_test(
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+        "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "xtask",

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: verify-release-asset-provenance <artifact-dir> <release-tag> [signer-workflow]
+
+Verify every release archive in artifact-dir against GitHub's signed build
+provenance. The certificate-bound source repository digest must equal the
+commit named by release-tag. signer-workflow defaults to the release workflow.
+EOF
+  exit 2
+}
+
+[[ "$#" -ge 2 && "$#" -le 3 ]] || usage
+
+artifact_dir="$1"
+release_tag="$2"
+signer_workflow="${3:-github.com/${GITHUB_REPOSITORY:-lukacf/meerkat}/.github/workflows/release.yml}"
+repository="${GITHUB_REPOSITORY:-lukacf/meerkat}"
+
+[[ -d "${artifact_dir}" ]] || {
+  echo "release artifact directory does not exist: ${artifact_dir}" >&2
+  exit 1
+}
+[[ "${release_tag}" == v* ]] || {
+  echo "release tag must start with v: ${release_tag}" >&2
+  exit 1
+}
+command -v gh >/dev/null 2>&1 || {
+  echo "gh is required to verify release attestations" >&2
+  exit 1
+}
+
+release_sha="$(git rev-parse "${release_tag}^{commit}")"
+[[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "release tag did not resolve to a commit: ${release_tag}" >&2
+  exit 1
+}
+
+archives=()
+while IFS= read -r -d '' archive; do
+  archives+=("${archive}")
+done < <(find "${artifact_dir}" -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0)
+
+if [[ "${#archives[@]}" -eq 0 ]]; then
+  echo "no release archives found under ${artifact_dir}" >&2
+  exit 1
+fi
+
+for archive in "${archives[@]}"; do
+  gh attestation verify "${archive}" \
+    --repo "${repository}" \
+    --source-digest "${release_sha}" \
+    --signer-workflow "${signer_workflow}" \
+    >/dev/null
+  echo "verified release provenance: $(basename "${archive}") <- ${release_sha}"
+done
+
+echo "Verified ${#archives[@]} release archive attestations for ${release_tag} at ${release_sha}"

@@ -1025,6 +1025,12 @@ jobs:
           print(f"Verified {len(actual)} macOS/Linux release archives")
           PY
 
+      - name: Verify exact-tag macOS/Linux build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/verify-release-asset-provenance release-artifacts "${RELEASE_TAG}"
+
       # Never churn already-published archives on a rerun. Missing archives
       # are still added, while the final publisher handles Windows later.
       - name: Publish macOS/Linux release assets
@@ -1222,6 +1228,12 @@ jobs:
             --source-dir release-artifacts \
             --output-dir prepared-release-artifacts \
             --release-tag "${RELEASE_TAG}"
+
+      - name: Verify exact-tag release build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: scripts/verify-release-asset-provenance prepared-release-artifacts "${RELEASE_TAG}"
 
       - name: Publish release archives
         uses: softprops/action-gh-release@v2

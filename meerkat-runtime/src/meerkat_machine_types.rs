@@ -1221,6 +1221,8 @@ pub enum SupervisorBridgeCommandKind {
     RevokeHost,
     MaterializeMember,
     ReleaseMember,
+    CreateForkedParticipant,
+    RevokeForkedParticipant,
     InstallPeerTrust,
     RemovePeerTrust,
     HostStatus,
@@ -1254,6 +1256,8 @@ impl SupervisorBridgeCommandKind {
         Self::RevokeHost,
         Self::MaterializeMember,
         Self::ReleaseMember,
+        Self::CreateForkedParticipant,
+        Self::RevokeForkedParticipant,
         Self::InstallPeerTrust,
         Self::RemovePeerTrust,
         Self::HostStatus,
@@ -1289,6 +1293,8 @@ impl SupervisorBridgeCommandKind {
             Self::RevokeHost => "RevokeHost",
             Self::MaterializeMember => "MaterializeMember",
             Self::ReleaseMember => "ReleaseMember",
+            Self::CreateForkedParticipant => "CreateForkedParticipant",
+            Self::RevokeForkedParticipant => "RevokeForkedParticipant",
             Self::InstallPeerTrust => "InstallPeerTrust",
             Self::RemovePeerTrust => "RemovePeerTrust",
             Self::HostStatus => "HostStatus",
@@ -1329,6 +1335,8 @@ impl SupervisorBridgeCommandKind {
             | Self::RevokeHost
             | Self::MaterializeMember
             | Self::ReleaseMember
+            | Self::CreateForkedParticipant
+            | Self::RevokeForkedParticipant
             | Self::InstallPeerTrust
             | Self::RemovePeerTrust
             | Self::HostStatus
@@ -1379,6 +1387,8 @@ impl SupervisorBridgeCommandKind {
             | Self::RevokeHost
             | Self::MaterializeMember
             | Self::ReleaseMember
+            | Self::CreateForkedParticipant
+            | Self::RevokeForkedParticipant
             | Self::InstallPeerTrust
             | Self::RemovePeerTrust
             | Self::HostStatus => SupervisorBridgeCommandRealization::RealizedOffDrain {

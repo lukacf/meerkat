@@ -7834,7 +7834,7 @@ impl MobHostActor {
         candidate: &PeerInputCandidate,
         payload: BridgeCreateForkedParticipantPayload,
     ) {
-        if payload.protocol_version != BridgeProtocolVersion::V6 {
+        if !payload.protocol_version.supports_forked_participants() {
             self.send_failure(
                 candidate,
                 BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
@@ -7933,7 +7933,7 @@ impl MobHostActor {
         candidate: &PeerInputCandidate,
         payload: BridgeRevokeForkedParticipantPayload,
     ) {
-        if payload.protocol_version != BridgeProtocolVersion::V6 {
+        if !payload.protocol_version.supports_forked_participants() {
             self.send_failure(
                 candidate,
                 BridgeRejectionCause::ForkedParticipantProtocolUnsupported,

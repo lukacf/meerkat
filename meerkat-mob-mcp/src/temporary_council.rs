@@ -15,8 +15,10 @@
 //! * `MobMachine`, the member machines, and `ForkedParticipantLifecycleMachine`
 //!   remain the canonical lifecycle owners, and live member truth is always
 //!   read back from [`MobHandle`] rather than mirrored into the council record;
-//! * capability custody is held BY REFERENCE (the deterministic request id),
-//!   so the capability store stays the single owner of bearer material.
+//! * capability lifecycle remains source-owned, while the council record
+//!   deliberately persists the immutable capability it holds so remote-owner
+//!   cleanup can survive coordinator loss. Debug output redacts the bearer and
+//!   no public wire projection exposes it.
 //!
 //! # Cancellation and crash safety
 //!
@@ -28,8 +30,8 @@
 //! request is rejected.
 //!
 //! A process crash leaves a record with no result. That is recovered by
-//! [`TemporaryCouncilCoordinator::recover_unfinished`] (also run before every
-//! council operation) as a typed
+//! [`TemporaryCouncilCoordinator::recover_unfinished`] (and same-id admission
+//! recovery) as a typed
 //! [`TemporaryCouncilExitReason::CoordinatorInterrupted`] terminal plus
 //! cleanup. It is never silently re-executed, because re-execution would
 //! duplicate model work and result delivery.
@@ -41,8 +43,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
 use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
-use meerkat_core::types::ContentInput;
 use meerkat_core::types::HandlingMode;
+use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::forked_participant::{
     ForkedParticipantOperationScope, ForkedParticipantRef, ForkedParticipantReusePolicy,
     MAX_FORKED_PARTICIPANT_TTL,
@@ -73,8 +75,8 @@ use meerkat_mob::temporary_council::{
     TemporaryCouncilSelectedExchange, TemporaryCouncilStructuredContractIdentity,
 };
 use meerkat_mob::{
-    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobHandle, MobId, ProfileBinding,
-    ProfileName, WorkOrigin, WorkSpec,
+    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobHandle, MobId, MobStoreError,
+    ProfileBinding, ProfileName, WorkOrigin, WorkSpec,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -105,11 +107,13 @@ pub const MAX_TEMPORARY_COUNCIL_SELECTED_INDICES: usize = 32;
 /// for a later sweep.
 pub const TEMPORARY_COUNCIL_CLEANUP_BUDGET: Duration = Duration::from_secs(30);
 
-/// Lease a coordinator claim is granted for, and renews on every commit.
+/// Minimum renewal window for a coordinator claim.
 ///
 /// A second process may only take a council over after observing this lease
 /// expired; the takeover advances the machine's claim epoch, which fences the
-/// previous executor.
+/// previous executor. Active execution is protected through the council's
+/// absolute deadline plus its cleanup budget, so a healthy bounded turn cannot
+/// outlive its claim.
 pub const TEMPORARY_COUNCIL_CLAIM_LEASE: Duration = Duration::from_secs(120);
 
 /// UUIDv5 namespace for deterministic council delivery correlation ids.
@@ -644,12 +648,12 @@ struct CanonicalCouncilFingerprint<'a> {
     temporary_mob_id: &'a str,
     definition_digest: String,
     topic_digest: String,
-    participants: Vec<serde_json::Value>,
-    deadline: serde_json::Value,
+    participants: &'a [TemporaryCouncilParticipantSpec],
+    deadline: &'a TemporaryCouncilDeadline,
     max_rounds: u32,
     max_exchanges: u32,
     max_result_bytes: u64,
-    merge_back: serde_json::Value,
+    merge_back: &'a MergeBackPolicy,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -890,26 +894,18 @@ fn validate(request: &TemporaryCouncilRequest) -> Result<ValidatedRequest, Tempo
 
     let definition_bytes = serde_json::to_vec(&definition)
         .map_err(|error| TemporaryCouncilError::invalid(error.to_string()))?;
-    let participant_shapes = request
-        .participants
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| TemporaryCouncilError::invalid(error.to_string()))?;
     let shape = CanonicalCouncilFingerprint {
         fingerprint_version: TEMPORARY_COUNCIL_FINGERPRINT_VERSION,
         council_id: council_id.as_str(),
         temporary_mob_id: temporary_mob_id.as_str(),
         definition_digest: digest(&definition_bytes),
         topic_digest: digest(request.topic.as_bytes()),
-        participants: participant_shapes,
-        deadline: serde_json::to_value(&bounds.deadline)
-            .map_err(|error| TemporaryCouncilError::invalid(error.to_string()))?,
+        participants: &request.participants,
+        deadline: &bounds.deadline,
         max_rounds: bounds.max_rounds,
         max_exchanges: bounds.max_exchanges,
         max_result_bytes: bounds.max_result_bytes as u64,
-        merge_back: serde_json::to_value(&request.merge_back)
-            .map_err(|error| TemporaryCouncilError::invalid(error.to_string()))?,
+        merge_back: &request.merge_back,
     };
     let fingerprint = format!(
         "tcf1:{}",
@@ -1115,11 +1111,18 @@ pub(crate) struct InflightCouncil {
     pub(crate) completion: tokio::sync::watch::Receiver<Option<CouncilPublish>>,
 }
 
+pub(crate) enum InflightReservation {
+    Owned,
+    Existing {
+        fingerprint: String,
+        completion: tokio::sync::watch::Receiver<Option<CouncilPublish>>,
+    },
+}
+
 /// Trusted in-process Rust API for temporary councils.
 ///
-/// Obtained from [`MobMcpState::temporary_council`]. There is deliberately no
-/// RPC/REST/SDK/CLI/public-MCP surface yet: this phase lands the orchestration
-/// core only.
+/// Obtained from [`MobMcpState::temporary_council`]. RPC, REST, CLI, public MCP,
+/// and generated SDK surfaces are thin adapters over this coordinator.
 #[derive(Clone)]
 pub struct TemporaryCouncilCoordinator {
     state: Arc<MobMcpState>,
@@ -1181,20 +1184,58 @@ impl TemporaryCouncilCoordinator {
         // here: a replay of a lost response may legitimately arrive after the
         // original deadline, and must return the sealed result.
         let validated = validate(&request)?;
-        let admission = {
-            // One admission decision at a time, and the recovery sweep runs
-            // INSIDE it: a record another caller has just inserted but not yet
-            // registered must never look like a crashed council to the sweep.
-            let _admission = self.state.temporary_council_admission.lock().await;
-            // Pre-operation recovery: a crashed council converges to a typed
-            // interrupted terminal BEFORE any caller can observe its id.
-            self.recover_unfinished_locked().await?;
-            self.admit_locked(&validated, host_bootstrap).await?
+        let key = validated.request.council_id.as_str().to_string();
+        let (owner_tx, candidate_rx) = tokio::sync::watch::channel(None);
+        let (mut completion, owned) = match self.state.temporary_council_reserve_inflight(
+            key.clone(),
+            validated.fingerprint.clone(),
+            candidate_rx.clone(),
+        ) {
+            InflightReservation::Owned => (candidate_rx, true),
+            InflightReservation::Existing {
+                fingerprint,
+                completion,
+            } => {
+                if fingerprint != validated.fingerprint {
+                    return Err(TemporaryCouncilError::ConflictingRequest {
+                        council_id: validated.request.council_id.clone(),
+                        stored_fingerprint: fingerprint,
+                        presented_fingerprint: validated.fingerprint.clone(),
+                    });
+                }
+                (completion, false)
+            }
         };
-        let mut completion = match admission {
-            Admission::Replay(outcome) => return Ok(*outcome),
-            Admission::Join(completion) => completion,
-        };
+        if owned {
+            // Registration happens atomically before any await. The guard
+            // removes it if admission is cancelled or fails before ownership
+            // transfers to the spawned execution task.
+            let mut guard = InflightGuard::new(self.state.clone(), key.clone());
+            match self
+                .admit_owned(
+                    &validated,
+                    host_bootstrap,
+                    key,
+                    owner_tx.clone(),
+                    completion.clone(),
+                )
+                .await
+            {
+                Ok(Admission::Replay(outcome)) => {
+                    let outcome = *outcome;
+                    let _ = owner_tx.send(Some(Arc::new(Ok(outcome.clone()))));
+                    return Ok(outcome);
+                }
+                Ok(Admission::Join(owned_completion)) => {
+                    completion = owned_completion;
+                    guard.disarm();
+                }
+                Err(error) => {
+                    let _ = owner_tx.send(Some(Arc::new(Err(error.clone()))));
+                    return Err(error);
+                }
+            }
+        }
 
         // Awaiting a watch channel is cancel-safe for the CALLER only: the
         // owned task holds the sender and keeps running if this future drops.
@@ -1217,26 +1258,17 @@ impl TemporaryCouncilCoordinator {
         }
     }
 
-    /// Admission body. The caller MUST already hold the admission lock.
-    async fn admit_locked(
+    /// Admission body for a caller that owns the process-local reservation.
+    async fn admit_owned(
         &self,
         validated: &ValidatedRequest,
         host_bootstrap: TemporaryCouncilHostBootstrap,
+        key: String,
+        tx: tokio::sync::watch::Sender<Option<CouncilPublish>>,
+        rx: tokio::sync::watch::Receiver<Option<CouncilPublish>>,
     ) -> Result<Admission, TemporaryCouncilError> {
         let mut validated = validated.clone();
         let council_id = validated.request.council_id.clone();
-        let key = council_id.as_str().to_string();
-
-        if let Some(existing) = self.state.temporary_council_inflight_entry(&key) {
-            if existing.0 != validated.fingerprint {
-                return Err(TemporaryCouncilError::ConflictingRequest {
-                    council_id,
-                    stored_fingerprint: existing.0,
-                    presented_fingerprint: validated.fingerprint.clone(),
-                });
-            }
-            return Ok(Admission::Join(existing.1));
-        }
 
         let store = self.store();
         let record = match store
@@ -1275,15 +1307,43 @@ impl TemporaryCouncilCoordinator {
                         replayed: true,
                     })));
                 }
-                // Unfinished with no in-flight owner: the recovery sweep above
-                // already converged every such record, so reaching here means
-                // custody changed under us. Refuse rather than re-execute.
-                return Err(TemporaryCouncilError::CoordinatorUnavailable {
-                    detail: format!(
-                        "council {council_id} is durably unfinished but has no owning task; a \
-                         recovery sweep must seal it before it can be observed"
-                    ),
-                });
+                // Same-id admission may recover exactly this record. It never
+                // sweeps unrelated councils or exercises realm-wide admin
+                // authority through the run surface.
+                self.recover_record(existing).await?;
+                let recovered = store
+                    .load(&council_id)
+                    .await
+                    .map_err(TemporaryCouncilError::store)?
+                    .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+                        detail: format!("council {council_id} disappeared after same-id recovery"),
+                    })?;
+                let result = recovered.result.ok_or_else(|| {
+                    TemporaryCouncilError::CoordinatorUnavailable {
+                        detail: format!(
+                            "council {council_id} recovery completed without sealing a result"
+                        ),
+                    }
+                })?;
+                let cleanup = recovered
+                    .cleanup
+                    .unwrap_or_else(|| TemporaryCouncilCleanupReceipt {
+                        attempted_at: recovered.updated_at,
+                        attempts: 0,
+                        temporary_mob_destroyed: false,
+                        released_participants: Vec::new(),
+                        revoked_participants: Vec::new(),
+                        debts: vec![TemporaryCouncilCleanupDebt {
+                            subject: format!("council:{council_id}"),
+                            detail: "same-id recovery sealed no cleanup receipt".to_string(),
+                        }],
+                        budget_exhausted: false,
+                    });
+                return Ok(Admission::Replay(Box::new(TemporaryCouncilOutcome {
+                    result,
+                    cleanup,
+                    replayed: true,
+                })));
             }
             None => {
                 // NEW admission only: this is where a deadline is resolved and
@@ -1344,9 +1404,7 @@ impl TemporaryCouncilCoordinator {
             }
         };
         record.machine_state = next_state;
-        record.claim_lease_expires_at = self.state.temporary_council_now()
-            + chrono::Duration::from_std(TEMPORARY_COUNCIL_CLAIM_LEASE)
-                .unwrap_or_else(|_| chrono::Duration::seconds(120));
+        record.claim_lease_expires_at = active_claim_lease_expiry(&self.state, record.deadline);
         // The deadline the record carries is authority; a takeover inherits it.
         validated.deadline = Some(record.deadline);
         let record = store
@@ -1354,20 +1412,10 @@ impl TemporaryCouncilCoordinator {
             .await
             .map_err(TemporaryCouncilError::store)?;
 
-        let (tx, rx) = tokio::sync::watch::channel(None);
-        self.state.temporary_council_register_inflight(
-            key.clone(),
-            validated.fingerprint.clone(),
-            rx.clone(),
-        );
-
         let state = self.state.clone();
         // OWNED task: the caller's await may be dropped; this may not.
         tokio::spawn(async move {
-            let guard = InflightGuard {
-                state: state.clone(),
-                key,
-            };
+            let guard = InflightGuard::new(state.clone(), key);
             let council_id = record.council_id.clone();
             let supervised = {
                 let run = CouncilRun {
@@ -1413,14 +1461,6 @@ impl TemporaryCouncilCoordinator {
     pub async fn recover_unfinished(
         &self,
     ) -> Result<Vec<TemporaryCouncilRecoveryReport>, TemporaryCouncilError> {
-        let _admission = self.state.temporary_council_admission.lock().await;
-        self.recover_unfinished_locked().await
-    }
-
-    /// Recovery body. The caller MUST already hold the admission lock.
-    async fn recover_unfinished_locked(
-        &self,
-    ) -> Result<Vec<TemporaryCouncilRecoveryReport>, TemporaryCouncilError> {
         let store = self.store();
         let unfinished = store
             .list_unfinished()
@@ -1428,14 +1468,50 @@ impl TemporaryCouncilCoordinator {
             .map_err(TemporaryCouncilError::store)?;
         let mut reports = Vec::new();
         for record in unfinished {
-            if self
-                .state
-                .temporary_council_inflight_entry(record.council_id.as_str())
-                .is_some()
-            {
+            let key = record.council_id.as_str().to_string();
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            if matches!(
+                self.state.temporary_council_reserve_inflight(
+                    key.clone(),
+                    record.request_fingerprint.clone(),
+                    rx,
+                ),
+                InflightReservation::Existing { .. }
+            ) {
                 continue;
             }
-            reports.push(self.recover_record(record).await?);
+            let _guard = InflightGuard::new(self.state.clone(), key);
+            match self.recover_record(record).await {
+                Ok(report) => {
+                    let publication = match store
+                        .load(&report.council_id)
+                        .await
+                        .map_err(TemporaryCouncilError::store)
+                    {
+                        Ok(Some(record)) => replay_outcome(record),
+                        Ok(None) => Err(TemporaryCouncilError::CoordinatorUnavailable {
+                            detail: format!(
+                                "council {} disappeared after recovery",
+                                report.council_id
+                            ),
+                        }),
+                        Err(error) => Err(error),
+                    };
+                    let _ = tx.send(Some(Arc::new(publication.clone())));
+                    publication?;
+                    reports.push(report);
+                }
+                Err(error @ TemporaryCouncilError::HeldByAnotherCoordinator { .. }) => {
+                    // A live foreign coordinator owns this record. Its lease
+                    // expiry will admit takeover later; unrelated recovery
+                    // work must continue.
+                    let _ = tx.send(Some(Arc::new(Err(error))));
+                }
+                Err(error) => {
+                    let _ = tx.send(Some(Arc::new(Err(error.clone()))));
+                    return Err(error);
+                }
+            }
         }
         Ok(reports)
     }
@@ -1484,9 +1560,10 @@ impl TemporaryCouncilCoordinator {
             }
         };
         record.machine_state = next_state;
-        record.claim_lease_expires_at = self.state.temporary_council_now()
-            + chrono::Duration::from_std(TEMPORARY_COUNCIL_CLAIM_LEASE)
-                .unwrap_or_else(|_| chrono::Duration::seconds(120));
+        record.claim_lease_expires_at = bounded_time_add(
+            self.state.temporary_council_now(),
+            TEMPORARY_COUNCIL_CLAIM_LEASE,
+        );
         record = store
             .commit(&record)
             .await
@@ -1636,15 +1713,62 @@ enum Admission {
     Join(tokio::sync::watch::Receiver<Option<CouncilPublish>>),
 }
 
+fn replay_outcome(
+    record: TemporaryCouncilRecord,
+) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
+    let council_id = record.council_id.clone();
+    let result = record
+        .result
+        .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+            detail: format!("council {council_id} recovery completed without sealing a result"),
+        })?;
+    let cleanup = record
+        .cleanup
+        .unwrap_or_else(|| TemporaryCouncilCleanupReceipt {
+            attempted_at: record.updated_at,
+            attempts: 0,
+            temporary_mob_destroyed: false,
+            released_participants: Vec::new(),
+            revoked_participants: Vec::new(),
+            debts: vec![TemporaryCouncilCleanupDebt {
+                subject: format!("council:{council_id}"),
+                detail: "no cleanup attempt is durably recorded".to_string(),
+            }],
+            budget_exhausted: false,
+        });
+    Ok(TemporaryCouncilOutcome {
+        result,
+        cleanup,
+        replayed: true,
+    })
+}
+
 /// Removes the single-flight registration even when the owned task unwinds.
 struct InflightGuard {
     state: Arc<MobMcpState>,
     key: String,
+    armed: bool,
+}
+
+impl InflightGuard {
+    fn new(state: Arc<MobMcpState>, key: String) -> Self {
+        Self {
+            state,
+            key,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.state.temporary_council_remove_inflight(&self.key);
+        if self.armed {
+            self.state.temporary_council_remove_inflight(&self.key);
+        }
     }
 }
 
@@ -1790,6 +1914,8 @@ impl CouncilRun {
         )?;
         reject_if_fenced(&self.record.council_id, &effects)?;
         self.record.machine_state = next;
+        self.record.claim_lease_expires_at =
+            active_claim_lease_expiry(&self.state, self.record.deadline);
         self.record = store
             .commit(&self.record)
             .await
@@ -1853,6 +1979,8 @@ impl CouncilRun {
     }
 
     async fn commit(&mut self) -> Result<(), TemporaryCouncilError> {
+        self.record.claim_lease_expires_at =
+            active_claim_lease_expiry(&self.state, self.record.deadline);
         self.record = self
             .state
             .temporary_council_store()
@@ -1883,7 +2011,12 @@ impl CouncilRun {
             .is_err()
             && let Err(error) = self
                 .state
-                .mob_create_definition(self.validated.definition.clone())
+                .mob_create_definition_with_owner_bridge_session(
+                    self.validated.definition.clone(),
+                    SessionId::new(),
+                    false,
+                    false,
+                )
                 .await
         {
             return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
@@ -1941,9 +2074,11 @@ impl CouncilRun {
                 }
             };
 
-            // The capability must outlive the council so cleanup can still
-            // revoke or release it; it is capped by the capability layer.
+            // Cleanup starts after the council deadline, so capability custody
+            // includes the configured cleanup budget. The capability layer's
+            // absolute maximum remains authoritative if that margin cannot fit.
             let ttl = remaining
+                .saturating_add(self.state.temporary_council_cleanup_budget())
                 .max(Duration::from_secs(60))
                 .min(MAX_FORKED_PARTICIPANT_TTL);
             // 2a. Persist the INTENT to acquire BEFORE calling the source
@@ -2176,6 +2311,42 @@ struct BoundedExchange {
     session_id: meerkat_core::types::SessionId,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum DeliveryFailure {
+    #[error("the council deadline elapsed before the turn was {phase}")]
+    DeadlineExceeded { phase: &'static str },
+    #[error("temporary mob is unavailable: {detail}")]
+    MobUnavailable { detail: String },
+    #[error("delivery identity is not canonical: {detail}")]
+    InvalidDeliveryIdentity { detail: String },
+    #[error("bounded result spec rejected: {detail}")]
+    InvalidResultSpec { detail: String },
+    #[error("turn admission failed: {detail}")]
+    Admission { detail: String },
+    #[error("turn failed: {detail}")]
+    Turn { detail: String },
+    #[error("turn did not complete: {status:?}")]
+    Incomplete {
+        status: meerkat_mob::BoundedHelperResultStatus,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MergeTurnError {
+    #[error("{identity} is not a council participant")]
+    NotParticipant { identity: AgentIdentity },
+    #[error("the council deadline elapsed before merge-back")]
+    DeadlineExceeded,
+    #[error("merge {stage} custody could not be persisted: {source}")]
+    Persistence {
+        stage: &'static str,
+        #[source]
+        source: TemporaryCouncilError,
+    },
+    #[error(transparent)]
+    Delivery(#[from] DeliveryFailure),
+}
+
 impl CouncilRun {
     /// 4. Run bounded sequential rounds.
     ///
@@ -2224,7 +2395,7 @@ impl CouncilRun {
 
                 let content = self.round_prompt(round, &custody);
                 let injected = self.injected_context();
-                let outcome = match self
+                let (outcome, deadline_exceeded) = match self
                     .deliver_bounded_turn(
                         &custody.target_identity,
                         content,
@@ -2240,17 +2411,27 @@ impl CouncilRun {
                     Ok(exchange) => {
                         completed_in_round = true;
                         sequence = sequence.saturating_add(1);
-                        TemporaryCouncilExchangeOutcome::Completed {
-                            text: exchange.text,
-                            truncated: exchange.truncated,
-                            session_id: exchange.session_id,
-                            completed_at: self.state.temporary_council_now(),
-                        }
+                        (
+                            TemporaryCouncilExchangeOutcome::Completed {
+                                text: exchange.text,
+                                truncated: exchange.truncated,
+                                session_id: exchange.session_id,
+                                completed_at: self.state.temporary_council_now(),
+                            },
+                            false,
+                        )
                     }
-                    Err(detail) => TemporaryCouncilExchangeOutcome::Failed {
-                        detail: detail.clone(),
-                        failed_at: self.state.temporary_council_now(),
-                    },
+                    Err(error) => {
+                        let deadline_exceeded =
+                            matches!(&error, DeliveryFailure::DeadlineExceeded { .. });
+                        (
+                            TemporaryCouncilExchangeOutcome::Failed {
+                                detail: error.to_string(),
+                                failed_at: self.state.temporary_council_now(),
+                            },
+                            deadline_exceeded,
+                        )
+                    }
                 };
                 let failed = matches!(outcome, TemporaryCouncilExchangeOutcome::Failed { .. });
                 let detail = match &outcome {
@@ -2261,7 +2442,7 @@ impl CouncilRun {
                 self.commit().await?;
 
                 if failed {
-                    exit = if self.remaining().is_none() {
+                    exit = if deadline_exceeded {
                         TemporaryCouncilExitReason::DeadlineExceeded
                     } else {
                         TemporaryCouncilExitReason::ExchangeFailed {
@@ -2308,16 +2489,12 @@ impl CouncilRun {
     /// records what was injected.
     fn injected_context(&self) -> Vec<ContentInput> {
         let mut entries: Vec<ContentInput> = Vec::new();
-        for receipt in self
+        let start = self
             .record
             .exchanges
-            .iter()
-            .rev()
-            .take(TEMPORARY_COUNCIL_MAX_INJECTED_CONTEXT_ENTRIES)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
+            .len()
+            .saturating_sub(TEMPORARY_COUNCIL_MAX_INJECTED_CONTEXT_ENTRIES);
+        for receipt in &self.record.exchanges[start..] {
             let Some(text) = receipt.completed_text() else {
                 continue;
             };
@@ -2347,16 +2524,24 @@ impl CouncilRun {
         label: String,
         max_bytes: usize,
         remaining: Duration,
-    ) -> Result<BoundedExchange, String> {
-        let handle = self
-            .temporary_handle()
-            .await
-            .map_err(|error| format!("temporary mob is unavailable: {error}"))?;
+    ) -> Result<BoundedExchange, DeliveryFailure> {
+        let handle =
+            self.temporary_handle()
+                .await
+                .map_err(|error| DeliveryFailure::MobUnavailable {
+                    detail: error.to_string(),
+                })?;
         let delivery =
-            meerkat_mob::store::MobDeliveryIdentity::new(idempotency_key, correlation_id)
-                .map_err(|error| format!("delivery identity is not canonical: {error}"))?;
-        let result_spec = BoundedResultSpec::new(label, max_bytes)
-            .map_err(|error| format!("bounded result spec rejected: {error}"))?;
+            meerkat_mob::store::MobDeliveryIdentity::new(idempotency_key, correlation_id).map_err(
+                |error| DeliveryFailure::InvalidDeliveryIdentity {
+                    detail: error.to_string(),
+                },
+            )?;
+        let result_spec = BoundedResultSpec::new(label, max_bytes).map_err(|error| {
+            DeliveryFailure::InvalidResultSpec {
+                detail: error.to_string(),
+            }
+        })?;
         let work = WorkSpec::new(content, WorkOrigin::Internal).with_injected_context(injected);
 
         let turn = tokio::time::timeout(
@@ -2370,22 +2555,26 @@ impl CouncilRun {
             ),
         )
         .await
-        .map_err(|_| "the council deadline elapsed before the turn was admitted".to_string())?
-        .map_err(|error| format!("turn admission failed: {error}"))?;
+        .map_err(|_| DeliveryFailure::DeadlineExceeded { phase: "admitted" })?
+        .map_err(|error| DeliveryFailure::Admission {
+            detail: error.to_string(),
+        })?;
 
         let Some(remaining) = self.remaining() else {
-            return Err("the council deadline elapsed before the turn completed".to_string());
+            return Err(DeliveryFailure::DeadlineExceeded { phase: "completed" });
         };
         let bounded = tokio::time::timeout(remaining, turn.wait_bounded(result_spec))
             .await
-            .map_err(|_| "the council deadline elapsed before the turn completed".to_string())?
-            .map_err(|error| format!("turn failed: {}", describe_turn_failure(error.failure())))?;
+            .map_err(|_| DeliveryFailure::DeadlineExceeded { phase: "completed" })?
+            .map_err(|error| DeliveryFailure::Turn {
+                detail: describe_turn_failure(error.failure()),
+            })?;
 
         let (_receipt, result) = bounded.into_parts();
         let status = result.result().status();
         let truncated = bounded_status_is_truncated(status);
         if !bounded_status_is_completed(status) {
-            return Err(format!("turn did not complete: {status:?}"));
+            return Err(DeliveryFailure::Incomplete { status });
         }
         Ok(BoundedExchange {
             text: result.result().text().to_string(),
@@ -2504,7 +2693,12 @@ impl CouncilRun {
         }
 
         match policy {
-            MergeBackPolicy::NoMerge => unreachable!("handled above"),
+            MergeBackPolicy::NoMerge => Ok((
+                TemporaryCouncilMergeOutcome::NoMerge {
+                    confirmed_participants: self.confirmed_participants().await,
+                },
+                false,
+            )),
             MergeBackPolicy::SelectedTranscript {
                 participant,
                 exchange_sequences,
@@ -2534,10 +2728,10 @@ impl CouncilRun {
                         },
                         exchange.truncated,
                     )),
-                    Err(detail) => Ok((
+                    Err(error) => Ok((
                         TemporaryCouncilMergeOutcome::Failed {
                             policy: TemporaryCouncilMergePolicyKind::BoundedTextSummary,
-                            detail,
+                            detail: error.to_string(),
                         },
                         false,
                     )),
@@ -2549,6 +2743,13 @@ impl CouncilRun {
                 max_bytes,
             } => {
                 let identity = contract.identity()?;
+                let rendered_schema =
+                    serde_json::to_string(&contract.json_schema).map_err(|error| {
+                        TemporaryCouncilError::invalid(format!(
+                            "structured-result contract '{}' could not be rendered: {error}",
+                            contract.schema_id
+                        ))
+                    })?;
                 let instruction = format!(
                     "Council merge-back: reply with ONE strict JSON document summarizing the \
                      council outcome on '{}'. It MUST validate against contract '{}' v{}. Emit \
@@ -2556,7 +2757,7 @@ impl CouncilRun {
                     self.validated.request.topic,
                     contract.schema_id,
                     contract.schema_version,
-                    serde_json::to_string(&contract.json_schema).unwrap_or_default()
+                    rendered_schema
                 );
                 match self
                     .merge_turn(&finalizer, instruction, max_bytes, "structured")
@@ -2578,10 +2779,10 @@ impl CouncilRun {
                                     },
                                     exchange.truncated,
                                 )),
-                                Err(detail) => Ok((
+                                Err(error) => Ok((
                                     TemporaryCouncilMergeOutcome::Failed {
                                         policy: TemporaryCouncilMergePolicyKind::StructuredResult,
-                                        detail,
+                                        detail: error.to_string(),
                                     },
                                     exchange.truncated,
                                 )),
@@ -2598,10 +2799,10 @@ impl CouncilRun {
                             )),
                         }
                     }
-                    Err(detail) => Ok((
+                    Err(error) => Ok((
                         TemporaryCouncilMergeOutcome::Failed {
                             policy: TemporaryCouncilMergePolicyKind::StructuredResult,
-                            detail,
+                            detail: error.to_string(),
                         },
                         false,
                     )),
@@ -2652,10 +2853,10 @@ impl CouncilRun {
                             )),
                         }
                     }
-                    Err(detail) => Ok((
+                    Err(error) => Ok((
                         TemporaryCouncilMergeOutcome::Failed {
                             policy: TemporaryCouncilMergePolicyKind::DurableArtifactReference,
-                            detail,
+                            detail: error.to_string(),
                         },
                         false,
                     )),
@@ -2689,14 +2890,16 @@ impl CouncilRun {
         instruction: String,
         max_bytes: usize,
         purpose: &str,
-    ) -> Result<BoundedExchange, String> {
+    ) -> Result<BoundedExchange, MergeTurnError> {
         let order = self
             .record
             .participants
             .iter()
             .find(|participant| &participant.target_identity == identity)
             .map(|participant| participant.order)
-            .ok_or_else(|| format!("{identity} is not a council participant"))?;
+            .ok_or_else(|| MergeTurnError::NotParticipant {
+                identity: identity.clone(),
+            })?;
         let round = self.validated.request.bounds.max_rounds;
         let idempotency_key = self
             .record
@@ -2727,11 +2930,12 @@ impl CouncilRun {
         });
         self.commit()
             .await
-            .map_err(|error| format!("merge delivery custody could not be persisted: {error}"))?;
+            .map_err(|source| MergeTurnError::Persistence {
+                stage: "delivery",
+                source,
+            })?;
 
-        let remaining = self
-            .remaining()
-            .ok_or_else(|| "the council deadline elapsed before merge-back".to_string())?;
+        let remaining = self.remaining().ok_or(MergeTurnError::DeadlineExceeded)?;
         let injected = self.injected_context();
         let result = self
             .deliver_bounded_turn(
@@ -2744,7 +2948,8 @@ impl CouncilRun {
                 max_bytes,
                 remaining,
             )
-            .await;
+            .await
+            .map_err(MergeTurnError::from);
 
         self.record.exchanges[receipt_index].outcome = match &result {
             Ok(exchange) => TemporaryCouncilExchangeOutcome::Completed {
@@ -2753,14 +2958,17 @@ impl CouncilRun {
                 session_id: exchange.session_id.clone(),
                 completed_at: self.state.temporary_council_now(),
             },
-            Err(detail) => TemporaryCouncilExchangeOutcome::Failed {
-                detail: detail.clone(),
+            Err(error) => TemporaryCouncilExchangeOutcome::Failed {
+                detail: error.to_string(),
                 failed_at: self.state.temporary_council_now(),
             },
         };
         self.commit()
             .await
-            .map_err(|error| format!("merge receipt could not be persisted: {error}"))?;
+            .map_err(|source| MergeTurnError::Persistence {
+                stage: "receipt",
+                source,
+            })?;
         result
     }
 
@@ -2827,23 +3035,38 @@ impl CouncilRun {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum StructuredValidationError {
+    #[error("structured-result contract '{schema_id}' is not a compilable JSON Schema: {detail}")]
+    InvalidSchema { schema_id: String, detail: String },
+    #[error(
+        "the finalizer's JSON does not satisfy contract '{schema_id}' v{schema_version}: {detail}"
+    )]
+    ContractViolation {
+        schema_id: String,
+        schema_version: u32,
+        detail: String,
+    },
+}
+
 /// Validate a parsed structured result against the caller's contract.
 fn validate_structured(
     contract: &TemporaryCouncilStructuredContract,
     value: &serde_json::Value,
-) -> Result<(), String> {
+) -> Result<(), StructuredValidationError> {
     let validator = jsonschema::Validator::new(&contract.json_schema).map_err(|error| {
-        format!(
-            "structured-result contract '{}' is not a compilable JSON Schema: {error}",
-            contract.schema_id
-        )
+        StructuredValidationError::InvalidSchema {
+            schema_id: contract.schema_id.clone(),
+            detail: error.to_string(),
+        }
     })?;
-    validator.validate(value).map_err(|error| {
-        format!(
-            "the finalizer's JSON does not satisfy contract '{}' v{}: {error}",
-            contract.schema_id, contract.schema_version
-        )
-    })
+    validator
+        .validate(value)
+        .map_err(|error| StructuredValidationError::ContractViolation {
+            schema_id: contract.schema_id.clone(),
+            schema_version: contract.schema_version,
+            detail: error.to_string(),
+        })
 }
 
 /// Truncate on a UTF-8 boundary, reporting whether anything was cut.
@@ -2863,23 +3086,24 @@ fn truncate_utf8(mut text: String, max_bytes: usize) -> (String, bool) {
 // Cleanup
 // ===========================================================================
 
-/// Step 7: retire seated members, revoke acquired-but-unattached
-/// capabilities, and destroy the temporary mob.
-///
-/// Retirement releases each attachment through the ORDINARY member-association
-/// path — this function never reaches into capability release directly. Only a
-/// capability that was acquired and never attached needs an explicit
-/// revocation, because no release path will ever reach it.
-///
-/// Revocation runs BEFORE the mob is destroyed so a live handle is still
-/// available to serve it. For a `Local` owner route any handle in this state
-/// serves the shared realm custody; for a `Host` route the source mob's own
-/// handle is required, and its absence is recorded as cleanup debt rather than
-/// silently skipped.
 fn cleanup_budget(state: &MobMcpState) -> DateTime<Utc> {
-    state.temporary_council_now()
-        + chrono::Duration::from_std(state.temporary_council_cleanup_budget())
-            .unwrap_or_else(|_| chrono::Duration::seconds(30))
+    bounded_time_add(
+        state.temporary_council_now(),
+        state.temporary_council_cleanup_budget(),
+    )
+}
+
+fn active_claim_lease_expiry(state: &MobMcpState, deadline: DateTime<Utc>) -> DateTime<Utc> {
+    let minimum = bounded_time_add(state.temporary_council_now(), TEMPORARY_COUNCIL_CLAIM_LEASE);
+    let execution_horizon = bounded_time_add(deadline, state.temporary_council_cleanup_budget());
+    minimum.max(execution_horizon)
+}
+
+fn bounded_time_add(start: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    let delta = chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX);
+    start
+        .checked_add_signed(delta)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// Remaining cleanup budget, or `None` once it is spent.
@@ -2923,7 +3147,18 @@ async fn cleanup_council(
     let mut debts = Vec::new();
     let mut budget_exhausted = false;
 
-    let temporary = state.handle_for(&record.temporary_mob_id).await.ok();
+    let (temporary, temporary_lookup_error) = match state.handle_for(&record.temporary_mob_id).await
+    {
+        Ok(handle) => (Some(handle), None),
+        Err(MobError::MobNotFound(_)) => (None, None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    if let Some(error) = temporary_lookup_error.as_ref() {
+        debts.push(TemporaryCouncilCleanupDebt {
+            subject: format!("mob:{}", record.temporary_mob_id),
+            detail: format!("temporary mob lookup failed: {error}"),
+        });
+    }
 
     if let Some(handle) = temporary.as_ref() {
         for participant in record.participants.iter().filter(|p| p.seated) {
@@ -2979,10 +3214,10 @@ async fn cleanup_council(
                 revoked_participants.push(participant.order);
                 continue;
             }
-            Err(detail) => {
+            Err(error) => {
                 debts.push(TemporaryCouncilCleanupDebt {
                     subject: format!("capability:{}", participant.capability_request_id),
-                    detail,
+                    detail: error.to_string(),
                 });
                 continue;
             }
@@ -2993,14 +3228,12 @@ async fn cleanup_council(
         // Try the source mob first, then the temporary mob, then any managed
         // mob — a council must not strand a revocation just because the mob it
         // happened to ask through is gone.
-        let revoker = match state.handle_for(&participant.source_mob_id).await {
-            Ok(handle) => Some(handle),
-            Err(_) => match temporary.clone() {
-                Some(handle) => Some(handle),
-                None => state.any_managed_handle().await,
-            },
+        let source_revoker = state.handle_for(&participant.source_mob_id).await.ok();
+        let fallback_revoker = match temporary.clone() {
+            Some(handle) => Some(handle),
+            None => state.any_managed_handle().await,
         };
-        let Some(revoker) = revoker else {
+        if source_revoker.is_none() && fallback_revoker.is_none() {
             debts.push(TemporaryCouncilCleanupDebt {
                 subject: format!("capability:{}", participant.capability_request_id),
                 detail: format!(
@@ -3009,51 +3242,60 @@ async fn cleanup_council(
                 ),
             });
             continue;
-        };
-        let Some(remaining) = budget_remaining(state, budget) else {
-            budget_exhausted = true;
+        }
+        let mut revocation_error = None;
+        let mut revoked = false;
+        for revoker in [source_revoker, fallback_revoker].into_iter().flatten() {
+            let Some(remaining) = budget_remaining(state, budget) else {
+                budget_exhausted = true;
+                revocation_error =
+                    Some("revocation exceeded the bounded cleanup budget".to_string());
+                break;
+            };
+            match tokio::time::timeout(
+                remaining,
+                revoker.revoke_forked_participant(state.console_principal_snapshot(), &capability),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    revoked = true;
+                    break;
+                }
+                // A capability the owner already carried to a terminal state
+                // is converged, not cleanup debt.
+                Ok(Err(MobError::ForkedParticipantRefused(refusal)))
+                    if matches!(
+                        refusal.as_ref(),
+                        meerkat_mob::forked_participant::ForkedParticipantError::RevocationDenied {
+                            reason:
+                                meerkat_mob::machines::forked_participant_lifecycle::ForkedParticipantRevocationDenial::AlreadyTerminal,
+                        }
+                    ) =>
+                {
+                    revoked = true;
+                    break;
+                }
+                Ok(Err(error)) => revocation_error = Some(error.to_string()),
+                Err(_) => {
+                    budget_exhausted = true;
+                    revocation_error =
+                        Some("revocation exceeded the bounded cleanup budget".to_string());
+                    break;
+                }
+            }
+        }
+        if revoked {
+            revoked_participants.push(participant.order);
+        } else {
             debts.push(TemporaryCouncilCleanupDebt {
                 subject: format!("capability:{}", participant.capability_request_id),
-                detail: "cleanup budget expired before this capability was revoked".to_string(),
+                detail: format!(
+                    "revocation failed: {}",
+                    revocation_error
+                        .unwrap_or_else(|| "no revocation handle accepted the request".to_string())
+                ),
             });
-            continue;
-        };
-        match match tokio::time::timeout(
-            remaining,
-            revoker.revoke_forked_participant(state.console_principal_snapshot(), &capability),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                budget_exhausted = true;
-                debts.push(TemporaryCouncilCleanupDebt {
-                    subject: format!("capability:{}", participant.capability_request_id),
-                    detail: "revocation exceeded the bounded cleanup budget".to_string(),
-                });
-                continue;
-            }
-        } {
-            Ok(_) => revoked_participants.push(participant.order),
-            // A capability the owner already carried to a terminal state (for
-            // example a one-shot lease consumed and released by a failed
-            // attached spawn) is converged, not owed. Recording debt here
-            // would be a cleanup obligation that can never be discharged.
-            Err(MobError::ForkedParticipantRefused(refusal))
-                if matches!(
-                    refusal.as_ref(),
-                    meerkat_mob::forked_participant::ForkedParticipantError::RevocationDenied {
-                        reason:
-                            meerkat_mob::machines::forked_participant_lifecycle::ForkedParticipantRevocationDenial::AlreadyTerminal,
-                    }
-                ) =>
-            {
-                revoked_participants.push(participant.order);
-            }
-            Err(error) => debts.push(TemporaryCouncilCleanupDebt {
-                subject: format!("capability:{}", participant.capability_request_id),
-                detail: format!("revocation failed: {error}"),
-            }),
         }
     }
 
@@ -3092,9 +3334,12 @@ async fn cleanup_council(
                 false
             }
         }
+    } else if temporary_lookup_error.is_some() {
+        false
     } else {
-        // The mob is not registered in this state: either it was already
-        // destroyed by an earlier attempt, or it never existed.
+        // `handle_for` performs durable restoration before returning
+        // `MobNotFound`; authoritative absence therefore proves the mob was
+        // already destroyed or never reached creation.
         true
     };
 
@@ -3117,10 +3362,26 @@ async fn cleanup_council(
 /// capability custody is consulted only as a fallback for records written
 /// before the reference was persisted, and its absence is never fatal for a
 /// remote capability.
+#[derive(Debug, thiserror::Error)]
+enum CapabilityResolutionError {
+    #[error("capability custody read failed: {source}")]
+    Store {
+        #[source]
+        source: MobStoreError,
+    },
+    #[error(
+        "acquisition is ambiguous: the create call for {request_id} was issued but neither a held \
+         reference nor a realm-local record resolves it; the owner may still hold a capability"
+    )]
+    Ambiguous {
+        request_id: meerkat_mob::forked_participant::ForkedParticipantRequestId,
+    },
+}
+
 async fn resolve_capability(
     state: &Arc<MobMcpState>,
     participant: &TemporaryCouncilParticipantCustody,
-) -> Result<Option<ForkedParticipantRef>, String> {
+) -> Result<Option<ForkedParticipantRef>, CapabilityResolutionError> {
     if let Some(capability) = participant.capability_ref.clone() {
         return Ok(Some(capability));
     }
@@ -3131,15 +3392,14 @@ async fn resolve_capability(
         .forked_participant_store()
         .load_by_request_id(&participant.capability_request_id)
         .await
-        .map_err(|error| format!("capability custody read failed: {error}"))?;
+        .map_err(|source| CapabilityResolutionError::Store { source })?;
     match record.and_then(|record| record.sidecar.capability_ref) {
         Some(capability) => Ok(Some(capability)),
-        None if participant.acquisition == TemporaryCouncilAcquisition::Pending => Err(format!(
-            "acquisition is ambiguous: the create call for {} was issued but neither a held \
-                 reference nor a realm-local record resolves it; the owner may still hold a \
-                 capability",
-            participant.capability_request_id
-        )),
+        None if participant.acquisition == TemporaryCouncilAcquisition::Pending => {
+            Err(CapabilityResolutionError::Ambiguous {
+                request_id: participant.capability_request_id.clone(),
+            })
+        }
         None => Ok(None),
     }
 }

@@ -1148,6 +1148,9 @@ impl ForkedParticipantService {
     ) -> Result<ForkedParticipantExpirySweepReport, ForkedParticipantError> {
         let mut report = ForkedParticipantExpirySweepReport::default();
         for record in self.store.list_all().await? {
+            if record.sidecar.owner_route != self.owner_route {
+                continue;
+            }
             let entry = ForkedParticipantSweepEntry {
                 capability_id: record.capability_id.clone(),
                 fork_session_id: record.fork_session_id().cloned(),
@@ -1317,6 +1320,9 @@ impl ForkedParticipantService {
     ) -> Result<ForkedParticipantCleanupReport, ForkedParticipantError> {
         let mut report = ForkedParticipantCleanupReport::default();
         for record in self.store.list_all().await? {
+            if record.sidecar.owner_route != self.owner_route {
+                continue;
+            }
             if record.machine_state.cleanup_state != fp::ForkedParticipantCleanupState::Pending {
                 continue;
             }

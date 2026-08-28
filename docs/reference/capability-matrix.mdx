@@ -89,6 +89,23 @@ The table below is the current **session transport** mapping (`SessionError::cod
 failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
 -32005, config errors -32602, everything else -32603.
 
+Temporary-council failures reuse the same canonical codes rather than minting
+new ones, and each carries a typed `data` payload:
+
+| Condition | `ErrorCode` | JSON-RPC | `data` |
+|-----------|-------------|----------|--------|
+| Request refused before any side effect | `InvalidParams` | -32602 | `{kind: "invalid_request", detail}` |
+| Council id bound to a different request | `DuplicateInput` | -32004 | `{council_id, stored_fingerprint, presented_fingerprint}` |
+| Another coordinator holds a live claim | `SessionBusy` | -32002 | `{council_id, current_claim_epoch}` |
+| This executor's claim was superseded | `StaleFence` | -32028 | `{council_id, current_claim_epoch}` |
+| `durable` declared against process-bound custody | `CapabilityUnavailable` | -32020 | `{council_id, required, available}` |
+| Custody, lifecycle, mob, or coordinator-task fault | `InternalError` | -32603 | `{kind, detail}` |
+
+Cleanup debt is deliberately not an error: a sealed result whose cleanup
+retained debt is a success carrying `cleanup.status = "debt"` or `"pending"`.
+Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are
+typed `exit_reason` values on a sealed result for the same reason.
+
 The durable resume holds are not service faults: the session exists, its
 content is retained intact, and no runnable authority is handed out until
 machine-authorized recovery or reconciliation clears it. They classify as
@@ -104,7 +121,7 @@ parsing messages.
 - **JSON-RPC**: `NotFound`/`Busy` keep dedicated codes (-32001/-32002), durable resume holds use `SessionNotRunning` (-32003), and typed agent causes use the canonical `meerkat_contracts::ErrorCode::jsonrpc_code()` values. Remaining session variants collapse to -32603 with the message preserved.
 - **REST**: Endpoint-typed `ApiError` mapping (`NotFound` -> 404; `Busy` -> 400 on create/turn, 409 on interrupt conflicts; archived/unavailable history -> 400; agent/internal -> 500). Where canonical wire errors are emitted, `ErrorCode::http_status()` decides the status. Error body includes `{ "code": "...", "message": "..." }`.
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
-- **CLI**: General commands use 0 for success, 1 for error, and 2 for graceful budget exhaustion. Multi-host mob commands additionally preserve the typed operator failures: 45 scope denied, 46 host unavailable, 47 stale cursor, and 48 stale fence. Error details are printed to stderr.
+- **CLI**: General commands use 0 for success, 1 for error, and 2 for graceful budget exhaustion. Multi-host mob commands additionally preserve the typed operator failures: 45 scope denied, 46 host unavailable, 47 stale cursor, and 48 stale fence. Error details are printed to stderr. Temporary-council commands project their own typed failures through the same canonical `ErrorCode` mapping: 2 invalid request, 13 conflicting request, 11 contested claim, 40 durability unavailable, 48 fenced executor, and 1 for a coordinator-side fault.
 
 ## Mob control scopes
 
@@ -264,12 +281,23 @@ not treat an agent's ability to call a model-visible tool as an operator API.
 | WorkGraph | Observation plus trusted goal/attention controls | Observation | Observation | Agent mutation tools plus observation |
 | Live audio | Placed mob-member WebSocket controls | No | Session `live/*` supports WebSocket/WebRTC; member control is WebSocket-only | No |
 | Multi-host mobs | Admin and observation | Observation only | Admin and observation | Placement plus observation only |
+| Temporary councils | Run, read, recover | Run, read, recover | Run, read, recover | Run and read only |
 | Provider credential management | Yes | Yes | Yes | No |
 
 Shared wire types do not grant exposure. In particular, durable member role
 migration is absent from every public CLI, REST, JSON-RPC, MCP, and generated
 SDK spawn request even though the private remote-host bridge shares schema
 types with public artifacts.
+
+The temporary-council recovery sweep is owner-console only. It seals typed
+terminals, revokes capabilities, and destroys temporary mobs for councils the
+caller never started, so it is withheld from the LLM-reachable MCP tool surface
+for the same reason host binding and grant administration are. Exact run
+admission may recover only its requested council id, so no LLM-facing surface
+needs realm-wide recovery authority to make progress. Agent-facing delegation
+tools expose no council verb at all: council
+participation mints capabilities over members of arbitrary mobs, which is a
+principal-lane decision.
 
 ### Live transport gates
 

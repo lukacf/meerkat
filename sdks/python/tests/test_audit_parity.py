@@ -169,6 +169,12 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "mob/bind_host": (Mob, "bind_host"),
     "mob/revoke_host": (Mob, "revoke_host"),
     "mob/hard_cancel_member": (Mob, "hard_cancel"),
+    "mob/temporary_council_run": (MeerkatClient, "run_temporary_council"),
+    "mob/temporary_council_get": (MeerkatClient, "get_temporary_council"),
+    "mob/temporary_council_recover": (
+        MeerkatClient,
+        "recover_temporary_councils",
+    ),
     "mob/member_live_open": (Mob, "member_live_open"),
     "mob/member_live_close": (Mob, "member_live_close"),
     "mob/member_live_status": (Mob, "member_live_status"),

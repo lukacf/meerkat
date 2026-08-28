@@ -2494,6 +2494,18 @@ impl MethodRouter {
             "mob/member_live_control" => {
                 handlers::mob::handle_member_live_control(id, params, &self.mob_state).await
             }
+            #[cfg(feature = "mob")]
+            "mob/temporary_council_run" => {
+                handlers::mob::handle_temporary_council_run(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/temporary_council_get" => {
+                handlers::mob::handle_temporary_council_get(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/temporary_council_recover" => {
+                handlers::mob::handle_temporary_council_recover(id, &self.mob_state).await
+            }
             #[cfg(feature = "comms")]
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]

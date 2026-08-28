@@ -336,6 +336,17 @@ async fn live_daemon_capability_lifecycle_end_to_end() {
         },
     )
     .await;
+    let cleanup_store = Arc::clone(&capability_store);
+    let cleanup_capability_id = capability.capability_id().clone();
+    until(
+        "the host completes fork cleanup after releasing the attachment",
+        || {
+            let store = Arc::clone(&cleanup_store);
+            let capability_id = cleanup_capability_id.clone();
+            async move { capability_cleanup_is_complete(store.as_ref(), &capability_id).await }
+        },
+    )
+    .await;
 
     let record = capability_store
         .load_by_capability_id(capability.capability_id())
@@ -362,10 +373,8 @@ async fn live_daemon_capability_lifecycle_end_to_end() {
         "convergence leaves no unreconciled obligation"
     );
 
-    // The fork BODY was archived by the member disposal, so the cleanup sweep
-    // has nothing left to archive. Asserted explicitly: the capability is
-    // terminal and detached, and whatever cleanup state it settles in is a
-    // recorded fact of this run rather than an unchecked assumption.
+    // The fork body was archived by member disposal; the cleanup sweep must
+    // still commit the capability machine's distinct completion boundary.
     use meerkat_mob::machines::forked_participant_lifecycle::ForkedParticipantCleanupState;
     let record = capability_store
         .load_by_capability_id(capability.capability_id())
@@ -414,4 +423,20 @@ async fn capability_is_terminal_and_detached(
             | ForkedParticipantLifecycleState::Expired
             | ForkedParticipantLifecycleState::Exhausted
     ) && record.machine_state.active_attachment_id.is_none()
+}
+
+async fn capability_cleanup_is_complete(
+    store: &dyn ForkedParticipantStore,
+    capability_id: &ForkedParticipantCapabilityId,
+) -> bool {
+    use meerkat_mob::machines::forked_participant_lifecycle::ForkedParticipantCleanupState;
+
+    store
+        .load_by_capability_id(capability_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            record.machine_state.cleanup_state == ForkedParticipantCleanupState::Complete
+        })
 }

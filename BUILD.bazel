@@ -505,6 +505,7 @@ test_suite(
         "//meerkat-memory:meerkat_memory_unit_test",
         "//meerkat-mob-adaptive:meerkat_mob_adaptive_unit_test",
         "//meerkat-mob-mcp:meerkat_mob_mcp_unit_test",
+        "//meerkat-mob-mcp:temporary_council_surface_test",
         "//meerkat-mob-mcp:temporary_council_test",
         "//meerkat-mob-pack:meerkat_mob_pack_unit_test",
         "//meerkat-mob:cold_restart_mob_resume_test",

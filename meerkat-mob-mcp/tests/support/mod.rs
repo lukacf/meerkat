@@ -97,6 +97,17 @@ impl TurnGate {
             self.entered()
         );
     }
+
+    /// Block the current task until [`Self::open`] is called.
+    pub async fn wait(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut rx = self.receiver();
+        while !*rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
 }
 
 type Script = Arc<dyn Fn(&LlmRequest) -> ScriptedTurn + Send + Sync>;
@@ -568,6 +579,91 @@ impl meerkat_mob::store::TemporaryCouncilStore for OneShotFailingCouncilStore {
             return Err(meerkat_mob::store::MobStoreError::WriteFailed(
                 "injected council custody write fault".to_string(),
             ));
+        }
+        self.inner.commit(record).await
+    }
+
+    async fn list_all(
+        &self,
+    ) -> Result<Vec<meerkat_mob::store::TemporaryCouncilRecord>, meerkat_mob::store::MobStoreError>
+    {
+        self.inner.list_all().await
+    }
+}
+
+/// Persists an ambiguous capability custody record, then pauses before
+/// panicking the coordinator task. This models a lost durable-store completion
+/// followed by process death, while giving an integration test one deterministic
+/// point to remove the source mob before supervised recovery begins.
+pub struct AmbiguousThenPanicCouncilStore {
+    inner: Arc<dyn meerkat_mob::store::TemporaryCouncilStore>,
+    fail_at_commit: usize,
+    commits: AtomicUsize,
+    gate: Arc<TurnGate>,
+}
+
+impl AmbiguousThenPanicCouncilStore {
+    pub fn new(
+        inner: Arc<dyn meerkat_mob::store::TemporaryCouncilStore>,
+        fail_at_commit: usize,
+        gate: Arc<TurnGate>,
+    ) -> Self {
+        Self {
+            inner,
+            fail_at_commit,
+            commits: AtomicUsize::new(0),
+            gate,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob::store::TemporaryCouncilStore for AmbiguousThenPanicCouncilStore {
+    fn durability(&self) -> meerkat_mob::temporary_council::TemporaryCouncilStoreDurability {
+        self.inner.durability()
+    }
+
+    async fn insert_new(
+        &self,
+        record: &meerkat_mob::store::TemporaryCouncilRecord,
+    ) -> Result<meerkat_mob::store::TemporaryCouncilRecord, meerkat_mob::store::MobStoreError> {
+        self.inner.insert_new(record).await
+    }
+
+    async fn load(
+        &self,
+        council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+    ) -> Result<Option<meerkat_mob::store::TemporaryCouncilRecord>, meerkat_mob::store::MobStoreError>
+    {
+        self.inner.load(council_id).await
+    }
+
+    async fn commit(
+        &self,
+        record: &meerkat_mob::store::TemporaryCouncilRecord,
+    ) -> Result<meerkat_mob::store::TemporaryCouncilRecord, meerkat_mob::store::MobStoreError> {
+        let index = self.commits.fetch_add(1, Ordering::SeqCst);
+        if index == self.fail_at_commit {
+            let _ = self.inner.commit(record).await?;
+            return Err(meerkat_mob::store::MobStoreError::WriteFailed(
+                "injected council custody completion loss".to_string(),
+            ));
+        }
+        if index == self.fail_at_commit + 1 {
+            let mut ambiguous = record.clone();
+            ambiguous.revision = self
+                .inner
+                .load(&record.council_id)
+                .await?
+                .ok_or_else(|| {
+                    meerkat_mob::store::MobStoreError::ReadFailed(
+                        "injected custody record disappeared before ambiguity repair".to_string(),
+                    )
+                })?
+                .revision;
+            self.inner.commit(&ambiguous).await?;
+            self.gate.wait().await;
+            panic!("injected coordinator crash after ambiguous capability custody");
         }
         self.inner.commit(record).await
     }

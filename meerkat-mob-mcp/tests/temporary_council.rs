@@ -793,7 +793,7 @@ async fn a_process_style_restart_seals_an_interrupted_terminal_and_cleans_up() {
     let error = fixture
         .state
         .temporary_council()
-        .run(request)
+        .run(request.clone())
         .await
         .expect_err("the injected custody fault aborts the owned task");
     assert!(
@@ -817,32 +817,31 @@ async fn a_process_style_restart_seals_an_interrupted_terminal_and_cleans_up() {
     // once the dead coordinator's lease has been observed expired.
     let restarted = fixture.restart_state();
     let held = restarted.temporary_council_store_for_tests();
-    assert!(
-        matches!(
-            restarted.temporary_council().recover_unfinished().await,
-            Err(TemporaryCouncilError::HeldByAnotherCoordinator { .. })
-        ),
-        "a live lease must fence a second process out"
-    );
-    fixture.expire_claim_lease(&held, &id).await;
-
     let reports = restarted
         .temporary_council()
         .recover_unfinished()
         .await
-        .expect("recovery sweep");
-    assert_eq!(
-        reports.len(),
-        1,
-        "exactly one unfinished council: {reports:?}"
-    );
-    let report = &reports[0];
-    assert_eq!(report.council_id, id);
-    assert!(report.sealed_interrupted_result);
+        .expect("a busy council is skipped rather than aborting the sweep");
     assert!(
-        report.settled,
+        reports.is_empty(),
+        "a live foreign claim is neither recovered nor reported as settled"
+    );
+    fixture.expire_claim_lease(&held, &id).await;
+
+    let outcome = restarted
+        .temporary_council()
+        .run(request)
+        .await
+        .expect("same-id admission recovers the interrupted council");
+    assert!(outcome.replayed);
+    assert!(
+        outcome.cleanup.settled(),
         "recovery cleanup debt: {:?}",
-        report.cleanup
+        outcome.cleanup
+    );
+    assert_eq!(
+        outcome.result.exit_reason,
+        TemporaryCouncilExitReason::CoordinatorInterrupted
     );
 
     let record = restarted
@@ -970,13 +969,14 @@ async fn a_partial_seating_failure_cleans_up_prior_participants_and_revokes() {
 /// recovery attempt converges it. The immutable result stays valid throughout.
 #[tokio::test(flavor = "multi_thread")]
 async fn retained_cleanup_debt_converges_on_retry() {
-    // One injected OWNER-SIDE revocation lookup fault for participant slot 1:
-    // the first cleanup attempt records real debt, the retry converges.
+    // Fail every eligible revoker in the first cleanup pass for participant
+    // slot 1. The coordinator deliberately tries source, temporary, and any
+    // remaining managed handle before retaining debt; the retry then converges.
     let fixture = CouncilFixture::new_with(role_script, |state, _root| {
         let inner: Arc<dyn meerkat_mob::store::ForkedParticipantStore> =
             Arc::new(meerkat_mob::store::InMemoryForkedParticipantStore::new());
         state.with_forked_participant_store(Arc::new(
-            FlakyCapabilityStore::failing_revocation_lookup(inner, ":p1", 1),
+            FlakyCapabilityStore::failing_revocation_lookup(inner, ":p1", 3),
         ))
     });
     fixture.seed_source_mob(&["researcher", "reviewer"]).await;
@@ -2098,6 +2098,7 @@ async fn a_second_coordinator_over_the_same_custody_is_fenced_until_the_lease_ex
     // refused: process-local single-flight cannot span processes, so the
     // durable claim is what keeps exactly one executor.
     let second = fixture.restart_state();
+    second.set_temporary_council_clock_offset(chrono::Duration::seconds(150));
     let error = second
         .temporary_council()
         .run(request.clone())

@@ -10435,10 +10435,11 @@ impl MultiBackendProvisioner {
             super::bridge_protocol::BridgeBindPayload {
                 supervisor: sup_spec.into(),
                 epoch: authority.epoch,
-                // BindMember requires V5+, but a current authority should
-                // advertise its negotiated version rather than pinning the
-                // first version that introduced the command shape.
-                protocol_version: authority.protocol_version,
+                // Peer-only members negotiate no per-recipient protocol
+                // version. BindMember's V5 shape remains valid under newer
+                // supervisor authority and preserves compatibility with V5
+                // peers.
+                protocol_version: super::bridge_protocol::BridgeProtocolVersion::V5,
                 expected_peer_id: peer_id.to_string(),
                 expected_address: address.to_string(),
                 bootstrap_token,

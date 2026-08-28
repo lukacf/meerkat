@@ -18696,13 +18696,13 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
         )
         .await
         .expect("spawn live external worker");
-    let default_protocol_version =
-        meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_default_protocol_version();
+    let peer_bind_protocol_version =
+        meerkat_contracts::wire::supervisor_bridge::BridgeProtocolVersion::V5;
     assert_eq!(external.bind_count(), 1, "initial spawn should bind once");
     assert_eq!(
         external.bind_protocol_versions().await,
-        vec![default_protocol_version],
-        "initial bridge bind should use the canonical default protocol version"
+        vec![peer_bind_protocol_version],
+        "peer-only bind should use its V5-compatible command shape"
     );
 
     external.forget_supervisor().await;
@@ -18721,8 +18721,8 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
     );
     assert_eq!(
         external.bind_protocol_versions().await,
-        vec![default_protocol_version, default_protocol_version],
-        "restart rebind should keep reporting the canonical bridge protocol version"
+        vec![peer_bind_protocol_version, peer_bind_protocol_version],
+        "restart rebind should preserve the V5-compatible command shape"
     );
     assert_eq!(
         external.delivered_input_ids().await.len(),
@@ -27184,14 +27184,17 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         )
         .await
         .expect_err("peer-only delivery must not silently drop runtime metadata");
-    assert!(matches!(
-        metadata_error,
-        MobError::UnsupportedForMode {
-            mode: crate::MobRuntimeMode::TurnDriven,
-            ref reason,
-        } if reason.contains("tracked turn event streams are not supported")
-            && reason.contains("peer-only")
-    ));
+    assert!(
+        matches!(
+            metadata_error,
+            MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                ref reason,
+            } if reason.contains("tracked turn completion is not supported")
+                && reason.contains("legacy peer-only")
+        ),
+        "unexpected metadata rejection: {metadata_error:?}"
+    );
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
     let event_error = peer_member
         .start_turn(

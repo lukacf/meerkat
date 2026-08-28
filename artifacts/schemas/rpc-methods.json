@@ -984,6 +984,23 @@
       "result_type": "BridgeLiveControlOutcome"
     },
     {
+      "description": "Run one bounded temporary council of source-owned forked participants",
+      "name": "mob/temporary_council_run",
+      "params_type": "MobTemporaryCouncilRunParams",
+      "result_type": "MobTemporaryCouncilRunResult"
+    },
+    {
+      "description": "Read one sealed temporary-council record projection",
+      "name": "mob/temporary_council_get",
+      "params_type": "MobTemporaryCouncilGetParams",
+      "result_type": "MobTemporaryCouncilGetResult"
+    },
+    {
+      "description": "Converge every unfinished temporary council (owner/admin maintenance)",
+      "name": "mob/temporary_council_recover",
+      "result_type": "MobTemporaryCouncilRecoverResult"
+    },
+    {
       "description": "Stage live MCP server add for a session",
       "name": "mcp/add",
       "params_type": "McpAddParams",

@@ -1957,12 +1957,12 @@
           },
           "current_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 5,
+            "default": 6,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 5,
+            "default": 6,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -1980,6 +1980,10 @@
           "engine_version": {
             "description": "Engine version string; `\"\"` = not reported (pre-V4 peer).",
             "type": "string"
+          },
+          "forked_participants": {
+            "description": "Host can serve the V6 source-owner forked-participant family.",
+            "type": "boolean"
           },
           "hard_cancel_member": {
             "default": false,
@@ -2017,7 +2021,8 @@
               2,
               3,
               4,
-              5
+              5,
+              6
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -3058,6 +3063,17 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "forked_participant_attachment": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BridgeForkedParticipantAttachment"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V6 attachment carried only with ordinary `Resume` materialization."
+              },
               "generation": {
                 "format": "uint64",
                 "minimum": 0,
@@ -3372,6 +3388,112 @@
               "observer",
               "observer_epoch",
               "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V6 source-owner capability creation, addressed to the source host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "create_forked_participant",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "prefix_message_count": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "reuse": {
+                "$ref": "#/components/schemas/BridgeForkedParticipantReuse"
+              },
+              "scope": {
+                "$ref": "#/components/schemas/BridgeForkedParticipantScope"
+              },
+              "source_member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              },
+              "ttl_millis": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "source_member",
+              "request_id",
+              "scope",
+              "reuse",
+              "ttl_millis"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V6 source-owner capability revocation, addressed to the source host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "capability": {
+                "$ref": "#/components/schemas/BridgeForkedParticipantRef"
+              },
+              "command": {
+                "const": "revoke_forked_participant",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "source_member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "source_member",
+              "capability"
             ],
             "type": "object"
           }
@@ -3750,6 +3872,215 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeForkedParticipantAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "attachment_id": {
+            "type": "string"
+          },
+          "capability": {
+            "$ref": "#/components/schemas/BridgeForkedParticipantRef"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "capability"
+        ],
+        "type": "object"
+      },
+      "BridgeForkedParticipantOwnerRoute": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "local",
+                "type": "string"
+              },
+              "realm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "host_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "host",
+                "type": "string"
+              },
+              "realm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id",
+              "host_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantRef": {
+        "additionalProperties": false,
+        "description": "V6 immutable capability reference. It is deliberately metadata-only: no\ncredentials or transcript content may cross this bridge.",
+        "properties": {
+          "capability_id": {
+            "type": "string"
+          },
+          "cleanup_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "fork_session_id": {
+            "type": "string"
+          },
+          "owner_route": {
+            "$ref": "#/components/schemas/BridgeForkedParticipantOwnerRoute"
+          },
+          "prefix_digest": {
+            "type": "string"
+          },
+          "prefix_message_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reuse": {
+            "$ref": "#/components/schemas/BridgeForkedParticipantReuse"
+          },
+          "revocation_id": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/BridgeForkedParticipantScope"
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability_id",
+          "source_identity",
+          "fork_session_id",
+          "owner_route",
+          "source_session_id",
+          "prefix_message_count",
+          "prefix_digest",
+          "scope",
+          "reuse",
+          "expires_at",
+          "revocation_id",
+          "cleanup_id"
+        ],
+        "type": "object"
+      },
+      "BridgeForkedParticipantReuse": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "one_shot",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "bounded_reuse",
+                "type": "string"
+              },
+              "max_uses": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_uses"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantRevocationOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cleanup_pending": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "const": "revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cleanup_pending"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "pending_attached_release",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "converged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantScope": {
+        "enum": [
+          "invoke",
+          "observe",
+          "invoke_and_observe"
+        ],
+        "type": "string"
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -4168,6 +4499,19 @@
         "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.\n\nNot `Copy` since V4: several causes carry typed detail payloads.",
         "oneOf": [
           {
+            "enum": [
+              "forked_participant_not_found",
+              "forked_participant_tampered",
+              "forked_participant_expired",
+              "forked_participant_revoked",
+              "forked_participant_exhausted",
+              "forked_participant_busy",
+              "forked_participant_source_mismatch",
+              "forked_participant_route_mismatch"
+            ],
+            "type": "string"
+          },
+          {
             "const": "not_bound",
             "description": "No supervisor is bound yet; caller must `bind_member` first.",
             "type": "string"
@@ -4195,6 +4539,16 @@
           {
             "const": "unsupported_protocol_version",
             "description": "The wire protocol version is not supported by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "forked_participant_protocol_unsupported",
+            "description": "A V6 capability operation was sent to a peer that does not implement\nthe forked-participant protocol family.",
+            "type": "string"
+          },
+          {
+            "const": "forked_participant_cleanup_debt",
+            "description": "Capability cleanup remains durable reconciliation work.",
             "type": "string"
           },
           {
@@ -5357,6 +5711,40 @@
             "required": [
               "result",
               "request_id",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "capability": {
+                "$ref": "#/components/schemas/BridgeForkedParticipantRef"
+              },
+              "result": {
+                "const": "forked_participant_created",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "$ref": "#/components/schemas/BridgeForkedParticipantRevocationOutcome"
+              },
+              "result": {
+                "const": "forked_participant_revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
               "outcome"
             ],
             "type": "object"
@@ -10242,6 +10630,26 @@
         "title": "MobApplyMemberToolDeclarationResult",
         "type": "object"
       },
+      "MobBackendConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/WireMobBackendKind",
+            "default": "session"
+          },
+          "external": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobExternalBackendConfigInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "MobBoundedHelperResult": {
         "description": "Receiver-bounded helper payload with explicit truncation state.",
         "properties": {
@@ -10275,6 +10683,615 @@
           "unavailable_truncated"
         ],
         "type": "string"
+      },
+      "MobCollectionPolicyInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "all",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "n": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "quorum",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "n"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobConditionExprInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "eq",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "in",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "values": {
+                "items": true,
+                "type": "array"
+              }
+            },
+            "required": [
+              "op",
+              "path",
+              "values"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "gt",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "lt",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "exprs": {
+                "items": {
+                  "$ref": "#/components/schemas/MobConditionExprInput"
+                },
+                "type": "array"
+              },
+              "op": {
+                "const": "and",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "exprs"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "exprs": {
+                "items": {
+                  "$ref": "#/components/schemas/MobConditionExprInput"
+                },
+                "type": "array"
+              },
+              "op": {
+                "const": "or",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "exprs"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "expr": {
+                "$ref": "#/components/schemas/MobConditionExprInput"
+              },
+              "op": {
+                "const": "not",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "expr"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobDefinitionInput": {
+        "additionalProperties": false,
+        "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.\n\nNot `Eq`: `profiles` transitively carries float provider params.",
+        "properties": {
+          "backend": {
+            "$ref": "#/components/schemas/MobBackendConfigInput",
+            "default": {
+              "default": "session"
+            }
+          },
+          "event_router": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobEventRouterConfigInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flows": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MobFlowSpecInput"
+            },
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mob-level default provider for `Auto` image-generation targets."
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobLimitsSpecInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CustomModelConfig"
+            },
+            "description": "Mob-scoped custom model registry entries (`[models.<id>]`). Reuses the\ntyped config owner so one definition feeds provider inference,\ncompaction scaling, capability gates, and call timeouts.",
+            "type": "object"
+          },
+          "orchestrator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobOrchestratorInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profiles": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MobProfileBindingInput"
+            },
+            "type": "object"
+          },
+          "skills": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MobSkillSourceInput"
+            },
+            "type": "object"
+          },
+          "spawn_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobSpawnPolicyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "supervisor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobSupervisorSpecInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "topology": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobTopologySpecInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "wiring": {
+            "$ref": "#/components/schemas/MobWiringRulesInput",
+            "default": {
+              "auto_wire_orchestrator": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "profiles"
+        ],
+        "title": "MobDefinitionInput",
+        "type": "object"
+      },
+      "MobDependencyModeInput": {
+        "enum": [
+          "all",
+          "any"
+        ],
+        "type": "string"
+      },
+      "MobDispatchModeInput": {
+        "enum": [
+          "fan_out",
+          "one_to_one",
+          "fan_in"
+        ],
+        "type": "string"
+      },
+      "MobEventRouterConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "buffer_size": {
+            "default": 256,
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exclude_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobExternalBackendConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "address_base": {
+            "type": "string"
+          },
+          "supervisor_bridge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobSupervisorBridgeEndpointConfigInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "address_base"
+        ],
+        "type": "object"
+      },
+      "MobFlowNodeFailurePolicyInput": {
+        "description": "Authored tolerance for a flow node's failure.\n\n`Escalate` (the default) classifies the enclosing frame Failed when the node\nfails. `Continue` keeps the recorded node/step failure but lets the frame\nclassify on the remaining nodes.",
+        "enum": [
+          "escalate",
+          "continue"
+        ],
+        "type": "string"
+      },
+      "MobFlowNodeInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "depends_on": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "depends_on_mode": {
+                "$ref": "#/components/schemas/MobDependencyModeInput",
+                "default": "all"
+              },
+              "failure_policy": {
+                "$ref": "#/components/schemas/MobFlowNodeFailurePolicyInput",
+                "default": "escalate",
+                "description": "Tolerance for this node's failure; omitted means `escalate`."
+              },
+              "kind": {
+                "const": "step",
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "step_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "$ref": "#/components/schemas/MobFrameSpecInput"
+              },
+              "depends_on": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "depends_on_mode": {
+                "$ref": "#/components/schemas/MobDependencyModeInput",
+                "default": "all"
+              },
+              "failure_policy": {
+                "$ref": "#/components/schemas/MobFlowNodeFailurePolicyInput",
+                "default": "escalate",
+                "description": "Tolerance for this loop node's failure; omitted means `escalate`."
+              },
+              "kind": {
+                "const": "repeat_until",
+                "type": "string"
+              },
+              "loop_id": {
+                "type": "string"
+              },
+              "max_iterations": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "until": {
+                "$ref": "#/components/schemas/MobConditionExprInput"
+              }
+            },
+            "required": [
+              "kind",
+              "loop_id",
+              "body",
+              "until",
+              "max_iterations"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobFlowSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobFrameSpecInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MobFlowStepInput"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "MobFlowStepInput": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "collection_policy": {
+            "$ref": "#/components/schemas/MobCollectionPolicyInput",
+            "default": {
+              "type": "all"
+            }
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobConditionExprInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "depends_on_mode": {
+            "$ref": "#/components/schemas/MobDependencyModeInput",
+            "default": "all"
+          },
+          "dispatch_mode": {
+            "$ref": "#/components/schemas/MobDispatchModeInput",
+            "default": "fan_out"
+          },
+          "expected_schema_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_policy": {
+            "$ref": "#/components/schemas/MobFlowNodeFailurePolicyInput",
+            "default": "escalate",
+            "description": "Tolerance for this step's failure once compiled into the root frame;\nomitted means `escalate`."
+          },
+          "message": {
+            "$ref": "#/components/schemas/WireContentInput"
+          },
+          "output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MobStepOutputFormatInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit output format; omitted resolves schema-aware at the\ndefinition layer (`json` with `expected_schema_ref`, `text` without)."
+          },
+          "role": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role",
+          "message"
+        ],
+        "type": "object"
+      },
+      "MobFrameSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "nodes": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MobFlowNodeInput"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "nodes"
+        ],
+        "type": "object"
       },
       "MobHostStatus": {
         "description": "One tracked host row for `mob/hosts` (A13).\n\n`endpoint`, `authority_epoch`, and `capabilities` are the CommitHostBind\nfacts — present for `Bound` hosts, typed-absent for a `Requested`-phase\nhost (an open or failed bind window commits nothing; fabricating empty\nvalues would launder ceremony state into committed facts).\n\n`control_reachability`/`last_seen_ms`/`freshness_reason` are fed by the\nobserver-local periodic `HostStatus` driver shared with orphan\nreconciliation. They remain typed-absent until the first observation and\nnever become durable membership facts.",
@@ -10364,6 +11381,68 @@
         "title": "MobHostsResult",
         "type": "object"
       },
+      "MobLimitsSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel_grace_timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_active_frames": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_active_nodes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_flow_duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_frame_depth": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_orphaned_turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_step_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "MobMemberHistoryResult": {
         "description": "Response payload for `mob/member_history`. Pagination facts live inside\n`page` (one owner); this envelope adds the placement/provenance facts\nonly the controlling host knows.",
         "properties": {
@@ -10428,6 +11507,173 @@
         "title": "MobMemberToolDeclarationResult",
         "type": "object"
       },
+      "MobOrchestratorInput": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "MobPolicyModeInput": {
+        "enum": [
+          "advisory",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "MobProfileBindingInput": {
+        "anyOf": [
+          {
+            "description": "Reference to a realm-scoped profile.",
+            "properties": {
+              "realm_profile": {
+                "description": "Name of the realm profile.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "realm_profile"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/MobProfileInput",
+            "description": "Inline profile definition."
+          }
+        ],
+        "description": "Profile binding input: either an inline profile or a realm profile reference.\n\nNot `Eq`: `Inline(MobProfileInput)` transitively carries float provider\nparams (`temperature`, `top_p`) so `Eq` cannot be derived without\nlosing fidelity."
+      },
+      "MobProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_compact_threshold": {
+            "description": "Per-profile auto-compaction threshold override (tokens, non-zero).",
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured default provider for `Auto` image-generation targets."
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peer_description": {
+            "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit typed provider for the profile model (closed vocabulary,\nfail-closed at the wire boundary)."
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-`Eq` field: `WireProviderParamsOverride` contains float scalars\n(`temperature`, `top_p`) so the struct can't derive `Eq` without\nlosing fidelity."
+          },
+          "resume_overrides": {
+            "description": "Profile fields that win over durable session metadata on resume.",
+            "items": {
+              "$ref": "#/components/schemas/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
+          "runtime_mode": {
+            "$ref": "#/components/schemas/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "description": "Durable self-hosted server binding for configured self-hosted aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/MobToolConfigInput",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "image_generation": false,
+              "memory": false,
+              "mob": false,
+              "read_only": false,
+              "schedule": false,
+              "shell": false,
+              "workgraph": false
+            }
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
       "MobResolveIdentityConvergenceBlockResult": {
         "additionalProperties": false,
         "properties": {
@@ -10443,6 +11689,22 @@
           "convergence"
         ],
         "title": "MobResolveIdentityConvergenceBlockResult",
+        "type": "object"
+      },
+      "MobRoleWiringRuleInput": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
         "type": "object"
       },
       "MobRouteInstallsResult": {
@@ -10463,6 +11725,130 @@
           "complete"
         ],
         "title": "MobRouteInstallsResult",
+        "type": "object"
+      },
+      "MobSkillSourceInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "source": {
+                "const": "inline",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "source": {
+                "const": "path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobSpawnPolicyInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              },
+              "profile_map": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "mode",
+              "profile_map"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobStepOutputFormatInput": {
+        "description": "Explicit step output format. Omitting `output_format` on a step is\nmeaningful — the definition layer resolves a schema-aware default (`json`\nwhen the step declares `expected_schema_ref`, `text` otherwise) — so the\nwire shape keeps \"omitted\" representable instead of baking in a default.",
+        "enum": [
+          "json",
+          "text"
+        ],
+        "type": "string"
+      },
+      "MobSupervisorBridgeEndpointConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "advertised_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bind_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobSupervisorSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "escalation_threshold": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "escalation_turn_timeout_ms": {
+            "description": "Declared escalation turn timeout in milliseconds. Absent means the\nruntime default applies (mirrors the domain `SupervisorSpec` owner).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "escalation_threshold"
+        ],
         "type": "object"
       },
       "MobTargetBinding": {
@@ -10583,6 +11969,175 @@
           }
         ]
       },
+      "MobTemporaryCouncilGetResult": {
+        "description": "Response payload for `mob/temporary_council_get`.\n\n`council` is absent when no record is bound to the requested id. An unknown\ncouncil is an ordinary absence, not an error.",
+        "properties": {
+          "council": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTemporaryCouncilRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The sealed record projection, when one exists."
+          }
+        },
+        "title": "MobTemporaryCouncilGetResult",
+        "type": "object"
+      },
+      "MobTemporaryCouncilRecoverResult": {
+        "description": "Response payload for `mob/temporary_council_recover`.",
+        "properties": {
+          "reports": {
+            "description": "One report per unfinished council this sweep converged.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilRecoveryReport"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "reports"
+        ],
+        "title": "MobTemporaryCouncilRecoverResult",
+        "type": "object"
+      },
+      "MobTemporaryCouncilRunParams": {
+        "additionalProperties": false,
+        "description": "Request payload for `mob/temporary_council_run`.\n\n`host_bindings` is deliberately OUTSIDE the request: a host binding\ndescriptor carries a one-time ceremony token, so folding it into the request\nwould make an honest retry present a different fingerprint and would put\ncredential-like material into the durable council record. Nothing in it is\nfingerprinted or persisted, and a replay or joined caller ignores it.",
+        "properties": {
+          "host_bindings": {
+            "description": "One-time host bootstrap for the hosts this council must reach before\nany HOST-owned participant can be seated.",
+            "items": {
+              "$ref": "#/components/schemas/WireHostBindingDescriptor"
+            },
+            "type": "array"
+          },
+          "request": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilRequest",
+            "description": "The council request."
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "title": "MobTemporaryCouncilRunParams",
+        "type": "object"
+      },
+      "MobTemporaryCouncilRunResult": {
+        "description": "Response payload for `mob/temporary_council_run`.\n\nThe immutable result and the cleanup verdict are reported separately: a\nsealed result stays valid even when its cleanup retained debt.",
+        "properties": {
+          "cleanup": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilCleanup",
+            "description": "The most recent cleanup receipt."
+          },
+          "replayed": {
+            "description": "Whether this outcome was replayed from durable custody rather than\nproduced by this call.",
+            "type": "boolean"
+          },
+          "result": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilResult",
+            "description": "The immutable council result."
+          }
+        },
+        "required": [
+          "result",
+          "cleanup",
+          "replayed"
+        ],
+        "title": "MobTemporaryCouncilRunResult",
+        "type": "object"
+      },
+      "MobToolConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "read_only": {
+            "default": false,
+            "description": "Declare the profile read-only: the execution gate admits only tools\ntheir owning dispatcher declares read-only, and a spawn cannot widen\nit. Enforcement, not prompt guidance.",
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          },
+          "workgraph": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "MobTopologyRuleInput": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "from_role": {
+            "type": "string"
+          },
+          "to_role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_role",
+          "to_role",
+          "allowed"
+        ],
+        "type": "object"
+      },
+      "MobTopologySpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/MobPolicyModeInput"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/MobTopologyRuleInput"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "rules"
+        ],
+        "type": "object"
+      },
       "MobWireMembersBatchEdge": {
         "additionalProperties": false,
         "description": "One local-member edge in `mob/wire_members_batch`.",
@@ -10628,6 +12183,22 @@
           "already_wired"
         ],
         "title": "MobWireMembersBatchResult",
+        "type": "object"
+      },
+      "MobWiringRulesInput": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_wire_orchestrator": {
+            "default": false,
+            "type": "boolean"
+          },
+          "role_wiring": {
+            "items": {
+              "$ref": "#/components/schemas/MobRoleWiringRuleInput"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "ModelsCatalogResponse": {
@@ -18273,6 +19844,46 @@
         ],
         "type": "string"
       },
+      "WireHostBindingDescriptor": {
+        "additionalProperties": false,
+        "description": "Host flavor of the `--comms-binding-out` descriptor: what `rkat mob host`\nwrites for the operator to hand to the controlling mob. Mirrors the\nmember descriptor's shape (typed Ed25519 identity, never a raw peer id)\nwith `kind: \"host\"` and the optional advertised live endpoint (DL5/DL6).",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "bootstrap_token": {
+            "$ref": "#/components/schemas/BridgeBootstrapToken"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/WireTrustedPeerIdentity"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WireHostBindingDescriptorKind"
+          },
+          "live_endpoint": {
+            "description": "Advertised ws/wss live base URL; `None` = live-incapable host.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "address",
+          "identity",
+          "bootstrap_token"
+        ],
+        "title": "WireHostBindingDescriptor",
+        "type": "object"
+      },
+      "WireHostBindingDescriptorKind": {
+        "description": "Marker discriminant for the host binding descriptor file.",
+        "enum": [
+          "host"
+        ],
+        "type": "string"
+      },
       "WireHostCapabilityFlags": {
         "additionalProperties": false,
         "description": "Wire mirror of the DSL `HostCapabilityFlags` single enumeration (§6.1) —\nthe machine owns the fact; this is its console projection.\n\nField vocabulary matches the machine maps and the domain\n`HostCapabilityReport` exactly (ADJ-P7-1, FLAG-A2): `u64` protocol bounds\nand an OPEN `BTreeSet<String>` provider vocabulary — a newer member host\nadvertising a provider this build's enum lacks must stay representable\n(no silent caps).",
@@ -21258,6 +22869,1606 @@
         },
         "type": "object"
       },
+      "WireTemporaryCouncilAcquisition": {
+        "description": "How far capability acquisition got for one participant slot.",
+        "oneOf": [
+          {
+            "const": "not_attempted",
+            "description": "No create call has been issued for this slot.",
+            "type": "string"
+          },
+          {
+            "const": "pending",
+            "description": "The create call was issued; its outcome is not durably known.",
+            "type": "string"
+          },
+          {
+            "const": "acquired",
+            "description": "The exact capability reference is durably held.",
+            "type": "string"
+          },
+          {
+            "const": "ambiguous",
+            "description": "A capability WAS returned but its custody commit did not succeed.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireTemporaryCouncilArtifactClaim": {
+        "description": "A participant's UNVERIFIED, typed claim about an artifact it says it\nproduced. The council performs no store lookup, fetch, or existence check.",
+        "properties": {
+          "byte_len": {
+            "description": "Optional byte length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "Optional content digest.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "description": "Optional media type.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uri": {
+            "description": "Participant-reported location. Not resolved or validated.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilBounds": {
+        "additionalProperties": false,
+        "description": "Bounded budget for one council.\n\nEvery field is validated before any side effect: an over-budget request\nnever creates a mob, a capability, or a turn.",
+        "properties": {
+          "deadline": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilDeadline",
+            "description": "Absolute or relative deadline."
+          },
+          "max_exchanges": {
+            "description": "Maximum number of individual participant exchanges across all rounds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_result_bytes": {
+            "description": "Receiver bound applied to each exchange result, in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_rounds": {
+            "description": "Maximum number of sequential rounds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deadline",
+          "max_rounds",
+          "max_exchanges",
+          "max_result_bytes"
+        ],
+        "title": "WireTemporaryCouncilBounds",
+        "type": "object"
+      },
+      "WireTemporaryCouncilCapabilityProvenance": {
+        "description": "Non-secret provenance of the exact capability one participant was seated\nunder.\n\nDeliberately carries NO capability bearer token, capability id, revocation\nid, or cleanup id: the bearer stays in coordinator custody and in the\ncapability store, never in a returned result.",
+        "properties": {
+          "correlation_hint": {
+            "description": "Non-secret correlation hint of the capability.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Absolute expiry of the capability (RFC 3339).",
+            "type": "string"
+          },
+          "fork_session_id": {
+            "description": "Fork session the seated branch resumed.",
+            "type": "string"
+          },
+          "owner_route": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilOwnerRoute",
+            "description": "Typed route to the runtime that owns the capability."
+          },
+          "reuse": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilReusePolicy",
+            "description": "Reuse policy the capability was minted under."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilScope",
+            "description": "Operations the holder was granted."
+          },
+          "source": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilSourceProvenance",
+            "description": "Exact source transcript provenance."
+          }
+        },
+        "required": [
+          "owner_route",
+          "fork_session_id",
+          "source",
+          "scope",
+          "reuse",
+          "expires_at",
+          "correlation_hint"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilCleanup": {
+        "description": "Durable receipt of one cleanup attempt.",
+        "properties": {
+          "attempted_at": {
+            "description": "When this attempt ran (RFC 3339).",
+            "type": "string"
+          },
+          "attempts": {
+            "description": "Number of cleanup attempts including this one.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "budget_exhausted": {
+            "description": "Whether the bounded cleanup budget expired with work outstanding.",
+            "type": "boolean"
+          },
+          "debts": {
+            "description": "Outstanding obligations. Empty means the attempt fully converged.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilCleanupDebt"
+            },
+            "type": "array"
+          },
+          "released_participants": {
+            "description": "Participant slots whose seated member was retired.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "revoked_participants": {
+            "description": "Participant slots whose acquired-but-unattached capability was\nexplicitly revoked.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilCleanupStatus",
+            "description": "Typed verdict for this attempt."
+          },
+          "temporary_mob_destroyed": {
+            "description": "Whether the temporary mob is gone.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "attempted_at",
+          "attempts",
+          "temporary_mob_destroyed",
+          "released_participants",
+          "revoked_participants",
+          "debts",
+          "budget_exhausted"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilCleanupDebt": {
+        "description": "One unpaid cleanup obligation.",
+        "properties": {
+          "detail": {
+            "description": "Typed detail of the failure.",
+            "type": "string"
+          },
+          "subject": {
+            "description": "What could not be cleaned (mob id, participant slot, capability id).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilCleanupStatus": {
+        "description": "How a cleanup attempt ended, as a single typed verdict.",
+        "oneOf": [
+          {
+            "const": "settled",
+            "description": "Every obligation was discharged.",
+            "type": "string"
+          },
+          {
+            "const": "debt",
+            "description": "Cleanup ran to completion and retained typed debt.",
+            "type": "string"
+          },
+          {
+            "const": "pending",
+            "description": "The bounded cleanup budget expired with work still outstanding.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireTemporaryCouncilDeadline": {
+        "description": "Absolute or relative bound on how long a council may run.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "An explicit wall-clock instant, as an RFC 3339 timestamp.",
+            "properties": {
+              "at": {
+                "description": "The instant after which no further work may start or continue.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "absolute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "at"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A duration measured from acceptance, in milliseconds.",
+            "properties": {
+              "after_millis": {
+                "description": "How long the council may run, in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "relative",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "after_millis"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilDurability": {
+        "description": "Whether a council's custody must survive a process restart.\n\nThis is an explicit caller declaration, never an inference. `Durable` is\nrefused when the serving runtime's council store is process-bound;\n`ProcessBound` is the explicit opt-in that says a process death loses the\nrecord and the source capability TTL is the only remaining backstop.",
+        "oneOf": [
+          {
+            "const": "durable",
+            "description": "Custody must survive process restart; crash recovery is guaranteed.",
+            "type": "string"
+          },
+          {
+            "const": "process_bound",
+            "description": "Custody is process-bound; a process death loses the record.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireTemporaryCouncilExchange": {
+        "description": "Durable receipt of one participant turn.",
+        "properties": {
+          "delivery_correlation_id": {
+            "description": "Deterministic delivery correlation id persisted BEFORE the send.",
+            "type": "string"
+          },
+          "delivery_idempotency_key": {
+            "description": "Deterministic delivery idempotency key persisted BEFORE the send.",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilExchangeOutcome",
+            "description": "Terminal classification."
+          },
+          "participant_order": {
+            "description": "Participant slot order.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "round": {
+            "description": "Zero-based round index.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Monotonic exchange sequence across the whole council.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started_at": {
+            "description": "When the send was recorded (RFC 3339).",
+            "type": "string"
+          },
+          "target_identity": {
+            "description": "Identity the turn was delivered to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "round",
+          "sequence",
+          "participant_order",
+          "target_identity",
+          "delivery_idempotency_key",
+          "delivery_correlation_id",
+          "started_at",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilExchangeOutcome": {
+        "description": "Terminal classification of one bounded exchange.",
+        "oneOf": [
+          {
+            "description": "The delivery identity is durably recorded but no terminal was observed.",
+            "properties": {
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The exchange committed an exact receiver-bounded turn.",
+            "properties": {
+              "completed_at": {
+                "description": "When the terminal was observed (RFC 3339).",
+                "type": "string"
+              },
+              "session_id": {
+                "description": "Session the committed turn belongs to.",
+                "type": "string"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              },
+              "text": {
+                "description": "Receiver-bounded compact text the participant produced IN THIS\nCOUNCIL. Never an inherited source-prefix message.",
+                "type": "string"
+              },
+              "truncated": {
+                "description": "Whether the receiver bound truncated the member's output.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "status",
+              "text",
+              "truncated",
+              "session_id",
+              "completed_at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The exchange failed, timed out, or was cancelled.",
+            "properties": {
+              "detail": {
+                "description": "Typed detail, already bounded.",
+                "type": "string"
+              },
+              "failed_at": {
+                "description": "When the failure was observed (RFC 3339).",
+                "type": "string"
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "detail",
+              "failed_at"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilExitReason": {
+        "description": "Why the council stopped.",
+        "oneOf": [
+          {
+            "description": "The configured round schedule ran to completion within bounds.",
+            "properties": {
+              "reason": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The exchange budget cut the round schedule short.",
+            "properties": {
+              "reason": {
+                "const": "max_exchanges_reached",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The absolute deadline elapsed.",
+            "properties": {
+              "reason": {
+                "const": "deadline_exceeded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One participant could not be seated.",
+            "properties": {
+              "detail": {
+                "description": "Typed detail.",
+                "type": "string"
+              },
+              "participant_order": {
+                "description": "Slot that failed.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "const": "participant_seating_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "participant_order",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The requested topology could not be fully wired.",
+            "properties": {
+              "detail": {
+                "description": "Typed detail, including the observed wiring report.",
+                "type": "string"
+              },
+              "reason": {
+                "const": "wiring_incomplete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One exchange failed terminally.",
+            "properties": {
+              "detail": {
+                "description": "Typed detail.",
+                "type": "string"
+              },
+              "reason": {
+                "const": "exchange_failed",
+                "type": "string"
+              },
+              "round": {
+                "description": "Round the failure occurred in.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target_identity": {
+                "description": "Identity the turn was delivered to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "round",
+              "target_identity",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The coordinator process died before committing a result.\n\nRecovery commits this reason rather than silently re-executing: a re-run\nwould duplicate model work and result delivery.",
+            "properties": {
+              "reason": {
+                "const": "coordinator_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilMergeBack": {
+        "description": "The single explicit merge-back policy for one council.\n\nNo variant merges a whole transcript, and no variant mutates the caller's\nsession: the outcome is RETURNED, never written back implicitly.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One final bounded turn on `finalizer` asking for a prose summary.",
+            "properties": {
+              "finalizer": {
+                "description": "Participant asked to produce the summary.",
+                "type": "string"
+              },
+              "max_bytes": {
+                "description": "Receiver bound applied to that final turn, in bytes.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "policy": {
+                "const": "bounded_text_summary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy",
+              "finalizer",
+              "max_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One final bounded turn on `finalizer` whose output is parsed as STRICT\nJSON and then validated against the caller's declared contract.",
+            "properties": {
+              "contract": {
+                "$ref": "#/components/schemas/WireTemporaryCouncilStructuredContract",
+                "description": "The contract the value must satisfy."
+              },
+              "finalizer": {
+                "description": "Participant asked to produce the value.",
+                "type": "string"
+              },
+              "max_bytes": {
+                "description": "Receiver bound applied to that final turn, in bytes.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "policy": {
+                "const": "structured_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy",
+              "finalizer",
+              "contract",
+              "max_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Explicitly selected COUNCIL EXCHANGE SEQUENCES from one participant.\n\nThe selection domain is the council's own bounded exchange receipts,\nnever the seated fork session's transcript: a raw transcript index\ncould name an inherited source-prefix message the council never\nproduced.",
+            "properties": {
+              "exchange_sequences": {
+                "description": "Exact council exchange sequences to select.",
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "max_bytes": {
+                "description": "Total byte cap across the whole selection.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "participant": {
+                "description": "Participant whose council exchanges are selected.",
+                "type": "string"
+              },
+              "policy": {
+                "const": "selected_transcript",
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy",
+              "participant",
+              "exchange_sequences",
+              "max_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One final bounded turn whose output is parsed as a typed, UNVERIFIED\nartifact claim. The council performs no store lookup or fetch.",
+            "properties": {
+              "max_bytes": {
+                "description": "Receiver bound applied to that final turn, in bytes.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "participant": {
+                "description": "Participant asked to produce the claim.",
+                "type": "string"
+              },
+              "policy": {
+                "const": "durable_artifact_reference",
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy",
+              "participant",
+              "max_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Observation only: provenance and confirmation, no content.",
+            "properties": {
+              "policy": {
+                "const": "no_merge",
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireTemporaryCouncilMergeBack"
+      },
+      "WireTemporaryCouncilMergeOutcome": {
+        "description": "What the explicit merge-back policy actually produced.",
+        "oneOf": [
+          {
+            "description": "Observation only: provenance and confirmation, no content.",
+            "properties": {
+              "confirmed_participants": {
+                "description": "Participants confirmed seated at merge time.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "no_merge",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "confirmed_participants"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One bounded natural-language summary from the named finalizer.",
+            "properties": {
+              "finalizer": {
+                "description": "Participant that produced the summary.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "bounded_text_summary",
+                "type": "string"
+              },
+              "text": {
+                "description": "Receiver-bounded summary text.",
+                "type": "string"
+              },
+              "truncated": {
+                "description": "Whether the receiver bound truncated the summary.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "finalizer",
+              "text",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One strict-JSON structured result, validated against the declared\ncontract.",
+            "properties": {
+              "contract": {
+                "$ref": "#/components/schemas/WireTemporaryCouncilStructuredContractIdentity",
+                "description": "Contract the value was validated against."
+              },
+              "finalizer": {
+                "description": "Participant that produced the value.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "structured_result",
+                "type": "string"
+              },
+              "truncated": {
+                "description": "Whether the receiver bound truncated the raw output before parsing.",
+                "type": "boolean"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WireOpaqueJson",
+                "description": "Strictly parsed and schema-valid JSON value."
+              }
+            },
+            "required": [
+              "kind",
+              "finalizer",
+              "contract",
+              "value",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Explicitly selected council exchanges, by their exchange sequence.",
+            "properties": {
+              "excerpts": {
+                "description": "One bounded excerpt per returned sequence, in the same order.",
+                "items": {
+                  "$ref": "#/components/schemas/WireTemporaryCouncilSelectedExchange"
+                },
+                "type": "array"
+              },
+              "exchange_sequences": {
+                "description": "The exact exchange sequences that were requested and found.",
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "selected_transcript",
+                "type": "string"
+              },
+              "participant": {
+                "description": "Participant whose council exchanges were selected.",
+                "type": "string"
+              },
+              "truncated": {
+                "description": "Whether the total byte cap truncated the selection.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "participant",
+              "exchange_sequences",
+              "excerpts",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A typed, participant-reported artifact reference. UNVERIFIED.",
+            "properties": {
+              "claim": {
+                "$ref": "#/components/schemas/WireTemporaryCouncilArtifactClaim",
+                "description": "Parsed typed claim."
+              },
+              "kind": {
+                "const": "durable_artifact_reference",
+                "type": "string"
+              },
+              "participant": {
+                "description": "Participant that produced the claim.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "participant",
+              "claim"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The council terminated before merge was attempted.",
+            "properties": {
+              "kind": {
+                "const": "not_attempted",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Why the merge never ran.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The merge ran and failed in a typed, non-fatal way.",
+            "properties": {
+              "detail": {
+                "description": "Typed detail.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "failed",
+                "type": "string"
+              },
+              "policy": {
+                "$ref": "#/components/schemas/WireTemporaryCouncilMergePolicyKind",
+                "description": "Which policy failed."
+              }
+            },
+            "required": [
+              "kind",
+              "policy",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilMergePolicyKind": {
+        "description": "Stable discriminant of the caller's merge-back policy.",
+        "oneOf": [
+          {
+            "const": "bounded_text_summary",
+            "description": "Bounded text summary.",
+            "type": "string"
+          },
+          {
+            "const": "structured_result",
+            "description": "Strict-JSON structured result.",
+            "type": "string"
+          },
+          {
+            "const": "selected_transcript",
+            "description": "Selected council exchange sequences.",
+            "type": "string"
+          },
+          {
+            "const": "durable_artifact_reference",
+            "description": "Durable artifact reference claim.",
+            "type": "string"
+          },
+          {
+            "const": "no_merge",
+            "description": "No merge.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireTemporaryCouncilOwnerRoute": {
+        "description": "Typed route to the runtime that owns a participant's capability.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The source member runs in this runtime, inside the named realm.",
+            "properties": {
+              "kind": {
+                "const": "local",
+                "type": "string"
+              },
+              "realm_id": {
+                "description": "Realm that owns the source member and the fork.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source member runs on a bound member host inside the named realm.",
+            "properties": {
+              "host_id": {
+                "description": "Typed host identity of the owning runtime host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "host",
+                "type": "string"
+              },
+              "realm_id": {
+                "description": "Realm that owns the source member and the fork.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id",
+              "host_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilParticipant": {
+        "additionalProperties": false,
+        "description": "One council participant: which source member is forked, and how the branch\nis seated in the temporary mob.\n\nThere is deliberately no credential, auth override, or mutable session state\nhere. Tool, auth, realm, and filesystem boundaries stay those of the source\nexecution context, which is exactly what the capability layer guarantees.",
+        "properties": {
+          "order": {
+            "description": "Deterministic slot order, also the turn order within a round.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prefix_message_count": {
+            "description": "Complete-boundary prefix length to fork; omitted selects the head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "Deterministic role label carried into provenance and prompts.",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilScope",
+            "description": "Granted operation scope. Must admit invocation and observation."
+          },
+          "source_identity": {
+            "description": "Source member identity.",
+            "type": "string"
+          },
+          "source_mob_id": {
+            "description": "Mob that owns the source member.",
+            "type": "string"
+          },
+          "target_backend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional portable backend override for the seated member."
+          },
+          "target_identity": {
+            "description": "Identity the branch is seated under in the temporary mob.",
+            "type": "string"
+          },
+          "target_profile": {
+            "description": "Profile in the caller's definition template the branch is seated from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order",
+          "role",
+          "source_mob_id",
+          "source_identity",
+          "target_identity",
+          "target_profile",
+          "scope"
+        ],
+        "title": "WireTemporaryCouncilParticipant",
+        "type": "object"
+      },
+      "WireTemporaryCouncilParticipantCustody": {
+        "description": "Non-secret projection of one participant custody slot.\n\nThe durable record additionally holds the FULL capability reference,\nincluding its bearer token. That field has no wire representation here and\nnever reaches a caller.",
+        "properties": {
+          "acquisition": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilAcquisition",
+            "description": "How far capability acquisition got for this slot."
+          },
+          "attachment_id": {
+            "description": "Deterministic attachment id used for the attached spawn.",
+            "type": "string"
+          },
+          "capability_correlation_hint": {
+            "description": "Non-secret correlation hint of the acquired capability, once created.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capability_request_id": {
+            "description": "Deterministic capability request id.",
+            "type": "string"
+          },
+          "order": {
+            "description": "Deterministic slot order.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "description": "Deterministic role label.",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilScope",
+            "description": "Granted operation scope."
+          },
+          "seated": {
+            "description": "Whether the attached spawn was durably observed to succeed.",
+            "type": "boolean"
+          },
+          "seated_session_id": {
+            "description": "Fork session the seated member resumed, once seated.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_identity": {
+            "description": "Source member identity.",
+            "type": "string"
+          },
+          "source_mob_id": {
+            "description": "Mob that owns the source member being forked.",
+            "type": "string"
+          },
+          "target_identity": {
+            "description": "Identity this participant is seated under in the temporary mob.",
+            "type": "string"
+          },
+          "target_profile": {
+            "description": "Profile the branch is seated from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order",
+          "role",
+          "source_mob_id",
+          "source_identity",
+          "target_identity",
+          "target_profile",
+          "scope",
+          "capability_request_id",
+          "attachment_id",
+          "acquisition",
+          "seated"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilParticipantProvenance": {
+        "description": "Non-secret provenance of one participant, carried in the immutable result.",
+        "properties": {
+          "attachment_id": {
+            "description": "Attachment id the temporary mob held.",
+            "type": "string"
+          },
+          "capability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTemporaryCouncilCapabilityProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact non-secret capability provenance, once a capability was acquired."
+          },
+          "capability_request_id": {
+            "description": "Deterministic capability request id (non-secret idempotency\ncorrelation, not custody).",
+            "type": "string"
+          },
+          "order": {
+            "description": "Deterministic slot order.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "description": "Deterministic role label.",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilScope",
+            "description": "Granted operation scope."
+          },
+          "seated": {
+            "description": "Whether the participant was actually seated.",
+            "type": "boolean"
+          },
+          "source_identity": {
+            "description": "Source member identity.",
+            "type": "string"
+          },
+          "source_mob_id": {
+            "description": "Mob that owned the source member.",
+            "type": "string"
+          },
+          "target_identity": {
+            "description": "Identity the participant was seated under.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order",
+          "role",
+          "source_mob_id",
+          "source_identity",
+          "target_identity",
+          "scope",
+          "capability_request_id",
+          "attachment_id",
+          "seated"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilRecord": {
+        "description": "Sealed projection of one durable council record.\n\nCarries no store revision, no persisted machine state, and no coordinator\nclaim lease: those are coordinator authority, not caller-observable state.",
+        "properties": {
+          "cleanup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTemporaryCouncilCleanup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The most recent cleanup attempt's receipt."
+          },
+          "council_id": {
+            "description": "Council identity.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "Creation instant (RFC 3339).",
+            "type": "string"
+          },
+          "deadline": {
+            "description": "Absolute deadline computed once, before any work (RFC 3339).",
+            "type": "string"
+          },
+          "durability": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilDurability",
+            "description": "Durability the caller declared for this council."
+          },
+          "exchanges": {
+            "description": "Ordered exchange receipts.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilExchange"
+            },
+            "type": "array"
+          },
+          "participants": {
+            "description": "Per-participant custody projection in deterministic slot order.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilParticipantCustody"
+            },
+            "type": "array"
+          },
+          "request_fingerprint": {
+            "description": "Canonical fingerprint of the accepted request.",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTemporaryCouncilResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The immutable result, once sealed."
+          },
+          "temporary_mob_id": {
+            "description": "Deterministic temporary mob this council owns.",
+            "type": "string"
+          },
+          "unfinished": {
+            "description": "Whether the canonical lifecycle machine still owes this record work.",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "description": "Last mutation instant (RFC 3339).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "council_id",
+          "request_fingerprint",
+          "temporary_mob_id",
+          "deadline",
+          "durability",
+          "unfinished",
+          "participants",
+          "exchanges",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilRecoveryReport": {
+        "description": "What one recovery sweep did to one unfinished council.",
+        "properties": {
+          "cleanup": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilCleanup",
+            "description": "The cleanup receipt this sweep committed."
+          },
+          "council_id": {
+            "description": "Council that was recovered.",
+            "type": "string"
+          },
+          "sealed_interrupted_result": {
+            "description": "Whether this sweep sealed a terminal interrupted result.",
+            "type": "boolean"
+          },
+          "settled": {
+            "description": "Whether the record is now fully settled.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "council_id",
+          "sealed_interrupted_result",
+          "settled",
+          "cleanup"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilRequest": {
+        "additionalProperties": false,
+        "description": "One complete temporary-council request.",
+        "properties": {
+          "bounds": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilBounds",
+            "description": "Bounded budget."
+          },
+          "council_id": {
+            "description": "Caller-stable council identity. The same id plus the same request is a\nretry; the same id plus a different request is a conflict.",
+            "type": "string"
+          },
+          "definition_template": {
+            "$ref": "#/components/schemas/MobDefinitionInput",
+            "description": "Caller-supplied explicit definition template for the temporary mob.\n\nIts `id` is REPLACED with the council's deterministic temporary mob id\nso a retry after a crash finds the same real mob instead of creating a\nsecond one. Everything else is validated through the ordinary public\nmob-definition decoder and used verbatim."
+          },
+          "durability": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilDurability",
+            "description": "Whether this council's custody must survive a process restart."
+          },
+          "merge_back": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilMergeBack",
+            "description": "The single explicit merge-back policy."
+          },
+          "participants": {
+            "description": "Participants, in caller-declared order.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilParticipant"
+            },
+            "type": "array"
+          },
+          "topic": {
+            "description": "Initial topic/prompt for round 0.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "council_id",
+          "definition_template",
+          "participants",
+          "topic",
+          "bounds",
+          "merge_back",
+          "durability"
+        ],
+        "title": "WireTemporaryCouncilRequest",
+        "type": "object"
+      },
+      "WireTemporaryCouncilResult": {
+        "description": "Immutable result of one temporary council.\n\nSealed BEFORE cleanup runs, so it stays valid even when cleanup later fails.\nCleanup status is reported separately and never folded into this value.",
+        "properties": {
+          "concluded_at": {
+            "description": "When the result was sealed (RFC 3339).",
+            "type": "string"
+          },
+          "council_id": {
+            "description": "Council identity.",
+            "type": "string"
+          },
+          "durability": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilDurability",
+            "description": "The durability the caller declared and the store honoured."
+          },
+          "exchanges": {
+            "description": "Every bounded exchange receipt, in order.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilExchange"
+            },
+            "type": "array"
+          },
+          "exit_reason": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilExitReason",
+            "description": "Why the council stopped."
+          },
+          "merge": {
+            "$ref": "#/components/schemas/WireTemporaryCouncilMergeOutcome",
+            "description": "Explicit merge-back outcome."
+          },
+          "merge_truncated": {
+            "description": "Whether the merge output was truncated by its own byte cap.",
+            "type": "boolean"
+          },
+          "participants": {
+            "description": "Non-secret provenance for each participant slot.",
+            "items": {
+              "$ref": "#/components/schemas/WireTemporaryCouncilParticipantProvenance"
+            },
+            "type": "array"
+          },
+          "request_fingerprint": {
+            "description": "Canonical fingerprint of the request that produced this result.",
+            "type": "string"
+          },
+          "rounds_completed": {
+            "description": "Number of rounds that completed at least one exchange.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "temporary_mob_id": {
+            "description": "The real temporary mob the council ran in.",
+            "type": "string"
+          },
+          "truncated_exchange_count": {
+            "description": "Number of exchanges whose text was truncated by the receiver bound.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "council_id",
+          "request_fingerprint",
+          "temporary_mob_id",
+          "exit_reason",
+          "rounds_completed",
+          "exchanges",
+          "merge",
+          "participants",
+          "truncated_exchange_count",
+          "merge_truncated",
+          "durability",
+          "concluded_at"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilReusePolicy": {
+        "description": "How many times one capability may be attached over its lifetime.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exactly one attachment; the capability exhausts on its release.",
+            "properties": {
+              "kind": {
+                "const": "one_shot",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A bounded number of sequential attachments.",
+            "properties": {
+              "kind": {
+                "const": "bounded_reuse",
+                "type": "string"
+              },
+              "max_uses": {
+                "description": "Attachment budget.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_uses"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTemporaryCouncilScope": {
+        "description": "Operations a council participant's capability grants its holder.",
+        "oneOf": [
+          {
+            "const": "invoke",
+            "description": "Send bounded work into the seated participant.",
+            "type": "string"
+          },
+          {
+            "const": "observe",
+            "description": "Observe the seated participant's output only.",
+            "type": "string"
+          },
+          {
+            "const": "invoke_and_observe",
+            "description": "Both invoke and observe.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireTemporaryCouncilSelectedExchange": {
+        "description": "One selected council exchange, with its own provenance.",
+        "properties": {
+          "participant_order": {
+            "description": "Participant slot that produced it.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "round": {
+            "description": "Round the exchange belongs to.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Council-wide exchange sequence.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_identity": {
+            "description": "Identity that produced it.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Bounded excerpt of the exchange's own receiver-bounded text.",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "Whether this excerpt was cut by the selection's total byte cap.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sequence",
+          "round",
+          "participant_order",
+          "target_identity",
+          "text",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilSourceProvenance": {
+        "description": "Exact selected-prefix provenance of one fork.",
+        "properties": {
+          "prefix_digest": {
+            "description": "Content digest of the selected prefix.",
+            "type": "string"
+          },
+          "prefix_message_count": {
+            "description": "Number of source messages selected into the child.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_session_id": {
+            "description": "Session the fork was taken from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "prefix_message_count",
+          "prefix_digest"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilStructuredContract": {
+        "additionalProperties": false,
+        "description": "The typed contract a `structured_result` merge must satisfy.\n\nA council does not accept \"any syntactically valid JSON\" as a structured\nresult: the caller declares an identity, a version, and a JSON Schema, and\nthe finalizer's output is validated against it before the result is sealed.\nSchema compilation stays a coordinator preflight — the wire carries the\ndeclared schema, never a compiled or trusted one.",
+        "properties": {
+          "json_schema": {
+            "$ref": "#/components/schemas/WireOpaqueJson",
+            "description": "The JSON Schema the finalizer's output is validated against."
+          },
+          "schema_id": {
+            "description": "Caller-stable contract identity.",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "Caller-declared contract version.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_id",
+          "schema_version",
+          "json_schema"
+        ],
+        "type": "object"
+      },
+      "WireTemporaryCouncilStructuredContractIdentity": {
+        "description": "Non-secret identity of the structured-result contract a value satisfied.",
+        "properties": {
+          "schema_digest": {
+            "description": "Digest of the exact JSON Schema the value was validated against.",
+            "type": "string"
+          },
+          "schema_id": {
+            "description": "Caller-stable contract identity.",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "Caller-declared contract version.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_id",
+          "schema_version",
+          "schema_digest"
+        ],
+        "type": "object"
+      },
       "WireToolAccessConstraint": {
         "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
@@ -23107,6 +26318,110 @@
           }
         },
         "summary": "Ask Meerkat usage help"
+      }
+    },
+    "/mob/temporary-councils/recover": {
+      "post": {
+        "operationId": "post_mob_temporary_councils_recover",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobTemporaryCouncilRecoverResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Converge every unfinished temporary council (owner/admin maintenance)"
+      }
+    },
+    "/mob/temporary-councils/run": {
+      "post": {
+        "operationId": "post_mob_temporary_councils_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobTemporaryCouncilRunParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobTemporaryCouncilRunResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Run one bounded temporary council to a durable terminal outcome"
+      }
+    },
+    "/mob/temporary-councils/{council_id}": {
+      "get": {
+        "operationId": "get_mob_temporary_councils_council_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "council_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobTemporaryCouncilGetResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Read one sealed temporary-council record projection"
       }
     },
     "/mob/{id}/events": {

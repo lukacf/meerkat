@@ -221,6 +221,12 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberLiveChannelParams",
     "MobMemberLiveStatusParams",
     "MobMemberLiveControlParams",
+    # Issue #159: temporary-council console verb contracts.
+    "MobTemporaryCouncilRunParams",
+    "MobTemporaryCouncilRunResult",
+    "MobTemporaryCouncilGetParams",
+    "MobTemporaryCouncilGetResult",
+    "MobTemporaryCouncilRecoverResult",
 ]
 
 COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
@@ -521,6 +527,22 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     # An alias, not a contract type: the object emitter would turn a
     # single-variant string enum into an empty `{}` interface.
     "WireMobRunUsageAttribution",
+    # Issue #159: temporary-council enum/oneOf vocabulary. Aliases, not
+    # object contracts: routing a tagged union through the object emitter
+    # would flatten it to an empty `{}` interface.
+    "WireTemporaryCouncilDurability",
+    "WireTemporaryCouncilScope",
+    "WireTemporaryCouncilReusePolicy",
+    "WireTemporaryCouncilOwnerRoute",
+    "WireTemporaryCouncilMergePolicyKind",
+    "WireTemporaryCouncilDeadline",
+    "WireTemporaryCouncilMergeBack",
+    "WireTemporaryCouncilExitReason",
+    "WireTemporaryCouncilExchangeOutcome",
+    "WireTemporaryCouncilMergeOutcome",
+    "WireTemporaryCouncilCleanupStatus",
+    "WireTemporaryCouncilAcquisition",
+    "WireTemporaryCouncilFailureKind",
     "WireWorkExecutionLifecyclePhase",
     "WirePeerConnectivity",
     "WireHostBindingDescriptorKind",
@@ -601,6 +623,32 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     # Phase 7 (W-A8): the host-binding descriptor struct referenced by
     # `MobBindHostParams.descriptor`.
     "WireHostBindingDescriptor",
+    # Issue #159: temporary-council object contracts nested by the run/get/
+    # recover results. Without promotion each nesting widens to an opaque
+    # map, which would hide the bounded exchanges and the non-secret
+    # capability provenance an auditor is supposed to read.
+    "WireTemporaryCouncilRequest",
+    "WireTemporaryCouncilBounds",
+    "WireTemporaryCouncilParticipant",
+    "WireTemporaryCouncilStructuredContract",
+    "WireTemporaryCouncilResult",
+    "WireTemporaryCouncilExchange",
+    "WireTemporaryCouncilCapabilityProvenance",
+    "WireTemporaryCouncilSourceProvenance",
+    "WireTemporaryCouncilParticipantProvenance",
+    "WireTemporaryCouncilArtifactClaim",
+    "WireTemporaryCouncilSelectedExchange",
+    "WireTemporaryCouncilStructuredContractIdentity",
+    "WireTemporaryCouncilCleanup",
+    "WireTemporaryCouncilCleanupDebt",
+    "WireTemporaryCouncilRecord",
+    "WireTemporaryCouncilParticipantCustody",
+    "WireTemporaryCouncilRecoveryReport",
+    # Typed `data` payloads for the council error codes.
+    "WireTemporaryCouncilFailureDetail",
+    "WireTemporaryCouncilConflictDetail",
+    "WireTemporaryCouncilClaimDetail",
+    "WireTemporaryCouncilDurabilityDetail",
     # Control-scope RPC results embed this schema-local row. Keep the row a
     # named public SDK type instead of widening it to an opaque map.
     "WireGrantRecord",

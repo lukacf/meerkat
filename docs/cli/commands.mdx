@@ -570,6 +570,9 @@ rkat mob revoke-host <MOB_ID> <HOST_ID>
 rkat mob hosts <MOB_ID> [--json]
 rkat mob member-history <MOB_ID> <AGENT_IDENTITY> [--from-index <N>] [--limit <N>]
 rkat mob route-installs <MOB_ID>
+rkat mob council-run --request <REQUEST.json> [--host-binding <DESCRIPTOR.json>]...
+rkat mob council-get <COUNCIL_ID>
+rkat mob council-recover
 rkat mob live open <MOB_ID> <AGENT_IDENTITY> [--turning-mode <provider-managed|explicit-commit>] [--transport <websocket|webrtc>]
 rkat mob live close <MOB_ID> <AGENT_IDENTITY> <CHANNEL_ID>
 rkat mob live status <MOB_ID> <AGENT_IDENTITY> [--channel-id <ID>]
@@ -593,6 +596,14 @@ Multi-host notes:
   `rkat mob host --descriptor-out`; the 0600 descriptor carries a single-use
   bootstrap token, and the bind report (host id, authority epoch, capability
   record) prints as JSON.
+- `rkat mob council-run` takes its request as JSON only: a temporary-council
+  request carries a full mob definition template, participant slots, bounds,
+  and one merge-back policy, which is not an honest flag surface. stdout is the
+  wire run result (sealed council result plus a separate cleanup verdict).
+  `--host-binding` is repeatable and reads the same 0600 descriptor files
+  `rkat mob bind-host` consumes; the descriptors are needed before a HOST-owned
+  participant can be seated, are never fingerprinted or persisted, and are
+  never echoed. See the [Temporary Councils Guide](/guides/temporary-councils).
 - `grant`, `revoke-grant`, and `grants` manage the closed control-scope set:
   `list`, `read_history`, `subscribe_events`, `send_command`, `cancel`,
   `retire`, `wire_topology`, `live`, `admin_host`, and `admin_grants`.

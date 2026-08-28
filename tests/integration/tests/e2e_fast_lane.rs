@@ -6,6 +6,10 @@
 #[path = "../../../meerkat-mob/tests/support/mod.rs"]
 mod support;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "../../../meerkat-mob-mcp/tests/support/mod.rs"]
+mod council_support;
+
 // Phase 6b: the live-plane fixture half (support/live_plane.rs is
 // deliberately NOT declared inside support/mod.rs — only live-capable test
 // roots compose it).
@@ -16,6 +20,9 @@ mod live_support;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/cross_host_live_member.rs"]
 mod cross_host_live_member;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/mixed_temporary_council.rs"]
+mod mixed_temporary_council;
 #[path = "e2e_fast/multi_host_bind.rs"]
 mod multi_host_bind;
 // Phase 7 (T-A8): the console verbs served through the REAL RPC handler →

@@ -2157,13 +2157,24 @@ fn validate_member_turn_carriers(
         });
     }
 
-    if (has_event_sender || has_completion_sender) && (peer_only || autonomous) {
+    if has_event_sender && (peer_only || autonomous) {
         return Err(MobError::UnsupportedForMode {
             mode: entry.runtime_mode,
             reason: if peer_only {
                 "tracked turn event streams are not supported for remotely hosted or peer-only members"
             } else {
                 "tracked turn event streams are not supported by autonomous inbox delivery"
+            }
+            .to_string(),
+        });
+    }
+    if has_completion_sender && ((!remotely_hosted && peer_only) || autonomous) {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: if peer_only {
+                "tracked turn completion is not supported for legacy peer-only members"
+            } else {
+                "tracked turn completion is not supported by autonomous inbox delivery"
             }
             .to_string(),
         });
@@ -2190,7 +2201,11 @@ fn validate_member_turn_carriers(
             reason: "transient turn context requires a queued executor turn".to_string(),
         });
     }
-    let unsupported = if peer_only {
+    let unsupported = if remotely_hosted {
+        // A placed bounded turn carries its exact interaction identity through
+        // `BridgeBoundedResultSpec` and the durable terminal sidecar.
+        unsupported_turn_metadata_fields(metadata, handling_mode, false, true, true)
+    } else if peer_only {
         unsupported_turn_metadata_fields(metadata, handling_mode, false, false, true)
     } else if autonomous {
         unsupported_turn_metadata_fields(metadata, handling_mode, true, true, false)
@@ -8910,7 +8925,39 @@ impl MobActor {
         &mut self,
         identity: &AgentIdentity,
     ) -> Result<Option<String>, MobError> {
-        let Some(session_id) = self.machine_bridge_session_id_for_identity(identity)? else {
+        let session_id = match self.machine_bridge_session_id_for_identity(identity)? {
+            Some(session_id) => Some(session_id),
+            None => {
+                // Retire intentionally removes the live machine binding before
+                // its machine-authorized cross-host unwire is realized. The
+                // retained roster anchor names the exact local session for
+                // this teardown-only registration; ordinary routes still
+                // require the current machine binding above.
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+                let retiring = self
+                    .dsl_authority
+                    .state()
+                    .identity_to_runtime
+                    .get(&dsl_identity)
+                    .and_then(|runtime_id| {
+                        self.dsl_authority
+                            .state()
+                            .member_state_markers
+                            .get(runtime_id)
+                    })
+                    == Some(&mob_dsl::MobMemberState::Retiring);
+                if retiring {
+                    self.roster
+                        .read()
+                        .await
+                        .get(identity)
+                        .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(session_id) = session_id else {
             return Ok(None);
         };
         // Material first, bind second: a composer that supplies no
@@ -8968,7 +9015,38 @@ impl MobActor {
         if has_cross_host_edges {
             return Ok(());
         }
-        let Some(session_id) = self.machine_bridge_session_id_for_identity(identity)? else {
+        let session_id = match self.machine_bridge_session_id_for_identity(identity)? {
+            Some(session_id) => Some(session_id),
+            None => {
+                // Retiring members deliberately lost their live machine
+                // binding before their final cross-host unwire. Match the
+                // registration fallback above so that teardown can remove
+                // the exact retained local-session lease.
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+                let retiring = self
+                    .dsl_authority
+                    .state()
+                    .identity_to_runtime
+                    .get(&dsl_identity)
+                    .and_then(|runtime_id| {
+                        self.dsl_authority
+                            .state()
+                            .member_state_markers
+                            .get(runtime_id)
+                    })
+                    == Some(&mob_dsl::MobMemberState::Retiring);
+                if retiring {
+                    self.roster
+                        .read()
+                        .await
+                        .get(identity)
+                        .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(session_id) = session_id else {
             return Ok(());
         };
         let material = {
@@ -39882,17 +39960,6 @@ impl MobActor {
             )
             .await?;
 
-            // A respawn preserves the logical machine edge, so the ordinary
-            // unwire-driven cleanup never runs for the retiring local endpoint.
-            // Remove its exact process-acceptor lease after every remote trust
-            // lane has been removed and before the replacement can be published.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(pubkey) = retiring_reverse_lane_pubkey.as_ref()
-                && let Some(state) = self.controlling_acceptor.as_mut()
-            {
-                state.remove_registration(pubkey).await?;
-            }
-
             tracing::debug!(
                 agent_identity = %agent_identity,
                 "MobActor::handle_retire_inner planning trust cleanup"
@@ -39974,6 +40041,18 @@ impl MobActor {
             && step == DisposalStep::ArchiveSession
         {
             return Err(error);
+        }
+
+        // A respawn preserves the logical machine edge, so the ordinary
+        // unwire-driven cleanup never runs for the retiring local endpoint.
+        // Keep its exact process-acceptor lease alive until DisposeMember has
+        // removed every remote trust lane; otherwise the remote recipient
+        // cannot authenticate the final UnwireMember callback.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pubkey) = retiring_reverse_lane_pubkey.as_ref()
+            && let Some(state) = self.controlling_acceptor.as_mut()
+        {
+            state.remove_registration(pubkey).await?;
         }
 
         let is_placed =
@@ -54367,6 +54446,30 @@ impl MobActor {
         &self,
         entry: &RosterEntry,
     ) -> Result<WiringEndpoint, MobError> {
+        // Retire has already removed the live MobMachine session binding before
+        // trust cleanup runs. The roster's exact local session reference is
+        // retained for this one teardown action, so resolve it directly rather
+        // than trying to resurrect an ordinary behavior binding.
+        if matches!(&entry.member_ref, MemberRef::Session { .. }) {
+            let comms_name = self.comms_name_for(entry)?;
+            if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+                let public_key = comms.public_key().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "unwire retirement requires public key for '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
+                let spec = self
+                    .local_wiring_spec(entry, &entry.member_ref, &comms, &comms_name, &public_key)
+                    .await?;
+                return Ok(WiringEndpoint::Local {
+                    entry: Box::new(entry.clone()),
+                    comms,
+                    spec,
+                    comms_name,
+                });
+            }
+        }
         if let Some(host) = self.confirmed_revoked_placed_host(&entry.agent_identity) {
             let spec = self
                 .machine_member_peer_spec_for(

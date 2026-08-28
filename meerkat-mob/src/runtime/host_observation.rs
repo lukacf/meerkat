@@ -2263,7 +2263,12 @@ impl MemberObservationHost for HostMemberObservation {
             )));
         }
         match self
-            .reserve_pending(&facts, &request.input_id, None, None)
+            .reserve_pending(
+                &facts,
+                &request.input_id,
+                request.bounded_result_spec.as_ref(),
+                None,
+            )
             .await?
         {
             HostPendingReservationReply::Replayed { window_start }

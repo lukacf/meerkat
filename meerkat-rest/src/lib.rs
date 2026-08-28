@@ -691,7 +691,7 @@ impl AppState {
                 if let Some(acceptor) = controlling_acceptor {
                     state = state.with_controlling_acceptor(acceptor);
                 }
-                let state = Arc::new(state);
+                let state = state.into_shared();
                 state.start_workgraph_flow_reconciler();
                 *mob_tools_slot
                     .write()
@@ -2389,7 +2389,23 @@ pub fn router(state: AppState) -> Router {
             get(mob_member_history),
         )
         .route("/mob/{id}/hosts", get(mob_hosts))
-        .route("/mob/{id}/route-installs", get(mob_route_installs));
+        .route("/mob/{id}/route-installs", get(mob_route_installs))
+        // Temporary councils (issue #159). Realm-scoped, not mob-scoped: the
+        // temporary mob is coordinator-owned, so these paths do not hang off a
+        // caller-named mob id. Every operation renders through the SAME
+        // `meerkat-mob-mcp` wire converters the RPC handlers use.
+        .route(
+            "/mob/temporary-councils/run",
+            post(mob_temporary_council_run),
+        )
+        .route(
+            "/mob/temporary-councils/recover",
+            post(mob_temporary_council_recover),
+        )
+        .route(
+            "/mob/temporary-councils/{council_id}",
+            get(mob_temporary_council_get),
+        );
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -3291,6 +3307,103 @@ async fn mob_route_installs(
         .await
         .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
     Ok(Json(result))
+}
+
+/// The ONE REST rendering for a typed temporary-council failure.
+///
+/// `meerkat-mob-mcp` owns the variant→code pairing, so REST and RPC cannot
+/// disagree about what a conflict, a busy claim, or an unmet durability
+/// declaration means.
+#[cfg(feature = "mob")]
+fn temporary_council_rest_error(err: &meerkat_mob_mcp::TemporaryCouncilError) -> Response {
+    let detail = meerkat_mob_mcp::temporary_council_wire::temporary_council_error_detail(err);
+    match detail.detail_value() {
+        Ok(details) => rest_wire_error_with_details(detail.code(), err.to_string(), Some(details)),
+        Err(serialize_error) => rest_wire_error(
+            ErrorCode::InternalError,
+            format!("failed to serialize temporary council error detail: {serialize_error}"),
+        ),
+    }
+}
+
+/// POST /mob/temporary-councils/run — run one bounded temporary council.
+///
+/// The coordinator task is owned by the runtime: an abandoned HTTP request
+/// abandons the response, never the execution.
+#[cfg(feature = "mob")]
+async fn mob_temporary_council_run(
+    State(state): State<AppState>,
+    Json(body): Json<meerkat_contracts::wire::MobTemporaryCouncilRunParams>,
+) -> Result<Json<meerkat_contracts::wire::MobTemporaryCouncilRunResult>, Response> {
+    state
+        .mob_state
+        .admit_temporary_council_run()
+        .map_err(|err| mob_rest_error(&err, ApiError::Unauthorized))?;
+    let request =
+        meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_request(body.request)
+            .map_err(|err| temporary_council_rest_error(&err))?;
+    let bootstrap =
+        meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_host_bootstrap(
+            body.host_bindings,
+        )
+        .map_err(|err| temporary_council_rest_error(&err))?;
+    let outcome = state
+        .mob_state
+        .temporary_council()
+        .run_with_host_bootstrap(request, bootstrap)
+        .await
+        .map_err(|err| temporary_council_rest_error(&err))?;
+    Ok(Json(
+        meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_outcome(&outcome),
+    ))
+}
+
+/// GET /mob/temporary-councils/{council_id} — sealed record projection.
+#[cfg(feature = "mob")]
+async fn mob_temporary_council_get(
+    State(state): State<AppState>,
+    Path(council_id): Path<String>,
+) -> Result<Json<meerkat_contracts::wire::MobTemporaryCouncilGetResult>, Response> {
+    state
+        .mob_state
+        .admit_temporary_council_read()
+        .map_err(|err| mob_rest_error(&err, ApiError::Unauthorized))?;
+    let council_id =
+        meerkat_mob_mcp::temporary_council_wire::parse_temporary_council_id(&council_id)
+            .map_err(|err| temporary_council_rest_error(&err))?;
+    let record = state
+        .mob_state
+        .temporary_council()
+        .load(&council_id)
+        .await
+        .map_err(|err| temporary_council_rest_error(&err))?;
+    Ok(Json(
+        meerkat_contracts::wire::MobTemporaryCouncilGetResult {
+            council: record
+                .as_ref()
+                .map(meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_record),
+        },
+    ))
+}
+
+/// POST /mob/temporary-councils/recover — owner/admin maintenance sweep.
+#[cfg(feature = "mob")]
+async fn mob_temporary_council_recover(
+    State(state): State<AppState>,
+) -> Result<Json<meerkat_contracts::wire::MobTemporaryCouncilRecoverResult>, Response> {
+    state
+        .mob_state
+        .admit_temporary_council_recovery()
+        .map_err(|err| mob_rest_error(&err, ApiError::Unauthorized))?;
+    let reports = state
+        .mob_state
+        .temporary_council()
+        .recover_unfinished()
+        .await
+        .map_err(|err| temporary_council_rest_error(&err))?;
+    Ok(Json(
+        meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_recovery(&reports),
+    ))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/respawn — retire + respawn member.
@@ -12032,6 +12145,168 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "an unclassified MemberNotFound keeps the BadRequest fallback"
         );
+    }
+
+    /// Issue #159: the temporary-council REST endpoints are served by the
+    /// SAME wire converters and typed error mapping the RPC handlers use.
+    /// An unknown council is a typed absence, an empty realm sweep converges
+    /// with no reports, and a `durable` declaration against process-bound
+    /// custody is a 501 `capability_unavailable` with its typed details —
+    /// never a laundered 400 string.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_temporary_council_rest_endpoints_mirror_rpc_semantics() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/mob/temporary-councils/never-created")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: meerkat_contracts::wire::MobTemporaryCouncilGetResult =
+            serde_json::from_slice(&body).expect("typed get payload");
+        assert!(payload.council.is_none(), "absence is not an error");
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/mob/temporary-councils/recover")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: meerkat_contracts::wire::MobTemporaryCouncilRecoverResult =
+            serde_json::from_slice(&body).expect("typed recover payload");
+        assert!(payload.reports.is_empty());
+
+        // A council whose participants cannot be seated is NOT an error: the
+        // sealed result carries a typed exit reason plus a separate cleanup
+        // verdict, and the REST body is the same wire projection the RPC
+        // handler returns. (The durable-custody refusal is exercised where
+        // custody is process-bound; the REST console roots durable custody.)
+        let request_body = json!({
+            "request": {
+                "council_id": "rest-unseatable-council",
+                "definition_template": {
+                    "id": "ignored",
+                    "profiles": { "participant": { "model": "claude-haiku-4-5-20251001" } }
+                },
+                "participants": [{
+                    "order": 0,
+                    "role": "critic",
+                    "source_mob_id": "no-such-source-mob",
+                    "source_identity": "alice",
+                    "target_identity": "alice-branch",
+                    "target_profile": "participant",
+                    "scope": "invoke_and_observe"
+                }],
+                "topic": "is this safe to ship?",
+                "bounds": {
+                    "deadline": { "kind": "relative", "after_millis": 60000 },
+                    "max_rounds": 1,
+                    "max_exchanges": 2,
+                    "max_result_bytes": 4096
+                },
+                "merge_back": { "policy": "no_merge" },
+                "durability": "durable"
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/mob/temporary-councils/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let outcome: meerkat_contracts::wire::MobTemporaryCouncilRunResult =
+            serde_json::from_slice(&body).expect("typed run payload");
+        assert!(matches!(
+            outcome.result.exit_reason,
+            meerkat_contracts::wire::WireTemporaryCouncilExitReason::ParticipantSeatingFailed { .. }
+        ));
+        assert!(
+            matches!(
+                outcome.result.merge,
+                meerkat_contracts::wire::WireTemporaryCouncilMergeOutcome::NotAttempted { .. }
+                    | meerkat_contracts::wire::WireTemporaryCouncilMergeOutcome::NoMerge { .. }
+            ),
+            "a council that seated nobody cannot produce merged content: {:?}",
+            outcome.result.merge
+        );
+        assert!(
+            outcome.result.exchanges.is_empty(),
+            "no participant turn can have happened: {:?}",
+            outcome.result.exchanges
+        );
+        let raw = String::from_utf8(body.to_vec()).expect("utf-8 body");
+        for forbidden in ["bearer", "capability_id", "revocation_id", "cleanup_id"] {
+            assert!(
+                !raw.contains(forbidden),
+                "the REST council projection must not carry `{forbidden}`"
+            );
+        }
+
+        // A request that smuggles capability custody is refused before any
+        // side effect, with the typed invalid-request payload.
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/mob/temporary-councils/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "request": {
+                                "council_id": "rest-smuggled",
+                                "definition_template": { "id": "ignored", "profiles": {} },
+                                "participants": [],
+                                "topic": "hello",
+                                "bounds": {
+                                    "deadline": { "kind": "relative", "after_millis": 1000 },
+                                    "max_rounds": 1,
+                                    "max_exchanges": 1,
+                                    "max_result_bytes": 512
+                                },
+                                "merge_back": { "policy": "no_merge" },
+                                "durability": "durable",
+                                "capability_ref": { "bearer": "secret" }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// Phase 7 (T-A7): a named console principal without `List` is denied

@@ -479,12 +479,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
     ] + [
+        "//meerkat-mob-mcp:tests/support/mod.rs",
         "//meerkat-mob:tests/support/live_plane.rs",
         "//meerkat-mob:tests/support/mod.rs",
         "//meerkat-mob:tests/support/probe.rs",
     ],
     srcs = [
         "tests/e2e_fast/cross_host_live_member.rs",
+        "tests/e2e_fast/mixed_temporary_council.rs",
         "tests/e2e_fast/multi_host_bind.rs",
         "tests/e2e_fast/multi_host_console.rs",
         "tests/e2e_fast/multi_host_flow.rs",
@@ -504,6 +506,7 @@ rust_test(
         "integration",
     ],
     data = [
+        "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob:package_runfiles",
         "//meerkat:package_runfiles",
         "//:workspace_runfiles",

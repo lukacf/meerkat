@@ -3363,6 +3363,131 @@ pub async fn handle_member_live_control(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Temporary councils (issue #159)
+// ---------------------------------------------------------------------------
+
+/// The ONE wire rendering for a typed temporary-council failure.
+///
+/// `meerkat-mob-mcp` owns the variant→code pairing; this renders it with the
+/// bare typed `data` payload, exactly like `mob_call_error`.
+fn temporary_council_error(
+    id: Option<RpcId>,
+    err: &meerkat_mob_mcp::TemporaryCouncilError,
+) -> RpcResponse {
+    let detail = meerkat_mob_mcp::temporary_council_wire::temporary_council_error_detail(err);
+    match detail.detail_value() {
+        Ok(data) => {
+            RpcResponse::error_with_data(id, detail.code().jsonrpc_code(), err.to_string(), data)
+        }
+        // Fail closed, mirroring the mob console posture.
+        Err(serialize_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to serialize temporary council error detail: {serialize_error}"),
+        ),
+    }
+}
+
+/// `mob/temporary_council_run` — run one bounded temporary council.
+///
+/// This call OWNS and join-waits the coordinator task. Dropping the caller's
+/// request abandons the RESPONSE, never the execution: the council runs to its
+/// absolute deadline, seals its immutable result, and cleans up regardless.
+pub async fn handle_temporary_council_run(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    if let Err(err) = state.admit_temporary_council_run() {
+        return mob_error_response(id, &err);
+    }
+    let params: meerkat_contracts::wire::MobTemporaryCouncilRunParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let request = match meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_request(
+        params.request,
+    ) {
+        Ok(request) => request,
+        Err(err) => return temporary_council_error(id, &err),
+    };
+    let bootstrap =
+        match meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_host_bootstrap(
+            params.host_bindings,
+        ) {
+            Ok(bootstrap) => bootstrap,
+            Err(err) => return temporary_council_error(id, &err),
+        };
+    match state
+        .temporary_council()
+        .run_with_host_bootstrap(request, bootstrap)
+        .await
+    {
+        Ok(outcome) => RpcResponse::success(
+            id,
+            meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_outcome(&outcome),
+        ),
+        Err(err) => temporary_council_error(id, &err),
+    }
+}
+
+/// `mob/temporary_council_get` — read one sealed record projection.
+///
+/// An unknown council is an ordinary absence (`council: null`), not an error.
+pub async fn handle_temporary_council_get(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    if let Err(err) = state.admit_temporary_council_read() {
+        return mob_error_response(id, &err);
+    }
+    let params: meerkat_contracts::wire::MobTemporaryCouncilGetParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let council_id = match meerkat_mob_mcp::temporary_council_wire::parse_temporary_council_id(
+        &params.council_id,
+    ) {
+        Ok(council_id) => council_id,
+        Err(err) => return temporary_council_error(id, &err),
+    };
+    match state.temporary_council().load(&council_id).await {
+        Ok(record) => RpcResponse::success(
+            id,
+            meerkat_contracts::wire::MobTemporaryCouncilGetResult {
+                council: record
+                    .as_ref()
+                    .map(meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_record),
+            },
+        ),
+        Err(err) => temporary_council_error(id, &err),
+    }
+}
+
+/// `mob/temporary_council_recover` — converge every unfinished council.
+///
+/// Owner/admin maintenance: this sweep seals interrupted terminals and runs
+/// cleanup for councils this caller may never have started, so it is served
+/// only by owner consoles (RPC, REST, CLI) and deliberately not by the
+/// agent-reachable public MCP tool surface.
+pub async fn handle_temporary_council_recover(
+    id: Option<RpcId>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    if let Err(err) = state.admit_temporary_council_recovery() {
+        return mob_error_response(id, &err);
+    }
+    match state.temporary_council().recover_unfinished().await {
+        Ok(reports) => RpcResponse::success(
+            id,
+            meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_recovery(&reports),
+        ),
+        Err(err) => temporary_council_error(id, &err),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
@@ -4800,5 +4925,166 @@ mod tests {
         assert_eq!(data["provider"], "openai");
         assert_eq!(data["realm_id"], "global");
         assert_eq!(data["binding_id"], "openai");
+    }
+
+    // ─── Temporary councils (issue #159) ────────────────────────────────
+
+    /// An unknown council is an ordinary absence, never an error: the get
+    /// handler answers `council: null` so a poller can tell "no such record"
+    /// from "the coordinator failed".
+    #[tokio::test]
+    async fn temporary_council_get_unknown_council_is_typed_absence() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::Owner);
+        let raw = raw_params(serde_json::json!({ "council_id": "never-created" }));
+
+        let response = handle_temporary_council_get(Some(RpcId::Num(1)), Some(&raw), &state).await;
+
+        assert!(response.error.is_none(), "absence is not an error");
+        let result: meerkat_contracts::wire::MobTemporaryCouncilGetResult =
+            serde_json::from_str(response.result.expect("get result").get())
+                .expect("get result decodes");
+        assert!(result.council.is_none());
+    }
+
+    #[tokio::test]
+    async fn temporary_council_owner_operations_reject_external_consoles() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::External(
+            meerkat_core::auth::PrincipalId::new("council-viewer").expect("valid principal"),
+        ));
+        let raw = raw_params(serde_json::json!({ "council_id": "never-created" }));
+
+        assert_scope_denied(
+            handle_temporary_council_run(Some(RpcId::Num(19)), None, &state).await,
+            meerkat_contracts::WireControlScope::SendCommand,
+            &[],
+            "temporary council admission",
+        );
+        assert_scope_denied(
+            handle_temporary_council_get(Some(RpcId::Num(20)), Some(&raw), &state).await,
+            meerkat_contracts::WireControlScope::List,
+            &[],
+            "realm-wide council read",
+        );
+        assert_scope_denied(
+            handle_temporary_council_recover(Some(RpcId::Num(21)), &state).await,
+            meerkat_contracts::WireControlScope::Retire,
+            &[],
+            "realm-wide council recovery",
+        );
+    }
+
+    /// A non-canonical council id is refused at the conversion boundary with
+    /// the typed invalid-request payload, before any store or mob is touched.
+    #[tokio::test]
+    async fn temporary_council_get_rejects_non_canonical_id() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::Owner);
+        let raw = raw_params(serde_json::json!({ "council_id": " padded " }));
+
+        let response = handle_temporary_council_get(Some(RpcId::Num(2)), Some(&raw), &state).await;
+
+        let error = response.error.expect("non-canonical id must fail");
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::InvalidParams.jsonrpc_code()
+        );
+        let data = error.data.expect("typed invalid-request data");
+        assert_eq!(data["kind"], "invalid_request");
+    }
+
+    /// An in-memory council store cannot promise crash recovery, so a
+    /// `durable` declaration is REFUSED with the typed capability-unavailable
+    /// payload rather than silently downgraded.
+    #[tokio::test]
+    async fn temporary_council_run_refuses_durable_on_process_bound_custody() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::Owner);
+        let raw = raw_params(serde_json::json!({
+            "request": {
+                "council_id": "durability-refusal",
+                "definition_template": {
+                    "id": "ignored",
+                    "profiles": {
+                        "council": { "model": "claude-haiku-4-5-20251001" }
+                    }
+                },
+                "participants": [{
+                    "order": 0,
+                    "role": "critic",
+                    "source_mob_id": "source-mob",
+                    "source_identity": "alice",
+                    "target_identity": "alice-branch",
+                    "target_profile": "council",
+                    "scope": "invoke_and_observe"
+                }],
+                "topic": "is this safe to ship?",
+                "bounds": {
+                    "deadline": { "kind": "relative", "after_millis": 60000 },
+                    "max_rounds": 1,
+                    "max_exchanges": 2,
+                    "max_result_bytes": 4096
+                },
+                "merge_back": { "policy": "no_merge" },
+                "durability": "durable"
+            }
+        }));
+
+        let response = handle_temporary_council_run(Some(RpcId::Num(3)), Some(&raw), &state).await;
+
+        let error = response.error.expect("durable custody must be refused");
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        let data = error.data.expect("typed durability data");
+        assert_eq!(data["council_id"], "durability-refusal");
+        assert_eq!(data["required"], "durable");
+        assert_eq!(data["available"], "process_bound");
+    }
+
+    /// A request that fails shape validation is refused before any side
+    /// effect, with the typed invalid-request payload.
+    #[tokio::test]
+    async fn temporary_council_run_rejects_unknown_request_fields() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::Owner);
+        let raw = raw_params(serde_json::json!({
+            "request": {
+                "council_id": "smuggled",
+                "definition_template": { "id": "ignored", "profiles": {} },
+                "participants": [],
+                "topic": "hello",
+                "bounds": {
+                    "deadline": { "kind": "relative", "after_millis": 1000 },
+                    "max_rounds": 1,
+                    "max_exchanges": 1,
+                    "max_result_bytes": 512
+                },
+                "merge_back": { "policy": "no_merge" },
+                "durability": "process_bound",
+                "capability_ref": { "bearer": "secret" }
+            }
+        }));
+
+        let response = handle_temporary_council_run(Some(RpcId::Num(4)), Some(&raw), &state).await;
+
+        let error = response.error.expect("unknown fields must be refused");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert!(
+            !error.message.contains("secret"),
+            "a rejection must not echo smuggled material: {}",
+            error.message
+        );
+    }
+
+    /// The recovery sweep over an empty realm converges with no reports.
+    #[tokio::test]
+    async fn temporary_council_recover_on_empty_custody_reports_nothing() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::Owner);
+
+        let response = handle_temporary_council_recover(Some(RpcId::Num(5)), &state).await;
+
+        assert!(response.error.is_none(), "empty sweep is not an error");
+        let result: meerkat_contracts::wire::MobTemporaryCouncilRecoverResult =
+            serde_json::from_str(response.result.expect("recover result").get())
+                .expect("recover result decodes");
+        assert!(result.reports.is_empty());
     }
 }

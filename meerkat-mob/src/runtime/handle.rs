@@ -6834,18 +6834,16 @@ impl MobHandle {
     /// — never a blind release, which would assert an absence the mob did not
     /// observe.
     ///
-    /// Only [`crate::forked_participant::ForkedParticipantOwnerRoute::Local`]
-    /// is served. A host route is typed
-    /// [`MobError::ForkedParticipantRemoteLeaseUnsupported`]: remote seating
-    /// must be coupled to V6 Materialize/Release rather than proxied as a
-    /// standalone command. `SendCommand`-scoped at chokepoint (a).
+    /// Local and host owner routes are supported. Host-owned seating is coupled
+    /// to V6 Materialize/Release at the owning host rather than treating a
+    /// remote fork as a local pointer. `SendCommand`-scoped at chokepoint (a).
     ///
     /// The returned outcome is explicit and complete: the caller keeps the
     /// spawn result AND the lease identity it now owns. Releasing the lease
     /// stays its own explicit act — no `Drop`-spawned async cleanup is started
-    /// anywhere on this path. Ordinary member teardown (retire, respawn,
-    /// destroy, shutdown) releases the exact attachment after the member's
-    /// session/runtime teardown completes.
+    /// anywhere on this path. Retire, respawn, and destroy release the exact
+    /// attachment after member teardown; clean process shutdown retains durable
+    /// custody for restart reconciliation.
     pub async fn spawn_attached_forked_participant(
         &self,
         caller: crate::control_policy::MobControlPrincipal,

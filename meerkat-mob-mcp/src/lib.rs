@@ -15,6 +15,7 @@ pub mod run_accounting;
 mod schedule_host;
 mod surface;
 pub mod temporary_council;
+pub mod temporary_council_wire;
 mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
@@ -98,6 +99,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+const LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(not(target_arch = "wasm32"))]
 use ::tokio::sync::{Mutex, RwLock, mpsc};
@@ -414,9 +417,6 @@ pub struct MobMcpState {
     forked_participant_store_selection: ForkedParticipantStoreSelection,
     /// Realm-scoped temporary-council orchestration custody (issue #159).
     temporary_council_store_selection: TemporaryCouncilStoreSelection,
-    /// Serializes council admission: load-or-insert plus single-flight
-    /// registration must be one decision per council id.
-    temporary_council_admission: Mutex<()>,
     /// Single-flight registry of owned council execution tasks, keyed by
     /// council id. A `std` mutex because the map is only ever touched without
     /// awaits, including from the task's drop guard.
@@ -443,6 +443,10 @@ pub struct MobMcpState {
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
+    /// Set once the realm-local capability expiry/cleanup driver is running.
+    local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
+    /// Driver cadence, configurable only through the explicit test seam.
+    local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64,
     /// Skill sources seeded from the owning mob definition.
     ///
     /// Realm profiles carry skill names, not the source bodies/paths. When an
@@ -516,7 +520,6 @@ impl MobMcpState {
             temporary_council_store_selection: TemporaryCouncilStoreSelection::DefaultInMemory(
                 Arc::new(InMemoryTemporaryCouncilStore::new()),
             ),
-            temporary_council_admission: Mutex::new(()),
             temporary_council_inflight: std::sync::Mutex::new(HashMap::new()),
             self_weak: std::sync::OnceLock::new(),
             coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
@@ -526,6 +529,11 @@ impl MobMcpState {
                     .unwrap_or(30_000),
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
+            local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
+            local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
+                u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
+                    .unwrap_or(30_000),
+            ),
             realm_skill_sources: BTreeMap::new(),
             member_live_host: std::sync::RwLock::new(None),
             controlling_acceptor: None,
@@ -617,8 +625,7 @@ impl MobMcpState {
 
     /// Trusted in-process temporary-council API (issue #159).
     ///
-    /// Deliberately Rust-only in this phase: no RPC/REST/SDK/CLI/public-MCP
-    /// handler is wired to it yet.
+    /// Public surfaces are thin adapters over this shared coordinator.
     /// Share this state, installing the self-reference that lets persistent
     /// restoration schedule its own temporary-council recovery sweep.
     ///
@@ -710,6 +717,7 @@ impl MobMcpState {
         {
             return;
         }
+
         let Some(weak) = self.self_weak.get().cloned() else {
             // No `Arc<Self>` has been observed yet, so nothing can own the
             // sweep. Allow a later attempt rather than pretending it ran.
@@ -739,6 +747,105 @@ impl MobMcpState {
         });
     }
 
+    /// Override the local capability sweep cadence for deterministic tests.
+    #[doc(hidden)]
+    pub fn set_local_forked_participant_sweep_interval(&self, interval: Duration) {
+        let interval = interval.max(Duration::from_millis(1));
+        self.local_forked_participant_sweep_interval_ms.store(
+            u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    fn schedule_local_forked_participant_sweeper(&self) {
+        use std::sync::atomic::Ordering;
+        if self
+            .local_forked_participant_sweeper_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            self.local_forked_participant_sweeper_started
+                .store(false, Ordering::SeqCst);
+            return;
+        };
+        tokio::spawn(async move {
+            loop {
+                let Some(state) = weak.upgrade() else {
+                    return;
+                };
+                state.sweep_local_forked_participants().await;
+                let interval = Duration::from_millis(
+                    state
+                        .local_forked_participant_sweep_interval_ms
+                        .load(Ordering::SeqCst),
+                );
+                drop(state);
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    async fn sweep_local_forked_participants(&self) {
+        let Some(runtime) = self
+            .session_service
+            .clone()
+            .forked_participant_source_runtime()
+        else {
+            return;
+        };
+        let store = self.forked_participant_store().clone();
+        let records = match store.list_all().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "local forked-participant sweep could not list capability custody"
+                );
+                return;
+            }
+        };
+        let routes: BTreeSet<_> = records
+            .into_iter()
+            .map(|record| record.sidecar.owner_route)
+            .filter(|route| {
+                matches!(
+                    route,
+                    meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Local { .. }
+                )
+            })
+            .collect();
+        for route in routes {
+            let service = match meerkat_mob::forked_participant::ForkedParticipantService::new(
+                route,
+                store.clone(),
+                runtime.clone(),
+            ) {
+                Ok(service) => service,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "local forked-participant sweep could not compose owner service"
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = service.sweep_expiry(chrono::Utc::now()).await {
+                tracing::warn!(
+                    error = %error,
+                    "local forked-participant expiry sweep failed"
+                );
+            }
+            if let Err(error) = service.sweep_cleanup(chrono::Utc::now()).await {
+                tracing::warn!(
+                    error = %error,
+                    "local forked-participant cleanup sweep failed"
+                );
+            }
+        }
+    }
+
     /// The console principal this state serves, for capability verbs that take
     /// an explicit caller.
     fn console_principal_snapshot(&self) -> MobControlPrincipal {
@@ -763,36 +870,30 @@ impl MobMcpState {
         })
     }
 
-    fn temporary_council_inflight_entry(
-        &self,
-        council_id: &str,
-    ) -> Option<(
-        String,
-        tokio::sync::watch::Receiver<Option<temporary_council::CouncilPublish>>,
-    )> {
-        self.temporary_council_inflight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(council_id)
-            .map(|entry| (entry.fingerprint.clone(), entry.completion.clone()))
-    }
-
-    fn temporary_council_register_inflight(
+    fn temporary_council_reserve_inflight(
         &self,
         council_id: String,
         fingerprint: String,
         completion: tokio::sync::watch::Receiver<Option<temporary_council::CouncilPublish>>,
-    ) {
-        self.temporary_council_inflight
+    ) -> temporary_council::InflightReservation {
+        let mut inflight = self
+            .temporary_council_inflight
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                council_id,
-                temporary_council::InflightCouncil {
-                    fingerprint,
-                    completion,
-                },
-            );
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = inflight.get(&council_id) {
+            return temporary_council::InflightReservation::Existing {
+                fingerprint: entry.fingerprint.clone(),
+                completion: entry.completion.clone(),
+            };
+        }
+        inflight.insert(
+            council_id,
+            temporary_council::InflightCouncil {
+                fingerprint,
+                completion,
+            },
+        );
+        temporary_council::InflightReservation::Owned
     }
 
     fn temporary_council_remove_inflight(&self, council_id: &str) {
@@ -1238,6 +1339,7 @@ impl MobMcpState {
 
     async fn ensure_restored(&self) -> Result<(), MobError> {
         if self.persistent_storage_root.is_none() {
+            self.schedule_local_forked_participant_sweeper();
             return Ok(());
         }
         if let Some(error) = &self.persistent_storage_setup_error {
@@ -1256,6 +1358,7 @@ impl MobMcpState {
         // on its own task, so recovery can use the ordinary mob verbs (which
         // call back into `ensure_restored`) without recursion or deadlock.
         self.schedule_temporary_council_recovery();
+        self.schedule_local_forked_participant_sweeper();
         Ok(())
     }
 
@@ -3119,6 +3222,29 @@ impl MobMcpState {
         }
     }
 
+    /// Admit a realm-wide temporary-council record read.
+    ///
+    /// Council ids are not authorization tokens, and record projections contain
+    /// exchange text from participants across arbitrary mobs. Until council-
+    /// specific grants exist, only the owner console may read them by id.
+    pub fn admit_temporary_council_read(&self) -> Result<(), MobError> {
+        self.require_console_owner(ControlScope::List)
+    }
+
+    /// Admit a temporary council before it can bind durable custody.
+    pub fn admit_temporary_council_run(&self) -> Result<(), MobError> {
+        self.require_console_owner(ControlScope::SendCommand)
+    }
+
+    /// Admit the realm-wide temporary-council recovery sweep.
+    ///
+    /// Recovery can seal terminals, revoke capabilities, and destroy temporary
+    /// mobs across the realm, so it is owner maintenance rather than a
+    /// per-council or per-mob grant.
+    pub fn admit_temporary_council_recovery(&self) -> Result<(), MobError> {
+        self.require_console_owner(ControlScope::Retire)
+    }
+
     /// Chokepoint (b) resolver gate for per-mob verbs that bypass the actor
     /// (watch-read projections, event-router subscriptions — DEC-P5E-9).
     /// Owner short-circuits without a clock read (A16); external principals
@@ -3449,7 +3575,7 @@ impl MobMcpState {
     /// the byte-identical path v2 bearer auth lands on.
     pub fn new_in_memory_as(console_principal: MobControlPrincipal) -> Arc<Self> {
         let service = Arc::new(LocalSessionService::new());
-        Arc::new(Self::new(service, console_principal))
+        Self::new(service, console_principal).into_shared()
     }
 }
 
@@ -9984,6 +10110,21 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(mob_a, mob_b, "different sessions must get different mobs");
+    }
+
+    #[tokio::test]
+    async fn in_memory_state_starts_local_capability_sweeper() {
+        let state = MobMcpState::new_in_memory();
+        state
+            .ensure_restored()
+            .await
+            .expect("in-memory restoration is a no-op");
+        assert!(
+            state
+                .local_forked_participant_sweeper_started
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "in-memory states still own local capability convergence"
+        );
     }
 
     #[tokio::test]

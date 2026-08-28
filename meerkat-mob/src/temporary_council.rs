@@ -299,9 +299,9 @@ pub struct TemporaryCouncilParticipantCustody {
     pub scope: ForkedParticipantOperationScope,
     /// Deterministic capability request id.
     ///
-    /// This is the durable REFERENCE to the capability record. The capability
-    /// store owns the bearer material; recovery resolves the exact reference
-    /// through this id rather than reading a copied one.
+    /// Stable request identity used for source-owner replay and correlation.
+    /// The council also persists the immutable capability it holds below,
+    /// because a remote owner's store is not locally readable during recovery.
     pub capability_request_id: ForkedParticipantRequestId,
     /// Non-secret correlation hint of the acquired capability, once created.
     #[serde(default, skip_serializing_if = "Option::is_none")]

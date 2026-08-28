@@ -2138,6 +2138,29 @@ export interface MobMemberLiveControlParams {
   verb: BridgeLiveControlVerb;
 }
 
+export interface MobTemporaryCouncilRunParams {
+  host_bindings?: WireHostBindingDescriptor[];
+  request: WireTemporaryCouncilRequest;
+}
+
+export interface MobTemporaryCouncilRunResult {
+  cleanup: WireTemporaryCouncilCleanup;
+  replayed: boolean;
+  result: WireTemporaryCouncilResult;
+}
+
+export interface MobTemporaryCouncilGetParams {
+  council_id: string;
+}
+
+export interface MobTemporaryCouncilGetResult {
+  council?: WireTemporaryCouncilRecord | null;
+}
+
+export interface MobTemporaryCouncilRecoverResult {
+  reports: WireTemporaryCouncilRecoveryReport[];
+}
+
 export interface PublicTurnToolOverlay {
   allowed_tools?: ToolName[] | null;
   blocked_tools?: ToolName[] | null;
@@ -2323,6 +2346,194 @@ export interface WireHostBindingDescriptor {
   identity: WireTrustedPeerIdentity;
   kind: WireHostBindingDescriptorKind;
   live_endpoint?: string | null;
+}
+
+export interface WireTemporaryCouncilRequest {
+  bounds: WireTemporaryCouncilBounds;
+  council_id: string;
+  definition_template: MobDefinitionInput;
+  durability: WireTemporaryCouncilDurability;
+  merge_back: WireTemporaryCouncilMergeBack;
+  participants: WireTemporaryCouncilParticipant[];
+  topic: string;
+}
+
+export interface WireTemporaryCouncilBounds {
+  deadline: WireTemporaryCouncilDeadline;
+  max_exchanges: number;
+  max_result_bytes: number;
+  max_rounds: number;
+}
+
+export interface WireTemporaryCouncilParticipant {
+  order: number;
+  prefix_message_count?: number | null;
+  role: string;
+  scope: WireTemporaryCouncilScope;
+  source_identity: string;
+  source_mob_id: string;
+  target_backend?: WireMobBackendKind | null;
+  target_identity: string;
+  target_profile: string;
+}
+
+export interface WireTemporaryCouncilStructuredContract {
+  json_schema: WireOpaqueJson;
+  schema_id: string;
+  schema_version: number;
+}
+
+export interface WireTemporaryCouncilResult {
+  concluded_at: string;
+  council_id: string;
+  durability: WireTemporaryCouncilDurability;
+  exchanges: WireTemporaryCouncilExchange[];
+  exit_reason: WireTemporaryCouncilExitReason;
+  merge: WireTemporaryCouncilMergeOutcome;
+  merge_truncated: boolean;
+  participants: WireTemporaryCouncilParticipantProvenance[];
+  request_fingerprint: string;
+  rounds_completed: number;
+  temporary_mob_id: string;
+  truncated_exchange_count: number;
+}
+
+export interface WireTemporaryCouncilExchange {
+  delivery_correlation_id: string;
+  delivery_idempotency_key: string;
+  outcome: WireTemporaryCouncilExchangeOutcome;
+  participant_order: number;
+  round: number;
+  sequence: number;
+  started_at: string;
+  target_identity: string;
+}
+
+export interface WireTemporaryCouncilCapabilityProvenance {
+  correlation_hint: string;
+  expires_at: string;
+  fork_session_id: string;
+  owner_route: WireTemporaryCouncilOwnerRoute;
+  reuse: WireTemporaryCouncilReusePolicy;
+  scope: WireTemporaryCouncilScope;
+  source: WireTemporaryCouncilSourceProvenance;
+}
+
+export interface WireTemporaryCouncilSourceProvenance {
+  prefix_digest: string;
+  prefix_message_count: number;
+  source_session_id: string;
+}
+
+export interface WireTemporaryCouncilParticipantProvenance {
+  attachment_id: string;
+  capability?: WireTemporaryCouncilCapabilityProvenance | null;
+  capability_request_id: string;
+  order: number;
+  role: string;
+  scope: WireTemporaryCouncilScope;
+  seated: boolean;
+  source_identity: string;
+  source_mob_id: string;
+  target_identity: string;
+}
+
+export interface WireTemporaryCouncilArtifactClaim {
+  byte_len?: number | null;
+  digest?: string | null;
+  media_type?: string | null;
+  uri: string;
+}
+
+export interface WireTemporaryCouncilSelectedExchange {
+  participant_order: number;
+  round: number;
+  sequence: number;
+  target_identity: string;
+  text: string;
+  truncated: boolean;
+}
+
+export interface WireTemporaryCouncilStructuredContractIdentity {
+  schema_digest: string;
+  schema_id: string;
+  schema_version: number;
+}
+
+export interface WireTemporaryCouncilCleanup {
+  attempted_at: string;
+  attempts: number;
+  budget_exhausted: boolean;
+  debts: WireTemporaryCouncilCleanupDebt[];
+  released_participants: number[];
+  revoked_participants: number[];
+  status: WireTemporaryCouncilCleanupStatus;
+  temporary_mob_destroyed: boolean;
+}
+
+export interface WireTemporaryCouncilCleanupDebt {
+  detail: string;
+  subject: string;
+}
+
+export interface WireTemporaryCouncilRecord {
+  cleanup?: WireTemporaryCouncilCleanup | null;
+  council_id: string;
+  created_at: string;
+  deadline: string;
+  durability: WireTemporaryCouncilDurability;
+  exchanges: WireTemporaryCouncilExchange[];
+  participants: WireTemporaryCouncilParticipantCustody[];
+  request_fingerprint: string;
+  result?: WireTemporaryCouncilResult | null;
+  temporary_mob_id: string;
+  unfinished: boolean;
+  updated_at: string;
+}
+
+export interface WireTemporaryCouncilParticipantCustody {
+  acquisition: WireTemporaryCouncilAcquisition;
+  attachment_id: string;
+  capability_correlation_hint?: string | null;
+  capability_request_id: string;
+  order: number;
+  role: string;
+  scope: WireTemporaryCouncilScope;
+  seated: boolean;
+  seated_session_id?: string | null;
+  source_identity: string;
+  source_mob_id: string;
+  target_identity: string;
+  target_profile: string;
+}
+
+export interface WireTemporaryCouncilRecoveryReport {
+  cleanup: WireTemporaryCouncilCleanup;
+  council_id: string;
+  sealed_interrupted_result: boolean;
+  settled: boolean;
+}
+
+export interface WireTemporaryCouncilFailureDetail {
+  detail: string;
+  kind: WireTemporaryCouncilFailureKind;
+}
+
+export interface WireTemporaryCouncilConflictDetail {
+  council_id: string;
+  presented_fingerprint: string;
+  stored_fingerprint: string;
+}
+
+export interface WireTemporaryCouncilClaimDetail {
+  council_id: string;
+  current_claim_epoch: number;
+}
+
+export interface WireTemporaryCouncilDurabilityDetail {
+  available: WireTemporaryCouncilDurability;
+  council_id: string;
+  required: WireTemporaryCouncilDurability;
 }
 
 export interface WireGrantRecord {
@@ -2705,6 +2916,7 @@ export interface BridgeCapabilities {
   destroy_member?: boolean;
   durable_sessions?: boolean;
   engine_version?: string;
+  forked_participants?: boolean;
   hard_cancel_member?: boolean;
   interrupt_member?: boolean;
   mcp?: boolean;
@@ -3356,6 +3568,189 @@ export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_t
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
 export type WireMobRunUsageAttribution = "session_cumulative";
+
+export type WireTemporaryCouncilDurability = "durable" | "process_bound";
+
+export type WireTemporaryCouncilScope = "invoke" | "observe" | "invoke_and_observe";
+
+export interface WireTemporaryCouncilReusePolicyOneShot {
+  kind: "one_shot";
+}
+
+export interface WireTemporaryCouncilReusePolicyBoundedReuse {
+  kind: "bounded_reuse";
+  max_uses: number;
+}
+
+export type WireTemporaryCouncilReusePolicy = WireTemporaryCouncilReusePolicyOneShot | WireTemporaryCouncilReusePolicyBoundedReuse;
+
+export interface WireTemporaryCouncilOwnerRouteLocal {
+  kind: "local";
+  realm_id: string;
+}
+
+export interface WireTemporaryCouncilOwnerRouteHost {
+  host_id: string;
+  kind: "host";
+  realm_id: string;
+}
+
+export type WireTemporaryCouncilOwnerRoute = WireTemporaryCouncilOwnerRouteLocal | WireTemporaryCouncilOwnerRouteHost;
+
+export type WireTemporaryCouncilMergePolicyKind = "bounded_text_summary" | "structured_result" | "selected_transcript" | "durable_artifact_reference" | "no_merge";
+
+export interface WireTemporaryCouncilDeadlineAbsolute {
+  at: string;
+  kind: "absolute";
+}
+
+export interface WireTemporaryCouncilDeadlineRelative {
+  after_millis: number;
+  kind: "relative";
+}
+
+export type WireTemporaryCouncilDeadline = WireTemporaryCouncilDeadlineAbsolute | WireTemporaryCouncilDeadlineRelative;
+
+export interface WireTemporaryCouncilMergeBackBoundedTextSummary {
+  finalizer: string;
+  max_bytes: number;
+  policy: "bounded_text_summary";
+}
+
+export interface WireTemporaryCouncilMergeBackStructuredResult {
+  contract: WireTemporaryCouncilStructuredContract;
+  finalizer: string;
+  max_bytes: number;
+  policy: "structured_result";
+}
+
+export interface WireTemporaryCouncilMergeBackSelectedTranscript {
+  exchange_sequences: number[];
+  max_bytes: number;
+  participant: string;
+  policy: "selected_transcript";
+}
+
+export interface WireTemporaryCouncilMergeBackDurableArtifactReference {
+  max_bytes: number;
+  participant: string;
+  policy: "durable_artifact_reference";
+}
+
+export interface WireTemporaryCouncilMergeBackNoMerge {
+  policy: "no_merge";
+}
+
+export type WireTemporaryCouncilMergeBack = WireTemporaryCouncilMergeBackBoundedTextSummary | WireTemporaryCouncilMergeBackStructuredResult | WireTemporaryCouncilMergeBackSelectedTranscript | WireTemporaryCouncilMergeBackDurableArtifactReference | WireTemporaryCouncilMergeBackNoMerge;
+
+export interface WireTemporaryCouncilExitReasonCompleted {
+  reason: "completed";
+}
+
+export interface WireTemporaryCouncilExitReasonMaxExchangesReached {
+  reason: "max_exchanges_reached";
+}
+
+export interface WireTemporaryCouncilExitReasonDeadlineExceeded {
+  reason: "deadline_exceeded";
+}
+
+export interface WireTemporaryCouncilExitReasonParticipantSeatingFailed {
+  detail: string;
+  participant_order: number;
+  reason: "participant_seating_failed";
+}
+
+export interface WireTemporaryCouncilExitReasonWiringIncomplete {
+  detail: string;
+  reason: "wiring_incomplete";
+}
+
+export interface WireTemporaryCouncilExitReasonExchangeFailed {
+  detail: string;
+  reason: "exchange_failed";
+  round: number;
+  target_identity: string;
+}
+
+export interface WireTemporaryCouncilExitReasonCoordinatorInterrupted {
+  reason: "coordinator_interrupted";
+}
+
+export type WireTemporaryCouncilExitReason = WireTemporaryCouncilExitReasonCompleted | WireTemporaryCouncilExitReasonMaxExchangesReached | WireTemporaryCouncilExitReasonDeadlineExceeded | WireTemporaryCouncilExitReasonParticipantSeatingFailed | WireTemporaryCouncilExitReasonWiringIncomplete | WireTemporaryCouncilExitReasonExchangeFailed | WireTemporaryCouncilExitReasonCoordinatorInterrupted;
+
+export interface WireTemporaryCouncilExchangeOutcomePending {
+  status: "pending";
+}
+
+export interface WireTemporaryCouncilExchangeOutcomeCompleted {
+  completed_at: string;
+  session_id: string;
+  status: "completed";
+  text: string;
+  truncated: boolean;
+}
+
+export interface WireTemporaryCouncilExchangeOutcomeFailed {
+  detail: string;
+  failed_at: string;
+  status: "failed";
+}
+
+export type WireTemporaryCouncilExchangeOutcome = WireTemporaryCouncilExchangeOutcomePending | WireTemporaryCouncilExchangeOutcomeCompleted | WireTemporaryCouncilExchangeOutcomeFailed;
+
+export interface WireTemporaryCouncilMergeOutcomeNoMerge {
+  confirmed_participants: string[];
+  kind: "no_merge";
+}
+
+export interface WireTemporaryCouncilMergeOutcomeBoundedTextSummary {
+  finalizer: string;
+  kind: "bounded_text_summary";
+  text: string;
+  truncated: boolean;
+}
+
+export interface WireTemporaryCouncilMergeOutcomeStructuredResult {
+  contract: WireTemporaryCouncilStructuredContractIdentity;
+  finalizer: string;
+  kind: "structured_result";
+  truncated: boolean;
+  value: WireOpaqueJson;
+}
+
+export interface WireTemporaryCouncilMergeOutcomeSelectedTranscript {
+  excerpts: WireTemporaryCouncilSelectedExchange[];
+  exchange_sequences: number[];
+  kind: "selected_transcript";
+  participant: string;
+  truncated: boolean;
+}
+
+export interface WireTemporaryCouncilMergeOutcomeDurableArtifactReference {
+  claim: WireTemporaryCouncilArtifactClaim;
+  kind: "durable_artifact_reference";
+  participant: string;
+}
+
+export interface WireTemporaryCouncilMergeOutcomeNotAttempted {
+  kind: "not_attempted";
+  reason: string;
+}
+
+export interface WireTemporaryCouncilMergeOutcomeFailed {
+  detail: string;
+  kind: "failed";
+  policy: WireTemporaryCouncilMergePolicyKind;
+}
+
+export type WireTemporaryCouncilMergeOutcome = WireTemporaryCouncilMergeOutcomeNoMerge | WireTemporaryCouncilMergeOutcomeBoundedTextSummary | WireTemporaryCouncilMergeOutcomeStructuredResult | WireTemporaryCouncilMergeOutcomeSelectedTranscript | WireTemporaryCouncilMergeOutcomeDurableArtifactReference | WireTemporaryCouncilMergeOutcomeNotAttempted | WireTemporaryCouncilMergeOutcomeFailed;
+
+export type WireTemporaryCouncilCleanupStatus = "settled" | "debt" | "pending";
+
+export type WireTemporaryCouncilAcquisition = "not_attempted" | "pending" | "acquired" | "ambiguous";
+
+export type WireTemporaryCouncilFailureKind = "invalid_request" | "store" | "lifecycle" | "mob" | "coordinator_unavailable";
 
 export type WireWorkExecutionLifecyclePhase = "absent" | "launch_requested" | "launch_uncertain" | "launch_quarantined" | "running" | "evidence_projection_requested" | "failure_evidence_projection_requested" | "cancellation_evidence_projection_requested" | "launch_failure_evidence_projection_requested" | "work_closure_requested" | "flow_failed" | "flow_canceled" | "evidence_projected" | "work_closed" | "launch_failed";
 
@@ -4223,6 +4618,7 @@ export interface BridgeCommandMaterializeMember {
   command: "materialize_member";
   epoch: number;
   fence_token: number;
+  forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
   launch: { mode: "fresh" } | Record<string, unknown>;
   protocol_version: BridgeProtocolVersion;
@@ -4295,7 +4691,31 @@ export interface BridgeCommandObserveSupervisorRotation {
   protocol_version: BridgeProtocolVersion;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation;
+export interface BridgeCommandCreateForkedParticipant {
+  binding_generation: number;
+  command: "create_forked_participant";
+  epoch: number;
+  prefix_message_count?: number | null;
+  protocol_version: BridgeProtocolVersion;
+  request_id: string;
+  reuse: { kind: "one_shot" } | Record<string, unknown>;
+  scope: "invoke" | "observe" | "invoke_and_observe";
+  source_member: BridgeMemberIncarnation;
+  supervisor: BridgePeerSpec;
+  ttl_millis: number;
+}
+
+export interface BridgeCommandRevokeForkedParticipant {
+  binding_generation: number;
+  capability: Record<string, unknown>;
+  command: "revoke_forked_participant";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  source_member: BridgeMemberIncarnation;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -4503,7 +4923,7 @@ export interface BridgeRejectionCauseSessionOwnershipConflict {
   session_ownership_conflict: BridgeRejectionCauseSessionOwnershipConflictPayload;
 }
 
-export type BridgeRejectionCause = "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -4666,7 +5086,17 @@ export interface BridgeReplyMemberOperatorReply {
   result: "member_operator_reply";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply;
+export interface BridgeReplyForkedParticipantCreated {
+  capability: Record<string, unknown>;
+  result: "forked_participant_created";
+}
+
+export interface BridgeReplyForkedParticipantRevoked {
+  outcome: Record<string, unknown> | { outcome: "pending_attached_release" } | { outcome: "converged" };
+  result: "forked_participant_revoked";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
 
 export interface ContentBlockText {
   text: string;

@@ -12,19 +12,19 @@ use thiserror::Error;
 
 /// Failure to draw OS entropy for a secret-quality value.
 #[derive(Debug, Error)]
-#[error("failed to draw {requested} bytes of OS entropy: {detail}")]
+#[error("failed to draw {requested} bytes of OS entropy: {error}")]
 pub struct SecretEntropyError {
     /// Number of bytes requested by the caller.
     pub requested: usize,
-    /// Platform detail for the failed draw.
-    pub detail: String,
+    /// Typed platform failure from the entropy provider.
+    pub error: getrandom::Error,
 }
 
 /// Fill `buffer` with cryptographic OS entropy.
 pub fn fill_secret_entropy(buffer: &mut [u8]) -> Result<(), SecretEntropyError> {
     getrandom::fill(buffer).map_err(|error| SecretEntropyError {
         requested: buffer.len(),
-        detail: error.to_string(),
+        error,
     })
 }
 

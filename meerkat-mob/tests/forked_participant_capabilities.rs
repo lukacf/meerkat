@@ -1473,6 +1473,55 @@ async fn foreign_source_and_foreign_route_are_refused() {
     }
 }
 
+#[tokio::test]
+async fn foreign_owner_sweeps_do_not_mutate_or_archive_capabilities() {
+    for harness in [Harness::in_memory(), Harness::sqlite()] {
+        let request = request("req-foreign-sweeper");
+        harness.register_source(&request);
+        let capability = harness
+            .service
+            .create(&request, now())
+            .await
+            .expect("create");
+        let before = harness
+            .store
+            .load_by_capability_id(capability.capability_id())
+            .await
+            .expect("load")
+            .expect("record");
+        let foreign = ForkedParticipantService::new(
+            ForkedParticipantOwnerRoute::Host {
+                realm_id: realm(),
+                host_id: meerkat_mob::machines::mob_machine::HostId::from("foreign-host"),
+            },
+            Arc::clone(&harness.store),
+            Arc::new(harness.runtime.clone()),
+        )
+        .expect("foreign service");
+
+        foreign
+            .sweep_expiry(now() + ChronoDuration::days(1))
+            .await
+            .expect("foreign expiry sweep");
+        foreign
+            .sweep_cleanup(now())
+            .await
+            .expect("foreign cleanup sweep");
+
+        let after = harness
+            .store
+            .load_by_capability_id(capability.capability_id())
+            .await
+            .expect("load")
+            .expect("record");
+        assert_eq!(after, before, "a foreign route must not mutate custody");
+        assert!(
+            harness.runtime.archived().is_empty(),
+            "a foreign route must not archive this owner's fork"
+        );
+    }
+}
+
 /// Two sweepers must not both archive one fork, and neither may record false
 /// debt for the other's work.
 #[tokio::test]

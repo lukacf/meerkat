@@ -127,6 +127,9 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/mob/{id}/members/{agent_identity}/history` | Read a mob member transcript page by identity (mob feature) |
 | `GET` | `/mob/{id}/hosts` | List tracked member hosts with bind phase and capabilities (mob feature) |
 | `GET` | `/mob/{id}/route-installs` | Outstanding cross-host route-install obligations (mob feature) |
+| `POST` | `/mob/temporary-councils/run` | Run one bounded temporary council of source-owned forked participants (mob feature) |
+| `POST` | `/mob/temporary-councils/recover` | Converge every unfinished temporary council; owner/admin maintenance (mob feature) |
+| `GET` | `/mob/temporary-councils/{council_id}` | Read one sealed temporary-council record projection (mob feature) |
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/runtime/host_info` | Read runtime host identity, endpoints, and realm projection |

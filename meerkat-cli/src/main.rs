@@ -3252,6 +3252,34 @@ enum MobCommands {
         /// Mob ID
         mob_id: String,
     },
+    /// Run one bounded temporary council of source-owned forked participants.
+    ///
+    /// The request is JSON-only: it carries an explicit mob definition
+    /// template, participant slots, bounds, and one merge-back policy, which
+    /// would be an unusable flag surface. stdout is the wire
+    /// `MobTemporaryCouncilRunResult`.
+    CouncilRun {
+        /// Path to a JSON file holding one wire temporary-council request.
+        #[arg(long)]
+        request: PathBuf,
+        /// Host binding descriptor JSON written by `rkat mob host
+        /// --descriptor-out`, repeatable. Required before a HOST-owned
+        /// participant can be seated in the temporary mob. The descriptors
+        /// carry one-time ceremony tokens, so they are read from files and
+        /// never echoed.
+        #[arg(long = "host-binding")]
+        host_bindings: Vec<PathBuf>,
+    },
+    /// Read one sealed temporary-council record projection.
+    CouncilGet {
+        /// Council identity
+        council_id: String,
+    },
+    /// Converge every unfinished temporary council (owner maintenance).
+    ///
+    /// Seals a typed interrupted terminal for a council whose coordinator
+    /// died and retries outstanding cleanup. Never re-executes a council.
+    CouncilRecover,
     /// Member live-channel console verbs (§16.9).
     Live {
         #[command(subcommand)]
@@ -3811,6 +3839,15 @@ async fn main() -> anyhow::Result<ExitCode> {
                     && let Ok(json) = detail.detail_value()
                 {
                     eprintln!("detail: {json}");
+                }
+                return Ok(ExitCode::from(code));
+            }
+            // Temporary-council verb family: same shape, own typed mapping.
+            #[cfg(feature = "mob")]
+            if let Some((code, detail)) = council_exit_projection(&e) {
+                eprintln!("Error: {e}");
+                if let Some(detail) = detail {
+                    eprintln!("detail: {detail}");
                 }
                 return Ok(ExitCode::from(code));
             }
@@ -14985,6 +15022,20 @@ fn mob_exit_code(e: &anyhow::Error) -> Option<u8> {
     u8::try_from(detail.code().cli_exit_code()).ok()
 }
 
+/// Typed exit projection for the temporary-council verb family (issue #159).
+///
+/// The council coordinator owns its own typed failure vocabulary, and
+/// `meerkat-mob-mcp` owns the variant→[`ErrorCode`] pairing, so the CLI's exit
+/// code and its `detail:` line are projections of the SAME mapping the RPC and
+/// REST surfaces render. No council detail payload carries bearer material.
+#[cfg(feature = "mob")]
+fn council_exit_projection(e: &anyhow::Error) -> Option<(u8, Option<serde_json::Value>)> {
+    let error = e.downcast_ref::<meerkat_mob_mcp::TemporaryCouncilError>()?;
+    let detail = meerkat_mob_mcp::temporary_council_wire::temporary_council_error_detail(error);
+    let code = u8::try_from(detail.code().cli_exit_code()).ok()?;
+    Some((code, detail.detail_value().ok()))
+}
+
 /// Human host-roster row (grants-verb rendering precedent): the wire enum
 /// owns the snake_case phase spelling — rendered via serde, never a
 /// CLI-local vocabulary copy.
@@ -16600,6 +16651,101 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .await
                 .map_err(mob_anyhow)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::CouncilRun {
+            request,
+            host_bindings,
+        } => {
+            state.admit_temporary_council_run().map_err(mob_anyhow)?;
+            let raw = tokio::fs::read(&request).await.map_err(|err| {
+                anyhow::anyhow!(
+                    "failed reading council request '{}': {err}",
+                    request.display()
+                )
+            })?;
+            let wire_request: meerkat_contracts::wire::WireTemporaryCouncilRequest =
+                serde_json::from_slice(&raw)
+                    .map_err(|err| anyhow::anyhow!("invalid council request: {err}"))?;
+            let mut descriptors = Vec::with_capacity(host_bindings.len());
+            for path in &host_bindings {
+                let raw = tokio::fs::read(path).await.map_err(|err| {
+                    anyhow::anyhow!(
+                        "failed reading host binding descriptor '{}': {err}",
+                        path.display()
+                    )
+                })?;
+                // The descriptor carries a one-time ceremony token: parse
+                // failures name the FILE, never the contents.
+                let descriptor: meerkat_contracts::wire::WireHostBindingDescriptor =
+                    serde_json::from_slice(&raw).map_err(|err| {
+                        anyhow::anyhow!(
+                            "invalid host binding descriptor '{}': {err}",
+                            path.display()
+                        )
+                    })?;
+                descriptors.push(descriptor);
+            }
+            let council_request =
+                meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_request(
+                    wire_request,
+                )
+                .map_err(mob_anyhow)?;
+            let bootstrap =
+                meerkat_mob_mcp::temporary_council_wire::decode_temporary_council_host_bootstrap(
+                    descriptors,
+                )
+                .map_err(mob_anyhow)?;
+            let outcome = state
+                .temporary_council()
+                .run_with_host_bootstrap(council_request, bootstrap)
+                .await
+                .map_err(mob_anyhow)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_outcome(
+                        &outcome
+                    )
+                )?
+            );
+            Ok(())
+        }
+        MobCommands::CouncilGet { council_id } => {
+            state.admit_temporary_council_read().map_err(mob_anyhow)?;
+            let council_id =
+                meerkat_mob_mcp::temporary_council_wire::parse_temporary_council_id(&council_id)
+                    .map_err(mob_anyhow)?;
+            let record = state
+                .temporary_council()
+                .load(&council_id)
+                .await
+                .map_err(mob_anyhow)?;
+            let result = meerkat_contracts::wire::MobTemporaryCouncilGetResult {
+                council: record
+                    .as_ref()
+                    .map(meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_record),
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::CouncilRecover => {
+            state
+                .admit_temporary_council_recovery()
+                .map_err(mob_anyhow)?;
+            let reports = state
+                .temporary_council()
+                .recover_unfinished()
+                .await
+                .map_err(mob_anyhow)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &meerkat_mob_mcp::temporary_council_wire::encode_temporary_council_recovery(
+                        &reports
+                    )
+                )?
+            );
             Ok(())
         }
         MobCommands::Live { command } => handle_mob_live_command(command, state.as_ref()).await,
@@ -21888,6 +22034,70 @@ default_model = "gemma"
         assert!(
             appends[0].content.render_text().contains("ash twelve"),
             "terminal peer-response notice must reach the CLI start_turn request"
+        );
+    }
+
+    /// Issue #159: the council verbs parse as JSON-in/JSON-out commands with
+    /// a repeatable host-binding file flag. The rich request never becomes a
+    /// flag surface, and descriptors are read from files rather than argv so
+    /// a one-time ceremony token cannot land in a process listing.
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_mob_council_verbs_parse_json_request_and_host_bindings() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "council-run",
+            "--request",
+            "./council.json",
+            "--host-binding",
+            "./host-a.json",
+            "--host-binding",
+            "./host-b.json",
+        ])
+        .expect("council-run parses");
+        match cli.command {
+            Some(Commands::Mob {
+                command:
+                    MobCommands::CouncilRun {
+                        request,
+                        host_bindings,
+                    },
+            }) => {
+                assert_eq!(request, PathBuf::from("./council.json"));
+                assert_eq!(
+                    host_bindings,
+                    vec![
+                        PathBuf::from("./host-a.json"),
+                        PathBuf::from("./host-b.json")
+                    ]
+                );
+            }
+            _ => panic!("council-run must parse as the council-run command"),
+        }
+
+        let cli = Cli::try_parse_from(["rkat", "mob", "council-get", "design-review-42"])
+            .expect("council-get parses");
+        match cli.command {
+            Some(Commands::Mob {
+                command: MobCommands::CouncilGet { council_id },
+            }) => assert_eq!(council_id, "design-review-42"),
+            _ => panic!("council-get must parse as the council-get command"),
+        }
+
+        let cli = Cli::try_parse_from(["rkat", "mob", "council-recover"])
+            .expect("council-recover parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Mob {
+                command: MobCommands::CouncilRecover
+            })
+        ));
+
+        // A council request has no flag surface: `--request` is mandatory.
+        assert!(
+            Cli::try_parse_from(["rkat", "mob", "council-run"]).is_err(),
+            "council-run must require its JSON request"
         );
     }
 

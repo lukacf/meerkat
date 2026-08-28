@@ -194,6 +194,11 @@ import type {
   MobStreamOpenResult,
   MobSubmitWorkParams,
   MobSubmitWorkResult,
+  MobTemporaryCouncilGetParams,
+  MobTemporaryCouncilGetResult,
+  MobTemporaryCouncilRecoverResult,
+  MobTemporaryCouncilRunParams,
+  MobTemporaryCouncilRunResult,
   MobTurnStartParams,
   MobUnwireParams,
   MobUnwireResult,
@@ -941,6 +946,18 @@ export interface RpcMethodContracts {
   "mob/member_live_control": {
     params: MobMemberLiveControlParams;
     result: (BridgeLiveControlOutcome) & Record<string, unknown>;
+  };
+  "mob/temporary_council_run": {
+    params: MobTemporaryCouncilRunParams;
+    result: (MobTemporaryCouncilRunResult) & Record<string, unknown>;
+  };
+  "mob/temporary_council_get": {
+    params: MobTemporaryCouncilGetParams;
+    result: (MobTemporaryCouncilGetResult) & Record<string, unknown>;
+  };
+  "mob/temporary_council_recover": {
+    params: Record<string, never>;
+    result: (MobTemporaryCouncilRecoverResult) & Record<string, unknown>;
   };
   "mcp/add": {
     params: McpAddParams;

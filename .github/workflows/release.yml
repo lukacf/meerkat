@@ -504,7 +504,7 @@ jobs:
           release_sha="$(git rev-parse HEAD)"
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EVIDENCE_RUN_ID}" > "${RUNNER_TEMP}/semver-run.json"
           gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${EVIDENCE_JOB_ID}" > "${RUNNER_TEMP}/semver-job.json"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${EVIDENCE_JOB_ID}/logs" > "${RUNNER_TEMP}/semver-job.log"
+          gh api --allow-escape-sequences "repos/${GITHUB_REPOSITORY}/actions/jobs/${EVIDENCE_JOB_ID}/logs" > "${RUNNER_TEMP}/semver-job.log"
           python3 .semver-recovery-policy/scripts/verify_semver_recovery_evidence.py \
             --run-json "${RUNNER_TEMP}/semver-run.json" \
             --job-json "${RUNNER_TEMP}/semver-job.json" \

@@ -2072,18 +2072,6 @@ impl CouncilRun {
                         ),
                     },
                 )?;
-            let source_member = source
-                .list_members()
-                .await
-                .into_iter()
-                .find(|member| member.agent_identity == custody.source_identity)
-                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                    participant_order: custody.order,
-                    detail: format!(
-                        "source member '{}' is not active in mob '{}'",
-                        custody.source_identity, custody.source_mob_id
-                    ),
-                })?;
             let source_profile = source
                 .effective_member_profile(&custody.source_identity)
                 .await

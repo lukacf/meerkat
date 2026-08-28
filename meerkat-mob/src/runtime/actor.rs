@@ -25466,8 +25466,9 @@ impl MobActor {
                 &mut profile,
                 tool_category_overrides,
             );
-            let effective_profile_override =
-                full_profile_override_requested.then(|| profile.clone());
+            let effective_profile_override = (full_profile_override_requested
+                || tool_category_overrides != meerkat_core::ToolCategoryOverrides::default())
+            .then(|| profile.clone());
             tracing::debug!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
@@ -27264,7 +27265,9 @@ impl MobActor {
             profile.model = model;
         }
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
-        let effective_profile_override = full_profile_override_requested.then(|| profile.clone());
+        let effective_profile_override = (full_profile_override_requested
+            || tool_category_overrides != meerkat_core::ToolCategoryOverrides::default())
+        .then(|| profile.clone());
         // ADJ-6: explicit fact, captured before the inherited-open mutation.
         let explicit_workgraph = profile.tools.workgraph;
         if inherited_tool_filter.is_some() && effective_profile_override.is_none() {

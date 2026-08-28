@@ -1304,20 +1304,6 @@ impl AgentMobToolSurface {
                 .await
                 .map_err(|error| Self::map_mob_error(call, error))?;
             let source_identity = AgentIdentity::from(participant.member_id);
-            let source_member = source
-                .list_members()
-                .await
-                .into_iter()
-                .find(|member| member.agent_identity == source_identity)
-                .ok_or_else(|| {
-                    ToolError::invalid_arguments(
-                        call.name,
-                        format!(
-                            "source member '{}' is not active in mob '{}'",
-                            source_identity, source_mob_id
-                        ),
-                    )
-                })?;
             let source_profile = source
                 .effective_member_profile(&source_identity)
                 .await

@@ -1,6 +1,6 @@
 ---
 title: "Hooks examples"
-description: "Lifecycle hooks for audit and guardrails at 8 hook points."
+description: "Lifecycle and committed-fact hooks for reactions, audit, and guardrails."
 icon: "anchor"
 ---
 
@@ -9,6 +9,28 @@ For the full guide, see [Hooks](/guides/hooks).
 <Note>
 Start here after you understand the normal session/tool flow. If you are new to Meerkat overall, read [Examples: Sessions](/examples/sessions) first.
 </Note>
+
+## Post-commit application reaction
+
+Use a committed-fact point when the handler updates UI or telemetry but must
+never affect the operation it observes:
+
+```toml
+[[hooks.entries]]
+id = "runtime-input-ui"
+point = "runtime_input_accepted"
+mode = "background"
+capability = "observe"
+
+[hooks.entries.runtime]
+type = "http"
+url = "http://127.0.0.1:4100/hooks/runtime-input"
+```
+
+The request carries `HookInvocation.observation` with
+`observation_type = "runtime_input_accepted"` and typed input id, kind, and
+handling mode. The operation has already committed. A denial-shaped response,
+hook failure, or timeout cannot change it.
 
 ## Observer hook (background)
 
@@ -464,7 +486,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
   </Tab>
 </Tabs>
 
-## All 8 hook points
+## All 14 hook points
 
 | Hook point | Classification | When it fires |
 |---|---|---|
@@ -476,10 +498,18 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
 | `post_tool_execution` | post | After each tool execution completes |
 | `run_completed` | post | After a successful run completes |
 | `run_failed` | post | After a run fails with an error |
+| `runtime_input_accepted` | post-commit, observe-only | After runtime and session authority commit an accepted input |
+| `runtime_input_rejected` | terminal, observe-only | After runtime terminally rejects an input |
+| `runtime_input_deduplicated` | post-commit, observe-only | After idempotency resolves to an existing committed input |
+| `peer_ingress_committed` | post-commit, observe-only | After runtime commits an accepted peer input |
+| `peer_egress_committed` | post-commit, observe-only | After a successful typed peer delivery receipt |
+| `interaction_completed` | post-commit, observe-only | After durable interaction-terminal publication |
 
 <Note>
 Foreground hooks halt loop progression until they return. Every hook in
 `background` mode is limited to `observe` capability, including post points.
+The six post-commit points are always dispatched asynchronously and require
+`observe`, regardless of their configured execution mode.
 </Note>
 
 ## Disable a hook

@@ -3346,15 +3346,16 @@ async fn comms_send(
 ) -> Result<Json<CommsSendResult>, ApiError> {
     let session_id = resolve_session_id_for_state(req.session_id(), &state)?;
 
-    let comms = state
+    if state
         .session_service
         .comms_runtime(&session_id)
         .await
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "Session not found or comms not enabled: {session_id}"
-            ))
-        })?;
+        .is_none()
+    {
+        return Err(ApiError::NotFound(format!(
+            "Session not found or comms not enabled: {session_id}"
+        )));
+    }
 
     let peer_name = req.peer_label();
     let cmd = req
@@ -3362,9 +3363,12 @@ async fn comms_send(
         .into_command(&session_id)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
-    match comms.send(cmd).await {
-        Ok(receipt) => Ok(Json(CommsSendResult::from(receipt))),
-        Err(e) => Err(normalize_rest_comms_send_error(peer_name.as_deref(), &e)),
+    match state.session_service.send_comms(&session_id, cmd).await {
+        Some(Ok(receipt)) => Ok(Json(CommsSendResult::from(receipt))),
+        Some(Err(e)) => Err(normalize_rest_comms_send_error(peer_name.as_deref(), &e)),
+        None => Err(ApiError::NotFound(format!(
+            "Session not found or comms not enabled: {session_id}"
+        ))),
     }
 }
 

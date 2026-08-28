@@ -1768,6 +1768,9 @@ impl MeerkatMachine {
                 ))
             }),
             cursor_state,
+            post_commit_hooks: Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+                session_id.clone(),
+            )),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             canonical_runtime_bindings: None,
@@ -1947,6 +1950,9 @@ impl MeerkatMachine {
                 ))
             }),
             cursor_state,
+            post_commit_hooks: Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+                session_id.clone(),
+            )),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             canonical_runtime_bindings: None,
@@ -2161,6 +2167,9 @@ impl MeerkatMachine {
                 ))
             }),
             cursor_state,
+            post_commit_hooks: Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+                session_id.clone(),
+            )),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             canonical_runtime_bindings: None,
@@ -4002,6 +4011,9 @@ impl MeerkatMachine {
                             crate::RuntimeActorMaterializationClaimState::new(false),
                         )),
                         cursor_state: recovered_cursors,
+                        post_commit_hooks: Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+                            session_id.clone(),
+                        )),
                         completions: completions.clone(),
                         tool_visibility_owner,
                         canonical_runtime_bindings: None,

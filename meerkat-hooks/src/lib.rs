@@ -559,6 +559,13 @@ impl DefaultHookEngine {
             )));
         }
 
+        if entry.point.is_observe_only() && entry.capability != HookCapability::Observe {
+            return Err(HookEngineError::InvalidConfiguration(format!(
+                "post-commit hook points are observe-only: {}",
+                entry.id
+            )));
+        }
+
         Ok(())
     }
 
@@ -1200,6 +1207,51 @@ impl HookEngine for DefaultHookEngine {
 
         Ok(merged)
     }
+
+    async fn execute_post_commit(
+        &self,
+        invocation: HookInvocation,
+        overrides: Option<&HookRunOverrides>,
+    ) -> Result<HookExecutionReport, HookEngineError> {
+        debug_assert!(invocation.point.is_observe_only());
+        let resolved = self.effective_entries(overrides)?;
+        let mut entries: Vec<(usize, HookEntryConfig, HookAdapterConfig)> = resolved
+            .entries()
+            .iter()
+            .filter(|entry| entry.enabled && entry.point == invocation.point)
+            .cloned()
+            .enumerate()
+            .map(|(registration_index, entry)| {
+                let adapter = resolved.adapter(&entry.id).cloned().ok_or_else(|| {
+                    HookEngineError::InvalidConfiguration(format!(
+                        "no resolved adapter for hook id '{}'",
+                        entry.id
+                    ))
+                })?;
+                Ok((registration_index, entry, adapter))
+            })
+            .collect::<Result<_, HookEngineError>>()?;
+        drop(resolved);
+        entries.sort_by(|(a_idx, a_entry, _), (b_idx, b_entry, _)| {
+            a_entry
+                .priority
+                .cmp(&b_entry.priority)
+                .then_with(|| a_idx.cmp(b_idx))
+        });
+
+        let mut report = HookExecutionReport::empty();
+        for (registration_index, entry, adapter) in entries {
+            report.started.push(entry.id.clone());
+            let outcome = self
+                .execute_one(entry, adapter, registration_index, invocation.clone())
+                .await?;
+            if let Some(decision) = outcome.decision.clone() {
+                report.decision = Some(decision);
+            }
+            report.outcomes.push(outcome);
+        }
+        Ok(report)
+    }
 }
 
 #[cfg(test)]
@@ -1308,6 +1360,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1361,6 +1414,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1420,6 +1474,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1495,6 +1550,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1564,6 +1620,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1609,6 +1666,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1647,6 +1705,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1729,6 +1788,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1787,6 +1847,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1836,6 +1897,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -1871,11 +1933,36 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
             .await
             .expect_err("invalid post background guardrail hook must be rejected");
+
+        assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn post_commit_point_rejects_foreground_guardrail_capability() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("accepted-input-guardrail"),
+            point: HookPoint::RuntimeInputAccepted,
+            mode: HookExecutionMode::Foreground,
+            capability: HookCapability::Guardrail,
+            runtime: runtime_in_process("guardrail"),
+            ..Default::default()
+        }];
+
+        let engine = DefaultHookEngine::new(config);
+        let err = engine
+            .execute(
+                invocation(HookPoint::RuntimeInputAccepted, SessionId::new()),
+                None,
+            )
+            .await
+            .expect_err("post-commit hook points must reject guardrail capability");
 
         assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
     }
@@ -1912,6 +1999,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -2024,6 +2112,7 @@ mod tests {
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 None,
             )
@@ -2049,6 +2138,7 @@ mod tests {
             llm_response: None,
             tool_call: None,
             tool_result: None,
+            observation: None,
         }
     }
 

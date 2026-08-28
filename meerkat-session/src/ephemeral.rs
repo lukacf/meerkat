@@ -1428,6 +1428,8 @@ struct SessionHandle {
     interaction_event_injector: Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>>,
     /// Optional comms runtime for keep-alive commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    /// Session-attributed peer-send surface with post-commit observation.
+    observed_comms_sender: Option<Arc<meerkat_core::ObservedCommsSender>>,
     /// Shared runtime control state for system-context appends.
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     /// Mechanical gate closed when an archive snapshot is taken.
@@ -2414,6 +2416,10 @@ pub trait SessionAgent: Send {
     /// runtime is stored in the session handle for surfaces that need comms
     /// command execution and stream attachment.
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        None
+    }
+
+    fn observed_comms_sender(&self) -> Option<Arc<meerkat_core::ObservedCommsSender>> {
         None
     }
 }
@@ -4717,6 +4723,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .and_then(|h| h.comms_runtime.clone())
     }
 
+    pub async fn send_comms(
+        &self,
+        session_id: &SessionId,
+        command: meerkat_core::CommsCommand,
+    ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
+        let sender = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .and_then(|handle| handle.observed_comms_sender.clone())
+        }?;
+        Some(sender.send(command).await)
+    }
+
     /// Wait for a session to be registered.
     ///
     /// Returns when the next session handle is stored. Used by CLI `--stdin`
@@ -5046,6 +5066,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let event_injector = agent.event_injector();
         let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
+        let observed_comms_sender = agent.observed_comms_sender();
         let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
         let turn_state_handle = agent.turn_state_handle();
         // W2-E: capture the session-context DSL handle so the session task
@@ -5137,6 +5158,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             event_injector,
             interaction_event_injector,
             comms_runtime,
+            observed_comms_sender,
             transient_turn_context_state,
             archive_snapshot_gate,
             turn_state_handle,
@@ -5785,6 +5807,14 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         EphemeralSessionService::<B>::comms_runtime(self, session_id).await
+    }
+
+    async fn send_comms(
+        &self,
+        session_id: &SessionId,
+        command: meerkat_core::CommsCommand,
+    ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
+        EphemeralSessionService::<B>::send_comms(self, session_id, command).await
     }
 
     async fn event_injector(

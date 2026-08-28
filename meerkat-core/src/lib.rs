@@ -112,9 +112,10 @@ pub use agent::{
     CurrentTurnContent, CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities,
     ExternalToolUpdate, FilteredToolDispatcher, LiveBridgeNoncommittingRunPermit,
     LiveBridgePreparedOperation, LiveBridgeToolDispatchAdmission, LlmStreamResult,
-    RequestAttemptAuthority, SnapshotProjectionError, StickyModelFallbackActivationProof,
-    ToolDispatchContext, dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
-    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    ObservedCommsSender, RequestAttemptAuthority, SnapshotProjectionError,
+    StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_tool_execution_plan_fenced,
+    resolve_tool_execution_plan_fenced, select_tool_catalog_mode,
+    should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -222,8 +223,12 @@ pub use handles::{
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
-    HookExecutionReport, HookFailureReason, HookId, HookInvocation, HookLlmRequest,
-    HookLlmResponse, HookOutcome, HookPoint, HookReasonCode, HookToolCall, HookToolResult,
+    HookExecutionReport, HookFailureReason, HookId, HookInteractionCompleted, HookInvocation,
+    HookLlmRequest, HookLlmResponse, HookObservation, HookOutcome, HookPeerEgressCommitted,
+    HookPeerEgressKind, HookPeerIngressCommitted, HookPoint, HookReasonCode,
+    HookRuntimeInputAccepted, HookRuntimeInputDeduplicated, HookRuntimeInputKind,
+    HookRuntimeInputRejected, HookRuntimeInputRejection, HookRuntimeState, HookToolCall,
+    HookToolResult, PostCommitHookDispatcher,
 };
 pub use image_content::{
     MissingBlobBehavior, RealtimeOpenProjectionAdmission, RealtimeOpenProjectionAdmissionError,

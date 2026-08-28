@@ -2,14 +2,17 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{
-    ContentBlock, RunInput, ServerToolKind, SessionId, StopReason, ToolProvenance, ToolResult,
-    Usage,
+    CommsNoticeKind, ContentBlock, HandlingMode, RunInput, ServerToolKind, SessionId, StopReason,
+    SystemNoticePeer, ToolProvenance, ToolResult, Usage,
 };
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, RwLock};
 
 /// Stable identifier for a configured hook.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
@@ -52,6 +55,12 @@ pub enum HookPoint {
     PreToolExecution,
     PostToolExecution,
     TurnBoundary,
+    RuntimeInputAccepted,
+    RuntimeInputRejected,
+    RuntimeInputDeduplicated,
+    PeerIngressCommitted,
+    PeerEgressCommitted,
+    InteractionCompleted,
 }
 
 impl HookPoint {
@@ -65,7 +74,30 @@ impl HookPoint {
     pub fn is_post(self) -> bool {
         matches!(
             self,
-            Self::PostLlmResponse | Self::PostToolExecution | Self::RunCompleted | Self::RunFailed
+            Self::PostLlmResponse
+                | Self::PostToolExecution
+                | Self::RunCompleted
+                | Self::RunFailed
+                | Self::RuntimeInputAccepted
+                | Self::RuntimeInputRejected
+                | Self::RuntimeInputDeduplicated
+                | Self::PeerIngressCommitted
+                | Self::PeerEgressCommitted
+                | Self::InteractionCompleted
+        )
+    }
+
+    /// Whether this point observes an already-committed or terminally-resolved
+    /// fact and therefore cannot carry policy authority.
+    pub fn is_observe_only(self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeInputAccepted
+                | Self::RuntimeInputRejected
+                | Self::RuntimeInputDeduplicated
+                | Self::PeerIngressCommitted
+                | Self::PeerEgressCommitted
+                | Self::InteractionCompleted
         )
     }
 }
@@ -84,6 +116,417 @@ pub enum HookExecutionMode {
 pub enum HookCapability {
     Observe,
     Guardrail,
+}
+
+/// Runtime input kind projected onto the public hook surface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookRuntimeInputKind {
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Runtime lifecycle state carried by a typed input rejection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookRuntimeState {
+    Initializing,
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+    Destroyed,
+}
+
+/// Typed terminal reason for a runtime input rejection observation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason_type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookRuntimeInputRejection {
+    NotReady { state: HookRuntimeState },
+    ValidationFailed { detail: String },
+    DurabilityViolation { detail: String },
+    PeerHandlingModeInvalid { detail: String },
+    PeerResponseTerminalInvalid { detail: String },
+}
+
+/// An input was durably admitted by runtime authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookRuntimeInputAccepted {
+    pub input_id: crate::lifecycle::InputId,
+    pub input_kind: HookRuntimeInputKind,
+    pub handling_mode: HandlingMode,
+}
+
+/// An input was terminally rejected without an admission commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookRuntimeInputRejected {
+    pub input_id: crate::lifecycle::InputId,
+    pub input_kind: HookRuntimeInputKind,
+    pub reason: HookRuntimeInputRejection,
+}
+
+/// An idempotent input submission resolved to an existing admitted input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookRuntimeInputDeduplicated {
+    pub input_id: crate::lifecycle::InputId,
+    pub input_kind: HookRuntimeInputKind,
+    pub existing_input_id: crate::lifecycle::InputId,
+}
+
+/// A typed peer input was committed by runtime admission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookPeerIngressCommitted {
+    pub kind: CommsNoticeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<SystemNoticePeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_taint: Option<crate::comms::SenderContentTaint>,
+}
+
+/// Typed class of a committed peer egress operation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookPeerEgressKind {
+    Message,
+    IncarnationFencedMessage,
+    Lifecycle,
+    Request,
+    Response,
+}
+
+/// A peer send reached the strongest successful outcome proved by its
+/// transport and local lifecycle authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookPeerEgressCommitted {
+    pub kind: HookPeerEgressKind,
+    pub peer_id: crate::comms::PeerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<crate::comms::PeerName>,
+    pub envelope_id: uuid::Uuid,
+    pub delivery: crate::comms::PeerDeliveryOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<crate::interaction::InteractionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<crate::interaction::InteractionId>,
+}
+
+/// A correlated interaction completion was durably published.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookInteractionCompleted {
+    pub interaction_id: crate::interaction::InteractionId,
+    pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
+}
+
+/// Typed committed fact carried by an observe-only hook invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "observation_type",
+    content = "observation",
+    rename_all = "snake_case"
+)]
+#[non_exhaustive]
+pub enum HookObservation {
+    RuntimeInputAccepted(HookRuntimeInputAccepted),
+    RuntimeInputRejected(HookRuntimeInputRejected),
+    RuntimeInputDeduplicated(HookRuntimeInputDeduplicated),
+    PeerIngressCommitted(HookPeerIngressCommitted),
+    PeerEgressCommitted(HookPeerEgressCommitted),
+    InteractionCompleted(HookInteractionCompleted),
+}
+
+impl HookObservation {
+    #[must_use]
+    pub fn point(&self) -> HookPoint {
+        match self {
+            Self::RuntimeInputAccepted(_) => HookPoint::RuntimeInputAccepted,
+            Self::RuntimeInputRejected(_) => HookPoint::RuntimeInputRejected,
+            Self::RuntimeInputDeduplicated(_) => HookPoint::RuntimeInputDeduplicated,
+            Self::PeerIngressCommitted(_) => HookPoint::PeerIngressCommitted,
+            Self::PeerEgressCommitted(_) => HookPoint::PeerEgressCommitted,
+            Self::InteractionCompleted(_) => HookPoint::InteractionCompleted,
+        }
+    }
+
+    /// Project a canonical committed agent event onto the hook surface.
+    #[must_use]
+    pub fn from_committed_agent_event(event: &crate::event::AgentEvent) -> Option<Self> {
+        match event {
+            crate::event::AgentEvent::PeerContentIngested {
+                kind,
+                peer,
+                request_id,
+                sender_taint,
+            } => Some(Self::PeerIngressCommitted(HookPeerIngressCommitted {
+                kind: kind.clone(),
+                peer: peer.clone(),
+                request_id: request_id.clone(),
+                sender_taint: *sender_taint,
+            })),
+            crate::event::AgentEvent::InteractionComplete {
+                interaction_id,
+                result,
+                structured_output,
+            } => Some(Self::InteractionCompleted(HookInteractionCompleted {
+                interaction_id: *interaction_id,
+                result: result.clone(),
+                structured_output: structured_output.clone(),
+            })),
+            _ => None,
+        }
+    }
+
+    /// Project a successful peer command receipt onto the hook surface.
+    #[must_use]
+    pub fn from_committed_peer_send(
+        command: &crate::comms::CommsCommand,
+        receipt: &crate::comms::SendReceipt,
+    ) -> Option<Self> {
+        use crate::comms::{CommsCommand, SendReceipt};
+
+        let (kind, route, envelope_id, delivery, interaction_id, in_reply_to) =
+            match (command, receipt) {
+                (
+                    CommsCommand::PeerMessage { to, .. },
+                    SendReceipt::PeerMessageSent {
+                        envelope_id,
+                        delivery,
+                    },
+                ) => (
+                    HookPeerEgressKind::Message,
+                    to,
+                    *envelope_id,
+                    *delivery,
+                    None,
+                    None,
+                ),
+                (
+                    CommsCommand::IncarnationFencedPeerMessage { to, .. },
+                    SendReceipt::PeerMessageSent {
+                        envelope_id,
+                        delivery,
+                    },
+                ) => (
+                    HookPeerEgressKind::IncarnationFencedMessage,
+                    to,
+                    *envelope_id,
+                    *delivery,
+                    None,
+                    None,
+                ),
+                (
+                    CommsCommand::PeerLifecycle { to, .. },
+                    SendReceipt::PeerLifecycleSent {
+                        envelope_id,
+                        delivery,
+                    },
+                ) => (
+                    HookPeerEgressKind::Lifecycle,
+                    to,
+                    *envelope_id,
+                    *delivery,
+                    None,
+                    None,
+                ),
+                (
+                    CommsCommand::PeerRequest { to, .. },
+                    SendReceipt::PeerRequestSent {
+                        envelope_id,
+                        interaction_id,
+                        delivery,
+                        ..
+                    },
+                ) => (
+                    HookPeerEgressKind::Request,
+                    to,
+                    *envelope_id,
+                    *delivery,
+                    Some(*interaction_id),
+                    None,
+                ),
+                (
+                    CommsCommand::PeerResponse { to, .. },
+                    SendReceipt::PeerResponseSent {
+                        envelope_id,
+                        in_reply_to,
+                        delivery,
+                    },
+                ) => (
+                    HookPeerEgressKind::Response,
+                    to,
+                    *envelope_id,
+                    *delivery,
+                    None,
+                    Some(*in_reply_to),
+                ),
+                _ => return None,
+            };
+
+        Some(Self::PeerEgressCommitted(HookPeerEgressCommitted {
+            kind,
+            peer_id: route.peer_id,
+            display_name: route.display_name.clone(),
+            envelope_id,
+            delivery,
+            interaction_id,
+            in_reply_to,
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct PostCommitHookRegistration {
+    engine: Arc<dyn HookEngine>,
+    overrides: crate::config::HookRunOverrides,
+}
+
+struct TrackedPostCommitHookTask {
+    abort: tokio::task::AbortHandle,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct PostCommitHookTaskCompletion(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for PostCommitHookTaskCompletion {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Session-scoped mechanical dispatcher for observe-only committed facts.
+///
+/// Producers call [`Self::dispatch`] only after their owning commit or terminal
+/// resolution. Dispatch never awaits hook execution and cannot change the fact
+/// being observed.
+pub struct PostCommitHookDispatcher {
+    session_id: SessionId,
+    registration: RwLock<Option<PostCommitHookRegistration>>,
+    inflight: std::sync::Mutex<Vec<TrackedPostCommitHookTask>>,
+}
+
+impl PostCommitHookDispatcher {
+    #[must_use]
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            registration: RwLock::new(None),
+            inflight: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn configure(
+        &self,
+        engine: Option<Arc<dyn HookEngine>>,
+        overrides: crate::config::HookRunOverrides,
+    ) {
+        let mut registration = self
+            .registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *registration = engine.map(|engine| PostCommitHookRegistration { engine, overrides });
+    }
+
+    pub fn dispatch(&self, observation: HookObservation) {
+        let registration = self
+            .registration
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(registration) = registration else {
+            return;
+        };
+        let invocation = HookInvocation::committed(self.session_id.clone(), observation);
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_finished = Arc::clone(&finished);
+        let task = async move {
+            let _completion = PostCommitHookTaskCompletion(task_finished);
+            match registration
+                .engine
+                .execute_post_commit(invocation.clone(), Some(&registration.overrides))
+                .await
+            {
+                Ok(report) => {
+                    if matches!(report.decision, Some(HookDecision::Deny { .. })) {
+                        tracing::warn!(
+                            point = ?invocation.point,
+                            "observe-only post-commit hook returned a denial; the committed fact is unchanged"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        point = ?invocation.point,
+                        error = %error,
+                        "observe-only post-commit hook execution failed; the committed fact is unchanged"
+                    );
+                }
+            }
+        };
+        let handle = tokio::spawn(task);
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inflight.retain(|task| !task.finished.load(std::sync::atomic::Ordering::Acquire));
+        inflight.push(TrackedPostCommitHookTask {
+            abort: handle.abort_handle(),
+            finished,
+        });
+    }
+
+    /// Stop accepting configured work and abort every owned observation task.
+    ///
+    /// Runtime session teardown calls this explicitly; `Drop` is the fallback.
+    pub fn shutdown(&self) {
+        self.registration
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in inflight.drain(..) {
+            task.abort.abort();
+        }
+    }
+
+    #[cfg(test)]
+    fn inflight_count(&self) -> usize {
+        self.inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+impl std::fmt::Debug for PostCommitHookDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostCommitHookDispatcher")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PostCommitHookDispatcher {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 /// Typed reason codes for guardrail denials.
@@ -373,6 +816,8 @@ pub struct HookInvocation {
     pub tool_call: Option<HookToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<HookToolResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<HookObservation>,
 }
 
 impl Serialize for HookInvocation {
@@ -399,7 +844,8 @@ impl Serialize for HookInvocation {
             + usize::from(self.llm_request.is_some())
             + usize::from(self.llm_response.is_some())
             + usize::from(self.tool_call.is_some())
-            + usize::from(self.tool_result.is_some());
+            + usize::from(self.tool_result.is_some())
+            + usize::from(self.observation.is_some());
         let mut state = serializer.serialize_struct("HookInvocation", len)?;
         state.serialize_field("point", &self.point)?;
         state.serialize_field("session_id", &self.session_id)?;
@@ -433,6 +879,9 @@ impl Serialize for HookInvocation {
         if let Some(tool_result) = &self.tool_result {
             state.serialize_field("tool_result", tool_result)?;
         }
+        if let Some(observation) = &self.observation {
+            state.serialize_field("observation", observation)?;
+        }
         state.end()
     }
 }
@@ -450,7 +899,14 @@ impl HookInvocation {
             llm_response: None,
             tool_call: None,
             tool_result: None,
+            observation: None,
         }
+    }
+
+    pub fn committed(session_id: SessionId, observation: HookObservation) -> Self {
+        let mut invocation = Self::new(observation.point(), session_id);
+        invocation.observation = Some(observation);
+        invocation
     }
 
     pub fn run_started(session_id: SessionId, prompt_input: RunInput) -> Self {
@@ -591,7 +1047,7 @@ impl HookEngineError {
 /// Runtime-independent engine interface.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait HookEngine: Send + Sync {
+pub trait HookEngine: Send + Sync + 'static {
     fn matching_hooks(
         &self,
         _invocation: &HookInvocation,
@@ -605,13 +1061,26 @@ pub trait HookEngine: Send + Sync {
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
+
+    /// Execute one post-commit observation inside its dispatcher's owned task.
+    ///
+    /// Implementations must not detach additional work from this future.
+    async fn execute_post_commit(
+        &self,
+        invocation: HookInvocation,
+        overrides: Option<&crate::config::HookRunOverrides>,
+    ) -> Result<HookExecutionReport, HookEngineError> {
+        self.execute(invocation, overrides).await
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::comms::{CommsCommand, PeerDeliveryOutcome, PeerId, PeerRoute, SendReceipt};
     use crate::types::{ContentBlock, ToolResult};
+    use std::sync::Arc;
 
     fn text_block(s: &str) -> ContentBlock {
         ContentBlock::Text {
@@ -624,6 +1093,260 @@ mod tests {
             media_type: media_type.to_string(),
             data: data.into(),
         }
+    }
+
+    struct BlockingObserveEngine {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl HookEngine for BlockingObserveEngine {
+        async fn execute(
+            &self,
+            invocation: HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<HookExecutionReport, HookEngineError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(HookExecutionReport {
+                decision: Some(HookDecision::deny(
+                    HookId::new("ignored-denial"),
+                    HookReasonCode::PolicyViolation,
+                    format!("{:?}", invocation.point),
+                    None,
+                )),
+                ..HookExecutionReport::empty()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn post_commit_dispatch_does_not_join_or_apply_a_hook_decision() {
+        let engine = Arc::new(BlockingObserveEngine {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        dispatcher.configure(
+            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+            crate::config::HookRunOverrides::default(),
+        );
+
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), engine.entered.notified())
+            .await
+            .expect("post-commit hook should start asynchronously");
+        engine.release.notify_one();
+    }
+
+    struct AbortGuard(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for AbortGuard {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    struct AbortObservedEngine {
+        entered: tokio::sync::Notify,
+        aborted: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl HookEngine for AbortObservedEngine {
+        async fn execute(
+            &self,
+            _invocation: HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<HookExecutionReport, HookEngineError> {
+            let sender = self
+                .aborted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let _guard = AbortGuard(sender);
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            Ok(HookExecutionReport::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_drop_aborts_a_blocked_observation() {
+        let (aborted_tx, aborted_rx) = tokio::sync::oneshot::channel();
+        let engine = Arc::new(AbortObservedEngine {
+            entered: tokio::sync::Notify::new(),
+            aborted: std::sync::Mutex::new(Some(aborted_tx)),
+        });
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        dispatcher.configure(
+            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+            crate::config::HookRunOverrides::default(),
+        );
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), engine.entered.notified())
+            .await
+            .expect("blocked observation should start");
+
+        drop(dispatcher);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), aborted_rx)
+            .await
+            .expect("dispatcher drop should abort its task")
+            .expect("abort guard should report cancellation");
+    }
+
+    struct ImmediateObserveEngine {
+        completed: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl HookEngine for ImmediateObserveEngine {
+        async fn execute(
+            &self,
+            _invocation: HookInvocation,
+            _overrides: Option<&crate::config::HookRunOverrides>,
+        ) -> Result<HookExecutionReport, HookEngineError> {
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(HookExecutionReport::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_reaps_finished_tasks_before_tracking_new_work() {
+        let engine = Arc::new(ImmediateObserveEngine {
+            completed: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let dispatcher = PostCommitHookDispatcher::new(SessionId::new());
+        dispatcher.configure(
+            Some(Arc::clone(&engine) as Arc<dyn HookEngine>),
+            crate::config::HookRunOverrides::default(),
+        );
+        for _ in 0..32 {
+            dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+                HookRuntimeInputAccepted {
+                    input_id: crate::lifecycle::InputId::new(),
+                    input_kind: HookRuntimeInputKind::Prompt,
+                    handling_mode: HandlingMode::Queue,
+                },
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while engine.completed.load(std::sync::atomic::Ordering::SeqCst) != 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all immediate observations should finish");
+
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+        assert_eq!(
+            dispatcher.inflight_count(),
+            1,
+            "finished task handles must be reaped before tracking new work"
+        );
+    }
+
+    #[test]
+    fn committed_agent_event_projects_typed_hook_observations() {
+        let peer_event = crate::event::AgentEvent::PeerContentIngested {
+            kind: CommsNoticeKind::Request,
+            peer: Some(SystemNoticePeer {
+                id: PeerId::new(),
+                display_name: Some("reviewer".to_string()),
+            }),
+            request_id: Some("request-1".to_string()),
+            sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
+        };
+        assert!(matches!(
+            HookObservation::from_committed_agent_event(&peer_event),
+            Some(HookObservation::PeerIngressCommitted(
+                HookPeerIngressCommitted {
+                    kind: CommsNoticeKind::Request,
+                    request_id: Some(request_id),
+                    sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
+                    ..
+                }
+            )) if request_id == "request-1"
+        ));
+
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let completion = crate::event::AgentEvent::InteractionComplete {
+            interaction_id,
+            result: "done".to_string(),
+            structured_output: Some(serde_json::json!({"ok": true})),
+        };
+        assert!(matches!(
+            HookObservation::from_committed_agent_event(&completion),
+            Some(HookObservation::InteractionCompleted(HookInteractionCompleted {
+                interaction_id: observed,
+                result,
+                ..
+            })) if observed == interaction_id && result == "done"
+        ));
+    }
+
+    #[test]
+    fn peer_egress_projection_requires_matching_command_and_receipt() {
+        let peer_id = PeerId::new();
+        let command = CommsCommand::PeerMessage {
+            to: PeerRoute::new(peer_id),
+            body: "hello".to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: HandlingMode::Queue,
+            objective_id: None,
+        };
+        let envelope_id = uuid::Uuid::new_v4();
+        let receipt = SendReceipt::PeerMessageSent {
+            envelope_id,
+            delivery: PeerDeliveryOutcome::Acked,
+        };
+        assert!(matches!(
+            HookObservation::from_committed_peer_send(&command, &receipt),
+            Some(HookObservation::PeerEgressCommitted(HookPeerEgressCommitted {
+                kind: HookPeerEgressKind::Message,
+                peer_id: observed_peer,
+                envelope_id: observed_envelope,
+                delivery: PeerDeliveryOutcome::Acked,
+                ..
+            })) if observed_peer == peer_id && observed_envelope == envelope_id
+        ));
+
+        let mismatched = SendReceipt::PeerLifecycleSent {
+            envelope_id,
+            delivery: PeerDeliveryOutcome::Acked,
+        };
+        assert!(
+            HookObservation::from_committed_peer_send(&command, &mismatched).is_none(),
+            "a mismatched custom runtime receipt must not mint a false egress fact"
+        );
     }
 
     #[test]

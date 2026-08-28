@@ -31104,6 +31104,146 @@ async fn spine_invariants_hold_after_queued_input() {
         .expect("all invariants should hold after queued input");
 }
 
+struct RecordingPostCommitHookEngine {
+    sender: tokio::sync::mpsc::UnboundedSender<meerkat_core::HookInvocation>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::HookEngine for RecordingPostCommitHookEngine {
+    async fn execute(
+        &self,
+        invocation: meerkat_core::HookInvocation,
+        _overrides: Option<&meerkat_core::HookRunOverrides>,
+    ) -> Result<meerkat_core::HookExecutionReport, meerkat_core::HookEngineError> {
+        let _ = self.sender.send(invocation);
+        Ok(meerkat_core::HookExecutionReport::empty())
+    }
+}
+
+#[tokio::test]
+async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    bindings.post_commit_hooks().configure(
+        Some(Arc::new(RecordingPostCommitHookEngine { sender })),
+        meerkat_core::HookRunOverrides::default(),
+    );
+
+    let mut first = crate::input::PromptInput::new("first", None);
+    first.header.idempotency_key = Some(crate::IdempotencyKey::new("same-input"));
+    let (accepted, _) = adapter
+        .accept_input_with_completion(&session_id, Input::Prompt(first))
+        .await
+        .expect("first input should commit");
+    assert!(matches!(accepted, crate::AcceptOutcome::Accepted { .. }));
+
+    let mut duplicate = crate::input::PromptInput::new("duplicate", None);
+    duplicate.header.idempotency_key = Some(crate::IdempotencyKey::new("same-input"));
+    let (deduplicated, _) = adapter
+        .accept_input_with_completion(&session_id, Input::Prompt(duplicate))
+        .await
+        .expect("duplicate input should resolve");
+    assert!(matches!(
+        deduplicated,
+        crate::AcceptOutcome::Deduplicated { .. }
+    ));
+
+    let peer_id = meerkat_core::comms::PeerId::new();
+    let valid_peer = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: meerkat_core::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: peer_id.to_string(),
+                display_identity: Some("reviewer".to_string()),
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        directed_interaction_id: None,
+        convention: Some(crate::input::PeerConvention::Message),
+        content: meerkat_core::ContentInput::Text("peer input".to_string()),
+        payload: None,
+        handling_mode: Some(meerkat_core::HandlingMode::Queue),
+        sender_taint: Some(meerkat_core::SenderContentTaint::Tainted),
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+    });
+    let (peer_accepted, _) = adapter
+        .accept_input_with_completion(&session_id, valid_peer)
+        .await
+        .expect("peer input should commit");
+    assert!(matches!(
+        peer_accepted,
+        crate::AcceptOutcome::Accepted { .. }
+    ));
+
+    let invalid_peer = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: meerkat_core::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: meerkat_core::comms::PeerId::new().to_string(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        directed_interaction_id: None,
+        convention: Some(crate::input::PeerConvention::ResponseProgress {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            phase: meerkat_core::PeerResponseProgressProjectionPhase::InProgress,
+        }),
+        content: meerkat_core::ContentInput::Text(String::new()),
+        payload: None,
+        handling_mode: Some(meerkat_core::HandlingMode::Queue),
+        sender_taint: None,
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+    });
+    adapter
+        .accept_input_with_completion(&session_id, invalid_peer)
+        .await
+        .expect_err("progress response with handling mode must reject");
+
+    let mut points = Vec::new();
+    for _ in 0..5 {
+        let invocation = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("post-commit hook dispatch should not stall")
+            .expect("hook dispatcher remains connected");
+        points.push(invocation.point);
+    }
+    assert_eq!(
+        points
+            .iter()
+            .filter(|point| **point == meerkat_core::HookPoint::RuntimeInputAccepted)
+            .count(),
+        2
+    );
+    assert!(points.contains(&meerkat_core::HookPoint::RuntimeInputDeduplicated));
+    assert!(points.contains(&meerkat_core::HookPoint::RuntimeInputRejected));
+    assert!(
+        points.contains(&meerkat_core::HookPoint::PeerIngressCommitted),
+        "accepted peer input must emit its committed ingress projection"
+    );
+}
+
 #[tokio::test]
 async fn spine_invariants_hold_after_destroy() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

@@ -1372,6 +1372,7 @@ impl MeerkatMachine {
         epoch_id: meerkat_core::RuntimeEpochId,
         ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
         cursor_state: Arc<meerkat_core::EpochCursorState>,
+        post_commit_hooks: Arc<meerkat_core::PostCommitHookDispatcher>,
         tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
         dsl_authority_shared: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
         handle_teardown_gate: Arc<crate::handles::HandleTeardownGate>,
@@ -1454,6 +1455,7 @@ impl MeerkatMachine {
                     dsl_authority: shared_handle_authority,
                     store: self.store.clone(),
                 }),
+                post_commit_hooks,
                 runtime_authority,
             ),
         )
@@ -1477,7 +1479,7 @@ impl MeerkatMachine {
         allow_late_compaction_binding: bool,
         runtime_authority: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
-        let (cached, durability_health) = {
+        let (cached, durability_health, post_commit_hooks) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(&session_id)
@@ -1500,6 +1502,7 @@ impl MeerkatMachine {
             (
                 entry.canonical_runtime_bindings.clone(),
                 entry.durability_health.clone(),
+                Arc::clone(&entry.post_commit_hooks),
             )
         };
         if let Some(cached) = cached {
@@ -1511,6 +1514,7 @@ impl MeerkatMachine {
             epoch_id.clone(),
             Arc::clone(&ops_lifecycle),
             Arc::clone(&cursor_state),
+            post_commit_hooks,
             Arc::clone(&tool_visibility_owner),
             Arc::clone(&dsl_authority_shared),
             Arc::clone(&handle_teardown_gate),

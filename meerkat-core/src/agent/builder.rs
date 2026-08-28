@@ -71,6 +71,7 @@ pub struct AgentBuilder {
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    pub(super) post_commit_hooks: Option<Arc<crate::hooks::PostCommitHookDispatcher>>,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) compaction_curator: Option<Arc<dyn crate::compact::CompactionCurator>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
@@ -239,6 +240,7 @@ impl AgentBuilder {
             comms_runtime: None,
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
+            post_commit_hooks: None,
             compactor: None,
             compaction_curator: None,
             memory_store: None,
@@ -406,6 +408,15 @@ impl AgentBuilder {
     /// Set run-scoped hook overrides.
     pub fn with_hook_run_overrides(mut self, overrides: HookRunOverrides) -> Self {
         self.hook_run_overrides = overrides;
+        self
+    }
+
+    /// Use the runtime-owned dispatcher for observe-only committed facts.
+    pub fn with_post_commit_hooks(
+        mut self,
+        dispatcher: Arc<crate::hooks::PostCommitHookDispatcher>,
+    ) -> Self {
+        self.post_commit_hooks = Some(dispatcher);
         self
     }
 
@@ -671,7 +682,11 @@ impl AgentBuilder {
         // ends: the receiver is drained at turn boundaries, the sender is
         // cloned for the requesting surface via `cancel_after_boundary_handle`.
         let (cancel_after_boundary_tx, cancel_after_boundary_rx) = mpsc::unbounded_channel();
-
+        let post_commit_hooks = self.post_commit_hooks.unwrap_or_else(|| {
+            Arc::new(crate::hooks::PostCommitHookDispatcher::new(
+                session.id().clone(),
+            ))
+        });
         let mut agent = Agent {
             config: resolved_config,
             client,
@@ -685,6 +700,7 @@ impl AgentBuilder {
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,
             hook_run_overrides: self.hook_run_overrides,
+            post_commit_hooks,
             compactor: self.compactor,
             compaction_curator: self.compaction_curator,
             last_input_tokens: 0,
@@ -891,6 +907,9 @@ impl AgentBuilder {
                 .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
         }
 
+        agent
+            .post_commit_hooks
+            .configure(agent.hook_engine.clone(), agent.hook_run_overrides.clone());
         Ok(agent)
     }
 

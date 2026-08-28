@@ -1072,6 +1072,7 @@ impl MeerkatMachine {
                     Some(guard) => Some(guard),
                     None => Some(Arc::clone(&gate).lock_owned().await),
                 };
+                let hook_input = crate::hook_observation::RuntimeInputHookFacts::from_input(&input);
                 let (
                     wake_tx,
                     effect_tx,
@@ -1079,6 +1080,7 @@ impl MeerkatMachine {
                     attachment_id,
                     dsl_authority,
                     publication_handle,
+                    post_commit_hooks,
                 ) = {
                     let sessions = self.sessions.read().await;
                     let entry =
@@ -1128,6 +1130,7 @@ impl MeerkatMachine {
                         entry.live_attachment_id(),
                         Arc::clone(&entry.dsl_authority),
                         entry.publication_handle(),
+                        Arc::clone(&entry.post_commit_hooks),
                     )
                 };
                 tracing::debug!(
@@ -1156,11 +1159,36 @@ impl MeerkatMachine {
                     visible_state = ?visible_state,
                     "MeerkatMachine::AcceptWithCompletion read runtime state"
                 );
-                Self::reject_visible_terminal_ingress(visible_state)?;
-                self.reject_unregistration_drain_ingress(&session_id, state)
-                    .await?;
-                self.require_directed_terminal_publication_capability(&session_id, &input)
-                    .await?;
+                if let Err(error) = Self::reject_visible_terminal_ingress(visible_state) {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .reject_unregistration_drain_ingress(&session_id, state)
+                    .await
+                {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .require_directed_terminal_publication_capability(&session_id, &input)
+                    .await
+                {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
                 // Acquire process-owned execution before mutating either the
                 // driver or generated DSL. Once admission commits, handing
                 // actor-bound work off must be infallible.
@@ -1217,10 +1245,20 @@ impl MeerkatMachine {
                         active_turn_boundary_available,
                         "resolving runtime ingress admission via canonical machine seam"
                     );
-                    let resolved = driver.resolve_admission_with_active_turn_boundary(
+                    let resolved = match driver.resolve_admission_with_active_turn_boundary(
                         &input,
                         active_turn_boundary_available,
-                    )?;
+                    ) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            crate::hook_observation::dispatch_runtime_input_error(
+                                &post_commit_hooks,
+                                &hook_input,
+                                &error,
+                            );
+                            return Err(error);
+                        }
+                    };
                     let flags = resolved.coarse_flags();
                     let stages_run_boundary = resolved.stages_run_boundary();
                     self.preview_session_dsl_input(
@@ -1327,6 +1365,11 @@ impl MeerkatMachine {
                             }
                         }
                         AcceptOutcome::Rejected { reason } => {
+                            crate::hook_observation::dispatch_runtime_input_outcome(
+                                &post_commit_hooks,
+                                &hook_input,
+                                &result,
+                            );
                             return Err(RuntimeDriverError::ValidationFailed {
                                 reason: reason.to_string(),
                             });
@@ -1436,6 +1479,11 @@ impl MeerkatMachine {
                 } else {
                     (signal, None)
                 };
+                crate::hook_observation::dispatch_runtime_input_outcome(
+                    &post_commit_hooks,
+                    &hook_input,
+                    &outcome,
+                );
 
                 let live_boundary_plan = if signal.should_interrupt_yielding()
                     && stages_run_boundary
@@ -1489,7 +1537,7 @@ impl MeerkatMachine {
                 })
             }
             MeerkatMachineCommand::AcceptWithoutWake { session_id, input } => {
-                let (driver, completions, mutation_gate, publication_handle) = {
+                let (driver, completions, mutation_gate, publication_handle, post_commit_hooks) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
@@ -1501,8 +1549,10 @@ impl MeerkatMachine {
                         entry.completions.clone(),
                         Arc::clone(&entry.mutation_gate),
                         entry.publication_handle(),
+                        Arc::clone(&entry.post_commit_hooks),
                     )
                 };
+                let hook_input = crate::hook_observation::RuntimeInputHookFacts::from_input(&input);
                 let gate_guard = self
                     .lock_current_session_driver_gate(&session_id, &driver)
                     .await?;
@@ -1515,26 +1565,71 @@ impl MeerkatMachine {
                     .existing_session_visible_runtime_state(&session_id)
                     .await
                     .unwrap_or(RuntimeState::Destroyed);
-                Self::reject_visible_terminal_ingress(visible_state)?;
-                self.reject_unregistration_drain_ingress(&session_id, state)
-                    .await?;
-                self.require_directed_terminal_publication_capability(&session_id, &input)
-                    .await?;
+                if let Err(error) = Self::reject_visible_terminal_ingress(visible_state) {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .reject_unregistration_drain_ingress(&session_id, state)
+                    .await
+                {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .require_directed_terminal_publication_capability(&session_id, &input)
+                    .await
+                {
+                    crate::hook_observation::dispatch_runtime_input_error(
+                        &post_commit_hooks,
+                        &hook_input,
+                        &error,
+                    );
+                    return Err(error);
+                }
                 let (outcome, accepted_input_id) = {
                     let mut driver = driver.lock().await;
-                    let resolved = driver
-                        .resolve_admission_without_wake_with_active_turn_boundary(&input, false)?;
-                    self.preview_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
-                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
-                                &InputId::new(),
-                            ),
-                        },
-                        "AcceptWithoutWake",
-                    )
-                    .await
-                    .map_err(|reason| Self::classify_ingress_dsl_rejection(state, reason))?;
+                    let resolved = match driver
+                        .resolve_admission_without_wake_with_active_turn_boundary(&input, false)
+                    {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            crate::hook_observation::dispatch_runtime_input_error(
+                                &post_commit_hooks,
+                                &hook_input,
+                                &error,
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let preview = self
+                        .preview_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
+                                input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                    &InputId::new(),
+                                ),
+                            },
+                            "AcceptWithoutWake",
+                        )
+                        .await
+                        .map_err(|reason| Self::classify_ingress_dsl_rejection(state, reason));
+                    if let Err(error) = preview {
+                        crate::hook_observation::dispatch_runtime_input_error(
+                            &post_commit_hooks,
+                            &hook_input,
+                            &error,
+                        );
+                        return Err(error);
+                    }
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await
@@ -1544,6 +1639,11 @@ impl MeerkatMachine {
                         Err(err) => return Err(err),
                     };
                     if let AcceptOutcome::Rejected { reason } = &result {
+                        crate::hook_observation::dispatch_runtime_input_outcome(
+                            &post_commit_hooks,
+                            &hook_input,
+                            &result,
+                        );
                         return Err(RuntimeDriverError::ValidationFailed {
                             reason: reason.to_string(),
                         });
@@ -1609,6 +1709,11 @@ impl MeerkatMachine {
                                             %terminalization_error,
                                             "AcceptWithoutWake DSL publication failed and exact terminal transfer failed; returning accepted authority"
                                         );
+                                        crate::hook_observation::dispatch_runtime_input_outcome(
+                                            &post_commit_hooks,
+                                            &hook_input,
+                                            &outcome,
+                                        );
                                         return Ok(MeerkatMachineCommandResult::AcceptOutcome(
                                             outcome,
                                         ));
@@ -1633,6 +1738,11 @@ impl MeerkatMachine {
                     );
                 }
 
+                crate::hook_observation::dispatch_runtime_input_outcome(
+                    &post_commit_hooks,
+                    &hook_input,
+                    &outcome,
+                );
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
             }
             _ => unreachable!("non-ingress command routed to ingress handler"),

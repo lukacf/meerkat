@@ -94,8 +94,8 @@ pub async fn handle_send(
         Err(resp) => return resp,
     };
 
-    let comms = match runtime.comms_runtime(&session_id).await {
-        Some(c) => c,
+    match runtime.comms_runtime(&session_id).await {
+        Some(_) => {}
         None => {
             return RpcResponse::error(
                 id,
@@ -128,8 +128,8 @@ pub async fn handle_send(
         }
     };
 
-    match comms.send(cmd).await {
-        Ok(receipt) => match send_receipt_json(receipt) {
+    match runtime.send_comms(&session_id, cmd).await {
+        Some(Ok(receipt)) => match send_receipt_json(receipt) {
             Ok(value) => RpcResponse::success(id, value),
             Err(serialize_error) => RpcResponse::error(
                 id,
@@ -137,7 +137,7 @@ pub async fn handle_send(
                 format!("failed to serialize comms send receipt: {serialize_error}"),
             ),
         },
-        Err(e) => {
+        Some(Err(e)) => {
             let normalized = normalize_send_error(peer_name.as_deref(), &e);
             let message = normalized.message().to_string();
             match serde_json::to_value(&normalized) {
@@ -149,6 +149,11 @@ pub async fn handle_send(
                 ),
             }
         }
+        None => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("Session not found or comms not enabled: {session_id}"),
+        ),
     }
 }
 

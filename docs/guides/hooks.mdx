@@ -4,7 +4,9 @@ description: "Typed extension points within the agent loop for observation and g
 icon: "anchor"
 ---
 
-Hooks let you run custom logic at defined points in the agent lifecycle -- before/after tool execution, LLM calls, or at turn boundaries. Use them for approval workflows, audit logging, content filtering, or typed denials.
+Hooks let you run custom logic at defined points in the agent lifecycle and react
+to committed runtime, session, and comms facts. Use them for approval workflows,
+responsive UI, audit logging, telemetry, content filtering, or typed denials.
 
 <Note>
 This page is the task-first guide. For the low-level type and payload inventory, see [Hooks reference](/reference/hooks-reference).
@@ -15,13 +17,15 @@ This page is the task-first guide. For the low-level type and payload inventory,
 Use this guide when you want to:
 
 - add approval gates
+- react to committed input and peer-delivery outcomes
+- update application UI from typed interaction completions
 - log or audit agent behavior
 - block unsafe tool inputs or outputs
 - choose between in-process, command, and HTTP hook runtimes
 
 ## Hook points
 
-Eight extension points are available:
+Fourteen extension points are available:
 
 | HookPoint | Classification | When it fires |
 |-----------|---------------|---------------|
@@ -33,8 +37,19 @@ Eight extension points are available:
 | `PostToolExecution` | post | After each tool execution completes |
 | `RunCompleted` | post | After a successful run completes |
 | `RunFailed` | post | After a run fails with an error |
+| `RuntimeInputAccepted` | post-commit, observe-only | After runtime and session authority commit an accepted input |
+| `RuntimeInputRejected` | terminal, observe-only | After runtime terminally rejects an input without committing admission |
+| `RuntimeInputDeduplicated` | post-commit, observe-only | After an idempotent submission resolves to an existing committed input |
+| `PeerIngressCommitted` | post-commit, observe-only | After runtime commits an accepted typed peer input |
+| `PeerEgressCommitted` | post-commit, observe-only | After a peer send returns a successful typed delivery receipt |
+| `InteractionCompleted` | post-commit, observe-only | After an interaction terminal is durably published |
 
 Classification is determined by the `is_pre()` and `is_post()` methods on `HookPoint`. Foreground hooks block loop progression; background hooks run asynchronously for observation.
+
+The six post-commit points are intrinsically observe-only. Their session-scoped
+dispatcher owns spawned tasks, reaps completed work, and aborts remaining work
+when the dispatcher is dropped. A returned denial, timeout, or hook runtime
+failure cannot change or delay the committed fact.
 
 ## Capabilities
 
@@ -56,6 +71,11 @@ The former `Rewrite` capability is deleted entirely; semantic patch authority is
 **All background hooks must be observe-only.** A background hook with any
 capability other than `Observe` is rejected with
 `HookEngineError::InvalidConfiguration`, regardless of hook point.
+
+The six post-commit points also require `Observe` capability in either execution
+mode. They are always dispatched outside the outcome path; configuring one as
+`Foreground` only orders matching hook handlers within its owned observation
+task.
 </Warning>
 
 Semantic patch publication is retired. `RuntimeHookResponse` rejects unknown fields, so a runtime response carrying any legacy `patches` field fails closed during deserialization.
@@ -199,6 +219,7 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 | `llm_response` | `Option<HookLlmResponse>` | `PostLlmResponse` |
 | `tool_call` | `Option<HookToolCall>` | `PreToolExecution` |
 | `tool_result` | `Option<HookToolResult>` | `PostToolExecution` |
+| `observation` | `Option<HookObservation>` | The six post-commit points |
 
 For command and HTTP hooks, the serialized wire payload additionally carries `prompt` and `error` strings. These are serialize-only projections of `prompt_input` and `error_report`; they are never stored fields and are never deserialized back as authority.
 
@@ -207,9 +228,29 @@ For command and HTTP hooks, the serialized wire payload additionally carries `pr
 - **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`, `server_tool_content` (typed `ServerToolKind` projection of provider-native server-tool blocks in the response, e.g. web search — empty when none; lets a foreground hook classify provider-native content ingestion synchronously)
 - **`HookToolCall`**: `tool_use_id`, `name`, `args`, `provenance` (typed `ToolProvenance` of the called tool — kind + source id, e.g. an MCP server name — projected from the tool's `ToolDef`; absent for tools without declared provenance)
 - **`HookToolResult`**: `tool_use_id`, `name`, `content_blocks`, `is_error`, `provenance` (as on `HookToolCall`; the wire payload adds a serialize-only `content` text projection)
+- **`HookObservation`**: a tagged typed union for accepted, rejected, or deduplicated runtime input; committed peer ingress or egress; and completed interaction facts
 </Accordion>
 
 `HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. The wire payload also serializes a `content` string -- a text projection derived from `content_blocks` for external command/HTTP hooks; in Rust, use `HookToolResult::text_projection()`. Both are observational projections and cannot be returned as a rewrite.
+
+## Hooks versus event streams
+
+Use hooks as the default in-process application reaction API. Event streams
+remain the canonical ordered transport for remote observers, replay-aware
+pipelines, transcript/audit projection, and resynchronization after stream
+truncation. Command receipts remain the direct result for the caller that
+initiated an action; the matching committed outcome is also projected through
+the hook surface.
+
+Post-commit hooks are process-local best-effort reactions, not durable delivery.
+A crash after the canonical event is published may lose a hook invocation, and
+recovery of a finalized outbox may replay one. Use event streams for durable or
+replay-aware consumption; hook handlers with external side effects should
+deduplicate by canonical ids such as `interaction_id`.
+
+Post-commit hooks are not synchronous policy seams. They cannot close an
+in-turn race or gate a same-turn write. Keep using synchronous points such as
+`PostToolExecution` when policy must join the agent loop before it advances.
 
 ## Priority ordering and deny short-circuiting
 

@@ -20,6 +20,7 @@ use crate::handles::{
     ModelRoutingHandle, PeerCommsHandle, PeerCommsInstallTarget, PeerInteractionHandle,
     SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
+use crate::hooks::PostCommitHookDispatcher;
 use crate::ops_lifecycle::CompletionCursorConsumer;
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::GeneratedToolVisibilityOwner;
@@ -230,6 +231,8 @@ pub struct SessionRuntimeBindings {
     /// Resultful handoff authorizing durable compaction transcript+memory
     /// pairs for this exact session/runtime epoch.
     compaction_commit_coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
+    /// Mechanical observe-only dispatcher shared with the runtime owner.
+    post_commit_hooks: Arc<PostCommitHookDispatcher>,
     runtime_authority: Arc<dyn Any + Send + Sync>,
 }
 
@@ -263,6 +266,7 @@ impl SessionRuntimeBindings {
         session_claim_handle: Arc<dyn SessionClaimHandle>,
         interaction_stream: Arc<dyn InteractionStreamHandle>,
         compaction_commit_coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
+        post_commit_hooks: Arc<PostCommitHookDispatcher>,
         runtime_authority: Arc<dyn Any + Send + Sync>,
     ) -> Self {
         Self {
@@ -285,6 +289,7 @@ impl SessionRuntimeBindings {
             session_claim_handle,
             interaction_stream,
             compaction_commit_coordinator,
+            post_commit_hooks,
             runtime_authority,
         }
     }
@@ -376,6 +381,10 @@ impl SessionRuntimeBindings {
         &self.compaction_commit_coordinator
     }
 
+    pub fn post_commit_hooks(&self) -> &Arc<PostCommitHookDispatcher> {
+        &self.post_commit_hooks
+    }
+
     #[doc(hidden)]
     pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
         self.runtime_authority.as_ref()
@@ -415,6 +424,7 @@ impl SessionRuntimeBindings {
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: Arc::clone(&self.interaction_stream),
             compaction_commit_coordinator: Arc::clone(&self.compaction_commit_coordinator),
+            post_commit_hooks: Arc::clone(&self.post_commit_hooks),
             runtime_authority,
         }
     }

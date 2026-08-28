@@ -2716,6 +2716,15 @@ pub trait SessionServiceCommsExt: SessionService {
         None
     }
 
+    async fn send_comms(
+        &self,
+        session_id: &SessionId,
+        command: crate::CommsCommand,
+    ) -> Option<Result<crate::SendReceipt, crate::SendError>> {
+        let runtime = self.comms_runtime(session_id).await?;
+        Some(runtime.send(command).await)
+    }
+
     /// Get the event injector for a session, if available.
     async fn event_injector(
         &self,

@@ -11298,6 +11298,14 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSess
     ) -> Option<std::sync::Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
         self.inner.interaction_event_injector(session_id).await
     }
+
+    async fn send_comms(
+        &self,
+        session_id: &SessionId,
+        command: meerkat_core::CommsCommand,
+    ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
+        self.inner.send_comms(session_id, command).await
+    }
 }
 
 #[async_trait]
@@ -11734,6 +11742,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session_id: &SessionId,
     ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.inner.comms_runtime(session_id).await
+    }
+
+    pub async fn send_comms(
+        &self,
+        session_id: &SessionId,
+        command: meerkat_core::CommsCommand,
+    ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
+        self.inner.send_comms(session_id, command).await
     }
 
     /// Wait for a session to be registered.

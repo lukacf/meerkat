@@ -56,6 +56,7 @@ pub mod exact_operation;
 #[doc(hidden)]
 pub mod generated;
 pub mod handles;
+mod hook_observation;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;

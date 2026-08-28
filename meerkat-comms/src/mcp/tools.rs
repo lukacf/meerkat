@@ -225,15 +225,37 @@ pub struct ToolContext {
 #[derive(Clone)]
 pub struct RuntimeCommsCommandHandle {
     runtime: Arc<dyn CoreCommsRuntime>,
+    post_commit_hooks: Option<Arc<meerkat_core::PostCommitHookDispatcher>>,
 }
 
 impl RuntimeCommsCommandHandle {
     pub fn new(runtime: Arc<dyn CoreCommsRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            post_commit_hooks: None,
+        }
+    }
+
+    pub fn with_post_commit_hooks(
+        mut self,
+        post_commit_hooks: Arc<meerkat_core::PostCommitHookDispatcher>,
+    ) -> Self {
+        self.post_commit_hooks = Some(post_commit_hooks);
+        self
     }
 
     pub async fn send(&self, command: CommsCommand) -> Result<SendReceipt, SendError> {
-        self.runtime.send(command).await
+        let observation_command = command.clone();
+        let receipt = self.runtime.send(command).await?;
+        if let Some(dispatcher) = &self.post_commit_hooks
+            && let Some(observation) = meerkat_core::HookObservation::from_committed_peer_send(
+                &observation_command,
+                &receipt,
+            )
+        {
+            dispatcher.dispatch(observation);
+        }
+        Ok(receipt)
     }
 
     pub async fn peers(&self) -> Vec<PeerDirectoryEntry> {
@@ -1077,6 +1099,22 @@ mod tests {
         sent: Mutex<Vec<CommsCommand>>,
         peers: Vec<PeerDirectoryEntry>,
         notify: Arc<Notify>,
+    }
+
+    struct RecordingPostCommitHook {
+        sender: tokio::sync::mpsc::UnboundedSender<meerkat_core::HookInvocation>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HookEngine for RecordingPostCommitHook {
+        async fn execute(
+            &self,
+            invocation: meerkat_core::HookInvocation,
+            _overrides: Option<&meerkat_core::HookRunOverrides>,
+        ) -> Result<meerkat_core::HookExecutionReport, meerkat_core::HookEngineError> {
+            let _ = self.sender.send(invocation);
+            Ok(meerkat_core::HookExecutionReport::empty())
+        }
     }
 
     impl RecordingRuntime {
@@ -2619,7 +2657,15 @@ mod tests {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
         let runtime = Arc::new(RecordingRuntime::new());
-        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
+        let (hook_tx, mut hook_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+            meerkat_core::SessionId::new(),
+        ));
+        hooks.configure(
+            Some(Arc::new(RecordingPostCommitHook { sender: hook_tx })),
+            meerkat_core::HookRunOverrides::default(),
+        );
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime).with_post_commit_hooks(hooks));
 
         let result = handle_tools_call(
             &ctx,
@@ -2632,6 +2678,21 @@ mod tests {
         assert_eq!(result["receipt"]["kind"], "peer_message_sent");
         assert_eq!(result["receipt"]["delivery"], "volatile_handed_off");
         assert!(result["receipt"].get("acked").is_none());
+        let hook = tokio::time::timeout(std::time::Duration::from_secs(1), hook_rx.recv())
+            .await
+            .expect("peer-egress hook should be dispatched")
+            .expect("hook dispatcher remains connected");
+        assert_eq!(hook.point, meerkat_core::HookPoint::PeerEgressCommitted);
+        assert!(matches!(
+            hook.observation,
+            Some(meerkat_core::HookObservation::PeerEgressCommitted(
+                meerkat_core::HookPeerEgressCommitted {
+                    kind: meerkat_core::HookPeerEgressKind::Message,
+                    peer_id: observed_peer,
+                    ..
+                }
+            )) if observed_peer == peer_id
+        ));
     }
 
     #[tokio::test]

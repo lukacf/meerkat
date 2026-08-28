@@ -30,6 +30,10 @@ them.
 
 ### Breaking
 
+- **Rust hook contracts gained committed-observation variants and payloads.**
+  Exact-pinned downstreams must update exhaustive matches over `HookPoint` and
+  struct literals for `HookInvocation`; `SessionRuntimeBindings::__from_runtime_authority`
+  also gains the runtime-owned `PostCommitHookDispatcher` argument.
 - **Rust auth/provider construction surfaces gained account-aware fields and
   variants.** Exact-pinned downstreams must update exhaustive matches and
   struct literals for `AuthCredentialIdentity`, `CredentialAccountId`,
@@ -56,6 +60,10 @@ them.
 
 ### Added
 
+- Added typed, observe-only post-commit hooks for runtime input acceptance,
+  rejection, and deduplication; peer ingress and egress; and enriched
+  interaction completion. Event streams remain the ordered/replay-aware
+  transport, while session-owned hook tasks are reaped and aborted on teardown.
 - Added native GitHub Copilot device authentication and account-scoped CAPI
   routing for OpenAI Responses/Chat Completions, Anthropic Messages, and
   Gemini Chat Completions, without a Copilot SDK or CLI dependency.

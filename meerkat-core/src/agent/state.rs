@@ -2025,6 +2025,7 @@ where
                     llm_response: None,
                     tool_call: None,
                     tool_result: None,
+                    observation: None,
                 },
                 event_tx,
             )
@@ -4569,6 +4570,7 @@ where
             llm_response: None,
             tool_call: None,
             tool_result: None,
+            observation: None,
         };
         // Pre-LLM hooks may observe or deny the turn.
         let pre_llm_report = if in_extraction {
@@ -5461,6 +5463,7 @@ where
             }),
             tool_call: None,
             tool_result: None,
+            observation: None,
         };
         let post_llm_report = if in_extraction {
             match self
@@ -5679,6 +5682,7 @@ where
                         provenance: provenance_for_tool(tc.name.as_str()),
                     }),
                     tool_result: None,
+                    observation: None,
                 },
                 ctx.event_tx.as_ref(),
             )
@@ -5829,6 +5833,7 @@ where
                             )
                             .with_provenance(provenance_for_tool(tc.name.as_str())),
                         ),
+                        observation: None,
                     },
                     ctx.run_id,
                     ctx.turn_count,

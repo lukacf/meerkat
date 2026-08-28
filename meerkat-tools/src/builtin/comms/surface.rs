@@ -53,6 +53,26 @@ impl CommsToolSurface {
         }
     }
 
+    pub fn new_with_runtime_and_post_commit_hooks(
+        router: Arc<Router>,
+        trusted_peers: TrustedPeersView,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        post_commit_hooks: Arc<meerkat_core::PostCommitHookDispatcher>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(
+                RuntimeCommsCommandHandle::new(runtime).with_post_commit_hooks(post_commit_hooks),
+            ),
+        };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
+        Self {
+            tool_context,
+            tool_defs,
+        }
+    }
+
     fn callability_for_tool(&self, name: &str) -> ToolCallability {
         comms_tool_unavailable_reason(&self.tool_context, name)
             .map_or_else(ToolCallability::callable, ToolCallability::unavailable)

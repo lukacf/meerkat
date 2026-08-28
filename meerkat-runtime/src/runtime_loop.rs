@@ -760,6 +760,7 @@ impl InteractionTerminalPublicationError {
 #[allow(clippy::too_many_arguments)]
 async fn finalize_publish_and_resolve_runtime_terminals(
     driver: &crate::meerkat_machine::SharedDriver,
+    post_commit_hooks: &std::sync::Arc<meerkat_core::PostCommitHookDispatcher>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     authority_guard: crate::tokio::sync::OwnedMutexGuard<()>,
     teardown_slot: &RuntimeLoopTeardownSlot,
@@ -800,6 +801,7 @@ async fn finalize_publish_and_resolve_runtime_terminals(
     };
     let result = publish_authorized_runtime_terminal_batch(
         driver,
+        post_commit_hooks,
         completions,
         Some(authority_guard),
         executor,
@@ -1123,6 +1125,7 @@ async fn realize_runtime_loop_terminal_owned(
 #[allow(clippy::too_many_arguments)]
 async fn publish_authorized_runtime_terminal_batch(
     driver: &crate::meerkat_machine::SharedDriver,
+    post_commit_hooks: &std::sync::Arc<meerkat_core::PostCommitHookDispatcher>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     authority_guard: Option<crate::tokio::sync::OwnedMutexGuard<()>>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -1290,6 +1293,10 @@ async fn publish_authorized_runtime_terminal_batch(
             )
         })?;
     let events = bundle.interaction_events();
+    let observations = events
+        .iter()
+        .filter_map(meerkat_core::HookObservation::from_committed_agent_event)
+        .collect::<Vec<_>>();
 
     if !events.is_empty() {
         let candidate_owner_input_id = match batch_key {
@@ -1379,6 +1386,7 @@ async fn publish_authorized_runtime_terminal_batch(
             let driver_guard = std::sync::Arc::clone(driver).lock_owned().await;
             let completion_guard = std::sync::Arc::clone(completions).lock_owned().await;
             let owned_input_ids = input_ids.to_vec();
+            let post_commit_hooks = std::sync::Arc::clone(post_commit_hooks);
             let handoff = tokio::spawn(async move {
                 let _authority_guard = authority_guard;
                 let mut driver_guard = driver_guard;
@@ -1397,6 +1405,9 @@ async fn publish_authorized_runtime_terminal_batch(
                 let mut completion_guard = completion_guard;
                 completion_guard
                     .resolve_authorized_runtime_terminal_bundle(owned_input_ids, bundle);
+                for observation in observations {
+                    post_commit_hooks.dispatch(observation);
+                }
                 Ok::<(), InteractionTerminalPublicationError>(())
             });
             return handoff.await.map_err(|error| {
@@ -1417,6 +1428,9 @@ async fn publish_authorized_runtime_terminal_batch(
                     error,
                 )
             })?;
+        for observation in observations {
+            post_commit_hooks.dispatch(observation);
+        }
     }
     Ok(())
 }
@@ -1429,6 +1443,7 @@ enum RuntimeProjectionRecoveryAuthority {
 
 async fn drain_recovered_interaction_terminal_outboxes(
     driver: &crate::meerkat_machine::SharedDriver,
+    post_commit_hooks: &std::sync::Arc<meerkat_core::PostCommitHookDispatcher>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     authority_binding: &RuntimeLoopAuthorityBinding,
@@ -1457,6 +1472,7 @@ async fn drain_recovered_interaction_terminal_outboxes(
     })?;
     drain_recovered_interaction_terminal_outboxes_under_authority(
         driver,
+        post_commit_hooks,
         completions,
         executor,
         &authority_guard,
@@ -1466,6 +1482,7 @@ async fn drain_recovered_interaction_terminal_outboxes(
 
 async fn drain_recovered_interaction_terminal_outboxes_under_authority(
     driver: &crate::meerkat_machine::SharedDriver,
+    post_commit_hooks: &std::sync::Arc<meerkat_core::PostCommitHookDispatcher>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     _authority_guard: &crate::tokio::sync::OwnedMutexGuard<()>,
@@ -1617,6 +1634,7 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
                 };
                 publish_authorized_runtime_terminal_batch(
                     driver,
+                    post_commit_hooks,
                     completions,
                     None,
                     executor,
@@ -1639,6 +1657,7 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
             } => {
                 publish_authorized_runtime_terminal_batch(
                     driver,
+                    post_commit_hooks,
                     completions,
                     None,
                     executor,
@@ -1801,6 +1820,7 @@ async fn drain_recovered_interaction_terminal_outboxes_until_clear(
     turn_boundary_already_held: bool,
     authority_kind: RuntimeProjectionRecoveryAuthority,
 ) -> bool {
+    let post_commit_hooks = authority_binding.post_commit_hooks().await;
     let _turn_finalization_guard = if turn_boundary_already_held {
         None
     } else {
@@ -1822,6 +1842,7 @@ async fn drain_recovered_interaction_terminal_outboxes_until_clear(
     loop {
         match drain_recovered_interaction_terminal_outboxes(
             driver,
+            &post_commit_hooks,
             completions,
             executor,
             authority_binding,
@@ -1920,6 +1941,7 @@ async fn recover_committed_runtime_projections_before_teardown(
         Some(OwnedTerminalizationState::PersistedDirectedDrainPending { run_id }) => Some(run_id),
         None => None,
     };
+    let post_commit_hooks = recovery.authority_binding.post_commit_hooks().await;
     // A rejected atomic boundary has no committed current-run compaction
     // outbox, and startup drained every older outbox before admitting work.
     // The whole-run abort above therefore already settled the exact live
@@ -1944,6 +1966,7 @@ async fn recover_committed_runtime_projections_before_teardown(
     if let Some(run_id) = pending_directed_terminalization_run_id.as_ref() {
         let first_drain = drain_recovered_interaction_terminal_outboxes_under_authority(
             driver,
+            &post_commit_hooks,
             recovery.completions.as_ref(),
             executor,
             authority_guard.as_ref().ok_or_else(|| {
@@ -2049,6 +2072,7 @@ async fn recover_committed_runtime_projections_before_teardown(
             };
             publish_authorized_runtime_terminal_batch(
                 driver,
+                &post_commit_hooks,
                 Some(completions),
                 Some(authority_guard.take().ok_or_else(|| {
                     crate::RuntimeDriverError::RecoveryCorruption {
@@ -4362,6 +4386,19 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
+    async fn post_commit_hooks(&self) -> std::sync::Arc<meerkat_core::PostCommitHookDispatcher> {
+        if let Some(machine) = self.machine.upgrade()
+            && let Some(dispatcher) = machine
+                .post_commit_hooks_for_session(&self.session_id)
+                .await
+        {
+            return dispatcher;
+        }
+        std::sync::Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+            self.session_id.clone(),
+        ))
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
@@ -4796,6 +4833,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let loop_body = async move {
         let mut loop_handoff_guard = loop_handoff_guard;
         let mut startup_guard = startup_guard;
+        let post_commit_hooks = authority_binding.post_commit_hooks().await;
         macro_rules! executor_or_return {
             () => {
                 match loop_handoff_guard.executor_mut() {
@@ -4952,6 +4990,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         }
         if let Err(error) = drain_recovered_interaction_terminal_outboxes_under_authority(
             &driver,
+            &post_commit_hooks,
             completions.as_ref(),
             executor_or_return!(),
             &startup_authority_guard,
@@ -5663,6 +5702,7 @@ async fn process_queue(
     teardown_slot: &std::sync::Arc<RuntimeLoopTeardownSlot>,
     handoff: &mut RuntimeLoopTerminalHandoff,
 ) -> bool {
+    let post_commit_hooks = authority_binding.post_commit_hooks().await;
     loop {
         let turn_finalization_guard = match executor.turn_finalization_boundary_handle() {
             Some(boundary) => match boundary.acquire().await {
@@ -6132,6 +6172,7 @@ async fn process_queue(
                             if let Err(error) =
                                 drain_recovered_interaction_terminal_outboxes_under_authority(
                                     driver,
+                                    &post_commit_hooks,
                                     completions,
                                     executor,
                                     &queue_authority_guard,
@@ -6276,6 +6317,7 @@ async fn process_queue(
                         if let Err(terminalization_error) =
                             drain_recovered_interaction_terminal_outboxes_under_authority(
                                 driver,
+                                &post_commit_hooks,
                                 completions,
                                 executor,
                                 &queue_authority_guard,
@@ -6533,6 +6575,7 @@ async fn process_queue(
                             let publication_error =
                                 finalize_publish_and_resolve_runtime_terminals(
                                     driver,
+                                    &post_commit_hooks,
                                     completions,
                                     terminal_authority_guard,
                                     teardown_slot,
@@ -6608,6 +6651,7 @@ async fn process_queue(
                                     let publication_error =
                                     finalize_publish_and_resolve_runtime_terminals(
                                         driver,
+                                        &post_commit_hooks,
                                         completions,
                                         terminal_authority_guard,
                                         teardown_slot,
@@ -6668,6 +6712,7 @@ async fn process_queue(
 
                         if let Err(err) = finalize_publish_and_resolve_runtime_terminals(
                             driver,
+                            &post_commit_hooks,
                             completions,
                             terminal_authority_guard,
                             teardown_slot,
@@ -6907,6 +6952,7 @@ async fn process_queue(
                             if let Err(error) =
                                 finalize_publish_and_resolve_runtime_terminals(
                                     driver,
+                                    &post_commit_hooks,
                                     completions,
                                     publication_authority_guard,
                                     teardown_slot,
@@ -6966,6 +7012,7 @@ async fn process_queue(
                                 if let Err(error) =
                                     drain_recovered_interaction_terminal_outboxes_under_authority(
                                         driver,
+                                        &post_commit_hooks,
                                         completions,
                                         executor,
                                         drain_authority_guard,

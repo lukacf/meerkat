@@ -594,6 +594,40 @@ pub fn compose_tools_with_comms(
     Ok((Arc::new(composite), instructions))
 }
 
+#[cfg(feature = "comms")]
+fn compose_tools_with_comms_and_post_commit_hooks(
+    base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
+    tool_usage_instructions: String,
+    material: meerkat_comms::CommsToolMaterial,
+    post_commit_hooks: std::sync::Arc<meerkat_core::PostCommitHookDispatcher>,
+) -> Result<
+    (
+        std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
+        String,
+    ),
+    meerkat_tools::ToolError,
+> {
+    use meerkat_tools::CommsToolSurface;
+    use std::sync::Arc;
+    let router = material.router().clone();
+    let trusted_peers = material.trusted_peers_shared();
+    let runtime = material.into_runtime();
+    let comms_surface = CommsToolSurface::new_with_runtime_and_post_commit_hooks(
+        router,
+        trusted_peers,
+        runtime,
+        post_commit_hooks,
+    );
+    let composite =
+        meerkat_core::DynamicToolComposite::new(vec![base_tools, Arc::new(comms_surface)]);
+    let mut instructions = tool_usage_instructions;
+    if !instructions.is_empty() {
+        instructions.push_str("\n\n");
+    }
+    instructions.push_str(CommsToolSurface::usage_instructions());
+    Ok((Arc::new(composite), instructions))
+}
+
 // Re-export provider-runtime types for downstream consumers that used to
 // reach them via meerkat_providers::* or meerkat_client::*.
 pub use meerkat_llm_core::provider_runtime::{

@@ -10,7 +10,7 @@ Use this page when you need exact hook vocabulary and structure rather than a pr
 
 | Type | Values |
 |------|--------|
-| `HookPoint` | `RunStarted`, `PreLlmRequest`, `PreToolExecution`, `TurnBoundary`, `PostLlmResponse`, `PostToolExecution`, `RunCompleted`, `RunFailed` |
+| `HookPoint` | `RunStarted`, `PreLlmRequest`, `PreToolExecution`, `TurnBoundary`, `PostLlmResponse`, `PostToolExecution`, `RunCompleted`, `RunFailed`, `RuntimeInputAccepted`, `RuntimeInputRejected`, `RuntimeInputDeduplicated`, `PeerIngressCommitted`, `PeerEgressCommitted`, `InteractionCompleted` |
 | `HookCapability` | `Observe`, `Guardrail` |
 | `HookExecutionMode` | `Foreground`, `Background` |
 
@@ -63,6 +63,35 @@ remaining foreground and background hooks.
 
 Background hooks are observational. Every background hook must have `Observe`
 capability or configuration validation rejects it, regardless of hook point.
+
+The six committed-fact points are always observe-only and reject `Guardrail`
+capability in either execution mode. Their session-scoped dispatcher does not
+join hook execution to the observed outcome, owns all spawned tasks, reaps
+completed task handles, and aborts in-flight work on drop. Hook decisions and
+runtime failures therefore cannot alter or delay committed facts.
+
+## Committed observation payloads
+
+`HookInvocation.observation` is a tagged `HookObservation` union:
+
+| Variant | Typed payload highlights |
+|---------|--------------------------|
+| `runtime_input_accepted` | input id, runtime input kind, resolved handling mode |
+| `runtime_input_rejected` | attempted input id, runtime input kind, typed rejection reason |
+| `runtime_input_deduplicated` | attempted input id, runtime input kind, existing committed input id |
+| `peer_ingress_committed` | accepted comms kind, canonical peer, request id, sender taint declaration |
+| `peer_egress_committed` | egress kind, canonical peer id, envelope id, strongest typed delivery outcome, interaction correlation |
+| `interaction_completed` | interaction id, result text, optional structured output |
+
+These payloads project exact committed receipts/events. Implementations never
+re-read idempotency rows or reconstruct peer identity from display strings.
+Event streams remain the ordered and replay-aware transport beneath this
+reaction API.
+
+Post-commit hooks are process-local best-effort reactions. Recovery may lose or
+replay an invocation around a crash boundary; use event streams for durable
+delivery and `interaction_id` as the idempotency key for completion side
+effects.
 
 ## Failure reasons
 

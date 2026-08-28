@@ -2435,6 +2435,39 @@ pub trait CommsRuntime: Send + Sync {
     }
 }
 
+/// Session-scoped comms command surface that projects successful peer sends
+/// onto the observe-only post-commit hook dispatcher.
+pub struct ObservedCommsSender {
+    runtime: Arc<dyn CommsRuntime>,
+    post_commit_hooks: Arc<crate::hooks::PostCommitHookDispatcher>,
+}
+
+impl ObservedCommsSender {
+    pub fn new(
+        runtime: Arc<dyn CommsRuntime>,
+        post_commit_hooks: Arc<crate::hooks::PostCommitHookDispatcher>,
+    ) -> Self {
+        Self {
+            runtime,
+            post_commit_hooks,
+        }
+    }
+
+    pub async fn send(
+        &self,
+        command: CommsCommand,
+    ) -> Result<crate::comms::SendReceipt, crate::comms::SendError> {
+        let observation_command = command.clone();
+        let receipt = self.runtime.send(command).await?;
+        if let Some(observation) =
+            crate::hooks::HookObservation::from_committed_peer_send(&observation_command, &receipt)
+        {
+            self.post_commit_hooks.dispatch(observation);
+        }
+        Ok(receipt)
+    }
+}
+
 /// The main Agent struct
 pub struct Agent<C, T, S>
 where
@@ -2454,6 +2487,7 @@ where
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
+    pub(super) post_commit_hooks: Arc<crate::hooks::PostCommitHookDispatcher>,
     /// Optional context compaction strategy.
     pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     /// Optional host-supplied compaction summary curator. When present it

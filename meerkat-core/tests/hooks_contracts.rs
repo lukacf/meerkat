@@ -76,6 +76,7 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         llm_response: None,
         tool_call: None,
         tool_result: None,
+        observation: None,
     };
 
     let outcome = HookOutcome {

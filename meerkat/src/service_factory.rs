@@ -121,11 +121,7 @@ impl FactoryAgent {
 
     /// Send a canonical comms command through the wrapped agent runtime.
     pub async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
-        let runtime = self
-            .agent
-            .comms()
-            .ok_or_else(|| SendError::Unsupported("comms runtime is not configured".to_string()))?;
-        runtime.send(cmd).await
+        self.agent.send_comms(cmd).await
     }
 
     /// List peers discoverable to this agent runtime.
@@ -931,6 +927,10 @@ impl SessionAgent for FactoryAgent {
 
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
+    }
+
+    fn observed_comms_sender(&self) -> Option<Arc<meerkat_core::ObservedCommsSender>> {
+        self.agent.observed_comms_sender()
     }
 }
 

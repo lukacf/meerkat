@@ -2595,6 +2595,9 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
 
         let (cancel_after_boundary_tx, cancel_after_boundary_rx) =
             tokio::sync::mpsc::unbounded_channel();
+        let post_commit_hooks = Arc::new(crate::hooks::PostCommitHookDispatcher::new(
+            snapshot.id().clone(),
+        ));
         let mut operation_agent = Agent {
             config: self.config.clone(),
             client: isolated_client,
@@ -2608,6 +2611,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             comms_runtime: None,
             hook_engine: None,
             hook_run_overrides: self.hook_run_overrides.clone(),
+            post_commit_hooks,
             compactor: None,
             compaction_curator: None,
             last_input_tokens: self.last_input_tokens,

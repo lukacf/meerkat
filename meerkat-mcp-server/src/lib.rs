@@ -3783,20 +3783,16 @@ async fn handle_meerkat_comms_send(
 ) -> Result<Value, ToolCallError> {
     let session_id = meerkat::SessionId::parse(input.session_id())
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
-    let comms = state
-        .service
-        .comms_runtime(&session_id)
-        .await
-        .ok_or_else(|| {
-            ToolCallError::new(
-                -32603,
-                format!("Session not found or comms not enabled: {session_id}"),
-                Some(json!({
-                    "code": "session_not_found_or_comms_disabled",
-                    "session_id": session_id.to_string(),
-                })),
-            )
-        })?;
+    if state.service.comms_runtime(&session_id).await.is_none() {
+        return Err(ToolCallError::new(
+            -32603,
+            format!("Session not found or comms not enabled: {session_id}"),
+            Some(json!({
+                "code": "session_not_found_or_comms_disabled",
+                "session_id": session_id.to_string(),
+            })),
+        ));
+    }
     let peer_name = input.peer_label();
     let cmd = input
         .into_command()
@@ -3811,9 +3807,20 @@ async fn handle_meerkat_comms_send(
                 })),
             )
         })?;
-    let receipt = comms
-        .send(cmd)
+    let receipt = state
+        .service
+        .send_comms(&session_id, cmd)
         .await
+        .ok_or_else(|| {
+            ToolCallError::new(
+                -32603,
+                format!("Session not found or comms not enabled: {session_id}"),
+                Some(json!({
+                    "code": "session_not_found_or_comms_disabled",
+                    "session_id": session_id.to_string(),
+                })),
+            )
+        })?
         .map_err(|e| normalize_mcp_comms_send_error(peer_name.as_deref(), &e))?;
     comms_send_tool_payload(receipt).map_err(ToolCallError::internal)
 }

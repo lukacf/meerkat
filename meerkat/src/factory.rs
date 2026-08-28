@@ -70,7 +70,7 @@ use tokio_with_wasm::alias::sync::mpsc;
 use crate::model_fallback::{ModelFallbackCandidate, ModelFallbackClient};
 
 #[cfg(feature = "comms")]
-use crate::compose_tools_with_comms;
+use crate::compose_tools_with_comms_and_post_commit_hooks;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
@@ -5543,6 +5543,12 @@ impl AgentFactory {
         };
 
         let resolved_mode = &build_config.runtime_build_mode;
+        let post_commit_hooks = match resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => Arc::clone(bindings.post_commit_hooks()),
+            RuntimeBuildMode::StandaloneEphemeral => Arc::new(
+                meerkat_core::PostCommitHookDispatcher::new(session.id().clone()),
+            ),
+        };
         // Inject pre-resolved metadata entries after runtime binding
         // validation and before the builder reads metadata for early-stage
         // recovery. Canonical visibility facts are not accepted through this
@@ -5904,11 +5910,13 @@ impl AgentFactory {
         // 9a. Compose tools with comms gateway.
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
-            let composed =
-                compose_tools_with_comms(tools, tool_usage_instructions, runtime.tool_material())
-                    .map_err(|e| {
-                    BuildAgentError::Config(format!("Failed to compose comms tools: {e}"))
-                })?;
+            let composed = compose_tools_with_comms_and_post_commit_hooks(
+                tools,
+                tool_usage_instructions,
+                runtime.tool_material(),
+                Arc::clone(&post_commit_hooks),
+            )
+            .map_err(|e| BuildAgentError::Config(format!("Failed to compose comms tools: {e}")))?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
         }
@@ -6187,7 +6195,6 @@ impl AgentFactory {
                 }
             }
         };
-
         // 11. Generate skill inventory section using the engine created in step 6a
         #[cfg(feature = "skills")]
         let skill_inventory_section = {
@@ -6622,6 +6629,7 @@ impl AgentFactory {
                 ..config.retry.clone().into()
             })
             .with_hook_run_overrides(build_config.hooks_override)
+            .with_post_commit_hooks(post_commit_hooks)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {
                 registry: Arc::clone(&effective_model_registry),
             }))

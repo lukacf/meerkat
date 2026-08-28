@@ -10638,6 +10638,14 @@ impl SessionRuntime {
         self.service.comms_runtime(session_id).await
     }
 
+    pub async fn send_comms(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        command: meerkat_core::CommsCommand,
+    ) -> Option<Result<meerkat_core::SendReceipt, meerkat_core::SendError>> {
+        self.service.send_comms(session_id, command).await
+    }
+
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
         // Clear pending sessions.

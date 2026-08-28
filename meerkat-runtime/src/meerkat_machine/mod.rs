@@ -4434,7 +4434,6 @@ impl RuntimeSessionEntry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.handle_teardown_gate.close();
-        self.post_commit_hooks.shutdown();
     }
 
     /// True while the runtime-loop executor registration is `Active` *or*

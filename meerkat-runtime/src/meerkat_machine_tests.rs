@@ -31245,6 +31245,55 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
 }
 
 #[tokio::test]
+async fn direct_ingest_retired_rejection_emits_typed_not_ready_hook() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    bindings.post_commit_hooks().configure(
+        Some(Arc::new(RecordingPostCommitHookEngine { sender })),
+        meerkat_core::HookRunOverrides::default(),
+    );
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire empty runtime");
+
+    let error = crate::traits::RuntimeControlPlane::ingest(
+        adapter.as_ref(),
+        &runtime_id,
+        make_prompt("must reject"),
+    )
+    .await
+    .expect_err("retired runtime must reject direct ingest");
+    assert!(matches!(
+        error,
+        crate::RuntimeControlPlaneError::InvalidState {
+            state: RuntimeState::Retired
+        }
+    ));
+
+    let hook = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("rejection hook should dispatch")
+        .expect("hook dispatcher remains connected");
+    assert!(matches!(
+        hook.observation,
+        Some(meerkat_core::HookObservation::RuntimeInputRejected(
+            meerkat_core::HookRuntimeInputRejected {
+                reason: meerkat_core::HookRuntimeInputRejection::NotReady {
+                    state: meerkat_core::HookRuntimeState::Retired
+                },
+                ..
+            }
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn spine_invariants_hold_after_destroy() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

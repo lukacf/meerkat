@@ -1677,6 +1677,9 @@ impl MeerkatMachine {
             }
             sessions.remove(session_id)
         };
+        if let Some(entry) = removed.as_ref() {
+            entry.post_commit_hooks.shutdown();
+        }
         drop(removed);
         Ok(())
     }

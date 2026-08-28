@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Stable identifier for a configured hook.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
@@ -415,8 +415,13 @@ impl Drop for PostCommitHookTaskCompletion {
 /// being observed.
 pub struct PostCommitHookDispatcher {
     session_id: SessionId,
-    registration: RwLock<Option<PostCommitHookRegistration>>,
-    inflight: std::sync::Mutex<Vec<TrackedPostCommitHookTask>>,
+    state: std::sync::Mutex<PostCommitHookDispatcherState>,
+}
+
+struct PostCommitHookDispatcherState {
+    registration: Option<PostCommitHookRegistration>,
+    inflight: Vec<TrackedPostCommitHookTask>,
+    shutdown: bool,
 }
 
 impl PostCommitHookDispatcher {
@@ -424,8 +429,11 @@ impl PostCommitHookDispatcher {
     pub fn new(session_id: SessionId) -> Self {
         Self {
             session_id,
-            registration: RwLock::new(None),
-            inflight: std::sync::Mutex::new(Vec::new()),
+            state: std::sync::Mutex::new(PostCommitHookDispatcherState {
+                registration: None,
+                inflight: Vec::new(),
+                shutdown: false,
+            }),
         }
     }
 
@@ -434,19 +442,25 @@ impl PostCommitHookDispatcher {
         engine: Option<Arc<dyn HookEngine>>,
         overrides: crate::config::HookRunOverrides,
     ) {
-        let mut registration = self
-            .registration
-            .write()
+        let mut state = self
+            .state
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *registration = engine.map(|engine| PostCommitHookRegistration { engine, overrides });
+        if state.shutdown {
+            return;
+        }
+        state.registration = engine.map(|engine| PostCommitHookRegistration { engine, overrides });
     }
 
     pub fn dispatch(&self, observation: HookObservation) {
-        let registration = self
-            .registration
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return;
+        }
+        let registration = state.registration.clone();
         let Some(registration) = registration else {
             return;
         };
@@ -478,12 +492,10 @@ impl PostCommitHookDispatcher {
             }
         };
         let handle = tokio::spawn(task);
-        let mut inflight = self
+        state
             .inflight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        inflight.retain(|task| !task.finished.load(std::sync::atomic::Ordering::Acquire));
-        inflight.push(TrackedPostCommitHookTask {
+            .retain(|task| !task.finished.load(std::sync::atomic::Ordering::Acquire));
+        state.inflight.push(TrackedPostCommitHookTask {
             abort: handle.abort_handle(),
             finished,
         });
@@ -493,24 +505,26 @@ impl PostCommitHookDispatcher {
     ///
     /// Runtime session teardown calls this explicitly; `Drop` is the fallback.
     pub fn shutdown(&self) {
-        self.registration
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let mut inflight = self
-            .inflight
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for task in inflight.drain(..) {
+        if state.shutdown {
+            return;
+        }
+        state.shutdown = true;
+        state.registration = None;
+        for task in state.inflight.drain(..) {
             task.abort.abort();
         }
     }
 
     #[cfg(test)]
     fn inflight_count(&self) -> usize {
-        self.inflight
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .inflight
             .len()
     }
 }
@@ -1270,6 +1284,58 @@ mod tests {
             dispatcher.inflight_count(),
             1,
             "finished task handles must be reaped before tracking new work"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_dispatch_and_shutdown_leave_no_owned_task() {
+        let engine = Arc::new(AbortObservedEngine {
+            entered: tokio::sync::Notify::new(),
+            aborted: std::sync::Mutex::new(None),
+        });
+        let dispatcher = Arc::new(PostCommitHookDispatcher::new(SessionId::new()));
+        dispatcher.configure(
+            Some(engine as Arc<dyn HookEngine>),
+            crate::config::HookRunOverrides::default(),
+        );
+
+        let mut dispatches = Vec::new();
+        for _ in 0..32 {
+            let dispatcher = Arc::clone(&dispatcher);
+            dispatches.push(tokio::spawn(async move {
+                dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+                    HookRuntimeInputAccepted {
+                        input_id: crate::lifecycle::InputId::new(),
+                        input_kind: HookRuntimeInputKind::Prompt,
+                        handling_mode: HandlingMode::Queue,
+                    },
+                ));
+            }));
+        }
+        let shutdown = {
+            let dispatcher = Arc::clone(&dispatcher);
+            tokio::spawn(async move {
+                dispatcher.shutdown();
+            })
+        };
+        for dispatch in dispatches {
+            dispatch.await.expect("dispatch task joins");
+        }
+        shutdown.await.expect("shutdown task joins");
+        tokio::task::yield_now().await;
+
+        assert_eq!(dispatcher.inflight_count(), 0);
+        dispatcher.dispatch(HookObservation::RuntimeInputAccepted(
+            HookRuntimeInputAccepted {
+                input_id: crate::lifecycle::InputId::new(),
+                input_kind: HookRuntimeInputKind::Prompt,
+                handling_mode: HandlingMode::Queue,
+            },
+        ));
+        assert_eq!(
+            dispatcher.inflight_count(),
+            0,
+            "shutdown must reject every later dispatch"
         );
     }
 

@@ -9152,6 +9152,9 @@ impl MeerkatMachine {
                 return Ok(());
             }
             let removed_entry = sessions.remove(session_id);
+            if let Some(entry) = removed_entry.as_ref() {
+                entry.post_commit_hooks.shutdown();
+            }
             drop(sessions);
             drop(mutation_guard);
             #[cfg(feature = "live")]

@@ -80,9 +80,8 @@ jobs:
             echo "needed=true" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Install Rust
-        if: ${{ steps.unpublished.outputs.needed == 'true' }}
-        uses: dtolnay/rust-toolchain@stable
+      - if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache Cargo
         if: ${{ steps.unpublished.outputs.needed == 'true' }}

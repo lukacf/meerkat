@@ -41,6 +41,39 @@ fn read_workflow(path: &Path) -> serde_yaml::Value {
         .unwrap_or_else(|error| panic!("cannot parse {} as YAML: {error}", path.display()))
 }
 
+#[test]
+fn release_workflows_use_the_repository_pinned_rust_toolchain() {
+    let release_path = workflow_yml_path();
+    let release = std::fs::read_to_string(&release_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", release_path.display()));
+    assert!(
+        !release.contains("dtolnay/rust-toolchain@stable"),
+        "release jobs must not resolve a moving stable compiler"
+    );
+    assert_eq!(
+        release
+            .matches("uses: ./.github/actions/setup-rust-ci")
+            .count(),
+        5,
+        "all five Rust-using release jobs must use the pinned setup action"
+    );
+
+    let semver_path = release_path.with_file_name("release-semver-readiness.yml");
+    let semver = std::fs::read_to_string(&semver_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", semver_path.display()));
+    assert!(
+        !semver.contains("dtolnay/rust-toolchain@stable"),
+        "semver readiness must not resolve a moving stable compiler"
+    );
+    assert_eq!(
+        semver
+            .matches("uses: ./.github/actions/setup-rust-ci")
+            .count(),
+        1,
+        "semver readiness must use the pinned setup action"
+    );
+}
+
 fn workflow_step<'a>(
     workflow: &'a serde_yaml::Value,
     path: &Path,

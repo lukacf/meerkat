@@ -257,8 +257,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -466,9 +465,8 @@ jobs:
           path: .semver-recovery-policy
           persist-credentials: false
 
-      - name: Install Rust
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
-        uses: dtolnay/rust-toolchain@stable
+      - if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
@@ -602,8 +600,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-ci
 
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
@@ -1096,8 +1093,7 @@ jobs:
           # package must always be built from the explicitly selected release.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -1336,8 +1332,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2

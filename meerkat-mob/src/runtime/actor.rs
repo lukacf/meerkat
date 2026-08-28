@@ -31562,6 +31562,9 @@ impl MobActor {
                 return;
             }
         };
+        if spec.binding.is_none() {
+            spec.binding = Some(crate::RuntimeBinding::Session);
+        }
         if let Err(error) = super::forked_participant_routing::validate_attached_spawn_spec(
             &spec,
             &capability,

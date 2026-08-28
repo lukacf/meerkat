@@ -20,8 +20,8 @@ use meerkat_mob::machines::mob_machine::HostId;
 use meerkat_mob::{
     AgentIdentity, BoundedResultSpec, DelegationExecutionError, DelegationExecutionRequest,
     DelegationExecutionService, DelegationMemberOptions, DelegationParentContext, MobBackendKind,
-    MobDefinition, MobError, MobHandle, MobId, MobRuntimeMode, ProfileName, SpawnMemberSpec,
-    SpawnResult, runtime::MobSessionService,
+    MobDefinition, MobError, MobHandle, MobId, MobRuntimeMode, ProfileBinding, ProfileName,
+    SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -1318,26 +1318,21 @@ impl AgentMobToolSurface {
                         ),
                     )
                 })?;
+            let source_profile = source
+                .effective_member_profile(&source_identity)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
             let source_definition = source.definition();
-            let source_profile = source_definition
-                .profiles
-                .get(&source_member.role)
-                .cloned()
-                .ok_or_else(|| {
-                    ToolError::execution_failed(format!(
-                        "tool '{}' could not resolve profile '{}' for source member '{}'",
-                        call.name, source_member.role, source_identity
-                    ))
-                })?;
             merge_council_definition_dependencies(call, &mut definition, source_definition)?;
 
             let order = u32::try_from(index).map_err(|_| {
                 ToolError::invalid_arguments(call.name, "too many council participants")
             })?;
             let target_profile = ProfileName::from(format!("council_p{order}"));
-            definition
-                .profiles
-                .insert(target_profile.clone(), source_profile);
+            definition.profiles.insert(
+                target_profile.clone(),
+                ProfileBinding::Inline(Box::new(source_profile)),
+            );
             let target_identity = AgentIdentity::from(format!("council-p{order}"));
             let mut spec = TemporaryCouncilParticipantSpec::new(
                 order,

@@ -707,17 +707,25 @@ impl ForkedParticipantService {
         }
 
         let planned_child = reservation.planned_child_session_id.clone();
-        let outcome = match self
-            .runtime
-            .planned_child_evidence(&planned_child)
-            .await
-            .map_err(ForkedParticipantError::Session)?
-        {
+        let planned_evidence = match self.runtime.planned_child_evidence(&planned_child).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                self.fail_activation_and_archive(&record.capability_id, &planned_child)
+                    .await?;
+                return Err(ForkedParticipantError::Session(error));
+            }
+        };
+        let outcome = match planned_evidence {
             Some(evidence) => {
                 // Crash after the child was saved but before activation was
                 // recorded. Prove the durable row against the SOURCE's own
                 // evidence before trusting it.
-                Self::verify_planned_child(&record, &source_evidence, &evidence)?;
+                if let Err(error) = Self::verify_planned_child(&record, &source_evidence, &evidence)
+                {
+                    self.fail_activation_and_archive(&record.capability_id, &planned_child)
+                        .await?;
+                    return Err(error);
+                }
                 PlannedForkOutcome {
                     child_session_id: planned_child.clone(),
                     prefix_message_count: evidence.prefix_message_count,

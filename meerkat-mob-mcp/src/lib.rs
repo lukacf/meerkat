@@ -30,9 +30,8 @@ pub use surface::wire_mob_tools;
 pub use temporary_council::{
     MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,
     TemporaryCouncilBounds, TemporaryCouncilCoordinator, TemporaryCouncilDeadline,
-    TemporaryCouncilError, TemporaryCouncilHostBootstrap, TemporaryCouncilOutcome,
-    TemporaryCouncilParticipantSpec, TemporaryCouncilRecoveryReport, TemporaryCouncilRequest,
-    TemporaryCouncilStructuredContract,
+    TemporaryCouncilError, TemporaryCouncilOutcome, TemporaryCouncilParticipantSpec,
+    TemporaryCouncilRecoveryReport, TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
 };
 pub use workgraph_flow::{
     AbandonUncertainWorkGraphFlowRequest, LaunchWorkGraphFlowRequest, WorkGraphFlowAbandonResult,

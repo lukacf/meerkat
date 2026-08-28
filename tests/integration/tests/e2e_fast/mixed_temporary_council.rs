@@ -199,8 +199,7 @@ async fn mixed_local_and_host_temporary_council_completes_and_releases_everythin
                 identity("local-source"),
                 identity("local-branch"),
                 ProfileName::from("participant"),
-            )
-            .with_target_backend(MobBackendKind::Session),
+            ),
             TemporaryCouncilParticipantSpec::new(
                 1,
                 "host",
@@ -413,14 +412,8 @@ async fn remote_ambiguous_custody_recovers_and_revokes_after_its_source_disappea
     );
     let council_id = request.council_id.clone();
     let remote_request_id = council_id.capability_request_id(0).expect("request id");
-    let bootstrap = TemporaryCouncilHostBootstrap::none()
-        .with_host_bindings(vec![descriptor_to_bind_request(&host.current_descriptor())]);
     let coordinator = fixture.state.temporary_council();
-    let running = tokio::spawn(async move {
-        coordinator
-            .run_with_host_bootstrap(request, bootstrap)
-            .await
-    });
+    let running = tokio::spawn(async move { coordinator.run(request).await });
 
     crash_gate.wait_entered(1).await;
     let before_crash = fixture

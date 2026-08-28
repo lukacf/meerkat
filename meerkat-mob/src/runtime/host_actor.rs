@@ -6358,17 +6358,24 @@ async fn run_host_responder(
         // sink attempt runs per due tick/batch boundary, and the pending state
         // retains its capped-backoff deadline across unrelated actor traffic.
         actor.retry_pending_descriptor_refresh_if_due();
-        let candidates = match actor
-            .host_comms
-            .handoff_volatile_peer_input_candidates()
-            .await
-        {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::error!(%error, "host peer-input responder stopped with FIFO head retained");
-                break;
+        let mut candidates = Vec::new();
+        for _ in 0..HOST_OBSERVATION_DRAIN_BATCH_LIMIT {
+            match actor
+                .host_comms
+                .handoff_one_volatile_peer_input_candidate()
+                .await
+            {
+                Ok(Some(candidate)) => candidates.push(candidate),
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "host peer-input responder stopped with FIFO head retained"
+                    );
+                    return;
+                }
             }
-        };
+        }
         if candidates.is_empty() {
             let descriptor_refresh_retry_at = actor
                 .pending_descriptor_refresh

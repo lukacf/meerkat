@@ -1350,94 +1350,53 @@ fn planned_identity_fork_selects_the_exact_prefix_and_leaves_the_source_unmodifi
 #[tokio::test]
 async fn retry_verifies_inherited_execution_metadata_against_source_evidence() {
     for harness in [Harness::in_memory(), Harness::sqlite()] {
-        let request = request("req-inherited-policy");
-        harness.register_source(&request);
+        for case in ["tool-policy", "auth-binding", "realm"] {
+            let request = request(&format!("req-inherited-{case}"));
+            harness.register_source(&request);
+            let reservation = harness
+                .service
+                .reserve(&request, now())
+                .await
+                .expect("reserve planned child");
+            let planned_child = reservation.planned_child_session_id.clone();
+            harness.runtime.crash_after_child_save(true);
+            harness
+                .runtime
+                .fork_planned_child(PlannedForkRequest {
+                    source_identity: request.source_identity.clone(),
+                    owner_realm: request.owner_route.realm_id().clone(),
+                    source_session_id: request.source_session_id.clone(),
+                    planned_child_session_id: planned_child.clone(),
+                    prefix_message_count: request.prefix_message_count,
+                })
+                .await
+                .expect_err("the source process dies after saving the child");
 
-        // Simulate a process death after the child save but before the service
-        // can run its in-process compensating archive, then corrupt the durable
-        // child's inherited execution metadata before each restart retry.
-        let reservation = harness
-            .service
-            .reserve(&request, now())
-            .await
-            .expect("reserve planned child");
-        harness.runtime.crash_after_child_save(true);
-        harness
-            .runtime
-            .fork_planned_child(PlannedForkRequest {
-                source_identity: request.source_identity.clone(),
-                owner_realm: request.owner_route.realm_id().clone(),
-                source_session_id: request.source_session_id.clone(),
-                planned_child_session_id: reservation.planned_child_session_id,
-                prefix_message_count: request.prefix_message_count,
-            })
-            .await
-            .expect_err("the source process dies after saving the child");
-        let record = harness
-            .store
-            .load_by_request_id(&request.request_id)
-            .await
-            .expect("load")
-            .expect("present");
-        let planned_child = record.planned_child_session_id.clone();
-        let source = source_evidence();
-
-        harness.runtime.set_child_policy(
-            &planned_child,
-            Some(meerkat_core::ops::ToolAccessPolicy::Inherit),
-        );
-        assert!(
-            matches!(
+            match case {
+                "tool-policy" => harness.runtime.set_child_policy(
+                    &planned_child,
+                    Some(meerkat_core::ops::ToolAccessPolicy::Inherit),
+                ),
+                "auth-binding" => harness.runtime.set_child_auth_binding(&planned_child, None),
+                "realm" => harness.runtime.set_child_realm(
+                    &planned_child,
+                    Some(meerkat_core::RealmId::parse("other").expect("realm")),
+                ),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
                 harness
                     .service
                     .create(&request, now())
                     .await
-                    .expect_err("a child that lost the source tool policy must not activate"),
+                    .expect_err("altered child execution context must not activate"),
                 ForkedParticipantError::PlannedChildConflict { .. }
-            ),
-            "a broadened tool policy must be refused"
-        );
-        harness
-            .runtime
-            .set_child_policy(&planned_child, source.tool_access_policy.clone());
-
-        harness.runtime.set_child_auth_binding(&planned_child, None);
-        assert!(matches!(
-            harness
-                .service
-                .create(&request, now())
-                .await
-                .expect_err("a child that lost the source auth binding must not activate"),
-            ForkedParticipantError::PlannedChildConflict { .. }
-        ));
-        harness
-            .runtime
-            .set_child_auth_binding(&planned_child, source.auth_binding.clone());
-
-        harness.runtime.set_child_realm(
-            &planned_child,
-            Some(meerkat_core::RealmId::parse("other").expect("realm")),
-        );
-        assert!(matches!(
-            harness
-                .service
-                .create(&request, now())
-                .await
-                .expect_err("a foreign-realm child must not activate"),
-            ForkedParticipantError::PlannedChildConflict { .. }
-        ));
-        harness
-            .runtime
-            .set_child_realm(&planned_child, source.realm_id.clone());
-
-        // With inheritance intact, the retry activates the exact planned child.
-        let capability = harness
-            .service
-            .create(&request, now())
-            .await
-            .expect("retry activates");
-        assert_eq!(capability.fork_session_id(), &planned_child);
-        assert_eq!(harness.runtime.fork_calls(), 1);
+            ));
+            assert!(
+                harness.runtime.archived().contains(&planned_child),
+                "a conflicting durable child must be archived"
+            );
+        }
     }
 }
 

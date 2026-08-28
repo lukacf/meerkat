@@ -6252,6 +6252,40 @@ impl MobHandle {
         &self.definition
     }
 
+    /// Resolve the execution profile currently carried by one live member.
+    ///
+    /// Per-spawn profile and model overrides are applied. A definition-level
+    /// realm reference without a captured override is refused because
+    /// re-resolving mutable realm state would not prove what built the source.
+    pub async fn effective_member_profile(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<crate::profile::Profile, MobError> {
+        let roster = self.roster.read().await;
+        let entry = roster
+            .get(identity)
+            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        let mut profile = match entry.effective_profile_override.clone() {
+            Some(profile) => profile,
+            None => self
+                .definition
+                .profiles
+                .get(&entry.role)
+                .and_then(crate::profile::ProfileBinding::as_inline)
+                .cloned()
+                .ok_or_else(|| MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                    detail: format!(
+                        "source member '{identity}' uses a mutable realm profile whose materialized \
+                         execution context is not captured"
+                    ),
+                })?,
+        };
+        if let Some(model) = &entry.effective_model_override {
+            profile.model.clone_from(model);
+        }
+        Ok(profile)
+    }
+
     /// Read-only projection of generated owner bridge-session lifecycle authority.
     #[doc(hidden)]
     pub fn owner_bridge_session_lifecycle_authority(

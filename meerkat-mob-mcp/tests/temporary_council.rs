@@ -15,25 +15,8 @@
 //! to pass under a plain `cargo test -p meerkat-mob-mcp --test
 //! temporary_council`.
 //!
-//! # Known coverage gap (stated, not stubbed)
-//!
-//! There is still no END-TO-END mixed local + host-owned council row: no test
-//! seats one local and one HOST-owned participant in the same temporary mob
-//! and runs a bounded round across both. Two concrete things block it, and
-//! both are named rather than papered over:
-//!
-//! 1. A host-owned participant can only be seated when its owning host is
-//!    BOUND in the temporary mob, and a bind consumes a one-time ceremony
-//!    token the coordinator cannot mint. That is why
-//!    `TemporaryCouncilHostBootstrap` exists — the caller declares the
-//!    bindings — but exercising it needs a real host daemon.
-//! 2. Driving a bounded round against a host-placed member needs the
-//!    multi-host daemon/scripted-peer fixture, which currently lives only in
-//!    `meerkat-mob/tests/support` and is not reachable from this crate's test
-//!    tree without a large dev-dependency expansion or a factored shared
-//!    seam.
-//!
-//! What IS proven here for the remote path:
+//! The mixed local + host-owned end-to-end path lives in the integration
+//! e2e-fast lane. What this crate-level suite additionally proves:
 //! [`a_remote_capability_acquired_but_never_seated_is_recovered_from_persisted_custody`]
 //! drives a real HOST-routed capability reference through real recovery and
 //! shows the persisted reference — not realm-local capability custody — is
@@ -59,7 +42,7 @@ use meerkat_mob::temporary_council::{
     TemporaryCouncilExchangeOutcome, TemporaryCouncilExitReason, TemporaryCouncilMergeOutcome,
     TemporaryCouncilMergePolicyKind,
 };
-use meerkat_mob::{AgentIdentity, MobBackendKind, ProfileName};
+use meerkat_mob::{AgentIdentity, ProfileName};
 use meerkat_mob_mcp::MobMcpState;
 use meerkat_mob_mcp::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilDeadline, TemporaryCouncilError,
@@ -86,7 +69,6 @@ fn participant(
         identity(target),
         ProfileName::from("participant"),
     )
-    .with_target_backend(MobBackendKind::Session)
 }
 
 fn bounds(max_rounds: u32, secs: u64) -> TemporaryCouncilBounds {

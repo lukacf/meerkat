@@ -75,8 +75,8 @@ use meerkat_mob::temporary_council::{
     TemporaryCouncilSelectedExchange, TemporaryCouncilStructuredContractIdentity,
 };
 use meerkat_mob::{
-    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobHandle, MobId, MobStoreError,
-    ProfileBinding, ProfileName, WorkOrigin, WorkSpec,
+    AgentIdentity, MobDefinition, MobError, MobHandle, MobId, MobStoreError, ProfileBinding,
+    ProfileName, WorkOrigin, WorkSpec,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -194,9 +194,6 @@ pub struct TemporaryCouncilParticipantSpec {
     pub target_identity: AgentIdentity,
     /// Profile in the caller's definition template the branch is seated from.
     pub target_profile: ProfileName,
-    /// Optional portable backend override for the seated member.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_backend: Option<MobBackendKind>,
     /// Complete-boundary prefix length to fork; `None` selects the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_message_count: Option<usize>,
@@ -222,17 +219,9 @@ impl TemporaryCouncilParticipantSpec {
             source_identity,
             target_identity,
             target_profile,
-            target_backend: None,
             prefix_message_count: None,
             scope: ForkedParticipantOperationScope::InvokeAndObserve,
         }
-    }
-
-    /// Seat this participant on an explicit backend.
-    #[must_use]
-    pub fn with_target_backend(mut self, backend: MobBackendKind) -> Self {
-        self.target_backend = Some(backend);
-        self
     }
 
     /// Fork a bounded prefix of the source transcript.
@@ -365,7 +354,7 @@ impl MergeBackPolicy {
 /// so the caller — which holds the descriptors — declares it here.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct TemporaryCouncilHostBootstrap {
+struct TemporaryCouncilHostBootstrap {
     /// Hosts to bind into the temporary mob before any participant is seated.
     pub host_bindings: Vec<HostBindRequest>,
 }
@@ -925,6 +914,24 @@ fn validate(request: &TemporaryCouncilRequest) -> Result<ValidatedRequest, Tempo
     })
 }
 
+fn same_source_execution_profile(target: &ProfileBinding, source: &meerkat_mob::Profile) -> bool {
+    match target {
+        ProfileBinding::Inline(target) => {
+            target.model == source.model
+                && target.provider == source.provider
+                && target.self_hosted_server_id == source.self_hosted_server_id
+                && target.image_generation_provider == source.image_generation_provider
+                && target.auto_compact_threshold == source.auto_compact_threshold
+                && target.resume_overrides == source.resume_overrides
+                && target.skills == source.skills
+                && target.tools == source.tools
+                && target.output_schema == source.output_schema
+                && target.provider_params == source.provider_params
+        }
+        ProfileBinding::RealmRef { .. } => false,
+    }
+}
+
 // ===========================================================================
 // Canonical lifecycle driver
 // ===========================================================================
@@ -1176,7 +1183,7 @@ impl TemporaryCouncilCoordinator {
     /// The bootstrap belongs to the ATTEMPT, not to the council identity: a
     /// replay or a joined caller reuses the owning task's bootstrap and this
     /// one is ignored, and nothing from it is fingerprinted or persisted.
-    pub async fn run_with_host_bootstrap(
+    async fn run_with_host_bootstrap(
         &self,
         request: TemporaryCouncilRequest,
         host_bootstrap: TemporaryCouncilHostBootstrap,
@@ -2078,16 +2085,17 @@ impl CouncilRun {
                     ),
                 })?;
             let source_profile = source
-                .definition()
-                .profiles
-                .get(&source_member.role)
-                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                    participant_order: custody.order,
-                    detail: format!(
-                        "source member '{}' has no profile binding for role '{}'",
-                        custody.source_identity, source_member.role
-                    ),
-                })?;
+                .effective_member_profile(&custody.source_identity)
+                .await
+                .map_err(
+                    |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                        participant_order: custody.order,
+                        detail: format!(
+                            "source member '{}' execution profile is unavailable: {error}",
+                            custody.source_identity
+                        ),
+                    },
+                )?;
             let target_profile = self
                 .validated
                 .definition
@@ -2100,7 +2108,7 @@ impl CouncilRun {
                         custody.target_profile
                     ),
                 })?;
-            if target_profile != source_profile {
+            if !same_source_execution_profile(target_profile, &source_profile) {
                 return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
                     participant_order: custody.order,
                     detail: format!(
@@ -2353,16 +2361,6 @@ impl CouncilRun {
             // turn-driven regardless of the template profile's mode: an
             // autonomous inbox loop cannot serve a tracked bounded turn.
             spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
-            if let Some(backend) = self
-                .validated
-                .request
-                .participants
-                .iter()
-                .find(|candidate| candidate.order == custody.order)
-                .and_then(|candidate| candidate.target_backend)
-            {
-                spec = spec.with_backend(backend);
-            }
             let Some(remaining) = self.remaining() else {
                 return Err(TemporaryCouncilExitReason::DeadlineExceeded);
             };
@@ -2419,6 +2417,7 @@ impl CouncilRun {
             // failure.
             return Ok(());
         }
+
         let mut edges = Vec::new();
         for (index, left) in seated.iter().enumerate() {
             for right in seated.iter().skip(index + 1) {

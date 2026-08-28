@@ -643,20 +643,28 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             export CARGO_BUILD_JOBS=2
           fi
+          cargo_cmd=(./scripts/repo-cargo)
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # The immutable v0.8.30 wrapper asks Git for
+            # `rev-parse --path-format=absolute`, which predates the
+            # Bullseye container's Git 2.30. The release job already owns an
+            # isolated target directory, so use the rustup-proxied Cargo
+            # directly only on this legacy container. Fail closed unless
+            # rustup selected the exact repository pin first.
+            expected_rust="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+            active_rust="$(rustc --version | awk '{ print $2 }')"
+            if [[ -z "${expected_rust}" || "${active_rust}" != "${expected_rust}" ]]; then
+              echo "Linux release toolchain mismatch: expected ${expected_rust:-missing}, active ${active_rust:-missing}" >&2
+              exit 1
+            fi
+            echo "Linux release toolchain: rustc ${active_rust}"
+            cargo_cmd=(cargo)
+          fi
+
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
           for pkg in "${PACKAGES[@]}"; do
-            if [[ "${{ runner.os }}" == "Linux" ]]; then
-              # The immutable v0.8.30 wrapper asks Git for
-              # `rev-parse --path-format=absolute`, which predates the
-              # Bullseye container's Git 2.30. The release job already owns an
-              # isolated target directory and installs the stable toolchain,
-              # so use that exact toolchain directly only on this legacy
-              # container. Non-Linux release builds retain repo-cargo.
-              rustup run stable cargo build --locked -p "$pkg" --release --target "${{ matrix.target }}"
-            else
-              ./scripts/repo-cargo build --locked -p "$pkg" --release --target "${{ matrix.target }}"
-            fi
+            "${cargo_cmd[@]}" build --locked -p "$pkg" --release --target "${{ matrix.target }}"
           done
 
       - name: Ad-hoc codesign macOS binaries

@@ -23420,8 +23420,14 @@ impl MobActor {
                     let result = self.handle_bind_host(*request).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::IssueHostBindingDescriptor { host_id, reply_tx } => {
-                    let result = self.issue_host_binding_descriptor(&host_id).await;
+                MobCommand::IssueHostBindingDescriptor {
+                    host_id,
+                    target_mob_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .issue_host_binding_descriptor(&host_id, &target_mob_id)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RevokeHost { host_id, reply_tx } => {
@@ -45793,15 +45799,23 @@ impl MobActor {
                 // the raw descriptor token is never placed in a wire
                 // payload, even transiently.
                 bootstrap_proof: super::bridge_protocol::BridgeHostBootstrapProof::new(""),
+                delegated_bootstrap_proof: request.delegated_bootstrap_proof.clone(),
                 mob_id: self.definition.id.to_string(),
                 required_capabilities,
             };
-            let command = super::bridge_protocol::BridgeCommand::BindHost(
-                super::bridge_protocol::seal_host_bind_bootstrap_proof(
-                    payload,
-                    &request.bootstrap_token,
-                ),
-            );
+            let payload = match request.bootstrap_token.as_ref() {
+                Some(token) => {
+                    super::bridge_protocol::seal_host_bind_bootstrap_proof(payload, token)
+                }
+                None if request.delegated_bootstrap_proof.is_some() => payload,
+                None => {
+                    return Err(MobError::WiringError(
+                        "host binding request carries neither bootstrap token nor delegated proof"
+                            .to_string(),
+                    ));
+                }
+            };
+            let command = super::bridge_protocol::BridgeCommand::BindHost(payload);
             let _install = self.supervisor_bridge.trust_recipient(&peer).await?;
             let value = self
                 .supervisor_bridge
@@ -45954,15 +45968,21 @@ impl MobActor {
             // Filled with a request-bound HMAC immediately below; the
             // raw descriptor token remains out-of-band only.
             bootstrap_proof: super::bridge_protocol::BridgeHostBootstrapProof::new(""),
+            delegated_bootstrap_proof: request.delegated_bootstrap_proof.clone(),
             mob_id: self.definition.id.to_string(),
             required_capabilities,
         };
-        let command = super::bridge_protocol::BridgeCommand::BindHost(
-            super::bridge_protocol::seal_host_bind_bootstrap_proof(
-                payload,
-                &request.bootstrap_token,
-            ),
-        );
+        let payload = match request.bootstrap_token.as_ref() {
+            Some(token) => super::bridge_protocol::seal_host_bind_bootstrap_proof(payload, token),
+            None if request.delegated_bootstrap_proof.is_some() => payload,
+            None => {
+                return Err(MobError::WiringError(
+                    "host binding request carries neither bootstrap token nor delegated proof"
+                        .to_string(),
+                ));
+            }
+        };
+        let command = super::bridge_protocol::BridgeCommand::BindHost(payload);
         let replacement = self
             .dsl_authority
             .state()
@@ -46561,7 +46581,8 @@ impl MobActor {
     async fn issue_host_binding_descriptor(
         &mut self,
         host_id: &str,
-    ) -> Result<super::bridge_protocol::WireHostBindingDescriptor, MobError> {
+        target_mob_id: &MobId,
+    ) -> Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError> {
         let dsl_host = mob_dsl::HostId::from(host_id.to_string());
         let binding_generation = self.current_host_binding_generation(&dsl_host)?;
         let (endpoint, pubkey, phase) = {
@@ -46606,12 +46627,13 @@ impl MobActor {
                 binding_generation,
                 protocol_version: super::bridge_protocol::BridgeProtocolVersion::V6,
                 mob_id: self.definition.id.to_string(),
+                target_mob_id: target_mob_id.to_string(),
             },
         );
         let response: super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse = self
             .send_bridge_command_typed(&peer, &command, std::time::Duration::from_secs(10))
             .await?;
-        Ok(response.descriptor)
+        Ok(response)
     }
 
     /// Apply one current host inventory. Network releases are themselves

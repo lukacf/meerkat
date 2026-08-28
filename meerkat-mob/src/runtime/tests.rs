@@ -68393,9 +68393,10 @@ impl HostDaemonStub {
             expected_peer_id: self.peer_id,
             pubkey: self.pubkey,
             address: self.address.clone(),
-            bootstrap_token: super::bridge_protocol::BridgeBootstrapToken::from(
+            bootstrap_token: Some(super::bridge_protocol::BridgeBootstrapToken::from(
                 "host-ceremony-token",
-            ),
+            )),
+            delegated_bootstrap_proof: None,
             live_endpoint: None,
         }
     }

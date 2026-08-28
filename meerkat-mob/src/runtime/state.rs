@@ -1256,8 +1256,9 @@ pub(super) enum MobCommand {
     /// a host already bound to this source mob.
     IssueHostBindingDescriptor {
         host_id: String,
+        target_mob_id: MobId,
         reply_tx: oneshot::Sender<
-            Result<super::bridge_protocol::WireHostBindingDescriptor, MobError>,
+            Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError>,
         >,
     },
     /// Revoke a bound (or bind-requested) member host. Bound hosts must first

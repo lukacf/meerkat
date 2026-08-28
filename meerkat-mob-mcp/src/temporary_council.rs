@@ -916,18 +916,7 @@ fn validate(request: &TemporaryCouncilRequest) -> Result<ValidatedRequest, Tempo
 
 fn same_source_execution_profile(target: &ProfileBinding, source: &meerkat_mob::Profile) -> bool {
     match target {
-        ProfileBinding::Inline(target) => {
-            target.model == source.model
-                && target.provider == source.provider
-                && target.self_hosted_server_id == source.self_hosted_server_id
-                && target.image_generation_provider == source.image_generation_provider
-                && target.auto_compact_threshold == source.auto_compact_threshold
-                && target.resume_overrides == source.resume_overrides
-                && target.skills == source.skills
-                && target.tools == source.tools
-                && target.output_schema == source.output_schema
-                && target.provider_params == source.provider_params
-        }
+        ProfileBinding::Inline(target) => target.as_ref() == source,
         ProfileBinding::RealmRef { .. } => false,
     }
 }
@@ -2053,61 +2042,6 @@ impl CouncilRun {
     /// 2. Create the real temporary mob, then acquire and seat each capability.
     async fn seat_participants(&mut self) -> Result<(), TemporaryCouncilExitReason> {
         let mut bound_hosts = BTreeSet::new();
-        // The target profile is not caller-owned policy. Prove that every
-        // requested seat uses the source member's own profile binding before
-        // creating the temporary mob or acquiring any capability. Exact
-        // binding equality is intentionally exhaustive: model, tools, MCP,
-        // skills, provider parameters, and resume overrides all stay contained.
-        for custody in &self.record.participants {
-            let source = self
-                .state
-                .handle_for(&custody.source_mob_id)
-                .await
-                .map_err(
-                    |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                        participant_order: custody.order,
-                        detail: format!(
-                            "source mob {} is unavailable: {error}",
-                            custody.source_mob_id
-                        ),
-                    },
-                )?;
-            let source_profile = source
-                .effective_member_profile(&custody.source_identity)
-                .await
-                .map_err(
-                    |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                        participant_order: custody.order,
-                        detail: format!(
-                            "source member '{}' execution profile is unavailable: {error}",
-                            custody.source_identity
-                        ),
-                    },
-                )?;
-            let target_profile = self
-                .validated
-                .definition
-                .profiles
-                .get(&custody.target_profile)
-                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                    participant_order: custody.order,
-                    detail: format!(
-                        "temporary profile '{}' disappeared before seating",
-                        custody.target_profile
-                    ),
-                })?;
-            if !same_source_execution_profile(target_profile, &source_profile) {
-                return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                    participant_order: custody.order,
-                    detail: format!(
-                        "temporary profile '{}' would widen or alter source member '{}' execution \
-                         context",
-                        custody.target_profile, custody.source_identity
-                    ),
-                });
-            }
-        }
-
         // The temporary mob is an ordinary explicit mob created from the
         // caller's own definition template through the ordinary path.
         if self
@@ -2181,6 +2115,40 @@ impl CouncilRun {
                     });
                 }
             };
+            let source_profile = source
+                .effective_member_profile(&custody.source_identity)
+                .await
+                .map_err(
+                    |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                        participant_order: custody.order,
+                        detail: format!(
+                            "source member '{}' execution profile is unavailable: {error}",
+                            custody.source_identity
+                        ),
+                    },
+                )?;
+            let target_profile = self
+                .validated
+                .definition
+                .profiles
+                .get(&custody.target_profile)
+                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "temporary profile '{}' disappeared before seating",
+                        custody.target_profile
+                    ),
+                })?;
+            if !same_source_execution_profile(target_profile, &source_profile) {
+                return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "temporary profile '{}' would widen or alter source member '{}' execution \
+                         context",
+                        custody.target_profile, custody.source_identity
+                    ),
+                });
+            }
 
             // Cleanup starts after the council deadline, so capability custody
             // includes the configured cleanup budget. The capability layer's
@@ -2275,7 +2243,10 @@ impl CouncilRun {
                 };
                 let descriptor = match tokio::time::timeout(
                     remaining,
-                    source.issue_host_binding_descriptor(host_id.as_str()),
+                    source.issue_host_binding_descriptor(
+                        host_id.as_str(),
+                        &self.record.temporary_mob_id,
+                    ),
                 )
                 .await
                 {
@@ -2291,7 +2262,10 @@ impl CouncilRun {
                     }
                     Err(_) => return Err(TemporaryCouncilExitReason::DeadlineExceeded),
                 };
-                let binding = match HostBindRequest::from_descriptor(&descriptor) {
+                let binding = match HostBindRequest::from_delegated_descriptor(
+                    &descriptor.descriptor,
+                    descriptor.delegated_bootstrap_proof,
+                ) {
                     Ok(binding) => binding,
                     Err(error) => {
                         return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {

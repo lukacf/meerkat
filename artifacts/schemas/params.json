@@ -2366,12 +2366,12 @@
           },
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 5,
+            "default": 6,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 5,
+            "default": 6,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -2389,6 +2389,10 @@
           "engine_version": {
             "description": "Engine version string; `\"\"` = not reported (pre-V4 peer).",
             "type": "string"
+          },
+          "forked_participants": {
+            "description": "Host can serve the V6 source-owner forked-participant family.",
+            "type": "boolean"
           },
           "hard_cancel_member": {
             "default": false,
@@ -2426,7 +2430,8 @@
               2,
               3,
               4,
-              5
+              5,
+              6
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -3321,6 +3326,17 @@
                 "const": "bind_host",
                 "type": "string"
               },
+              "delegated_bootstrap_proof": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeHostBootstrapProof"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Non-secret HMAC grant issued through an already-bound source mob and\nbound to this exact supervisor, host, address, and target mob."
+              },
               "epoch": {
                 "format": "uint64",
                 "minimum": 0,
@@ -3466,6 +3482,17 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "forked_participant_attachment": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeForkedParticipantAttachment"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V6 attachment carried only with ordinary `Resume` materialization."
               },
               "generation": {
                 "format": "uint64",
@@ -3693,6 +3720,50 @@
           },
           {
             "additionalProperties": false,
+            "description": "Return the host's current one-time binding descriptor to an already\nauthorized source-mob supervisor. The descriptor is consumed internally\nwhen a temporary council binds this host; it is never agent-facing.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "issue_host_binding_descriptor",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "mob_id": {
+                "description": "Existing source mob whose committed host binding authorizes the request.",
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "target_mob_id": {
+                "description": "Short-lived target mob the non-secret delegated proof is bound to.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "mob_id",
+              "target_mob_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Member-originated operator request forwarded from the member's host to\nthe controlling host (V4). Carries NO authority claim — admission is\nMobMachine-owned (`ResolveMemberOperatorAdmission`) and the recorded\nauthority context is read controlling-host-side.\n\n`request_id` is the idempotency key: duplicate delivery replays the\nrecorded reply.",
             "properties": {
               "agent_identity": {
@@ -3781,6 +3852,112 @@
               "observer",
               "observer_epoch",
               "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V6 source-owner capability creation, addressed to the source host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "create_forked_participant",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "prefix_message_count": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "reuse": {
+                "$ref": "#/$defs/BridgeForkedParticipantReuse"
+              },
+              "scope": {
+                "$ref": "#/$defs/BridgeForkedParticipantScope"
+              },
+              "source_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "ttl_millis": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "source_member",
+              "request_id",
+              "scope",
+              "reuse",
+              "ttl_millis"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V6 source-owner capability revocation, addressed to the source host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "capability": {
+                "$ref": "#/$defs/BridgeForkedParticipantRef"
+              },
+              "command": {
+                "const": "revoke_forked_participant",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "source_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "source_member",
+              "capability"
             ],
             "type": "object"
           }
@@ -4156,6 +4333,215 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeForkedParticipantAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "attachment_id": {
+            "type": "string"
+          },
+          "capability": {
+            "$ref": "#/$defs/BridgeForkedParticipantRef"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "capability"
+        ],
+        "type": "object"
+      },
+      "BridgeForkedParticipantOwnerRoute": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "local",
+                "type": "string"
+              },
+              "realm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "host_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "host",
+                "type": "string"
+              },
+              "realm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "realm_id",
+              "host_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantRef": {
+        "additionalProperties": false,
+        "description": "V6 immutable capability reference. It is deliberately metadata-only: no\ncredentials or transcript content may cross this bridge.",
+        "properties": {
+          "capability_id": {
+            "type": "string"
+          },
+          "cleanup_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "fork_session_id": {
+            "type": "string"
+          },
+          "owner_route": {
+            "$ref": "#/$defs/BridgeForkedParticipantOwnerRoute"
+          },
+          "prefix_digest": {
+            "type": "string"
+          },
+          "prefix_message_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reuse": {
+            "$ref": "#/$defs/BridgeForkedParticipantReuse"
+          },
+          "revocation_id": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/BridgeForkedParticipantScope"
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability_id",
+          "source_identity",
+          "fork_session_id",
+          "owner_route",
+          "source_session_id",
+          "prefix_message_count",
+          "prefix_digest",
+          "scope",
+          "reuse",
+          "expires_at",
+          "revocation_id",
+          "cleanup_id"
+        ],
+        "type": "object"
+      },
+      "BridgeForkedParticipantReuse": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "one_shot",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "bounded_reuse",
+                "type": "string"
+              },
+              "max_uses": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_uses"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantRevocationOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cleanup_pending": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "const": "revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "cleanup_pending"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "pending_attached_release",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "converged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeForkedParticipantScope": {
+        "enum": [
+          "invoke",
+          "observe",
+          "invoke_and_observe"
+        ],
+        "type": "string"
       },
       "BridgeHostBootstrapProof": {
         "description": "Dedicated host-bind proof carrier. This is intentionally distinct from\n[`BridgeBootstrapToken`]: the raw bearer lives only in the out-of-band\nhost descriptor, while a `BindHost` command may carry only the\nrequest-bound HMAC derived from it.",
@@ -4571,6 +4957,19 @@
         "description": "Typed vocabulary for why a bridge command was rejected.\n\nCallers branch on the typed `cause` to drive recovery logic; the\naccompanying `reason` string is for operator diagnostics only and must\nnot be pattern-matched. Reserve `Internal` for true invariant\nviolations — ordinary validation failures get a specific cause.\n\nNot `Copy` since V4: several causes carry typed detail payloads.",
         "oneOf": [
           {
+            "enum": [
+              "forked_participant_not_found",
+              "forked_participant_tampered",
+              "forked_participant_expired",
+              "forked_participant_revoked",
+              "forked_participant_exhausted",
+              "forked_participant_busy",
+              "forked_participant_source_mismatch",
+              "forked_participant_route_mismatch"
+            ],
+            "type": "string"
+          },
+          {
             "const": "not_bound",
             "description": "No supervisor is bound yet; caller must `bind_member` first.",
             "type": "string"
@@ -4598,6 +4997,16 @@
           {
             "const": "unsupported_protocol_version",
             "description": "The wire protocol version is not supported by this runtime.",
+            "type": "string"
+          },
+          {
+            "const": "forked_participant_protocol_unsupported",
+            "description": "A V6 capability operation was sent to a peer that does not implement\nthe forked-participant protocol family.",
+            "type": "string"
+          },
+          {
+            "const": "forked_participant_cleanup_debt",
+            "description": "Capability cleanup remains durable reconciliation work.",
             "type": "string"
           },
           {
@@ -5669,6 +6078,29 @@
           },
           {
             "additionalProperties": false,
+            "description": "Internal response carrying the current one-time host descriptor.",
+            "properties": {
+              "delegated_bootstrap_proof": {
+                "$ref": "#/$defs/BridgeHostBootstrapProof",
+                "description": "Request-bound proof; safe to carry over the signed, unencrypted bridge."
+              },
+              "descriptor": {
+                "$ref": "#/$defs/WireHostBindingDescriptor"
+              },
+              "result": {
+                "const": "host_binding_descriptor_issued",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "descriptor",
+              "delegated_bootstrap_proof"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Response to `OpenMemberLiveChannel`.\n\nThe payload field is named `open`, not `result`: this enum is\ninternally tagged on `result`, so the plan's literal\n`{ result: LiveOpenResult }` field shape is unrepresentable (serde\nrejects a variant field that collides with the internal tag). The\nembedded [`LiveOpenResult`] itself is verbatim so the owning host's\nabsolute URL + token round-trip untouched.",
             "properties": {
               "open": {
@@ -5759,6 +6191,40 @@
             "required": [
               "result",
               "request_id",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/BridgeForkedParticipantRef"
+              },
+              "result": {
+                "const": "forked_participant_created",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "$ref": "#/$defs/BridgeForkedParticipantRevocationOutcome"
+              },
+              "result": {
+                "const": "forked_participant_revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
               "outcome"
             ],
             "type": "object"
@@ -11782,6 +12248,45 @@
         "$ref": "#/$defs/WireSessionMessage",
         "description": "Equality adapter over a canonical wire transcript row.\n\n`WireSessionMessage` deliberately derives no `PartialEq` (opaque\ntool-call args ride `RawValue`), but the bridge reply chain that\ncarries history pages must be `Eq` (the comms envelope enums derive\nit). Equality here is semantic-JSON equality of the serialized wire\nform — exactly the fact reply comparison needs. Transparent: the wire\nshape stays the raw row object."
       },
+      "WireHostBindingDescriptor": {
+        "additionalProperties": false,
+        "description": "Host flavor of the `--comms-binding-out` descriptor: what `rkat mob host`\nwrites for the operator to hand to the controlling mob. Mirrors the\nmember descriptor's shape (typed Ed25519 identity, never a raw peer id)\nwith `kind: \"host\"` and the optional advertised live endpoint (DL5/DL6).",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "bootstrap_token": {
+            "$ref": "#/$defs/BridgeBootstrapToken"
+          },
+          "identity": {
+            "$ref": "#/$defs/WireTrustedPeerIdentity"
+          },
+          "kind": {
+            "$ref": "#/$defs/WireHostBindingDescriptorKind"
+          },
+          "live_endpoint": {
+            "description": "Advertised ws/wss live base URL; `None` = live-incapable host.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "address",
+          "identity",
+          "bootstrap_token"
+        ],
+        "type": "object"
+      },
+      "WireHostBindingDescriptorKind": {
+        "description": "Marker discriminant for the host binding descriptor file.",
+        "enum": [
+          "host"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -13518,6 +14023,29 @@
             "required": [
               "kind",
               "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
             ],
             "type": "object"
           }

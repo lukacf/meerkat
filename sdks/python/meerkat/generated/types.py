@@ -3884,6 +3884,7 @@ class BridgeCapabilities:
     destroy_member: Optional[bool] = None
     durable_sessions: Optional[bool] = None
     engine_version: Optional[str] = None
+    forked_participants: Optional[bool] = None
     hard_cancel_member: Optional[bool] = None
     interrupt_member: Optional[bool] = None
     mcp: Optional[bool] = None
@@ -7552,6 +7553,7 @@ class BridgeCommandBindHost(TypedDict, total=False):
     binding_generation: Required[int]
     bootstrap_proof: Required[str]
     command: Required[Literal['bind_host']]
+    delegated_bootstrap_proof: NotRequired[Optional[str]]
     epoch: Required[int]
     expected_address: Required[str]
     expected_host_peer_id: Required[str]
@@ -7582,6 +7584,7 @@ class BridgeCommandMaterializeMember(TypedDict, total=False):
     command: Required[Literal['materialize_member']]
     epoch: Required[int]
     fence_token: Required[int]
+    forked_participant_attachment: NotRequired[Optional[dict[str, Any]]]
     generation: Required[int]
     launch: Required[dict[str, Literal['fresh']] | dict[str, Any]]
     protocol_version: Required[BridgeProtocolVersion]
@@ -7628,6 +7631,15 @@ class BridgeCommandHostStatus(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandIssueHostBindingDescriptor(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['issue_host_binding_descriptor']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    target_mob_id: Required[str]
+
 class BridgeCommandMemberOperatorRequest(TypedDict, total=False):
     agent_identity: Required[str]
     command: Required[Literal['member_operator_request']]
@@ -7647,7 +7659,29 @@ class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
     operation_id: Required[str]
     protocol_version: Required[BridgeProtocolVersion]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation
+class BridgeCommandCreateForkedParticipant(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['create_forked_participant']]
+    epoch: Required[int]
+    prefix_message_count: NotRequired[Optional[int]]
+    protocol_version: Required[BridgeProtocolVersion]
+    request_id: Required[str]
+    reuse: Required[dict[str, Literal['one_shot']] | dict[str, Any]]
+    scope: Required[Literal['invoke', 'observe', 'invoke_and_observe']]
+    source_member: Required[BridgeMemberIncarnation]
+    supervisor: Required[BridgePeerSpec]
+    ttl_millis: Required[int]
+
+class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
+    binding_generation: Required[int]
+    capability: Required[dict[str, Any]]
+    command: Required[Literal['revoke_forked_participant']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    source_member: Required[BridgeMemberIncarnation]
+    supervisor: Required[BridgePeerSpec]
+
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -7835,7 +7869,7 @@ class BridgeRejectionCauseSessionOwnershipConflictPayload(TypedDict, total=False
 class BridgeRejectionCauseSessionOwnershipConflict(TypedDict, total=False):
     session_ownership_conflict: Required[BridgeRejectionCauseSessionOwnershipConflictPayload]
 
-BridgeRejectionCause = Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
+BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
 
 # A typed reply from a member runtime (or mob host daemon) back to the
 # supervisor, and — for `MemberOperatorReply` — from the controlling host
@@ -7961,6 +7995,11 @@ class BridgeReplyHostStatus(TypedDict, total=False):
     result: Required[Literal['host_status']]
     runtime_incarnation: Required[str]
 
+class BridgeReplyHostBindingDescriptorIssued(TypedDict, total=False):
+    delegated_bootstrap_proof: Required[str]
+    descriptor: Required[WireHostBindingDescriptor]
+    result: Required[Literal['host_binding_descriptor_issued']]
+
 class BridgeReplyMemberLiveChannelOpened(TypedDict, total=False):
     open: Required[LiveOpenResult]
     result: Required[Literal['member_live_channel_opened']]
@@ -7983,7 +8022,15 @@ class BridgeReplyMemberOperatorReply(TypedDict, total=False):
     request_id: Required[str]
     result: Required[Literal['member_operator_reply']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply
+class BridgeReplyForkedParticipantCreated(TypedDict, total=False):
+    capability: Required[dict[str, Any]]
+    result: Required[Literal['forked_participant_created']]
+
+class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
+    outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
+    result: Required[Literal['forked_participant_revoked']]
+
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

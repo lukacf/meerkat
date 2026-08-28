@@ -2705,6 +2705,7 @@ export interface BridgeCapabilities {
   destroy_member?: boolean;
   durable_sessions?: boolean;
   engine_version?: string;
+  forked_participants?: boolean;
   hard_cancel_member?: boolean;
   interrupt_member?: boolean;
   mcp?: boolean;
@@ -4190,6 +4191,7 @@ export interface BridgeCommandBindHost {
   binding_generation: number;
   bootstrap_proof: string;
   command: "bind_host";
+  delegated_bootstrap_proof?: string | null;
   epoch: number;
   expected_address: string;
   expected_host_peer_id: string;
@@ -4223,6 +4225,7 @@ export interface BridgeCommandMaterializeMember {
   command: "materialize_member";
   epoch: number;
   fence_token: number;
+  forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
   launch: { mode: "fresh" } | Record<string, unknown>;
   protocol_version: BridgeProtocolVersion;
@@ -4274,6 +4277,16 @@ export interface BridgeCommandHostStatus {
   supervisor: BridgePeerSpec;
 }
 
+export interface BridgeCommandIssueHostBindingDescriptor {
+  binding_generation: number;
+  command: "issue_host_binding_descriptor";
+  epoch: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  target_mob_id: string;
+}
+
 export interface BridgeCommandMemberOperatorRequest {
   agent_identity: string;
   command: "member_operator_request";
@@ -4295,7 +4308,31 @@ export interface BridgeCommandObserveSupervisorRotation {
   protocol_version: BridgeProtocolVersion;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation;
+export interface BridgeCommandCreateForkedParticipant {
+  binding_generation: number;
+  command: "create_forked_participant";
+  epoch: number;
+  prefix_message_count?: number | null;
+  protocol_version: BridgeProtocolVersion;
+  request_id: string;
+  reuse: { kind: "one_shot" } | Record<string, unknown>;
+  scope: "invoke" | "observe" | "invoke_and_observe";
+  source_member: BridgeMemberIncarnation;
+  supervisor: BridgePeerSpec;
+  ttl_millis: number;
+}
+
+export interface BridgeCommandRevokeForkedParticipant {
+  binding_generation: number;
+  capability: Record<string, unknown>;
+  command: "revoke_forked_participant";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  source_member: BridgeMemberIncarnation;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -4503,7 +4540,7 @@ export interface BridgeRejectionCauseSessionOwnershipConflict {
   session_ownership_conflict: BridgeRejectionCauseSessionOwnershipConflictPayload;
 }
 
-export type BridgeRejectionCause = "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -4639,6 +4676,12 @@ export interface BridgeReplyHostStatus {
   runtime_incarnation: string;
 }
 
+export interface BridgeReplyHostBindingDescriptorIssued {
+  delegated_bootstrap_proof: string;
+  descriptor: WireHostBindingDescriptor;
+  result: "host_binding_descriptor_issued";
+}
+
 export interface BridgeReplyMemberLiveChannelOpened {
   open: Record<string, unknown>;
   result: "member_live_channel_opened";
@@ -4666,7 +4709,17 @@ export interface BridgeReplyMemberOperatorReply {
   result: "member_operator_reply";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply;
+export interface BridgeReplyForkedParticipantCreated {
+  capability: Record<string, unknown>;
+  result: "forked_participant_created";
+}
+
+export interface BridgeReplyForkedParticipantRevoked {
+  outcome: Record<string, unknown> | { outcome: "pending_attached_release" } | { outcome: "converged" };
+  result: "forked_participant_revoked";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
 
 export interface ContentBlockText {
   text: string;

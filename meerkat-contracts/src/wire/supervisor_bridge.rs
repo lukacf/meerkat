@@ -958,6 +958,10 @@ pub struct BridgeHostBindPayload {
     /// out-of-band host descriptor. The raw bearer token must never be sent
     /// in this signed-but-unencrypted bridge command.
     pub bootstrap_proof: BridgeHostBootstrapProof,
+    /// Non-secret HMAC grant issued through an already-bound source mob and
+    /// bound to this exact supervisor, host, address, and target mob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_bootstrap_proof: Option<BridgeHostBootstrapProof>,
     pub required_capabilities: BridgeHostCapabilityRequirements,
 }
 
@@ -1242,6 +1246,8 @@ pub struct BridgeIssueHostBindingDescriptorPayload {
     pub protocol_version: BridgeProtocolVersion,
     /// Existing source mob whose committed host binding authorizes the request.
     pub mob_id: String,
+    /// Short-lived target mob the non-secret delegated proof is bound to.
+    pub target_mob_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,6 +2190,8 @@ pub struct BridgeHostStatusResponse {
 #[serde(deny_unknown_fields)]
 pub struct BridgeHostBindingDescriptorIssuedResponse {
     pub descriptor: WireHostBindingDescriptor,
+    /// Request-bound proof; safe to carry over the signed, unencrypted bridge.
+    pub delegated_bootstrap_proof: BridgeHostBootstrapProof,
 }
 
 /// One materialized-member row in a `HostStatus` reply.
@@ -5791,6 +5799,7 @@ mod tests {
                 expected_host_peer_id: "host-peer".to_string(),
                 expected_address: "tcp://10.0.0.2:7100".to_string(),
                 bootstrap_proof: BridgeHostBootstrapProof::new("host-bootstrap-proof"),
+                delegated_bootstrap_proof: None,
                 required_capabilities: Default::default(),
             }),
             BridgeCommand::RebindHost(BridgeHostRebindPayload {

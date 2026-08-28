@@ -10243,11 +10243,27 @@ impl MobHostActor {
             return;
         }
 
-        let descriptor = self.descriptor.descriptor(self.bootstrap_token.current());
+        let expected_host_peer_id = self
+            .host_comms
+            .peer_id()
+            .map(|peer_id| peer_id.to_string())
+            .unwrap_or_default();
+        let descriptor = self.descriptor.descriptor("");
+        let delegated_bootstrap_proof =
+            crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
+                self.bootstrap_token.current(),
+                &payload.supervisor,
+                &payload.target_mob_id,
+                &expected_host_peer_id,
+                &self.advertised_address,
+            );
         self.send_reply(
             candidate,
             HostBridgeReply::completed(BridgeReply::HostBindingDescriptorIssued(
-                BridgeHostBindingDescriptorIssuedResponse { descriptor },
+                BridgeHostBindingDescriptorIssuedResponse {
+                    descriptor,
+                    delegated_bootstrap_proof,
+                },
             )),
             Some(reply_address.as_str()),
         )
@@ -10568,7 +10584,20 @@ impl MobHostActor {
             sender_matches_supervisor: sender_matches_bridge_peer(&candidate.ingress, &supervisor),
             address_matches: canonicalize_bridge_address(&payload.expected_address)
                 == self.advertised_address,
-            token_valid: self.bootstrap_token.matches_bind_proof(&payload),
+            token_valid: self.bootstrap_token.matches_bind_proof(&payload)
+                || payload
+                    .delegated_bootstrap_proof
+                    .as_ref()
+                    .is_some_and(|proof| {
+                        proof
+                            == &crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
+                                self.bootstrap_token.current(),
+                                &payload.supervisor,
+                                &payload.mob_id,
+                                &payload.expected_host_peer_id,
+                                &payload.expected_address,
+                            )
+                    }),
             accepted_capabilities: capabilities,
             supervisor,
         };
@@ -11949,6 +11978,7 @@ mod tests {
             expected_address: "tcp://127.0.0.1:3000".to_string(),
             bootstrap_proof:
                 meerkat_contracts::wire::supervisor_bridge::BridgeHostBootstrapProof::new(""),
+            delegated_bootstrap_proof: None,
             required_capabilities: Default::default(),
         };
         let command = BridgeCommand::BindHost(
@@ -12288,6 +12318,7 @@ mod tests {
             expected_address: "tcp://127.0.0.1:9000".to_string(),
             bootstrap_proof:
                 meerkat_contracts::wire::supervisor_bridge::BridgeHostBootstrapProof::new(""),
+            delegated_bootstrap_proof: None,
             required_capabilities: BridgeHostCapabilityRequirements::default(),
         };
         payload.bootstrap_proof = derive_host_bind_bootstrap_proof(&first, &payload);

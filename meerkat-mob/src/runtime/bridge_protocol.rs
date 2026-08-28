@@ -79,6 +79,7 @@ pub use meerkat_contracts::wire::{
 pub use meerkat_contracts::wire::{WireMobRuntimeMode, WireOpaqueJson as WirePortableOpaqueJson};
 
 const HOST_BIND_BOOTSTRAP_PROOF_DOMAIN: &[u8] = b"meerkat-host-bind-bootstrap-proof-v1";
+const DELEGATED_HOST_BIND_PROOF_DOMAIN: &[u8] = b"meerkat-delegated-host-bind-proof-v1";
 
 /// Derive the proof carried by a `BindHost` command from the raw descriptor
 /// token and every authority-bearing field of that exact ceremony.
@@ -116,6 +117,37 @@ pub(crate) fn derive_host_bind_bootstrap_proof(
     for &byte in &proof {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+
+    pub(crate) fn derive_delegated_host_bind_proof(
+        raw_token: &str,
+        supervisor: &BridgePeerSpec,
+        target_mob_id: &str,
+        expected_host_peer_id: &str,
+        expected_address: &str,
+    ) -> BridgeHostBootstrapProof {
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(raw_token.as_bytes()) else {
+            return BridgeHostBootstrapProof::new("");
+        };
+        mac.update(DELEGATED_HOST_BIND_PROOF_DOMAIN);
+        update_host_bind_proof_field(&mut mac, supervisor.peer_id.as_bytes());
+        update_host_bind_proof_field(&mut mac, &supervisor.pubkey);
+        update_host_bind_proof_field(&mut mac, supervisor.address.as_bytes());
+        update_host_bind_proof_field(&mut mac, target_mob_id.as_bytes());
+        update_host_bind_proof_field(&mut mac, expected_host_peer_id.as_bytes());
+        update_host_bind_proof_field(
+            &mut mac,
+            canonicalize_bridge_address(expected_address).as_bytes(),
+        );
+        let proof = mac.finalize().into_bytes();
+        let mut encoded = String::with_capacity("hmac-sha256-v1:".len() + proof.len() * 2);
+        encoded.push_str("hmac-sha256-v1:");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in proof {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        BridgeHostBootstrapProof::new(encoded)
     }
     BridgeHostBootstrapProof::new(encoded)
 }
@@ -662,6 +694,7 @@ mod tests {
             expected_host_peer_id: "peer-host".to_string(),
             expected_address: "tcp://127.0.0.1:9000".to_string(),
             bootstrap_proof: BridgeHostBootstrapProof::new(""),
+            delegated_bootstrap_proof: None,
             mob_id: "mob-a".to_string(),
             required_capabilities: Default::default(),
         }

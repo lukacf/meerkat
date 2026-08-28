@@ -1545,7 +1545,9 @@ pub struct HostBindRequest {
     pub address: String,
     /// One-time ceremony token from the descriptor (redacted-Debug newtype;
     /// never a principal credential — D3).
-    pub bootstrap_token: super::bridge_protocol::BridgeBootstrapToken,
+    pub bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
+    /// Non-secret source-authorized proof for automatic temporary-mob binding.
+    pub delegated_bootstrap_proof: Option<super::bridge_protocol::BridgeHostBootstrapProof>,
     /// Advertised ws/wss live base URL from the descriptor; the bind reply's
     /// declaration is authoritative (restart truthfulness, DL5).
     pub live_endpoint: Option<String>,
@@ -1565,9 +1567,21 @@ impl HostBindRequest {
             expected_peer_id: resolved.peer_id,
             pubkey: resolved.pubkey,
             address: descriptor.address.clone(),
-            bootstrap_token: descriptor.bootstrap_token.clone(),
+            bootstrap_token: Some(descriptor.bootstrap_token.clone()),
+            delegated_bootstrap_proof: None,
             live_endpoint: descriptor.live_endpoint.clone(),
         })
+    }
+
+    #[doc(hidden)]
+    pub fn from_delegated_descriptor(
+        descriptor: &super::bridge_protocol::WireHostBindingDescriptor,
+        delegated_bootstrap_proof: super::bridge_protocol::BridgeHostBootstrapProof,
+    ) -> Result<Self, MobError> {
+        let mut request = Self::from_descriptor(descriptor)?;
+        request.bootstrap_token = None;
+        request.delegated_bootstrap_proof = Some(delegated_bootstrap_proof);
+        Ok(request)
     }
 }
 
@@ -9503,10 +9517,13 @@ impl MobHandle {
     pub async fn issue_host_binding_descriptor(
         &self,
         host_id: &str,
-    ) -> Result<super::bridge_protocol::WireHostBindingDescriptor, MobError> {
+        target_mob_id: &MobId,
+    ) -> Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError> {
         let host_id = host_id.to_string();
+        let target_mob_id = target_mob_id.clone();
         self.send_actor_command(|reply_tx| MobCommand::IssueHostBindingDescriptor {
             host_id,
+            target_mob_id,
             reply_tx,
         })
         .await?

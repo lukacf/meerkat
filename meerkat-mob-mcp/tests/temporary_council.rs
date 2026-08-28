@@ -760,6 +760,57 @@ async fn a_conflicting_request_under_a_bound_council_id_is_rejected() {
     fixture.teardown().await;
 }
 
+/// A council seat may rename the source role, but it may not replace the
+/// source member's execution profile. Exact binding equality covers model,
+/// tools, MCP servers, skills, provider parameters, and resume overrides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_profile_cannot_widen_the_source_execution_context() {
+    let fixture = CouncilFixture::new(role_script);
+    fixture.seed_source_mob(&["researcher", "reviewer"]).await;
+
+    let mut request =
+        two_participant_request(&fixture, "profile-widen", MergeBackPolicy::NoMerge, 1, 240);
+    let temporary_mob_id = request.council_id.temporary_mob_id();
+    request
+        .definition_template
+        .profiles
+        .get_mut(&ProfileName::from("participant"))
+        .and_then(meerkat_mob::ProfileBinding::as_inline_mut)
+        .expect("inline participant profile")
+        .model = "claude-opus-5".to_string();
+
+    let outcome = fixture
+        .state
+        .temporary_council()
+        .run(request)
+        .await
+        .expect("containment refusal is a sealed council outcome");
+    match outcome.result.exit_reason {
+        TemporaryCouncilExitReason::ParticipantSeatingFailed {
+            participant_order,
+            ref detail,
+        } => {
+            assert_eq!(participant_order, 0);
+            assert!(detail.contains("would widen or alter"));
+        }
+        ref other => panic!("expected a profile-containment refusal, got {other:?}"),
+    }
+    assert!(outcome.result.exchanges.is_empty());
+    assert_eq!(fixture.provider_calls(), 0, "no model work may begin");
+    assert!(
+        fixture
+            .state
+            .mob_handles_snapshot()
+            .await
+            .expect("mob snapshot")
+            .into_iter()
+            .all(|(mob_id, _)| mob_id != temporary_mob_id),
+        "the temporary mob must not exist when profile containment fails"
+    );
+
+    fixture.teardown().await;
+}
+
 /// A coordinator that dies before sealing a result is recovered by a restarted
 /// process as a typed interrupted terminal plus cleanup — never re-executed.
 #[tokio::test(flavor = "multi_thread")]

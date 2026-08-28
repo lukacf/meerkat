@@ -1120,30 +1120,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobMemberLiveControlParams",
                 "BridgeLiveControlOutcome",
             ),
-            // Temporary councils (issue #159). `run` owns and join-waits the
-            // coordinator task: caller cancellation abandons the RESPONSE, not
-            // the execution, so the committed council result must publish on
-            // success. `recover` commits durable terminals and cleanup, so it
-            // carries the same class. `get` is a pure sealed projection.
-            RpcMethodDescriptor::typed(
-                "mob/temporary_council_run",
-                "Run one bounded temporary council of source-owned forked participants",
-                "MobTemporaryCouncilRunParams",
-                "MobTemporaryCouncilRunResult",
-            )
-            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
-            RpcMethodDescriptor::typed(
-                "mob/temporary_council_get",
-                "Read one sealed temporary-council record projection",
-                "MobTemporaryCouncilGetParams",
-                "MobTemporaryCouncilGetResult",
-            ),
-            RpcMethodDescriptor::result_only(
-                "mob/temporary_council_recover",
-                "Converge every unfinished temporary council (owner/admin maintenance)",
-                "MobTemporaryCouncilRecoverResult",
-            )
-            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
         ]);
     }
 
@@ -1342,28 +1318,6 @@ mod tests {
         );
         assert_eq!(
             descriptor("mob/member_live_open")
-                .request_lifecycle
-                .resolve(None),
-            RequestLifecycle::InlineObservation
-        );
-        // A temporary council owns a coordinator task that survives caller
-        // cancellation, so its committed result must publish on success; the
-        // recovery sweep commits durable terminals and cleanup for the same
-        // reason. Reading a sealed record commits nothing.
-        assert_eq!(
-            descriptor("mob/temporary_council_run")
-                .request_lifecycle
-                .resolve(None),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            descriptor("mob/temporary_council_recover")
-                .request_lifecycle
-                .resolve(None),
-            RequestLifecycle::LongRunningPublishOnSuccess
-        );
-        assert_eq!(
-            descriptor("mob/temporary_council_get")
                 .request_lifecycle
                 .resolve(None),
             RequestLifecycle::InlineObservation
@@ -1943,21 +1897,6 @@ mod tests {
                 "mob/member_live_control",
                 Some("MobMemberLiveControlParams"),
                 Some("BridgeLiveControlOutcome"),
-            ),
-            (
-                "mob/temporary_council_run",
-                Some("MobTemporaryCouncilRunParams"),
-                Some("MobTemporaryCouncilRunResult"),
-            ),
-            (
-                "mob/temporary_council_get",
-                Some("MobTemporaryCouncilGetParams"),
-                Some("MobTemporaryCouncilGetResult"),
-            ),
-            (
-                "mob/temporary_council_recover",
-                None,
-                Some("MobTemporaryCouncilRecoverResult"),
             ),
         ] {
             let descriptor = methods

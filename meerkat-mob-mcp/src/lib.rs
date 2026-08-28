@@ -15,7 +15,6 @@ pub mod run_accounting;
 mod schedule_host;
 mod surface;
 pub mod temporary_council;
-pub mod temporary_council_wire;
 mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
@@ -3220,29 +3219,6 @@ impl MobMcpState {
                 presented: BTreeSet::new(),
             })),
         }
-    }
-
-    /// Admit a realm-wide temporary-council record read.
-    ///
-    /// Council ids are not authorization tokens, and record projections contain
-    /// exchange text from participants across arbitrary mobs. Until council-
-    /// specific grants exist, only the owner console may read them by id.
-    pub fn admit_temporary_council_read(&self) -> Result<(), MobError> {
-        self.require_console_owner(ControlScope::List)
-    }
-
-    /// Admit a temporary council before it can bind durable custody.
-    pub fn admit_temporary_council_run(&self) -> Result<(), MobError> {
-        self.require_console_owner(ControlScope::SendCommand)
-    }
-
-    /// Admit the realm-wide temporary-council recovery sweep.
-    ///
-    /// Recovery can seal terminals, revoke capabilities, and destroy temporary
-    /// mobs across the realm, so it is owner maintenance rather than a
-    /// per-council or per-mob grant.
-    pub fn admit_temporary_council_recovery(&self) -> Result<(), MobError> {
-        self.require_console_owner(ControlScope::Retire)
     }
 
     /// Chokepoint (b) resolver gate for per-mob verbs that bypass the actor

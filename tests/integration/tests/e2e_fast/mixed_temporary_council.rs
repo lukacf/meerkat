@@ -21,8 +21,8 @@ use meerkat_mob::machines::forked_participant_lifecycle::{
 use meerkat_mob::store::{ForkedParticipantStore, SqliteMobStores};
 use meerkat_mob::{MobBackendKind, MobDefinition, MobRuntimeMode, ProfileBinding, ProfileName};
 use meerkat_mob_mcp::temporary_council::{
-    MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilHostBootstrap,
-    TemporaryCouncilParticipantSpec, TemporaryCouncilRequest,
+    MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
+    TemporaryCouncilRequest,
 };
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, descriptor_to_bind_request, spawn_host_daemon_fixture,
@@ -216,16 +216,8 @@ async fn mixed_local_and_host_temporary_council_completes_and_releases_everythin
     );
     let temporary_mob_id = request.council_id.temporary_mob_id();
 
-    // Binding the source spent its descriptor; this freshly rotated descriptor
-    // is spent by the coordinator when it binds the temporary mob.
-    let bootstrap = TemporaryCouncilHostBootstrap::none()
-        .with_host_bindings(vec![descriptor_to_bind_request(&host.current_descriptor())]);
     let coordinator = fixture.state.temporary_council();
-    let running = tokio::spawn(async move {
-        coordinator
-            .run_with_host_bootstrap(request, bootstrap)
-            .await
-    });
+    let running = tokio::spawn(async move { coordinator.run(request).await });
 
     local_gate.wait_entered(1).await;
     let temporary = fixture

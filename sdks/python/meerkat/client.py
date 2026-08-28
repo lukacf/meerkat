@@ -128,11 +128,6 @@ from .generated.types import (
     MobMemberLiveChannelParams,
     MobMemberLiveControlParams,
     MobMemberLiveOpenParams,
-    MobTemporaryCouncilGetParams,
-    MobTemporaryCouncilGetResult,
-    MobTemporaryCouncilRecoverResult,
-    MobTemporaryCouncilRunParams,
-    MobTemporaryCouncilRunResult,
     MobMemberLiveStatusParams,
     MobMemberParams,
     MobRevokeHostParams,
@@ -170,11 +165,6 @@ from .generated.types import (
     WireContentInput,
     WireHistoryRow,
     WireHostBindingDescriptor,
-    WireTemporaryCouncilCleanup,
-    WireTemporaryCouncilRecord,
-    WireTemporaryCouncilRecoveryReport,
-    WireTemporaryCouncilRequest,
-    WireTemporaryCouncilResult,
     WireHostBindPhase,
     WireHostCapabilityFlags,
     WireLiveChannelCapabilities,
@@ -3122,78 +3112,6 @@ class MeerkatClient:
                 result.get("released_members"),
                 f"{context}: released_members",
             ),
-        )
-
-    async def run_temporary_council(
-        self,
-        request: WireTemporaryCouncilRequest | dict[str, Any],
-        *,
-        host_bindings: list[WireHostBindingDescriptor] | None = None,
-    ) -> MobTemporaryCouncilRunResult:
-        """Run one bounded temporary council to a durable terminal outcome.
-
-        The runtime owns the coordinator task: abandoning this call abandons
-        the response, never the execution. ``host_bindings`` carries the
-        one-time host bootstrap needed before a HOST-owned participant can be
-        seated; it is never fingerprinted and never persisted.
-        """
-        params = MobTemporaryCouncilRunParams(
-            request=cast(WireTemporaryCouncilRequest, request),
-            host_bindings=host_bindings,
-        )
-        result = await self._request(
-            "mob/temporary_council_run", _wire_params(params)
-        )
-        context = "Invalid mob/temporary_council_run response"
-        return MobTemporaryCouncilRunResult(
-            result=cast(
-                WireTemporaryCouncilResult,
-                self._require_dict(result.get("result"), "result", context),
-            ),
-            cleanup=cast(
-                WireTemporaryCouncilCleanup,
-                self._require_dict(result.get("cleanup"), "cleanup", context),
-            ),
-            replayed=self._require_bool_field(result, "replayed", context),
-        )
-
-    async def get_temporary_council(
-        self,
-        council_id: str,
-    ) -> MobTemporaryCouncilGetResult:
-        """Read one sealed temporary-council record projection.
-
-        An unknown council is an ordinary absence (``council is None``), not
-        an error. The projection carries no capability custody and no
-        coordinator internals.
-        """
-        params = MobTemporaryCouncilGetParams(council_id=council_id)
-        result = await self._request(
-            "mob/temporary_council_get", _wire_params(params)
-        )
-        context = "Invalid mob/temporary_council_get response"
-        council = self._optional_dict_field(result, "council", context)
-        return MobTemporaryCouncilGetResult(
-            council=cast("WireTemporaryCouncilRecord | None", council),
-        )
-
-    async def recover_temporary_councils(self) -> MobTemporaryCouncilRecoverResult:
-        """Converge every unfinished temporary council (owner maintenance).
-
-        Seals a typed interrupted terminal for a council whose coordinator
-        died and retries outstanding cleanup. Never re-executes a council.
-        """
-        result = await self._request("mob/temporary_council_recover", {})
-        context = "Invalid mob/temporary_council_recover response"
-        reports = self._require_present_list_field(result, "reports", context)
-        return MobTemporaryCouncilRecoverResult(
-            reports=[
-                cast(
-                    WireTemporaryCouncilRecoveryReport,
-                    self._require_dict(row, f"reports[{index}]", context),
-                )
-                for index, row in enumerate(reports)
-            ],
         )
 
     async def hard_cancel_mob_member(

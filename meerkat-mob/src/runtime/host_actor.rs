@@ -64,14 +64,15 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBootstrapToken, BridgeCapabilities, BridgeCommand, BridgeCommandDecodeError,
     BridgeCreateForkedParticipantPayload, BridgeForkedParticipantCreatedResponse,
     BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
-    BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostCapabilityRequirements,
-    BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
-    BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
-    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeMaterializePayload,
-    BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
-    BridgePeerTrustPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload,
-    BridgeReply, BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck,
-    BridgeTurnOutcomeRecord, MaterializeLaunchMode, MaterializeLaunchOutcome,
+    BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostBindingDescriptorIssuedResponse,
+    BridgeHostCapabilityRequirements, BridgeHostMemberRecord, BridgeHostRebindPayload,
+    BridgeHostReboundResponse, BridgeHostRevokePayload, BridgeHostRevokedResponse,
+    BridgeHostRuntimeIncarnation, BridgeHostStatusPayload, BridgeHostStatusResponse,
+    BridgeIssueHostBindingDescriptorPayload, BridgeMaterializePayload, BridgeMaterializedResponse,
+    BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec, BridgePeerTrustPayload,
+    BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload, BridgeReply,
+    BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
+    MaterializeLaunchMode, MaterializeLaunchOutcome,
     MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
     WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
     decode_bridge_command,
@@ -448,16 +449,20 @@ impl DescriptorRefresher {
     /// owner. That keeps serialization failure on the reversible side of the
     /// startup transaction.
     fn prepare(&self, token: &str) -> Result<String, MobHostActorError> {
-        let descriptor = WireHostBindingDescriptor {
+        let descriptor = self.descriptor(token);
+        serde_json::to_string_pretty(&descriptor).map_err(|err| MobHostActorError::RecordSerde {
+            detail: format!("descriptor serialization failed: {err}"),
+        })
+    }
+
+    fn descriptor(&self, token: &str) -> WireHostBindingDescriptor {
+        WireHostBindingDescriptor {
             kind: WireHostBindingDescriptorKind::Host,
             address: self.address.clone(),
             identity: self.identity.clone(),
             bootstrap_token: BridgeBootstrapToken::new(token),
             live_endpoint: self.live_endpoint.clone(),
-        };
-        serde_json::to_string_pretty(&descriptor).map_err(|err| MobHostActorError::RecordSerde {
-            detail: format!("descriptor serialization failed: {err}"),
-        })
+        }
     }
 
     /// Publish already-prepared descriptor JSON: durable file sink first,
@@ -6443,6 +6448,20 @@ async fn run_host_responder(
             };
             actor.serve_turn_outcome_ack(request).await;
         }
+        // The idle select is not reached while peer batches stay continuously
+        // non-empty. Poll the interval once without waiting so overdue
+        // capability maintenance still receives a fair turn between batches.
+        let maintenance_due = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(
+                std::pin::Pin::new(&mut forked_participant_tick)
+                    .poll_tick(cx)
+                    .is_ready(),
+            )
+        })
+        .await;
+        if maintenance_due {
+            actor.sweep_forked_participants().await;
+        }
         // A continuously non-empty inbox never enters the idle `select!`
         // above. Poll shutdown between finite drain batches so sustained peer
         // traffic cannot indefinitely starve actor termination (the same
@@ -7353,6 +7372,10 @@ impl MobHostActor {
             }
             BridgeCommand::HostStatus(payload) => {
                 self.serve_host_status_candidate(candidate, payload).await;
+            }
+            BridgeCommand::IssueHostBindingDescriptor(payload) => {
+                self.serve_issue_host_binding_descriptor_candidate(candidate, payload)
+                    .await;
             }
             // Everything member-addressed, plus the phase-6 operator upcall
             // (member-ORIGINATED — it never arrives host-addressed), stays
@@ -10179,6 +10202,46 @@ impl MobHostActor {
         self.send_reply(
             candidate,
             HostBridgeReply::completed(reply),
+            Some(reply_address.as_str()),
+        )
+        .await;
+    }
+
+    async fn serve_issue_host_binding_descriptor_candidate(
+        &mut self,
+        candidate: &PeerInputCandidate,
+        payload: BridgeIssueHostBindingDescriptorPayload,
+    ) {
+        let reply_address = payload.supervisor.address.clone();
+        if !payload.protocol_version.supports_forked_participants() {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                "host binding descriptor handoff requires forked-participant protocol support",
+                Some(reply_address.as_str()),
+            )
+            .await;
+            return;
+        }
+        if !self
+            .admit_host_command(
+                candidate,
+                &payload.mob_id,
+                payload.epoch,
+                payload.binding_generation,
+                &reply_address,
+            )
+            .await
+        {
+            return;
+        }
+
+        let descriptor = self.descriptor.descriptor(self.bootstrap_token.current());
+        self.send_reply(
+            candidate,
+            HostBridgeReply::completed(BridgeReply::HostBindingDescriptorIssued(
+                BridgeHostBindingDescriptorIssuedResponse { descriptor },
+            )),
             Some(reply_address.as_str()),
         )
         .await;

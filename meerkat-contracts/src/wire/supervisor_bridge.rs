@@ -443,6 +443,10 @@ pub enum BridgeCommand {
     InstallPeerTrust(BridgePeerTrustPayload),
     RemovePeerTrust(BridgePeerTrustPayload),
     HostStatus(BridgeHostStatusPayload),
+    /// Return the host's current one-time binding descriptor to an already
+    /// authorized source-mob supervisor. The descriptor is consumed internally
+    /// when a temporary council binds this host; it is never agent-facing.
+    IssueHostBindingDescriptor(BridgeIssueHostBindingDescriptorPayload),
     // --- V4 member-originated family (exactly one, A8) ---
     MemberOperatorRequest(BridgeMemberOperatorPayload),
     /// Observe one previously submitted durable supervisor rotation.
@@ -484,6 +488,7 @@ impl BridgeCommand {
                 payload.protocol_version
             }
             Self::HostStatus(payload) => payload.protocol_version,
+            Self::IssueHostBindingDescriptor(payload) => payload.protocol_version,
             Self::MemberOperatorRequest(payload) => payload.protocol_version,
             Self::ObserveSupervisorRotation(payload) => payload.protocol_version,
             Self::CreateForkedParticipant(payload) => payload.protocol_version,
@@ -616,7 +621,9 @@ fn bridge_command_minimum_protocol(
     let command = value.get("command")?.as_str()?;
     let minimum = match command {
         "bind_member" | "retire_member" => BridgeProtocolVersion::V5,
-        "create_forked_participant" | "revoke_forked_participant" => BridgeProtocolVersion::V6,
+        "create_forked_participant"
+        | "revoke_forked_participant"
+        | "issue_host_binding_descriptor" => BridgeProtocolVersion::V6,
         "materialize_member"
             if value
                 .get("forked_participant_attachment")
@@ -1223,6 +1230,20 @@ pub struct BridgeHostStatusPayload {
     pub mob_id: String,
 }
 
+/// Request the current host binding descriptor through an already-authorized
+/// source-mob binding.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeIssueHostBindingDescriptorPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub binding_generation: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    /// Existing source mob whose committed host binding authorizes the request.
+    pub mob_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // V4 payloads — member-originated operator family (exactly one, A8)
 // ---------------------------------------------------------------------------
@@ -1810,6 +1831,7 @@ pub enum BridgeReply {
     MemberMaterialized(BridgeMaterializedResponse),
     MemberReleased(BridgeMemberReleasedResponse),
     HostStatus(BridgeHostStatusResponse),
+    HostBindingDescriptorIssued(BridgeHostBindingDescriptorIssuedResponse),
     MemberLiveChannelOpened(BridgeLiveOpenedResponse),
     MemberLiveChannelClosed {
         status: LiveCloseStatus,
@@ -2154,6 +2176,14 @@ pub struct BridgeHostStatusResponse {
     pub runtime_incarnation: BridgeHostRuntimeIncarnation,
     pub members: Vec<BridgeHostMemberRecord>,
     pub capabilities: BridgeCapabilities,
+}
+
+/// Internal response carrying the current one-time host descriptor.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeHostBindingDescriptorIssuedResponse {
+    pub descriptor: WireHostBindingDescriptor,
 }
 
 /// One materialized-member row in a `HostStatus` reply.

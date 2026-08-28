@@ -2870,51 +2870,6 @@ class MobMemberLiveControlParams:
 
 
 @dataclass
-class MobTemporaryCouncilRunParams:
-    """Request payload for `mob/temporary_council_run`.
-
-`host_bindings` is deliberately OUTSIDE the request: a host binding
-descriptor carries a one-time ceremony token, so folding it into the request
-would make an honest retry present a different fingerprint and would put
-credential-like material into the durable council record. Nothing in it is
-fingerprinted or persisted, and a replay or joined caller ignores it."""
-    request: WireTemporaryCouncilRequest
-    host_bindings: Optional[list[WireHostBindingDescriptor]] = None
-
-
-@dataclass
-class MobTemporaryCouncilRunResult:
-    """Response payload for `mob/temporary_council_run`.
-
-The immutable result and the cleanup verdict are reported separately: a
-sealed result stays valid even when its cleanup retained debt."""
-    cleanup: WireTemporaryCouncilCleanup
-    replayed: bool
-    result: WireTemporaryCouncilResult
-
-
-@dataclass
-class MobTemporaryCouncilGetParams:
-    """Request payload for `mob/temporary_council_get`."""
-    council_id: str
-
-
-@dataclass
-class MobTemporaryCouncilGetResult:
-    """Response payload for `mob/temporary_council_get`.
-
-`council` is absent when no record is bound to the requested id. An unknown
-council is an ordinary absence, not an error."""
-    council: Optional[WireTemporaryCouncilRecord] = None
-
-
-@dataclass
-class MobTemporaryCouncilRecoverResult:
-    """Response payload for `mob/temporary_council_recover`."""
-    reports: list[WireTemporaryCouncilRecoveryReport]
-
-
-@dataclass
 class PublicTurnToolOverlay:
     """Public caller-safe per-turn tool overlay."""
     allowed_tools: Optional[list[ToolName]] = None
@@ -3170,267 +3125,6 @@ with `kind: "host"` and the optional advertised live endpoint (DL5/DL6)."""
     identity: WireTrustedPeerIdentity
     kind: WireHostBindingDescriptorKind
     live_endpoint: Optional[str] = None
-
-
-@dataclass
-class WireTemporaryCouncilRequest:
-    """One complete temporary-council request."""
-    bounds: WireTemporaryCouncilBounds
-    council_id: str
-    definition_template: MobDefinitionInput
-    durability: WireTemporaryCouncilDurability
-    merge_back: WireTemporaryCouncilMergeBack
-    participants: list[WireTemporaryCouncilParticipant]
-    topic: str
-
-
-@dataclass
-class WireTemporaryCouncilBounds:
-    """Bounded budget for one council.
-
-Every field is validated before any side effect: an over-budget request
-never creates a mob, a capability, or a turn."""
-    deadline: WireTemporaryCouncilDeadline
-    max_exchanges: int
-    max_result_bytes: int
-    max_rounds: int
-
-
-@dataclass
-class WireTemporaryCouncilParticipant:
-    """One council participant: which source member is forked, and how the branch
-is seated in the temporary mob.
-
-There is deliberately no credential, auth override, or mutable session state
-here. Tool, auth, realm, and filesystem boundaries stay those of the source
-execution context, which is exactly what the capability layer guarantees."""
-    order: int
-    role: str
-    scope: WireTemporaryCouncilScope
-    source_identity: str
-    source_mob_id: str
-    target_identity: str
-    target_profile: str
-    prefix_message_count: Optional[int] = None
-    target_backend: Optional[WireMobBackendKind] = None
-
-
-@dataclass
-class WireTemporaryCouncilStructuredContract:
-    """The typed contract a `structured_result` merge must satisfy.
-
-A council does not accept "any syntactically valid JSON" as a structured
-result: the caller declares an identity, a version, and a JSON Schema, and
-the finalizer's output is validated against it before the result is sealed.
-Schema compilation stays a coordinator preflight — the wire carries the
-declared schema, never a compiled or trusted one."""
-    json_schema: WireOpaqueJson
-    schema_id: str
-    schema_version: int
-
-
-@dataclass
-class WireTemporaryCouncilResult:
-    """Immutable result of one temporary council.
-
-Sealed BEFORE cleanup runs, so it stays valid even when cleanup later fails.
-Cleanup status is reported separately and never folded into this value."""
-    concluded_at: str
-    council_id: str
-    durability: WireTemporaryCouncilDurability
-    exchanges: list[WireTemporaryCouncilExchange]
-    exit_reason: WireTemporaryCouncilExitReason
-    merge: WireTemporaryCouncilMergeOutcome
-    merge_truncated: bool
-    participants: list[WireTemporaryCouncilParticipantProvenance]
-    request_fingerprint: str
-    rounds_completed: int
-    temporary_mob_id: str
-    truncated_exchange_count: int
-
-
-@dataclass
-class WireTemporaryCouncilExchange:
-    """Durable receipt of one participant turn."""
-    delivery_correlation_id: str
-    delivery_idempotency_key: str
-    outcome: WireTemporaryCouncilExchangeOutcome
-    participant_order: int
-    round: int
-    sequence: int
-    started_at: str
-    target_identity: str
-
-
-@dataclass
-class WireTemporaryCouncilCapabilityProvenance:
-    """Non-secret provenance of the exact capability one participant was seated
-under.
-
-Deliberately carries NO capability bearer token, capability id, revocation
-id, or cleanup id: the bearer stays in coordinator custody and in the
-capability store, never in a returned result."""
-    correlation_hint: str
-    expires_at: str
-    fork_session_id: str
-    owner_route: WireTemporaryCouncilOwnerRoute
-    reuse: WireTemporaryCouncilReusePolicy
-    scope: WireTemporaryCouncilScope
-    source: WireTemporaryCouncilSourceProvenance
-
-
-@dataclass
-class WireTemporaryCouncilSourceProvenance:
-    """Exact selected-prefix provenance of one fork."""
-    prefix_digest: str
-    prefix_message_count: int
-    source_session_id: str
-
-
-@dataclass
-class WireTemporaryCouncilParticipantProvenance:
-    """Non-secret provenance of one participant, carried in the immutable result."""
-    attachment_id: str
-    capability_request_id: str
-    order: int
-    role: str
-    scope: WireTemporaryCouncilScope
-    seated: bool
-    source_identity: str
-    source_mob_id: str
-    target_identity: str
-    capability: Optional[WireTemporaryCouncilCapabilityProvenance] = None
-
-
-@dataclass
-class WireTemporaryCouncilArtifactClaim:
-    """A participant's UNVERIFIED, typed claim about an artifact it says it
-produced. The council performs no store lookup, fetch, or existence check."""
-    uri: str
-    byte_len: Optional[int] = None
-    digest: Optional[str] = None
-    media_type: Optional[str] = None
-
-
-@dataclass
-class WireTemporaryCouncilSelectedExchange:
-    """One selected council exchange, with its own provenance."""
-    participant_order: int
-    round: int
-    sequence: int
-    target_identity: str
-    text: str
-    truncated: bool
-
-
-@dataclass
-class WireTemporaryCouncilStructuredContractIdentity:
-    """Non-secret identity of the structured-result contract a value satisfied."""
-    schema_digest: str
-    schema_id: str
-    schema_version: int
-
-
-@dataclass
-class WireTemporaryCouncilCleanup:
-    """Durable receipt of one cleanup attempt."""
-    attempted_at: str
-    attempts: int
-    budget_exhausted: bool
-    debts: list[WireTemporaryCouncilCleanupDebt]
-    released_participants: list[int]
-    revoked_participants: list[int]
-    status: WireTemporaryCouncilCleanupStatus
-    temporary_mob_destroyed: bool
-
-
-@dataclass
-class WireTemporaryCouncilCleanupDebt:
-    """One unpaid cleanup obligation."""
-    detail: str
-    subject: str
-
-
-@dataclass
-class WireTemporaryCouncilRecord:
-    """Sealed projection of one durable council record.
-
-Carries no store revision, no persisted machine state, and no coordinator
-claim lease: those are coordinator authority, not caller-observable state."""
-    council_id: str
-    created_at: str
-    deadline: str
-    durability: WireTemporaryCouncilDurability
-    exchanges: list[WireTemporaryCouncilExchange]
-    participants: list[WireTemporaryCouncilParticipantCustody]
-    request_fingerprint: str
-    temporary_mob_id: str
-    unfinished: bool
-    updated_at: str
-    cleanup: Optional[WireTemporaryCouncilCleanup] = None
-    result: Optional[WireTemporaryCouncilResult] = None
-
-
-@dataclass
-class WireTemporaryCouncilParticipantCustody:
-    """Non-secret projection of one participant custody slot.
-
-The durable record additionally holds the FULL capability reference,
-including its bearer token. That field has no wire representation here and
-never reaches a caller."""
-    acquisition: WireTemporaryCouncilAcquisition
-    attachment_id: str
-    capability_request_id: str
-    order: int
-    role: str
-    scope: WireTemporaryCouncilScope
-    seated: bool
-    source_identity: str
-    source_mob_id: str
-    target_identity: str
-    target_profile: str
-    capability_correlation_hint: Optional[str] = None
-    seated_session_id: Optional[str] = None
-
-
-@dataclass
-class WireTemporaryCouncilRecoveryReport:
-    """What one recovery sweep did to one unfinished council."""
-    cleanup: WireTemporaryCouncilCleanup
-    council_id: str
-    sealed_interrupted_result: bool
-    settled: bool
-
-
-@dataclass
-class WireTemporaryCouncilFailureDetail:
-    """Typed `data` payload for the string-detail council failures."""
-    detail: str
-    kind: WireTemporaryCouncilFailureKind
-
-
-@dataclass
-class WireTemporaryCouncilConflictDetail:
-    """Typed `data` payload for a council id bound to a materially different
-request."""
-    council_id: str
-    presented_fingerprint: str
-    stored_fingerprint: str
-
-
-@dataclass
-class WireTemporaryCouncilClaimDetail:
-    """Typed `data` payload for a contested or superseded coordinator claim."""
-    council_id: str
-    current_claim_epoch: int
-
-
-@dataclass
-class WireTemporaryCouncilDurabilityDetail:
-    """Typed `data` payload for a durability declaration the runtime cannot meet."""
-    available: WireTemporaryCouncilDurability
-    council_id: str
-    required: WireTemporaryCouncilDurability
 
 
 @dataclass
@@ -4190,7 +3884,6 @@ class BridgeCapabilities:
     destroy_member: Optional[bool] = None
     durable_sessions: Optional[bool] = None
     engine_version: Optional[str] = None
-    forked_participants: Optional[bool] = None
     hard_cancel_member: Optional[bool] = None
     interrupt_member: Optional[bool] = None
     mcp: Optional[bool] = None
@@ -6403,187 +6096,6 @@ WireMobRunStatus = Literal['pending', 'running', 'completed', 'failed', 'cancele
 # sessions.
 WireMobRunUsageAttribution = Literal['session_cumulative']
 
-# Whether a council's custody must survive a process restart.
-#
-# This is an explicit caller declaration, never an inference. `Durable` is
-# refused when the serving runtime's council store is process-bound;
-# `ProcessBound` is the explicit opt-in that says a process death loses the
-# record and the source capability TTL is the only remaining backstop.
-WireTemporaryCouncilDurability = Literal['durable', 'process_bound']
-
-# Operations a council participant's capability grants its holder.
-WireTemporaryCouncilScope = Literal['invoke', 'observe', 'invoke_and_observe']
-
-# How many times one capability may be attached over its lifetime.
-class WireTemporaryCouncilReusePolicyOneShot(TypedDict, total=False):
-    kind: Required[Literal['one_shot']]
-
-class WireTemporaryCouncilReusePolicyBoundedReuse(TypedDict, total=False):
-    kind: Required[Literal['bounded_reuse']]
-    max_uses: Required[int]
-
-WireTemporaryCouncilReusePolicy = WireTemporaryCouncilReusePolicyOneShot | WireTemporaryCouncilReusePolicyBoundedReuse
-
-# Typed route to the runtime that owns a participant's capability.
-class WireTemporaryCouncilOwnerRouteLocal(TypedDict, total=False):
-    kind: Required[Literal['local']]
-    realm_id: Required[str]
-
-class WireTemporaryCouncilOwnerRouteHost(TypedDict, total=False):
-    host_id: Required[str]
-    kind: Required[Literal['host']]
-    realm_id: Required[str]
-
-WireTemporaryCouncilOwnerRoute = WireTemporaryCouncilOwnerRouteLocal | WireTemporaryCouncilOwnerRouteHost
-
-# Stable discriminant of the caller's merge-back policy.
-WireTemporaryCouncilMergePolicyKind = Literal['bounded_text_summary', 'structured_result', 'selected_transcript', 'durable_artifact_reference', 'no_merge']
-
-# Absolute or relative bound on how long a council may run.
-class WireTemporaryCouncilDeadlineAbsolute(TypedDict, total=False):
-    at: Required[str]
-    kind: Required[Literal['absolute']]
-
-class WireTemporaryCouncilDeadlineRelative(TypedDict, total=False):
-    after_millis: Required[int]
-    kind: Required[Literal['relative']]
-
-WireTemporaryCouncilDeadline = WireTemporaryCouncilDeadlineAbsolute | WireTemporaryCouncilDeadlineRelative
-
-# The single explicit merge-back policy for one council.
-#
-# No variant merges a whole transcript, and no variant mutates the caller's
-# session: the outcome is RETURNED, never written back implicitly.
-class WireTemporaryCouncilMergeBackBoundedTextSummary(TypedDict, total=False):
-    finalizer: Required[str]
-    max_bytes: Required[int]
-    policy: Required[Literal['bounded_text_summary']]
-
-class WireTemporaryCouncilMergeBackStructuredResult(TypedDict, total=False):
-    contract: Required[WireTemporaryCouncilStructuredContract]
-    finalizer: Required[str]
-    max_bytes: Required[int]
-    policy: Required[Literal['structured_result']]
-
-class WireTemporaryCouncilMergeBackSelectedTranscript(TypedDict, total=False):
-    exchange_sequences: Required[list[int]]
-    max_bytes: Required[int]
-    participant: Required[str]
-    policy: Required[Literal['selected_transcript']]
-
-class WireTemporaryCouncilMergeBackDurableArtifactReference(TypedDict, total=False):
-    max_bytes: Required[int]
-    participant: Required[str]
-    policy: Required[Literal['durable_artifact_reference']]
-
-class WireTemporaryCouncilMergeBackNoMerge(TypedDict, total=False):
-    policy: Required[Literal['no_merge']]
-
-WireTemporaryCouncilMergeBack = WireTemporaryCouncilMergeBackBoundedTextSummary | WireTemporaryCouncilMergeBackStructuredResult | WireTemporaryCouncilMergeBackSelectedTranscript | WireTemporaryCouncilMergeBackDurableArtifactReference | WireTemporaryCouncilMergeBackNoMerge
-
-# Why the council stopped.
-class WireTemporaryCouncilExitReasonCompleted(TypedDict, total=False):
-    reason: Required[Literal['completed']]
-
-class WireTemporaryCouncilExitReasonMaxExchangesReached(TypedDict, total=False):
-    reason: Required[Literal['max_exchanges_reached']]
-
-class WireTemporaryCouncilExitReasonDeadlineExceeded(TypedDict, total=False):
-    reason: Required[Literal['deadline_exceeded']]
-
-class WireTemporaryCouncilExitReasonParticipantSeatingFailed(TypedDict, total=False):
-    detail: Required[str]
-    participant_order: Required[int]
-    reason: Required[Literal['participant_seating_failed']]
-
-class WireTemporaryCouncilExitReasonWiringIncomplete(TypedDict, total=False):
-    detail: Required[str]
-    reason: Required[Literal['wiring_incomplete']]
-
-class WireTemporaryCouncilExitReasonExchangeFailed(TypedDict, total=False):
-    detail: Required[str]
-    reason: Required[Literal['exchange_failed']]
-    round: Required[int]
-    target_identity: Required[str]
-
-class WireTemporaryCouncilExitReasonCoordinatorInterrupted(TypedDict, total=False):
-    reason: Required[Literal['coordinator_interrupted']]
-
-WireTemporaryCouncilExitReason = WireTemporaryCouncilExitReasonCompleted | WireTemporaryCouncilExitReasonMaxExchangesReached | WireTemporaryCouncilExitReasonDeadlineExceeded | WireTemporaryCouncilExitReasonParticipantSeatingFailed | WireTemporaryCouncilExitReasonWiringIncomplete | WireTemporaryCouncilExitReasonExchangeFailed | WireTemporaryCouncilExitReasonCoordinatorInterrupted
-
-# Terminal classification of one bounded exchange.
-class WireTemporaryCouncilExchangeOutcomePending(TypedDict, total=False):
-    status: Required[Literal['pending']]
-
-class WireTemporaryCouncilExchangeOutcomeCompleted(TypedDict, total=False):
-    completed_at: Required[str]
-    session_id: Required[str]
-    status: Required[Literal['completed']]
-    text: Required[str]
-    truncated: Required[bool]
-
-class WireTemporaryCouncilExchangeOutcomeFailed(TypedDict, total=False):
-    detail: Required[str]
-    failed_at: Required[str]
-    status: Required[Literal['failed']]
-
-WireTemporaryCouncilExchangeOutcome = WireTemporaryCouncilExchangeOutcomePending | WireTemporaryCouncilExchangeOutcomeCompleted | WireTemporaryCouncilExchangeOutcomeFailed
-
-# What the explicit merge-back policy actually produced.
-class WireTemporaryCouncilMergeOutcomeNoMerge(TypedDict, total=False):
-    confirmed_participants: Required[list[str]]
-    kind: Required[Literal['no_merge']]
-
-class WireTemporaryCouncilMergeOutcomeBoundedTextSummary(TypedDict, total=False):
-    finalizer: Required[str]
-    kind: Required[Literal['bounded_text_summary']]
-    text: Required[str]
-    truncated: Required[bool]
-
-class WireTemporaryCouncilMergeOutcomeStructuredResult(TypedDict, total=False):
-    contract: Required[WireTemporaryCouncilStructuredContractIdentity]
-    finalizer: Required[str]
-    kind: Required[Literal['structured_result']]
-    truncated: Required[bool]
-    value: Required[WireOpaqueJson]
-
-class WireTemporaryCouncilMergeOutcomeSelectedTranscript(TypedDict, total=False):
-    excerpts: Required[list[WireTemporaryCouncilSelectedExchange]]
-    exchange_sequences: Required[list[int]]
-    kind: Required[Literal['selected_transcript']]
-    participant: Required[str]
-    truncated: Required[bool]
-
-class WireTemporaryCouncilMergeOutcomeDurableArtifactReference(TypedDict, total=False):
-    claim: Required[WireTemporaryCouncilArtifactClaim]
-    kind: Required[Literal['durable_artifact_reference']]
-    participant: Required[str]
-
-class WireTemporaryCouncilMergeOutcomeNotAttempted(TypedDict, total=False):
-    kind: Required[Literal['not_attempted']]
-    reason: Required[str]
-
-class WireTemporaryCouncilMergeOutcomeFailed(TypedDict, total=False):
-    detail: Required[str]
-    kind: Required[Literal['failed']]
-    policy: Required[WireTemporaryCouncilMergePolicyKind]
-
-WireTemporaryCouncilMergeOutcome = WireTemporaryCouncilMergeOutcomeNoMerge | WireTemporaryCouncilMergeOutcomeBoundedTextSummary | WireTemporaryCouncilMergeOutcomeStructuredResult | WireTemporaryCouncilMergeOutcomeSelectedTranscript | WireTemporaryCouncilMergeOutcomeDurableArtifactReference | WireTemporaryCouncilMergeOutcomeNotAttempted | WireTemporaryCouncilMergeOutcomeFailed
-
-# How a cleanup attempt ended, as a single typed verdict.
-WireTemporaryCouncilCleanupStatus = Literal['settled', 'debt', 'pending']
-
-# How far capability acquisition got for one participant slot.
-WireTemporaryCouncilAcquisition = Literal['not_attempted', 'pending', 'acquired', 'ambiguous']
-
-# Which coordinator-side failure a [`WireTemporaryCouncilFailureDetail`]
-# reports.
-#
-# The JSON-RPC/HTTP code alone cannot separate a refused request from a
-# custody write failure once several causes share one code, so the `kind`
-# discriminant is carried in `data` and is the stable machine-readable fact.
-WireTemporaryCouncilFailureKind = Literal['invalid_request', 'store', 'lifecycle', 'mob', 'coordinator_unavailable']
-
 # Mob RPC helper wire type for WireWorkExecutionLifecyclePhase.
 WireWorkExecutionLifecyclePhase = Literal['absent', 'launch_requested', 'launch_uncertain', 'launch_quarantined', 'running', 'evidence_projection_requested', 'failure_evidence_projection_requested', 'cancellation_evidence_projection_requested', 'launch_failure_evidence_projection_requested', 'work_closure_requested', 'flow_failed', 'flow_canceled', 'evidence_projected', 'work_closed', 'launch_failed']
 
@@ -8070,7 +7582,6 @@ class BridgeCommandMaterializeMember(TypedDict, total=False):
     command: Required[Literal['materialize_member']]
     epoch: Required[int]
     fence_token: Required[int]
-    forked_participant_attachment: NotRequired[Optional[dict[str, Any]]]
     generation: Required[int]
     launch: Required[dict[str, Literal['fresh']] | dict[str, Any]]
     protocol_version: Required[BridgeProtocolVersion]
@@ -8136,29 +7647,7 @@ class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
     operation_id: Required[str]
     protocol_version: Required[BridgeProtocolVersion]
 
-class BridgeCommandCreateForkedParticipant(TypedDict, total=False):
-    binding_generation: Required[int]
-    command: Required[Literal['create_forked_participant']]
-    epoch: Required[int]
-    prefix_message_count: NotRequired[Optional[int]]
-    protocol_version: Required[BridgeProtocolVersion]
-    request_id: Required[str]
-    reuse: Required[dict[str, Literal['one_shot']] | dict[str, Any]]
-    scope: Required[Literal['invoke', 'observe', 'invoke_and_observe']]
-    source_member: Required[BridgeMemberIncarnation]
-    supervisor: Required[BridgePeerSpec]
-    ttl_millis: Required[int]
-
-class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
-    binding_generation: Required[int]
-    capability: Required[dict[str, Any]]
-    command: Required[Literal['revoke_forked_participant']]
-    epoch: Required[int]
-    protocol_version: Required[BridgeProtocolVersion]
-    source_member: Required[BridgeMemberIncarnation]
-    supervisor: Required[BridgePeerSpec]
-
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -8346,7 +7835,7 @@ class BridgeRejectionCauseSessionOwnershipConflictPayload(TypedDict, total=False
 class BridgeRejectionCauseSessionOwnershipConflict(TypedDict, total=False):
     session_ownership_conflict: Required[BridgeRejectionCauseSessionOwnershipConflictPayload]
 
-BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
+BridgeRejectionCause = Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
 
 # A typed reply from a member runtime (or mob host daemon) back to the
 # supervisor, and — for `MemberOperatorReply` — from the controlling host
@@ -8494,15 +7983,7 @@ class BridgeReplyMemberOperatorReply(TypedDict, total=False):
     request_id: Required[str]
     result: Required[Literal['member_operator_reply']]
 
-class BridgeReplyForkedParticipantCreated(TypedDict, total=False):
-    capability: Required[dict[str, Any]]
-    result: Required[Literal['forked_participant_created']]
-
-class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
-    outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
-    result: Required[Literal['forked_participant_revoked']]
-
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

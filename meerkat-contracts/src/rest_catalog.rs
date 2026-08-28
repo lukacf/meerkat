@@ -581,36 +581,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
                 "MobRouteInstallsResult",
             )],
         ),
-        // Temporary councils (issue #159). Councils are realm-scoped, not
-        // mob-scoped: the temporary mob is an implementation detail the
-        // coordinator owns, so these paths sit beside `/mob/...` rather than
-        // under one mob id. Every operation reuses the same wire converters as
-        // the RPC handlers; REST adds no council semantics of its own.
-        RestPathDescriptor::new(
-            "/mob/temporary-councils/run",
-            vec![RestOperationDescriptor::with_json_request(
-                "post",
-                "Run one bounded temporary council to a durable terminal outcome",
-                "MobTemporaryCouncilRunParams",
-                "MobTemporaryCouncilRunResult",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/mob/temporary-councils/recover",
-            vec![RestOperationDescriptor::json(
-                "post",
-                "Converge every unfinished temporary council (owner/admin maintenance)",
-                "MobTemporaryCouncilRecoverResult",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/mob/temporary-councils/{council_id}",
-            vec![RestOperationDescriptor::json(
-                "get",
-                "Read one sealed temporary-council record projection",
-                "MobTemporaryCouncilGetResult",
-            )],
-        ),
         RestPathDescriptor::new(
             "/health",
             vec![RestOperationDescriptor::text(
@@ -811,9 +781,6 @@ mod tests {
             "/mob/{id}/members/{agent_identity}/history",
             "/mob/{id}/hosts",
             "/mob/{id}/route-installs",
-            "/mob/temporary-councils/run",
-            "/mob/temporary-councils/recover",
-            "/mob/temporary-councils/{council_id}",
         ] {
             assert!(paths.iter().any(|path| path == &expected));
         }

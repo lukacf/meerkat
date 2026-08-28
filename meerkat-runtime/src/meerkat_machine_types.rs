@@ -1226,6 +1226,7 @@ pub enum SupervisorBridgeCommandKind {
     InstallPeerTrust,
     RemovePeerTrust,
     HostStatus,
+    IssueHostBindingDescriptor,
     MemberOperatorRequest,
 }
 
@@ -1261,6 +1262,7 @@ impl SupervisorBridgeCommandKind {
         Self::InstallPeerTrust,
         Self::RemovePeerTrust,
         Self::HostStatus,
+        Self::IssueHostBindingDescriptor,
         Self::MemberOperatorRequest,
     ];
 
@@ -1298,6 +1300,7 @@ impl SupervisorBridgeCommandKind {
             Self::InstallPeerTrust => "InstallPeerTrust",
             Self::RemovePeerTrust => "RemovePeerTrust",
             Self::HostStatus => "HostStatus",
+            Self::IssueHostBindingDescriptor => "IssueHostBindingDescriptor",
             Self::MemberOperatorRequest => "MemberOperatorRequest",
         }
     }
@@ -1340,6 +1343,7 @@ impl SupervisorBridgeCommandKind {
             | Self::InstallPeerTrust
             | Self::RemovePeerTrust
             | Self::HostStatus
+            | Self::IssueHostBindingDescriptor
             | Self::MemberOperatorRequest => {
                 SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed
             }
@@ -1391,9 +1395,12 @@ impl SupervisorBridgeCommandKind {
             | Self::RevokeForkedParticipant
             | Self::InstallPeerTrust
             | Self::RemovePeerTrust
-            | Self::HostStatus => SupervisorBridgeCommandRealization::RealizedOffDrain {
+            | Self::HostStatus
+            | Self::IssueHostBindingDescriptor => {
+                SupervisorBridgeCommandRealization::RealizedOffDrain {
                 by: OffDrainResponder::HostDaemon,
-            },
+                }
+            }
             // Member-originated operator requests are served by the
             // controlling host's supervisor-inbox responder (ADJ-13;
             // admission is MobMachine's ResolveMemberOperatorAdmission).

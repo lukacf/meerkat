@@ -9462,6 +9462,22 @@ impl MobHandle {
         .await?
     }
 
+    /// Request a fresh one-time binding descriptor from a host already bound to
+    /// this mob. Internal orchestration uses this to bind that same host into a
+    /// short-lived council without exposing bootstrap material to an agent.
+    #[doc(hidden)]
+    pub async fn issue_host_binding_descriptor(
+        &self,
+        host_id: &str,
+    ) -> Result<super::bridge_protocol::WireHostBindingDescriptor, MobError> {
+        let host_id = host_id.to_string();
+        self.send_actor_command(|reply_tx| MobCommand::IssueHostBindingDescriptor {
+            host_id,
+            reply_tx,
+        })
+        .await?
+    }
+
     /// Revoke a bound (or bind-requested) member host. A bound host first
     /// receives the authenticated host-addressed revoke and must return its
     /// durable terminal receipt after disposing every materialized member;

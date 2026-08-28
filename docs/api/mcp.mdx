@@ -93,23 +93,11 @@ source of truth for tool names and availability.
 | `meerkat_mob_member_history` | Read a mob member transcript page by identity, local or placed (mob feature) |
 | `meerkat_mob_hosts` | List bound member hosts with capabilities (mob feature) |
 | `meerkat_mob_route_installs` | Read outstanding cross-host route-install obligations (mob feature) |
-| `meerkat_mob_temporary_council_run` | Run one bounded [temporary council](/guides/temporary-councils) of source-owned forked participants (mob feature) |
-| `meerkat_mob_temporary_council_get` | Read one sealed temporary-council record projection (mob feature) |
 | `meerkat_mob_event_stream_open` | Open a mob-level event stream (mob feature) |
 | `meerkat_mob_event_stream_read` | Read the next event from an open mob stream (mob feature) |
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
 | `meerkat_comms_send` | Send a canonical comms command to a session (comms feature) |
 | `meerkat_comms_peers` | List peers visible to a session (comms feature) |
-
-<Note>
-There is deliberately no `meerkat_mob_temporary_council_recover` tool. A
-recovery sweep seals terminals, revokes capabilities, and destroys temporary
-mobs for councils the caller never started — the same realm-wide administrative
-class that keeps host binding and grant administration off this surface.
-Recovery stays on the owner consoles (`mob/temporary_council_recover`,
-`POST /mob/temporary-councils/recover`, `rkat mob council-recover`). Exact run
-admission may recover only its requested council id.
-</Note>
 
 <Note>
 Default `rkat-mcp` builds are driven by the crate feature set. The base/default

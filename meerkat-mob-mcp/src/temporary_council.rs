@@ -46,8 +46,8 @@ use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::forked_participant::{
-    ForkedParticipantOperationScope, ForkedParticipantRef, ForkedParticipantReusePolicy,
-    MAX_FORKED_PARTICIPANT_TTL,
+    ForkedParticipantOperationScope, ForkedParticipantOwnerRoute, ForkedParticipantRef,
+    ForkedParticipantReusePolicy, MAX_FORKED_PARTICIPANT_TTL,
 };
 use meerkat_mob::machines::temporary_council_lifecycle::{
     TemporaryCouncilClaimDenial, TemporaryCouncilLifecycleEffect, TemporaryCouncilLifecycleInput,
@@ -1121,8 +1121,9 @@ pub(crate) enum InflightReservation {
 
 /// Trusted in-process Rust API for temporary councils.
 ///
-/// Obtained from [`MobMcpState::temporary_council`]. RPC, REST, CLI, public MCP,
-/// and generated SDK surfaces are thin adapters over this coordinator.
+/// Obtained from [`MobMcpState::temporary_council`]. The agent-facing `council`
+/// mob tool is the product invocation boundary; this coordinator remains its
+/// trusted in-process orchestration substrate.
 #[derive(Clone)]
 pub struct TemporaryCouncilCoordinator {
     state: Arc<MobMcpState>,
@@ -1277,73 +1278,7 @@ impl TemporaryCouncilCoordinator {
             .map_err(TemporaryCouncilError::store)?
         {
             Some(existing) => {
-                // The machine, not a string compare in the shell, decides
-                // replay versus conflict for a bound council identity.
-                if !classify_open(&existing.machine_state, &validated.fingerprint)? {
-                    return Err(TemporaryCouncilError::ConflictingRequest {
-                        council_id,
-                        stored_fingerprint: existing.request_fingerprint,
-                        presented_fingerprint: validated.fingerprint.clone(),
-                    });
-                }
-                if let Some(result) = existing.result.clone() {
-                    let cleanup = existing.cleanup.clone().unwrap_or_else(|| {
-                        TemporaryCouncilCleanupReceipt {
-                            attempted_at: existing.updated_at,
-                            attempts: 0,
-                            temporary_mob_destroyed: false,
-                            released_participants: Vec::new(),
-                            revoked_participants: Vec::new(),
-                            debts: vec![TemporaryCouncilCleanupDebt {
-                                subject: format!("council:{council_id}"),
-                                detail: "no cleanup attempt is durably recorded".to_string(),
-                            }],
-                            budget_exhausted: false,
-                        }
-                    });
-                    return Ok(Admission::Replay(Box::new(TemporaryCouncilOutcome {
-                        result,
-                        cleanup,
-                        replayed: true,
-                    })));
-                }
-                // Same-id admission may recover exactly this record. It never
-                // sweeps unrelated councils or exercises realm-wide admin
-                // authority through the run surface.
-                self.recover_record(existing).await?;
-                let recovered = store
-                    .load(&council_id)
-                    .await
-                    .map_err(TemporaryCouncilError::store)?
-                    .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
-                        detail: format!("council {council_id} disappeared after same-id recovery"),
-                    })?;
-                let result = recovered.result.ok_or_else(|| {
-                    TemporaryCouncilError::CoordinatorUnavailable {
-                        detail: format!(
-                            "council {council_id} recovery completed without sealing a result"
-                        ),
-                    }
-                })?;
-                let cleanup = recovered
-                    .cleanup
-                    .unwrap_or_else(|| TemporaryCouncilCleanupReceipt {
-                        attempted_at: recovered.updated_at,
-                        attempts: 0,
-                        temporary_mob_destroyed: false,
-                        released_participants: Vec::new(),
-                        revoked_participants: Vec::new(),
-                        debts: vec![TemporaryCouncilCleanupDebt {
-                            subject: format!("council:{council_id}"),
-                            detail: "same-id recovery sealed no cleanup receipt".to_string(),
-                        }],
-                        budget_exhausted: false,
-                    });
-                return Ok(Admission::Replay(Box::new(TemporaryCouncilOutcome {
-                    result,
-                    cleanup,
-                    replayed: true,
-                })));
+                return self.admit_existing_record(&validated, existing).await;
             }
             None => {
                 // NEW admission only: this is where a deadline is resolved and
@@ -1373,10 +1308,38 @@ impl TemporaryCouncilCoordinator {
                     updated_at: now,
                 };
                 // Side effects start only AFTER the record is durable.
-                store
-                    .insert_new(&record)
-                    .await
-                    .map_err(TemporaryCouncilError::store)?
+                match store.insert_new(&record).await {
+                    Ok(inserted) => inserted,
+                    Err(MobStoreError::CasConflict(_)) => {
+                        let winner = store
+                            .load(&council_id)
+                            .await
+                            .map_err(TemporaryCouncilError::store)?
+                            .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+                                detail: format!(
+                                    "council {council_id} insert conflicted but no winning record \
+                                     could be loaded"
+                                ),
+                            })?;
+                        if !classify_open(&winner.machine_state, &validated.fingerprint)? {
+                            return Err(TemporaryCouncilError::ConflictingRequest {
+                                council_id,
+                                stored_fingerprint: winner.request_fingerprint,
+                                presented_fingerprint: validated.fingerprint.clone(),
+                            });
+                        }
+                        if winner.result.is_some() {
+                            return self.admit_existing_record(&validated, winner).await;
+                        }
+                        // Another coordinator won the insert but has not
+                        // necessarily claimed execution yet. Continue through
+                        // the ordinary durable claim below: exactly one side
+                        // wins, and a live winner is reported as busy rather
+                        // than being misclassified as interrupted recovery.
+                        winner
+                    }
+                    Err(error) => return Err(TemporaryCouncilError::store(error)),
+                }
             }
         };
 
@@ -1449,6 +1412,86 @@ impl TemporaryCouncilCoordinator {
         });
 
         Ok(Admission::Join(rx))
+    }
+
+    async fn admit_existing_record(
+        &self,
+        validated: &ValidatedRequest,
+        existing: TemporaryCouncilRecord,
+    ) -> Result<Admission, TemporaryCouncilError> {
+        let council_id = validated.request.council_id.clone();
+        // The machine, not a string compare in the shell, decides replay
+        // versus conflict for a bound council identity.
+        if !classify_open(&existing.machine_state, &validated.fingerprint)? {
+            return Err(TemporaryCouncilError::ConflictingRequest {
+                council_id,
+                stored_fingerprint: existing.request_fingerprint,
+                presented_fingerprint: validated.fingerprint.clone(),
+            });
+        }
+        if let Some(result) = existing.result.clone() {
+            let cleanup =
+                existing
+                    .cleanup
+                    .clone()
+                    .unwrap_or_else(|| TemporaryCouncilCleanupReceipt {
+                        attempted_at: existing.updated_at,
+                        attempts: 0,
+                        temporary_mob_destroyed: false,
+                        released_participants: Vec::new(),
+                        revoked_participants: Vec::new(),
+                        debts: vec![TemporaryCouncilCleanupDebt {
+                            subject: format!("council:{council_id}"),
+                            detail: "no cleanup attempt is durably recorded".to_string(),
+                        }],
+                        budget_exhausted: false,
+                    });
+            return Ok(Admission::Replay(Box::new(TemporaryCouncilOutcome {
+                result,
+                cleanup,
+                replayed: true,
+            })));
+        }
+
+        // Same-id admission may recover exactly this record. It never sweeps
+        // unrelated councils or exercises realm-wide admin authority through
+        // the run surface.
+        self.recover_record(existing).await?;
+        let recovered = self
+            .store()
+            .load(&council_id)
+            .await
+            .map_err(TemporaryCouncilError::store)?
+            .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+                detail: format!("council {council_id} disappeared after same-id recovery"),
+            })?;
+        let result =
+            recovered
+                .result
+                .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+                    detail: format!(
+                        "council {council_id} recovery completed without sealing a result"
+                    ),
+                })?;
+        let cleanup = recovered
+            .cleanup
+            .unwrap_or_else(|| TemporaryCouncilCleanupReceipt {
+                attempted_at: recovered.updated_at,
+                attempts: 0,
+                temporary_mob_destroyed: false,
+                released_participants: Vec::new(),
+                revoked_participants: Vec::new(),
+                debts: vec![TemporaryCouncilCleanupDebt {
+                    subject: format!("council:{council_id}"),
+                    detail: "same-id recovery sealed no cleanup receipt".to_string(),
+                }],
+                budget_exhausted: false,
+            });
+        Ok(Admission::Replay(Box::new(TemporaryCouncilOutcome {
+            result,
+            cleanup,
+            replayed: true,
+        })))
     }
 
     /// Converge every unfinished council record.
@@ -2002,6 +2045,73 @@ impl CouncilRun {
 
     /// 2. Create the real temporary mob, then acquire and seat each capability.
     async fn seat_participants(&mut self) -> Result<(), TemporaryCouncilExitReason> {
+        let mut bound_hosts = BTreeSet::new();
+        // The target profile is not caller-owned policy. Prove that every
+        // requested seat uses the source member's own profile binding before
+        // creating the temporary mob or acquiring any capability. Exact
+        // binding equality is intentionally exhaustive: model, tools, MCP,
+        // skills, provider parameters, and resume overrides all stay contained.
+        for custody in &self.record.participants {
+            let source = self
+                .state
+                .handle_for(&custody.source_mob_id)
+                .await
+                .map_err(
+                    |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                        participant_order: custody.order,
+                        detail: format!(
+                            "source mob {} is unavailable: {error}",
+                            custody.source_mob_id
+                        ),
+                    },
+                )?;
+            let source_member = source
+                .list_members()
+                .await
+                .into_iter()
+                .find(|member| member.agent_identity == custody.source_identity)
+                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "source member '{}' is not active in mob '{}'",
+                        custody.source_identity, custody.source_mob_id
+                    ),
+                })?;
+            let source_profile = source
+                .definition()
+                .profiles
+                .get(&source_member.role)
+                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "source member '{}' has no profile binding for role '{}'",
+                        custody.source_identity, source_member.role
+                    ),
+                })?;
+            let target_profile = self
+                .validated
+                .definition
+                .profiles
+                .get(&custody.target_profile)
+                .ok_or_else(|| TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "temporary profile '{}' disappeared before seating",
+                        custody.target_profile
+                    ),
+                })?;
+            if target_profile != source_profile {
+                return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                    participant_order: custody.order,
+                    detail: format!(
+                        "temporary profile '{}' would widen or alter source member '{}' execution \
+                         context",
+                        custody.target_profile, custody.source_identity
+                    ),
+                });
+            }
+        }
+
         // The temporary mob is an ordinary explicit mob created from the
         // caller's own definition template through the ordinary path.
         if self
@@ -2043,7 +2153,9 @@ impl CouncilRun {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
                 };
                 match tokio::time::timeout(remaining, temporary.bind_host(binding)).await {
-                    Ok(Ok(_report)) => {}
+                    Ok(Ok(report)) => {
+                        bound_hosts.insert(report.host_id);
+                    }
                     Ok(Err(error)) => {
                         return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
                             participant_order: 0,
@@ -2157,6 +2269,71 @@ impl CouncilRun {
                         if reconciled { "ambiguous" } else { "pending" }
                     ),
                 });
+            }
+
+            if let ForkedParticipantOwnerRoute::Host { host_id, .. } = capability.owner_route()
+                && !bound_hosts.contains(host_id.as_str())
+            {
+                let Some(remaining) = self.remaining() else {
+                    return Err(TemporaryCouncilExitReason::DeadlineExceeded);
+                };
+                let descriptor = match tokio::time::timeout(
+                    remaining,
+                    source.issue_host_binding_descriptor(host_id.as_str()),
+                )
+                .await
+                {
+                    Ok(Ok(descriptor)) => descriptor,
+                    Ok(Err(error)) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!(
+                                "source host descriptor handoff failed for '{}': {error}",
+                                host_id.as_str()
+                            ),
+                        });
+                    }
+                    Err(_) => return Err(TemporaryCouncilExitReason::DeadlineExceeded),
+                };
+                let binding = match HostBindRequest::from_descriptor(&descriptor) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!(
+                                "source host descriptor handoff was invalid for '{}': {error}",
+                                host_id.as_str()
+                            ),
+                        });
+                    }
+                };
+                let temporary = match self.temporary_handle().await {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!("temporary mob is unavailable: {error}"),
+                        });
+                    }
+                };
+                let Some(remaining) = self.remaining() else {
+                    return Err(TemporaryCouncilExitReason::DeadlineExceeded);
+                };
+                match tokio::time::timeout(remaining, temporary.bind_host(binding)).await {
+                    Ok(Ok(report)) => {
+                        bound_hosts.insert(report.host_id);
+                    }
+                    Ok(Err(error)) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!(
+                                "temporary mob could not bind source host '{}': {error}",
+                                host_id.as_str()
+                            ),
+                        });
+                    }
+                    Err(_) => return Err(TemporaryCouncilExitReason::DeadlineExceeded),
+                }
             }
 
             let temporary = match self.temporary_handle().await {

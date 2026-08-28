@@ -176,8 +176,8 @@ meerkat-schedule  → Scheduler: once/interval/calendar triggers, occurrence lif
                      host-runnable targets (TargetBinding::HostRunnable + ScheduleRunnableHost registry)
 meerkat-jobs      → Durable detached-job lifecycle, atomic store/outbox contracts,
                      predicate watches, health, and restart-safe delivery vocabulary
-meerkat-mob-mcp   → Shared mob surface orchestration (MobMcpState), including temporary councils,
-                     plus public MCP and agent-facing delegation tools (MobMcpDispatcher, AgentMobToolSurface)
+meerkat-mob-mcp   → Shared mob surface orchestration (MobMcpState), public MCP, and agent-facing
+                     mob tools including delegate, fork_off, and temporary councils
 meerkat-workgraph → Work graph (work items, dependencies) + agent-facing workgraph tools
 meerkat-runtime   → Runtime control plane (MeerkatMachine, ops lifecycle, runtime handles) between surfaces and core
 meerkat-live      → Live multimodal WebSocket transport plus feature-gated WebRTC signaling/media

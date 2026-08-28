@@ -1252,6 +1252,14 @@ pub(super) enum MobCommand {
         request: Box<super::handle::HostBindRequest>,
         reply_tx: oneshot::Sender<Result<super::handle::HostBindReport, MobError>>,
     },
+    /// Internal council bootstrap: request the current one-time descriptor from
+    /// a host already bound to this source mob.
+    IssueHostBindingDescriptor {
+        host_id: String,
+        reply_tx: oneshot::Sender<
+            Result<super::bridge_protocol::WireHostBindingDescriptor, MobError>,
+        >,
+    },
     /// Revoke a bound (or bind-requested) member host. Bound hosts must first
     /// complete the authenticated remote revoke terminal; the local machine
     /// and durable authority row clear only after the host's durable receipt
@@ -1481,6 +1489,7 @@ impl MobCommand {
             Self::Reset { .. } => "Reset",
             Self::RotateSupervisor { .. } => "RotateSupervisor",
             Self::BindHost { .. } => "BindHost",
+            Self::IssueHostBindingDescriptor { .. } => "IssueHostBindingDescriptor",
             Self::RevokeHost { .. } => "RevokeHost",
             Self::GrantScopes { .. } => "GrantScopes",
             Self::RevokeScopes { .. } => "RevokeScopes",

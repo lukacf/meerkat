@@ -23420,6 +23420,10 @@ impl MobActor {
                     let result = self.handle_bind_host(*request).await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::IssueHostBindingDescriptor { host_id, reply_tx } => {
+                    let result = self.issue_host_binding_descriptor(&host_id).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::RevokeHost { host_id, reply_tx } => {
                     let result = self.handle_revoke_host(&host_id).await;
                     let _ = reply_tx.send(result);
@@ -31576,14 +31580,6 @@ impl MobActor {
                 Ok(service) => service,
                 Err(error) => reject!(error),
             };
-        let grant = match service
-            .attach(&capability, &attachment_id, true, chrono::Utc::now())
-            .await
-        {
-            Ok(grant) => grant,
-            Err(error) => reject!(Self::forked_participant_refused(error)),
-        };
-
         let association = crate::forked_participant::ForkedParticipantAttachmentAssociation::new(
             capability.clone(),
             attachment_id.clone(),
@@ -31624,6 +31620,13 @@ impl MobActor {
                     && entry.generation.get() == target.generation
                     && entry.fence_token.get() == target.fence_token
                 {
+                    let grant = match service
+                        .attach(&capability, &attachment_id, true, chrono::Utc::now())
+                        .await
+                    {
+                        Ok(grant) => grant,
+                        Err(error) => reject!(Self::forked_participant_refused(error)),
+                    };
                     let _ = reply_tx.send(Ok(
                         super::forked_participant_routing::AttachedForkedParticipantSpawn {
                             spawn: super::handle::SpawnResult::new(
@@ -31647,28 +31650,59 @@ impl MobActor {
             });
         }
 
-        // Durable custody BEFORE the spawn. A process that dies anywhere in
-        // the seating window must leave an explicit, un-forgettable
-        // reconciliation obligation rather than a silently leaked lease.
-        let record = crate::store::MobForkedParticipantMemberAssociation {
+        // Durable custody BEFORE the source-owner attach. Recovery can replay
+        // this exact attachment id and release it, so neither side of the
+        // cross-store call contains a crash window that parks an unowned lease.
+        let mut record = crate::store::MobForkedParticipantMemberAssociation {
             association_key: association.association_key(),
             agent_identity: spec.identity.clone(),
             association,
             target: None,
-            obligation: Some(crate::store::MobForkedParticipantObligationCause::SpawnInFlight),
-            detail: "capability attachment admitted; seating spawn outcome not yet observed"
-                .to_string(),
+            obligation: Some(crate::store::MobForkedParticipantObligationCause::AttachPending),
+            detail: "target custody recorded; source-owner attachment not yet observed".to_string(),
         };
         if let Err(error) = self
             .runtime_metadata
             .put_forked_participant_member_association(&self.definition.id, &record)
             .await
         {
-            // The write may or may not have committed, so this is exactly the
-            // ambiguous case: releasing here would assert an absence this mob
-            // cannot observe. Surface the outstanding attachment instead; the
-            // owner's own pending-attached enumeration and TTL expiry remain
-            // the backstops.
+            reject!(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
+                attachment_id: attachment_id.as_str().to_string(),
+                detail: error.to_string(),
+            });
+        }
+
+        let grant = match service
+            .attach(&capability, &attachment_id, true, chrono::Utc::now())
+            .await
+        {
+            Ok(grant) => grant,
+            Err(error) => {
+                if let Err(delete_error) = self
+                    .runtime_metadata
+                    .delete_forked_participant_member_association(&self.definition.id, &record)
+                    .await
+                {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        association_key = %record.association_key,
+                        error = %delete_error,
+                        "source-owner attach was refused but its pre-attach custody row could not be deleted"
+                    );
+                }
+                reject!(Self::forked_participant_refused(error));
+            }
+        };
+        record.obligation = Some(crate::store::MobForkedParticipantObligationCause::SpawnInFlight);
+        record.detail =
+            "capability attachment admitted; seating spawn outcome not yet observed".to_string();
+        if let Err(error) = self
+            .runtime_metadata
+            .put_forked_participant_member_association(&self.definition.id, &record)
+            .await
+        {
+            // The durable AttachPending row remains sufficient custody:
+            // recovery replays this exact attach and then releases it.
             reject!(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
                 attachment_id: attachment_id.as_str().to_string(),
                 detail: error.to_string(),
@@ -32238,6 +32272,20 @@ impl MobActor {
         };
         let service =
             self.local_forked_participant_service(capability.source_identity(), realm_id)?;
+        if matches!(
+            record.obligation,
+            Some(crate::store::MobForkedParticipantObligationCause::AttachPending)
+        ) {
+            service
+                .attach(
+                    capability,
+                    &record.association.attachment_id,
+                    true,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(Self::forked_participant_refused)?;
+        }
         service
             .release(capability, &record.association.attachment_id)
             .await
@@ -46502,6 +46550,62 @@ impl MobActor {
             .send_bridge_command_typed(&peer, &command, std::time::Duration::from_secs(10))
             .await?;
         self.reconcile_host_status_response(host_id, status).await
+    }
+
+    async fn issue_host_binding_descriptor(
+        &mut self,
+        host_id: &str,
+    ) -> Result<super::bridge_protocol::WireHostBindingDescriptor, MobError> {
+        let dsl_host = mob_dsl::HostId::from(host_id.to_string());
+        let binding_generation = self.current_host_binding_generation(&dsl_host)?;
+        let (endpoint, pubkey, phase) = {
+            let state = self.dsl_authority.state();
+            (
+                state.host_endpoints.get(&dsl_host).cloned(),
+                state.host_public_keys.get(&dsl_host).copied(),
+                state.host_bind_phase.get(&dsl_host).copied(),
+            )
+        };
+        if phase != Some(mob_dsl::HostBindPhase::Bound) {
+            return Err(MobError::ForkedParticipantOwnerHostUnavailable {
+                host_id: host_id.to_string(),
+                rejection: crate::error::ForkedParticipantOwnerHostRejection::HostNotBound,
+            });
+        }
+        let (Some(endpoint), Some(pubkey)) = (endpoint, pubkey) else {
+            return Err(MobError::Internal(format!(
+                "bound host '{host_id}' has incomplete descriptor handoff facts"
+            )));
+        };
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            host_id,
+            host_id,
+            pubkey.0,
+            endpoint.0.as_str(),
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "bound host '{host_id}' has invalid descriptor handoff facts: {error}"
+            ))
+        })?;
+        let authority = self.supervisor_bridge.authority().await;
+        let supervisor = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&peer)
+            .await?;
+        let command = super::bridge_protocol::BridgeCommand::IssueHostBindingDescriptor(
+            super::bridge_protocol::BridgeIssueHostBindingDescriptorPayload {
+                supervisor: supervisor.into(),
+                epoch: authority.epoch,
+                binding_generation,
+                protocol_version: super::bridge_protocol::BridgeProtocolVersion::V6,
+                mob_id: self.definition.id.to_string(),
+            },
+        );
+        let response: super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse = self
+            .send_bridge_command_typed(&peer, &command, std::time::Duration::from_secs(10))
+            .await?;
+        Ok(response.descriptor)
     }
 
     /// Apply one current host inventory. Network releases are themselves

@@ -40,6 +40,10 @@ use tokio_with_wasm::alias::{
 };
 
 use crate::MobMcpState;
+use crate::temporary_council::{
+    MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilDeadline, TemporaryCouncilError,
+    TemporaryCouncilParticipantSpec, TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
+};
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult, PeerId, PeerName, PeerRoute,
     SendError, TrustedPeerDescriptor,
@@ -53,6 +57,7 @@ const TOOL_MOB_CREATE: &str = "mob_create";
 const TOOL_MOB_DESTROY: &str = "mob_destroy";
 const TOOL_MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
 const TOOL_FORK_OFF: &str = "fork_off";
+const TOOL_COUNCIL: &str = "council";
 const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
@@ -434,6 +439,10 @@ impl AgentMobToolSurface {
                 call.name
             )),
         }
+    }
+
+    fn map_council_error(call: ToolCallView<'_>, error: TemporaryCouncilError) -> ToolError {
+        ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
 
     fn authority_context_snapshot(&self) -> MobToolAuthorityContext {
@@ -1262,6 +1271,142 @@ impl AgentMobToolSurface {
         Self::encode_result(call, value)
     }
 
+    async fn dispatch_council(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_create_authority(call.name).await?;
+        let args: CouncilArgs = call
+            .parse_args()
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+        if args.participants.is_empty() {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                "a council needs at least one participant",
+            ));
+        }
+
+        let council_id = match args.council_id {
+            Some(council_id) => meerkat_mob::temporary_council::TemporaryCouncilId::new(council_id)
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?,
+            None => agent_council_id(&self.owner_bridge_session_id, call.id, call.name)?,
+        };
+        let mut definition = MobDefinition::explicit(MobId::from("agent-council-template"));
+        let mut participants = Vec::with_capacity(args.participants.len());
+        let mut target_identities = Vec::with_capacity(args.participants.len());
+
+        for (index, participant) in args.participants.into_iter().enumerate() {
+            let source_mob_id = MobId::from(participant.mob_id);
+            self.ensure_mob_scope_authority(call.name, &source_mob_id)
+                .await?;
+            let source = self
+                .bound_handle(&source_mob_id)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
+            let source_identity = AgentIdentity::from(participant.member_id);
+            let source_member = source
+                .list_members()
+                .await
+                .into_iter()
+                .find(|member| member.agent_identity == source_identity)
+                .ok_or_else(|| {
+                    ToolError::invalid_arguments(
+                        call.name,
+                        format!(
+                            "source member '{}' is not active in mob '{}'",
+                            source_identity, source_mob_id
+                        ),
+                    )
+                })?;
+            let source_definition = source.definition();
+            let source_profile = source_definition
+                .profiles
+                .get(&source_member.role)
+                .cloned()
+                .ok_or_else(|| {
+                    ToolError::execution_failed(format!(
+                        "tool '{}' could not resolve profile '{}' for source member '{}'",
+                        call.name, source_member.role, source_identity
+                    ))
+                })?;
+            merge_council_definition_dependencies(call, &mut definition, source_definition)?;
+
+            let order = u32::try_from(index).map_err(|_| {
+                ToolError::invalid_arguments(call.name, "too many council participants")
+            })?;
+            let target_profile = ProfileName::from(format!("council_p{order}"));
+            definition
+                .profiles
+                .insert(target_profile.clone(), source_profile);
+            let target_identity = AgentIdentity::from(format!("council-p{order}"));
+            let mut spec = TemporaryCouncilParticipantSpec::new(
+                order,
+                participant.role,
+                source_mob_id,
+                source_identity,
+                target_identity.clone(),
+                target_profile,
+            );
+            if let Some(prefix_message_count) = participant.prefix_message_count {
+                spec = spec.with_prefix_message_count(prefix_message_count);
+            }
+            target_identities.push(target_identity);
+            participants.push(spec);
+        }
+
+        let merge_back =
+            lower_agent_council_merge(call, args.merge, &target_identities, args.max_result_bytes)?;
+        let max_exchanges = args.max_exchanges.unwrap_or_else(|| {
+            u32::try_from(participants.len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(args.max_rounds)
+        });
+        let bounds = TemporaryCouncilBounds {
+            deadline: TemporaryCouncilDeadline::Relative {
+                after: std::time::Duration::from_secs(args.timeout_seconds),
+            },
+            max_rounds: args.max_rounds,
+            max_exchanges,
+            max_result_bytes: args.max_result_bytes,
+        };
+        let durability = match self.state.temporary_council_store().durability() {
+            meerkat_mob::temporary_council::TemporaryCouncilStoreDurability::Durable => {
+                meerkat_mob::temporary_council::TemporaryCouncilDurability::Durable
+            }
+            meerkat_mob::temporary_council::TemporaryCouncilStoreDurability::ProcessBound => {
+                meerkat_mob::temporary_council::TemporaryCouncilDurability::ProcessBound
+            }
+            _ => {
+                return Err(ToolError::execution_failed(
+                    "council custody reported an unsupported durability class",
+                ));
+            }
+        };
+        let mut request = TemporaryCouncilRequest::new(
+            council_id,
+            definition,
+            participants,
+            args.topic,
+            bounds,
+            merge_back,
+        );
+        request.durability = durability;
+        let outcome = self
+            .state
+            .temporary_council()
+            .run(request)
+            .await
+            .map_err(|error| Self::map_council_error(call, error))?;
+        Self::encode_result(
+            call,
+            json!({
+                "result": outcome.result,
+                "cleanup": outcome.cleanup,
+                "replayed": outcome.replayed,
+            }),
+        )
+    }
+
     #[inline(never)]
     fn ensure_spawn_member_scope_boxed<'a>(
         &'a self,
@@ -1692,6 +1837,7 @@ impl AgentMobToolSurface {
         dispatch_fork_off,
         objective_id: Option<meerkat_core::interaction::ObjectiveId>
     );
+    boxed_agent_dispatch!(dispatch_council_boxed, dispatch_council);
     boxed_agent_dispatch!(dispatch_mob_retire_member_boxed, dispatch_mob_retire_member);
     boxed_agent_dispatch!(dispatch_mob_check_member_boxed, dispatch_mob_check_member);
     boxed_agent_dispatch!(dispatch_mob_list_members_boxed, dispatch_mob_list_members);
@@ -1747,6 +1893,7 @@ impl AgentMobToolSurface {
                     .await
             }
             TOOL_FORK_OFF => self.dispatch_fork_off_boxed(call, objective_id).await,
+            TOOL_COUNCIL => self.dispatch_council_boxed(call).await,
             TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member_boxed(call).await,
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member_boxed(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members_boxed(call).await,
@@ -2085,6 +2232,22 @@ fn build_tool_defs_with_profile_support(
             typed_schema::<ForkOffArgs>(),
         ),
         tool_def(
+            TOOL_COUNCIL,
+            "Convene a bounded council of existing mob members for decision support.\n\n\
+             Each participant is forked at its source execution owner, preserving that member's \
+             transcript prefix, tools, auth, realm, and filesystem boundaries. The forks are seated \
+             in a real short-lived mob, wired together, run for bounded sequential rounds, and \
+             cleaned up automatically. Use this when a decision benefits from several existing \
+             specialists debating from their native contexts; use delegate for independent one-off \
+             work and fork_off for one durable continuation of the current member.\n\n\
+             Supply source participants as mob_id/member_id plus the role they should play in the \
+             discussion. The tool resolves and copies their existing profiles; you do not construct \
+             a temporary mob definition. The default merge asks the last participant for a bounded \
+             summary. council_id is optional and should be supplied only when you need an explicit \
+             idempotency key across retries.",
+            typed_schema::<CouncilArgs>(),
+        ),
+        tool_def(
             TOOL_MOB_RETIRE_MEMBER,
             "Retire a mob member and archive its session.\n\n\
              Retirement is graceful: the member's session is archived (preserving its history) \
@@ -2319,6 +2482,234 @@ struct ForkOffArgs {
     /// Maximum UTF-8 bytes returned, including any truncation marker.
     #[serde(default = "fork_off_default_max_text_bytes")]
     max_text_bytes: usize,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CouncilArgs {
+    /// Optional explicit idempotency key. Omit to derive one from this tool call.
+    #[serde(default)]
+    council_id: Option<String>,
+    /// Decision, question, or proposal the council should examine.
+    topic: String,
+    /// Existing mob members whose native contexts should participate.
+    participants: Vec<CouncilParticipantArgs>,
+    /// Sequential discussion rounds.
+    #[serde(default = "council_default_rounds")]
+    max_rounds: u32,
+    /// Total participant turns. Defaults to participants × rounds.
+    #[serde(default)]
+    max_exchanges: Option<u32>,
+    /// Per-exchange UTF-8 result ceiling.
+    #[serde(default = "council_default_result_bytes")]
+    max_result_bytes: usize,
+    /// Absolute execution budget for discussion, merge, and cleanup.
+    #[serde(default = "council_default_timeout_seconds")]
+    timeout_seconds: u64,
+    /// Explicit result merge policy. Defaults to a bounded summary by the last participant.
+    #[serde(default)]
+    merge: CouncilMergeArgs,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CouncilParticipantArgs {
+    /// Mob containing the source member.
+    mob_id: String,
+    /// Existing source member identity.
+    member_id: String,
+    /// Role this participant should play in the discussion.
+    role: String,
+    /// Optional exact committed transcript prefix length; omit for the current head.
+    #[serde(default)]
+    prefix_message_count: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+enum CouncilMergeArgs {
+    Summary {
+        /// Participant index asked to synthesize the decision. Defaults to the last participant.
+        #[serde(default)]
+        finalizer: Option<u32>,
+        /// UTF-8 byte ceiling for the summary.
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    Structured {
+        /// Participant index asked to produce the structured decision.
+        finalizer: u32,
+        schema_id: String,
+        schema_version: u32,
+        #[schemars(with = "serde_json::Value")]
+        json_schema: Value,
+        /// UTF-8 byte ceiling for the structured output.
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    SelectedExchanges {
+        /// Participant index whose council exchanges are selected.
+        participant: u32,
+        exchange_sequences: Vec<u32>,
+        /// Aggregate UTF-8 byte ceiling.
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    ArtifactReference {
+        /// Participant index asked to return a durable artifact claim.
+        participant: u32,
+        /// UTF-8 byte ceiling for the claim.
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    NoMerge,
+}
+
+impl Default for CouncilMergeArgs {
+    fn default() -> Self {
+        Self::Summary {
+            finalizer: None,
+            max_bytes: None,
+        }
+    }
+}
+
+const fn council_default_rounds() -> u32 {
+    2
+}
+
+const fn council_default_result_bytes() -> usize {
+    8 * 1024
+}
+
+const fn council_default_timeout_seconds() -> u64 {
+    5 * 60
+}
+
+const AGENT_COUNCIL_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x312d_5af0_861a_4ba8_a35d_d6b4_734a_25b9);
+
+fn agent_council_id(
+    owner_bridge_session_id: &SessionId,
+    tool_call_id: &str,
+    tool_name: &str,
+) -> Result<meerkat_mob::temporary_council::TemporaryCouncilId, ToolError> {
+    let seed = format!("{owner_bridge_session_id}:{tool_call_id}");
+    let id = uuid::Uuid::new_v5(&AGENT_COUNCIL_NAMESPACE, seed.as_bytes());
+    meerkat_mob::temporary_council::TemporaryCouncilId::new(format!("agent:{id}")).map_err(
+        |error| {
+            ToolError::execution_failed(format!(
+                "tool '{tool_name}' could not derive its canonical council id: {error}"
+            ))
+        },
+    )
+}
+
+fn council_target_identity(
+    call: ToolCallView<'_>,
+    targets: &[AgentIdentity],
+    index: u32,
+) -> Result<AgentIdentity, ToolError> {
+    targets
+        .get(usize::try_from(index).unwrap_or(usize::MAX))
+        .cloned()
+        .ok_or_else(|| {
+            ToolError::invalid_arguments(
+                call.name,
+                format!(
+                    "participant index {index} is out of range for {} participants",
+                    targets.len()
+                ),
+            )
+        })
+}
+
+fn lower_agent_council_merge(
+    call: ToolCallView<'_>,
+    merge: CouncilMergeArgs,
+    targets: &[AgentIdentity],
+    default_max_bytes: usize,
+) -> Result<MergeBackPolicy, ToolError> {
+    match merge {
+        CouncilMergeArgs::Summary {
+            finalizer,
+            max_bytes,
+        } => {
+            let index = finalizer.unwrap_or_else(|| {
+                u32::try_from(targets.len().saturating_sub(1)).unwrap_or(u32::MAX)
+            });
+            Ok(MergeBackPolicy::BoundedTextSummary {
+                finalizer: council_target_identity(call, targets, index)?,
+                max_bytes: max_bytes.unwrap_or(default_max_bytes),
+            })
+        }
+        CouncilMergeArgs::Structured {
+            finalizer,
+            schema_id,
+            schema_version,
+            json_schema,
+            max_bytes,
+        } => Ok(MergeBackPolicy::StructuredResult {
+            finalizer: council_target_identity(call, targets, finalizer)?,
+            contract: TemporaryCouncilStructuredContract::new(
+                schema_id,
+                schema_version,
+                json_schema,
+            ),
+            max_bytes: max_bytes.unwrap_or(default_max_bytes),
+        }),
+        CouncilMergeArgs::SelectedExchanges {
+            participant,
+            exchange_sequences,
+            max_bytes,
+        } => Ok(MergeBackPolicy::SelectedTranscript {
+            participant: council_target_identity(call, targets, participant)?,
+            exchange_sequences,
+            max_bytes: max_bytes.unwrap_or(default_max_bytes),
+        }),
+        CouncilMergeArgs::ArtifactReference {
+            participant,
+            max_bytes,
+        } => Ok(MergeBackPolicy::DurableArtifactReference {
+            participant: council_target_identity(call, targets, participant)?,
+            max_bytes: max_bytes.unwrap_or(default_max_bytes),
+        }),
+        CouncilMergeArgs::NoMerge => Ok(MergeBackPolicy::NoMerge),
+    }
+}
+
+fn merge_council_definition_dependencies(
+    call: ToolCallView<'_>,
+    target: &mut MobDefinition,
+    source: &MobDefinition,
+) -> Result<(), ToolError> {
+    for (name, model) in &source.models {
+        match target.models.get(name) {
+            Some(existing) if existing != model => {
+                return Err(ToolError::execution_failed(format!(
+                    "tool '{}' found conflicting custom model definitions named '{name}'",
+                    call.name
+                )));
+            }
+            Some(_) => {}
+            None => {
+                target.models.insert(name.clone(), model.clone());
+            }
+        }
+    }
+    for (name, skill) in &source.skills {
+        match target.skills.get(name) {
+            Some(existing) if existing != skill => {
+                return Err(ToolError::execution_failed(format!(
+                    "tool '{}' found conflicting skill sources named '{name}'",
+                    call.name
+                )));
+            }
+            Some(_) => {}
+            None => {
+                target.skills.insert(name.clone(), skill.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

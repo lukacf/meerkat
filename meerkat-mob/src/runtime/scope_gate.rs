@@ -138,9 +138,10 @@ impl MobCommand {
 
             // ── AdminHost: host-plane administration (A9: exactly
             //    bind/revoke hosts; supervisor authority is host-plane). ──
-            Self::BindHost { .. } | Self::RevokeHost { .. } | Self::RotateSupervisor { .. } => {
-                Some(ControlScope::AdminHost)
-            }
+            Self::BindHost { .. }
+            | Self::IssueHostBindingDescriptor { .. }
+            | Self::RevokeHost { .. }
+            | Self::RotateSupervisor { .. } => Some(ControlScope::AdminHost),
 
             // ── SubscribeEvents: the mob event journal surface ──
             Self::PollEvents { .. } | Self::ReplayAllEvents { .. } => {
@@ -352,6 +353,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::BindHost { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::IssueHostBindingDescriptor { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::RevokeHost { reply_tx, .. } => {

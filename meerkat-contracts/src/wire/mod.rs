@@ -29,7 +29,6 @@ pub mod skills;
 mod spec_digest;
 mod stream_read;
 pub mod supervisor_bridge;
-mod temporary_council;
 mod usage;
 mod workgraph;
 
@@ -294,26 +293,6 @@ pub use supervisor_bridge::{
     decode_bridge_command, supervisor_bridge_current_protocol_version,
     supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
     supervisor_bridge_supported_protocol_versions,
-};
-pub use temporary_council::{
-    MobTemporaryCouncilGetParams, MobTemporaryCouncilGetResult, MobTemporaryCouncilRecoverResult,
-    MobTemporaryCouncilRunParams, MobTemporaryCouncilRunResult, WireTemporaryCouncilAcquisition,
-    WireTemporaryCouncilArtifactClaim, WireTemporaryCouncilBounds,
-    WireTemporaryCouncilCapabilityProvenance, WireTemporaryCouncilClaimDetail,
-    WireTemporaryCouncilCleanup, WireTemporaryCouncilCleanupDebt,
-    WireTemporaryCouncilCleanupStatus, WireTemporaryCouncilConflictDetail,
-    WireTemporaryCouncilDeadline, WireTemporaryCouncilDurability,
-    WireTemporaryCouncilDurabilityDetail, WireTemporaryCouncilErrorDetail,
-    WireTemporaryCouncilExchange, WireTemporaryCouncilExchangeOutcome,
-    WireTemporaryCouncilExitReason, WireTemporaryCouncilFailureDetail,
-    WireTemporaryCouncilFailureKind, WireTemporaryCouncilMergeBack,
-    WireTemporaryCouncilMergeOutcome, WireTemporaryCouncilMergePolicyKind,
-    WireTemporaryCouncilOwnerRoute, WireTemporaryCouncilParticipant,
-    WireTemporaryCouncilParticipantCustody, WireTemporaryCouncilParticipantProvenance,
-    WireTemporaryCouncilRecord, WireTemporaryCouncilRecoveryReport, WireTemporaryCouncilRequest,
-    WireTemporaryCouncilResult, WireTemporaryCouncilReusePolicy, WireTemporaryCouncilScope,
-    WireTemporaryCouncilSelectedExchange, WireTemporaryCouncilSourceProvenance,
-    WireTemporaryCouncilStructuredContract, WireTemporaryCouncilStructuredContractIdentity,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

@@ -584,30 +584,6 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
         description: "Read outstanding cross-host route-install obligations for one mob.",
         schema: typed_schema::<MeerkatMobIdInput>,
     },
-    // ─── Temporary councils (issue #159) ────────────────────────────────
-    // Deliberate asymmetry, recorded as intent: `run` and `get` are exposed
-    // because this surface is the OWNER-local console
-    // (`MobControlPrincipal::Owner`) and they add no authority a caller that
-    // already holds `meerkat_mob_spawn`/`meerkat_mob_member_send` lacks —
-    // capability creation still passes the ordinary `MobHandle` scope checks
-    // under the same principal. `meerkat_mob_temporary_council_recover` is
-    // deliberately ABSENT: it is a realm-wide maintenance sweep that seals
-    // terminals, revokes capabilities, and destroys temporary mobs for
-    // councils this caller never started, which is exactly the plane-(b)
-    // admin class SD-4 keeps off an LLM-reachable tool surface. Recovery
-    // stays on the owner consoles (RPC `mob/temporary_council_recover`,
-    // REST `POST /mob/temporary-councils/recover`, `rkat mob council-recover`)
-    // while exact run admission may recover only its requested council id.
-    PublicTool {
-        name: "meerkat_mob_temporary_council_run",
-        description: "Run one bounded temporary council of source-owned forked participants and return its sealed result.",
-        schema: typed_schema::<meerkat_contracts::wire::MobTemporaryCouncilRunParams>,
-    },
-    PublicTool {
-        name: "meerkat_mob_temporary_council_get",
-        description: "Read one sealed temporary-council record projection (no capability custody).",
-        schema: typed_schema::<meerkat_contracts::wire::MobTemporaryCouncilGetParams>,
-    },
 ];
 
 pub fn public_tool_names() -> Vec<&'static str> {
@@ -688,8 +664,6 @@ const DISPATCH_TOOL_NAMES: &[&str] = &[
     "meerkat_mob_member_history",
     "meerkat_mob_hosts",
     "meerkat_mob_route_installs",
-    "meerkat_mob_temporary_council_run",
-    "meerkat_mob_temporary_council_get",
 ];
 
 pub async fn handle_public_tools_call(
@@ -1353,54 +1327,6 @@ pub async fn handle_public_tools_call(
             serde_json::to_value(result)
                 .map_err(|err| McpToolError::internal(format!("route installs serialize: {err}")))
         }
-        "meerkat_mob_temporary_council_run" => {
-            state
-                .admit_temporary_council_run()
-                .map_err(|err| McpToolError::from_mob(&err))?;
-            let input: meerkat_contracts::wire::MobTemporaryCouncilRunParams =
-                parse_args(arguments)?;
-            let request =
-                crate::temporary_council_wire::decode_temporary_council_request(input.request)
-                    .map_err(|err| {
-                        crate::temporary_council_wire::temporary_council_tool_error(&err)
-                    })?;
-            let bootstrap = crate::temporary_council_wire::decode_temporary_council_host_bootstrap(
-                input.host_bindings,
-            )
-            .map_err(|err| crate::temporary_council_wire::temporary_council_tool_error(&err))?;
-            let outcome = state
-                .temporary_council()
-                .run_with_host_bootstrap(request, bootstrap)
-                .await
-                .map_err(|err| crate::temporary_council_wire::temporary_council_tool_error(&err))?;
-            serde_json::to_value(
-                crate::temporary_council_wire::encode_temporary_council_outcome(&outcome),
-            )
-            .map_err(|err| McpToolError::internal(format!("council outcome serialize: {err}")))
-        }
-        "meerkat_mob_temporary_council_get" => {
-            state
-                .admit_temporary_council_read()
-                .map_err(|err| McpToolError::from_mob(&err))?;
-            let input: meerkat_contracts::wire::MobTemporaryCouncilGetParams =
-                parse_args(arguments)?;
-            let council_id =
-                crate::temporary_council_wire::parse_temporary_council_id(&input.council_id)
-                    .map_err(|err| {
-                        crate::temporary_council_wire::temporary_council_tool_error(&err)
-                    })?;
-            let record = state
-                .temporary_council()
-                .load(&council_id)
-                .await
-                .map_err(|err| crate::temporary_council_wire::temporary_council_tool_error(&err))?;
-            serde_json::to_value(meerkat_contracts::wire::MobTemporaryCouncilGetResult {
-                council: record
-                    .as_ref()
-                    .map(crate::temporary_council_wire::encode_temporary_council_record),
-            })
-            .map_err(|err| McpToolError::internal(format!("council record serialize: {err}")))
-        }
         _ => Err(McpToolError::method_not_found(format!(
             "Method not found: {name}"
         ))),
@@ -1722,28 +1648,10 @@ mod tests {
                 "{name} must be routable, advertised, and dispatched"
             );
         }
-        // Issue #159: the two owner-local temporary-council tools.
-        for name in [
-            "meerkat_mob_temporary_council_run",
-            "meerkat_mob_temporary_council_get",
-        ] {
-            assert!(
-                table_names.contains(name),
-                "{name} must be routable, advertised, and dispatched"
-            );
-        }
-        // The realm-wide council recovery sweep is a deliberate absence, not
-        // an oversight: it seals terminals, revokes capabilities, and destroys
-        // temporary mobs for councils this caller never started, which is the
-        // same plane-(b) admin class SD-4 keeps off an LLM-reachable surface.
-        assert!(
-            !table_names.contains("meerkat_mob_temporary_council_recover"),
-            "the council recovery sweep must stay off the tool surface"
-        );
         assert_eq!(
             table_names.len(),
-            38,
-            "expected exactly 38 public tools across all surfaces"
+            36,
+            "expected exactly 36 public tools across all surfaces"
         );
     }
 

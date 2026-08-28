@@ -3302,6 +3302,10 @@ pub struct MobForkedParticipantTargetIncarnation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MobForkedParticipantObligationCause {
+    /// The target recorded custody before asking the source owner to attach.
+    /// Recovery replays the exact attach and then releases it, so a crash on
+    /// either side of the attach call cannot park an unowned lease.
+    AttachPending,
     /// The attach was admitted and the seating spawn has not reported an
     /// outcome yet. A process that dies here leaves exactly this row.
     SpawnInFlight,
@@ -3321,6 +3325,7 @@ impl MobForkedParticipantObligationCause {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AttachPending => "attach_pending",
             Self::SpawnInFlight => "spawn_in_flight",
             Self::AmbiguousSpawn => "ambiguous_spawn",
             Self::ReleaseUnproven => "release_unproven",

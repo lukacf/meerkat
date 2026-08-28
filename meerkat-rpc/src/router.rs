@@ -185,7 +185,7 @@ pub fn compose_rpc_mob_state(
     if let Some(acceptor) = controlling_acceptor {
         state = state.with_controlling_acceptor(acceptor);
     }
-    let state = state.into_shared();
+    let state = Arc::new(state);
     state.start_workgraph_flow_reconciler();
     state
 }
@@ -2493,18 +2493,6 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/member_live_control" => {
                 handlers::mob::handle_member_live_control(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/temporary_council_run" => {
-                handlers::mob::handle_temporary_council_run(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/temporary_council_get" => {
-                handlers::mob::handle_temporary_council_get(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/temporary_council_recover" => {
-                handlers::mob::handle_temporary_council_recover(id, &self.mob_state).await
             }
             #[cfg(feature = "comms")]
             "comms/send" => self.handle_comms_send(id, params).await,

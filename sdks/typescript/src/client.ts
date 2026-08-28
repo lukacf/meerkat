@@ -217,11 +217,6 @@ import type {
   MobRevokeScopesParams as RpcMobRevokeScopesParams,
   MobRevokeScopesResult as RpcMobRevokeScopesResult,
   MobRouteInstallsResult as RpcMobRouteInstallsResult,
-  MobTemporaryCouncilGetResult as RpcMobTemporaryCouncilGetResult,
-  MobTemporaryCouncilRecoverResult as RpcMobTemporaryCouncilRecoverResult,
-  MobTemporaryCouncilRunParams as RpcMobTemporaryCouncilRunParams,
-  MobTemporaryCouncilRunResult as RpcMobTemporaryCouncilRunResult,
-  WireTemporaryCouncilRequest as RpcWireTemporaryCouncilRequest,
   WireHostBindingDescriptor as RpcWireHostBindingDescriptor,
   WireHostCapabilityFlags as RpcWireHostCapabilityFlags,
   WireRouteInstallObligation as RpcWireRouteInstallObligation,
@@ -2713,59 +2708,6 @@ export class MeerkatClient {
     MeerkatClient.requireStringField(result, "host_id", context);
     MeerkatClient.requireStringArray(result.released_members, `${context}: released_members`);
     return result as unknown as RpcMobRevokeHostResult;
-  }
-
-  /**
-   * Run one bounded temporary council to a durable terminal outcome.
-   *
-   * The runtime owns the coordinator task: abandoning this call abandons the
-   * response, never the execution. `hostBindings` carries the one-time host
-   * bootstrap needed before a HOST-owned participant can be seated; it is
-   * never fingerprinted and never persisted.
-   */
-  async runTemporaryCouncil(
-    request: RpcWireTemporaryCouncilRequest,
-    hostBindings?: RpcWireHostBindingDescriptor[],
-  ): Promise<RpcMobTemporaryCouncilRunResult> {
-    const params: RpcMobTemporaryCouncilRunParams =
-      hostBindings !== undefined && hostBindings.length > 0
-        ? { request, host_bindings: hostBindings }
-        : { request };
-    const result = await this.request("mob/temporary_council_run", params);
-    const context = "Invalid mob/temporary_council_run response";
-    MeerkatClient.requireRecord(result.result, "result", context);
-    MeerkatClient.requireRecord(result.cleanup, "cleanup", context);
-    MeerkatClient.requireBooleanField(result, "replayed", context);
-    return result as unknown as RpcMobTemporaryCouncilRunResult;
-  }
-
-  /**
-   * Read one sealed temporary-council record projection. An unknown council
-   * is an ordinary absence (`council` undefined), not an error.
-   */
-  async getTemporaryCouncil(
-    councilId: string,
-  ): Promise<RpcMobTemporaryCouncilGetResult> {
-    const result = await this.request("mob/temporary_council_get", {
-      council_id: councilId,
-    });
-    const context = "Invalid mob/temporary_council_get response";
-    if (result.council !== undefined && result.council !== null) {
-      MeerkatClient.requireRecord(result.council, "council", context);
-    }
-    return result as unknown as RpcMobTemporaryCouncilGetResult;
-  }
-
-  /**
-   * Converge every unfinished temporary council (owner maintenance). Seals a
-   * typed interrupted terminal for a council whose coordinator died and
-   * retries outstanding cleanup; never re-executes a council.
-   */
-  async recoverTemporaryCouncils(): Promise<RpcMobTemporaryCouncilRecoverResult> {
-    const result = await this.request("mob/temporary_council_recover", {});
-    const context = "Invalid mob/temporary_council_recover response";
-    MeerkatClient.requireRecordArray(result.reports, `${context}: reports`);
-    return result as unknown as RpcMobTemporaryCouncilRecoverResult;
   }
 
   /** Hard-cancel a mob member; `reason` is required. */

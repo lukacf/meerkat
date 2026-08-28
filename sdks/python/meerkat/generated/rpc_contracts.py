@@ -202,11 +202,6 @@ from .types import (
     MobStreamOpenResult,
     MobSubmitWorkParams,
     MobSubmitWorkResult,
-    MobTemporaryCouncilGetParams,
-    MobTemporaryCouncilGetResult,
-    MobTemporaryCouncilRecoverResult,
-    MobTemporaryCouncilRunParams,
-    MobTemporaryCouncilRunResult,
     MobTurnStartParams,
     MobUnwireParams,
     MobUnwireResult,
@@ -1619,30 +1614,6 @@ class RpcRequest(Protocol):
         params: MobMemberLiveControlParams,
         /,
     ) -> Awaitable[BridgeLiveControlOutcome]: ...
-
-    @overload
-    def __call__(
-        self,
-        method: Literal["mob/temporary_council_run"],
-        params: MobTemporaryCouncilRunParams,
-        /,
-    ) -> Awaitable[MobTemporaryCouncilRunResult]: ...
-
-    @overload
-    def __call__(
-        self,
-        method: Literal["mob/temporary_council_get"],
-        params: MobTemporaryCouncilGetParams,
-        /,
-    ) -> Awaitable[MobTemporaryCouncilGetResult]: ...
-
-    @overload
-    def __call__(
-        self,
-        method: Literal["mob/temporary_council_recover"],
-        params: dict[str, Any],
-        /,
-    ) -> Awaitable[MobTemporaryCouncilRecoverResult]: ...
 
     @overload
     def __call__(

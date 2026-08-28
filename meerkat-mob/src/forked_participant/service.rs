@@ -738,7 +738,7 @@ impl ForkedParticipantService {
                 {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        self.record_activation_failure(&record.capability_id)
+                        self.fail_activation_and_archive(&record.capability_id, &planned_child)
                             .await?;
                         return Err(ForkedParticipantError::Session(error));
                     }
@@ -747,7 +747,7 @@ impl ForkedParticipantService {
         };
 
         if outcome.child_session_id != planned_child {
-            self.record_activation_failure(&record.capability_id)
+            self.fail_activation_and_archive(&record.capability_id, &planned_child)
                 .await?;
             return Err(ForkedParticipantError::PlannedChildConflict {
                 detail: "source runtime created a child other than the planned identity"
@@ -758,7 +758,7 @@ impl ForkedParticipantService {
         let capability = ForkedParticipantRef::new_source_owned(
             record.capability_id.clone(),
             record.sidecar.source_identity.clone(),
-            planned_child,
+            planned_child.clone(),
             record.sidecar.owner_route.clone(),
             ForkedParticipantProvenance {
                 source_session_id: record.sidecar.source_session_id.clone(),
@@ -771,8 +771,17 @@ impl ForkedParticipantService {
             ForkedParticipantRevocationId::for_request(&record.request_id),
             ForkedParticipantCleanupId::for_request(&record.request_id),
         );
-        self.record_activation(&record.capability_id, capability)
+        match self
+            .record_activation(&record.capability_id, capability)
             .await
+        {
+            Ok(capability) => Ok(capability),
+            Err(error) => {
+                self.fail_activation_and_archive(&record.capability_id, &planned_child)
+                    .await?;
+                Err(error)
+            }
+        }
     }
 
     /// Prove that a durable planned child really is this request's child.
@@ -904,6 +913,36 @@ impl ForkedParticipantService {
             })
         })
         .await
+    }
+
+    /// Fail closed after any activation path that did not return a capability.
+    ///
+    /// The planned child identity was reserved before the fork, so it is the
+    /// only cleanup target that remains valid even when the fork or activation
+    /// write returned ambiguously. Both operations are attempted: a failed
+    /// lifecycle write must not prevent the deterministic child archive.
+    async fn fail_activation_and_archive(
+        &self,
+        capability_id: &ForkedParticipantCapabilityId,
+        planned_child: &SessionId,
+    ) -> Result<(), ForkedParticipantError> {
+        let activation_failure = self.record_activation_failure(capability_id).await;
+        let archive = self.archive_converging(planned_child).await;
+        match (activation_failure, archive) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(activation_error), Err(archive_error)) => {
+                tracing::error!(
+                    capability = %capability_id.correlation_hint(),
+                    child_session_id = %planned_child,
+                    activation_error = %activation_error,
+                    archive_error = %archive_error,
+                    "fork activation failure and deterministic child archive both failed"
+                );
+                Err(archive_error)
+            }
+        }
     }
 
     /// Attach one participant to a temporary mob.

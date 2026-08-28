@@ -422,7 +422,7 @@ backend_cases!(
     concurrent_same_request_converges_on_one_capability,
     create_records_exact_prefix_provenance,
     create_replay_returns_the_same_capability_without_forking_again,
-    crash_after_child_save_retries_onto_the_same_planned_child,
+    crash_after_child_save_archives_then_retries_the_same_planned_identity,
     create_failure_is_retryable_by_the_same_request,
     tampered_reference_never_resolves,
     attach_replay_does_not_increment_and_concurrent_attach_is_denied,
@@ -558,7 +558,7 @@ async fn create_replay_returns_the_same_capability_without_forking_again(harness
     );
 }
 
-async fn crash_after_child_save_retries_onto_the_same_planned_child(harness: Harness) {
+async fn crash_after_child_save_archives_then_retries_the_same_planned_identity(harness: Harness) {
     let request = request("req-crash");
     harness.register_source(&request);
     harness.runtime.crash_after_child_save(true);
@@ -581,8 +581,15 @@ async fn crash_after_child_save_retries_onto_the_same_planned_child(harness: Har
         record.sidecar.capability_ref.is_none(),
         "a crashed create must not publish a capability"
     );
+    assert_eq!(
+        harness.runtime.archived(),
+        vec![planned_child.clone()],
+        "an ambiguous activation must archive the deterministic planned child"
+    );
 
     // Reopen, as a restarted owner process would, and retry the exact request.
+    // Cleanup removed the ambiguous child, so the source repeats the fork under
+    // the same pre-reserved identity rather than adopting uncertain state.
     let reopened = harness.reopen();
     let capability = reopened.create(&request, now()).await.expect("retry");
     assert_eq!(
@@ -592,8 +599,8 @@ async fn crash_after_child_save_retries_onto_the_same_planned_child(harness: Har
     );
     assert_eq!(
         harness.runtime.fork_calls(),
-        1,
-        "the retry must discover the saved child instead of forking again"
+        2,
+        "the retry must recreate only the same planned identity"
     );
     assert_eq!(
         harness.store.list_all().await.expect("list").len(),
@@ -1346,14 +1353,26 @@ async fn retry_verifies_inherited_execution_metadata_against_source_evidence() {
         let request = request("req-inherited-policy");
         harness.register_source(&request);
 
-        // Crash after the child was saved, then corrupt the durable child's
-        // inherited execution metadata before each retry.
+        // Simulate a process death after the child save but before the service
+        // can run its in-process compensating archive, then corrupt the durable
+        // child's inherited execution metadata before each restart retry.
+        let reservation = harness
+            .service
+            .reserve(&request, now())
+            .await
+            .expect("reserve planned child");
         harness.runtime.crash_after_child_save(true);
         harness
-            .service
-            .create(&request, now())
+            .runtime
+            .fork_planned_child(PlannedForkRequest {
+                source_identity: request.source_identity.clone(),
+                owner_realm: request.owner_route.realm_id().clone(),
+                source_session_id: request.source_session_id.clone(),
+                planned_child_session_id: reservation.planned_child_session_id,
+                prefix_message_count: request.prefix_message_count,
+            })
             .await
-            .expect_err("the crashed create fails");
+            .expect_err("the source process dies after saving the child");
         let record = harness
             .store
             .load_by_request_id(&request.request_id)

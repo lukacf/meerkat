@@ -159,129 +159,64 @@ The council id is the idempotency key.
 Caller cancellation abandons the **response**, not the execution: the council
 runs to its deadline, seals its result, and cleans up regardless.
 
-## Surfaces
+## Agent Tool
 
-<CodeGroup>
+Temporary councils are invoked by agents through the `council` mob tool,
+beside `delegate` and `fork_off`. They are deliberately absent from CLI, REST,
+JSON-RPC, public MCP, and generated SDKs: convening a council is an agent
+decision-support action, not a human-operated lifecycle surface.
 
-```bash CLI
-# The request is JSON-only: definition template, participants, bounds, and
-# one merge policy would be an unusable flag surface.
-rkat mob council-run --request ./council.json
+The caller names existing source members and the question to decide. The tool
+resolves each member's current profile and placement, synthesizes the explicit
+temporary `MobDefinition`, derives stable branch identities, runs the council,
+and returns the sealed result through the ordinary structured tool-result
+channel.
 
-# HOST-owned participants need their host bound first (repeatable).
-rkat mob council-run --request ./council.json \
-  --host-binding ./host-a.json --host-binding ./host-b.json
+### Example Tool Call
 
-rkat mob council-get design-review-42
-rkat mob council-recover
-```
-
-```json JSON-RPC
-{"jsonrpc":"2.0","id":1,"method":"mob/temporary_council_run",
- "params":{"request":{ "...": "see council.json below" }}}
-
-{"jsonrpc":"2.0","id":2,"method":"mob/temporary_council_get",
- "params":{"council_id":"design-review-42"}}
-
-{"jsonrpc":"2.0","id":3,"method":"mob/temporary_council_recover"}
-```
-
-```bash REST
-curl -X POST localhost:8080/mob/temporary-councils/run \
-  -H 'content-type: application/json' -d @run.json
-
-curl localhost:8080/mob/temporary-councils/design-review-42
-
-curl -X POST localhost:8080/mob/temporary-councils/recover
-```
-
-```python Python
-outcome = await client.run_temporary_council(request)
-record = await client.get_temporary_council("design-review-42")
-reports = await client.recover_temporary_councils()
-```
-
-```typescript TypeScript
-const outcome = await client.runTemporaryCouncil(request);
-const record = await client.getTemporaryCouncil("design-review-42");
-const reports = await client.recoverTemporaryCouncils();
-```
-
-</CodeGroup>
-
-### Example Request
-
-```json council.json
+```json
 {
-  "council_id": "design-review-42",
-  "definition_template": {
-    "id": "replaced-by-the-coordinator",
-    "profiles": {
-      "council": { "model": "claude-sonnet-4-6" }
-    }
-  },
+  "topic": "Is the storage migration safe to ship this week?",
   "participants": [
     {
-      "order": 0,
-      "role": "author",
-      "source_mob_id": "design-team",
-      "source_identity": "author",
-      "target_identity": "author-branch",
-      "target_profile": "council",
-      "scope": "invoke_and_observe"
+      "mob_id": "design-team",
+      "member_id": "author",
+      "role": "author"
     },
     {
-      "order": 1,
+      "mob_id": "platform-team",
+      "member_id": "reviewer",
       "role": "reviewer",
-      "source_mob_id": "platform-team",
-      "source_identity": "reviewer",
-      "target_identity": "reviewer-branch",
-      "target_profile": "council",
-      "prefix_message_count": 12,
-      "scope": "invoke_and_observe"
+      "prefix_message_count": 12
     }
   ],
-  "topic": "Is the storage migration safe to ship this week?",
-  "bounds": {
-    "deadline": { "kind": "relative", "after_millis": 300000 },
-    "max_rounds": 2,
-    "max_exchanges": 8,
-    "max_result_bytes": 8192
-  },
-  "merge_back": {
-    "policy": "bounded_text_summary",
-    "finalizer": "reviewer-branch",
+  "max_rounds": 2,
+  "max_exchanges": 8,
+  "max_result_bytes": 8192,
+  "timeout_seconds": 300,
+  "merge": {
+    "policy": "summary",
+    "finalizer": 1,
     "max_bytes": 4096
-  },
-  "durability": "durable"
+  }
 }
 ```
 
-### Public MCP
+`council_id` is optional. Omit it for an id derived from the tool call; provide
+one when the agent needs an explicit idempotency key across retries. The default
+merge is a bounded summary by the last participant. Other policies are
+`structured`, `selected_exchanges`, `artifact_reference`, and `no_merge`.
 
-The owner-local public MCP surface exposes `meerkat_mob_temporary_council_run`
-and `meerkat_mob_temporary_council_get`. It deliberately does **not** expose
-`recover`: a recovery sweep seals terminals, revokes capabilities, and destroys
-temporary mobs for councils the caller never started, which is the same
-realm-wide administrative class that keeps host binding and grant
-administration off an LLM-reachable tool surface. Recovery stays on the owner
-consoles. Exact run admission may recover only its requested council id; it
-does not perform a realm-wide sweep.
-
-Agent-facing delegation tools expose no council verb at all: council
-participation mints capabilities over members of arbitrary mobs, and that
-decision belongs to a principal-lane caller.
+The tool is available only when the calling agent's generated mob authority can
+create a temporary mob and manage every source mob in the participant list.
 
 ## Errors
 
-| Condition | Code | `data` |
-|-----------|------|--------|
-| Request refused before any side effect | `invalid_params` | `{kind: "invalid_request", detail}` |
-| Council id bound to a different request | `duplicate_input` | `{council_id, stored_fingerprint, presented_fingerprint}` |
-| Another coordinator holds a live claim | `session_busy` | `{council_id, current_claim_epoch}` |
-| This executor's claim was superseded | `stale_fence` | `{council_id, current_claim_epoch}` |
-| `durable` declared against a process-bound store | `capability_unavailable` | `{council_id, required, available}` |
-| Custody, lifecycle, mob, or coordinator-task fault | `internal_error` | `{kind, detail}` |
+Malformed input and missing mob authority are ordinary tool errors. Once a
+council is admitted, its structured result separates the discussion terminal
+from cleanup status. A repeated explicit `council_id` with the same arguments
+joins or replays the original run; the same id with different arguments is a
+conflict.
 
 Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are
 **not** errors: they are typed `exit_reason` values on a sealed result, so you
@@ -292,4 +227,3 @@ was seated.
 
 - [Mobs Guide](/guides/mobs)
 - [Mob Architecture](/reference/mob-architecture)
-- [JSON-RPC methods](/api/rpc)

@@ -104,6 +104,34 @@ filegroup(
     urls = ["https://github.com/Kitware/CMake/releases/download/v3.30.9/cmake-3.30.9-macos-universal.tar.gz"],
 )
 
+CMAKE_LINUX_BUILD_FILE = '''
+exports_files(
+    ["bin/cmake"],
+    visibility = ["//visibility:public"],
+)
+filegroup(
+    name = "runtime",
+    srcs = glob(["share/cmake-3.30/**"]),
+    visibility = ["//visibility:public"],
+)
+'''
+
+http_archive(
+    name = "cmake_linux_aarch64",
+    build_file_content = CMAKE_LINUX_BUILD_FILE,
+    sha256 = "9ae2b709ed3aaef504dd25fb6abe7dd4df68cd46824e45d7ee89ae57951d215a",
+    strip_prefix = "cmake-3.30.9-linux-aarch64",
+    urls = ["https://github.com/Kitware/CMake/releases/download/v3.30.9/cmake-3.30.9-linux-aarch64.tar.gz"],
+)
+
+http_archive(
+    name = "cmake_linux_x86_64",
+    build_file_content = CMAKE_LINUX_BUILD_FILE,
+    sha256 = "9114e33358a9efc93d6ea658805280fc3201b882b944a4d946edd9472fd1eec7",
+    strip_prefix = "cmake-3.30.9-linux-x86_64",
+    urls = ["https://github.com/Kitware/CMake/releases/download/v3.30.9/cmake-3.30.9-linux-x86_64.tar.gz"],
+)
+
 http_archive(
     name = "python_darwin_arm64",
     build_file_content = '''
@@ -202,6 +230,30 @@ crate.annotation_select(
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
     ],
+    repositories = ["meerkat_live_crates"],
+    version = "0.2.2",
+)
+crate.annotation_select(
+    crate = "audiopus_sys",
+    build_script_data = ["@@+http_archive+cmake_linux_aarch64//:runtime"],
+    build_script_env = {
+        "CMAKE": "$(execpath @@+http_archive+cmake_linux_aarch64//:bin/cmake)",
+        "NUM_JOBS": "8",
+    },
+    build_script_tools = ["@@+http_archive+cmake_linux_aarch64//:bin/cmake"],
+    triples = ["aarch64-unknown-linux-gnu"],
+    repositories = ["meerkat_live_crates"],
+    version = "0.2.2",
+)
+crate.annotation_select(
+    crate = "audiopus_sys",
+    build_script_data = ["@@+http_archive+cmake_linux_x86_64//:runtime"],
+    build_script_env = {
+        "CMAKE": "$(execpath @@+http_archive+cmake_linux_x86_64//:bin/cmake)",
+        "NUM_JOBS": "8",
+    },
+    build_script_tools = ["@@+http_archive+cmake_linux_x86_64//:bin/cmake"],
+    triples = ["x86_64-unknown-linux-gnu"],
     repositories = ["meerkat_live_crates"],
     version = "0.2.2",
 )

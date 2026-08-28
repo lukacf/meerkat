@@ -106,6 +106,42 @@ fn workspace_member_dirs(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
+fn linux_release_rbe_provides_hermetic_cmake_for_vendored_opus() {
+    let root = repo_root();
+    let module = read(root.join("MODULE.bazel"));
+
+    for (architecture, digest, triple) in [
+        (
+            "aarch64",
+            "9ae2b709ed3aaef504dd25fb6abe7dd4df68cd46824e45d7ee89ae57951d215a",
+            "aarch64-unknown-linux-gnu",
+        ),
+        (
+            "x86_64",
+            "9114e33358a9efc93d6ea658805280fc3201b882b944a4d946edd9472fd1eec7",
+            "x86_64-unknown-linux-gnu",
+        ),
+    ] {
+        let repository = format!("cmake_linux_{architecture}");
+        let executable = format!("@@+http_archive+{repository}//:bin/cmake");
+        assert!(
+            module.contains(&format!("name = \"{repository}\""))
+                && module.contains(&format!("sha256 = \"{digest}\""))
+                && module.contains(&format!(
+                    "strip_prefix = \"cmake-3.30.9-linux-{architecture}\""
+                ))
+                && module.contains(&format!(
+                    "build_script_data = [\"@@+http_archive+{repository}//:runtime\"]"
+                ))
+                && module.contains(&format!("\"CMAKE\": \"$(execpath {executable})\""))
+                && module.contains(&format!("build_script_tools = [\"{executable}\"]"))
+                && module.contains(&format!("triples = [\"{triple}\"]")),
+            "Linux {architecture} release RBE must pin CMake and pass its executable plus runtime to audiopus_sys"
+        );
+    }
+}
+
+#[test]
 fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
     let root = repo_root();
     let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));

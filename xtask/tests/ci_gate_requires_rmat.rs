@@ -73,6 +73,10 @@ fn ci_runs_one_authoritative_buildbuddy_lane() {
     );
     assert!(ci.contains("name: Enforce push-to-terminal budget"));
     assert!(ci.contains("MAX_SECONDS: \"1200\""));
+    assert!(
+        ci.contains("id-token: write"),
+        "the caller must grant the OIDC permission requested by the reusable BuildBuddy workflow"
+    );
 }
 
 #[test]

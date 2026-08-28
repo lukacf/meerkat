@@ -1359,10 +1359,47 @@ impl TemporaryCouncilCoordinator {
         record.claim_lease_expires_at = active_claim_lease_expiry(&self.state, record.deadline);
         // The deadline the record carries is authority; a takeover inherits it.
         validated.deadline = Some(record.deadline);
-        let record = store
-            .commit(&record)
-            .await
-            .map_err(TemporaryCouncilError::store)?;
+        let record = match store.commit(&record).await {
+            Ok(record) => record,
+            Err(MobStoreError::CasConflict(_)) => {
+                let winner = store
+                    .load(&council_id)
+                    .await
+                    .map_err(TemporaryCouncilError::store)?
+                    .ok_or_else(|| TemporaryCouncilError::CoordinatorUnavailable {
+                        detail: format!(
+                            "council {council_id} claim conflicted but no winning record could be loaded"
+                        ),
+                    })?;
+                if winner.result.is_some() {
+                    return self.admit_existing_record(&validated, winner).await;
+                }
+                let lease_expired =
+                    winner.claim_lease_expires_at <= self.state.temporary_council_now();
+                let (_, outcome) = present_claim(&winner.machine_state, &claim_id, lease_expired)?;
+                return match outcome {
+                    ClaimOutcome::Busy {
+                        current_claim_epoch,
+                    } => Err(TemporaryCouncilError::HeldByAnotherCoordinator {
+                        council_id,
+                        current_claim_epoch,
+                    }),
+                    ClaimOutcome::Settled => Err(TemporaryCouncilError::CoordinatorUnavailable {
+                        detail: format!(
+                            "council {council_id} settled during claim arbitration without a result"
+                        ),
+                    }),
+                    ClaimOutcome::Granted(_) => {
+                        Err(TemporaryCouncilError::CoordinatorUnavailable {
+                            detail: format!(
+                                "council {council_id} claim conflict had no durable winning claim"
+                            ),
+                        })
+                    }
+                };
+            }
+            Err(error) => return Err(TemporaryCouncilError::store(error)),
+        };
 
         let state = self.state.clone();
         // OWNED task: the caller's await may be dropped; this may not.
@@ -2109,7 +2146,7 @@ impl CouncilRun {
                 }
             };
             let source_profile = source
-                .effective_member_profile(&custody.source_identity)
+                .effective_member_profile_witness(&custody.source_identity)
                 .await
                 .map_err(
                     |error| TemporaryCouncilExitReason::ParticipantSeatingFailed {
@@ -2132,7 +2169,7 @@ impl CouncilRun {
                         custody.target_profile
                     ),
                 })?;
-            if !same_source_execution_profile(target_profile, &source_profile) {
+            if !same_source_execution_profile(target_profile, source_profile.profile()) {
                 return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
                     participant_order: custody.order,
                     detail: format!(
@@ -2172,9 +2209,10 @@ impl CouncilRun {
             // executes at the source owner and can block on a remote host.
             let created = tokio::time::timeout(
                 remaining,
-                source.create_forked_participant(
+                source.create_forked_participant_with_profile_witness(
                     self.state.console_principal_snapshot(),
                     custody.source_identity.clone(),
+                    source_profile,
                     custody.capability_request_id.clone(),
                     self.validated
                         .request

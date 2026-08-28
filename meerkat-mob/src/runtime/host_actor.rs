@@ -6013,6 +6013,10 @@ pub struct MobHostActor {
     host_comms: Arc<dyn CoreCommsRuntime>,
     host_dsl: Arc<meerkat_runtime::HandleDslAuthority>,
     bootstrap_token: HostBootstrapTokenSlot,
+    /// Actor-lifetime secret for target-bound delegated council proofs. Unlike
+    /// the operator bootstrap token, successful unrelated binds do not rotate
+    /// it and invalidate already-issued independent grants.
+    delegated_bind_key: String,
     capabilities: HostCapabilitiesComposer,
     capability_facts: HostCapabilityFacts,
     descriptor: DescriptorRefresher,
@@ -6226,6 +6230,7 @@ pub async fn spawn_mob_host_actor(
         host_comms,
         host_dsl,
         bootstrap_token,
+        delegated_bind_key: mint_bootstrap_token(),
         capabilities,
         capability_facts,
         descriptor,
@@ -6347,7 +6352,7 @@ async fn run_host_responder(
     let notify = actor.host_runtime.inbox_notify();
     let mut forked_participant_tick = tokio::time::interval(forked_participant_sweep_interval);
     forked_participant_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
+    'responder: loop {
         let notified = notify.notified();
         tokio::pin!(notified);
         // `inbox_notify` fires with `notify_waiters()`, so merely creating the
@@ -6372,7 +6377,7 @@ async fn run_host_responder(
                         %error,
                         "host peer-input responder stopped with FIFO head retained"
                     );
-                    return;
+                    break 'responder;
                 }
             }
         }
@@ -10251,7 +10256,7 @@ impl MobHostActor {
         let descriptor = self.descriptor.descriptor("");
         let delegated_bootstrap_proof =
             crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
-                self.bootstrap_token.current(),
+                &self.delegated_bind_key,
                 &payload.target_supervisor,
                 &payload.target_mob_id,
                 &expected_host_peer_id,
@@ -10590,14 +10595,17 @@ impl MobHostActor {
                     .delegated_bootstrap_proof
                     .as_ref()
                     .is_some_and(|proof| {
-                        proof
-                            == &crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
-                                self.bootstrap_token.current(),
+                        meerkat_comms::constant_time_str_eq(
+                            proof.as_str(),
+                            crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
+                                &self.delegated_bind_key,
                                 &payload.supervisor,
                                 &payload.mob_id,
                                 &payload.expected_host_peer_id,
                                 &payload.expected_address,
                             )
+                            .as_str(),
+                        )
                     }),
             accepted_capabilities: capabilities,
             supervisor,

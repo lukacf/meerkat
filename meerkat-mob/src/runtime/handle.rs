@@ -518,7 +518,7 @@ pub enum SpawnMemberAdmission {
 /// The private field makes this unforgeable outside `meerkat-mob`; adaptive
 /// driver code can hold and pass it back to the narrow adaptive seam, but it
 /// cannot manufacture one or write raw machine inputs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdaptiveDriverCapability {
     adaptive_run_id: String,
     _private: (),
@@ -1277,6 +1277,21 @@ pub struct MobMemberListEntry {
     pub(crate) current_session_id: Option<SessionId>,
     #[serde(skip)]
     pub(crate) current_bridge_session_id: Option<SessionId>,
+}
+
+/// Immutable source-generation/profile observation used to make council
+/// capability creation atomic with its no-widening check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberExecutionProfileWitness {
+    pub(crate) generation: Generation,
+    pub(crate) profile: crate::profile::Profile,
+}
+
+impl MemberExecutionProfileWitness {
+    #[must_use]
+    pub fn profile(&self) -> &crate::profile::Profile {
+        &self.profile
+    }
 }
 
 impl MobMemberListEntry {
@@ -6280,6 +6295,18 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<crate::profile::Profile, MobError> {
+        Ok(self
+            .effective_member_profile_witness(identity)
+            .await?
+            .profile)
+    }
+
+    /// Capture the exact live generation and effective profile together.
+    #[doc(hidden)]
+    pub async fn effective_member_profile_witness(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberExecutionProfileWitness, MobError> {
         let roster = self.roster.read().await;
         let entry = roster
             .get(identity)
@@ -6302,7 +6329,13 @@ impl MobHandle {
         if let Some(model) = &entry.effective_model_override {
             profile.model.clone_from(model);
         }
-        Ok(profile)
+        profile.image_generation_provider = profile
+            .image_generation_provider
+            .or(self.definition.image_generation_provider);
+        Ok(MemberExecutionProfileWitness {
+            generation: entry.generation,
+            profile,
+        })
     }
 
     /// Read-only projection of generated owner bridge-session lifecycle authority.
@@ -6766,6 +6799,41 @@ impl MobHandle {
                     request: Box::new(
                         super::forked_participant_routing::ForkedParticipantCreateRequest {
                             source_identity,
+                            expected_profile: None,
+                            request_id,
+                            prefix_message_count,
+                            scope,
+                            reuse,
+                            ttl,
+                        },
+                    ),
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_forked_participant_with_profile_witness(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        source_identity: AgentIdentity,
+        expected_profile: MemberExecutionProfileWitness,
+        request_id: crate::forked_participant::ForkedParticipantRequestId,
+        prefix_message_count: Option<usize>,
+        scope: crate::forked_participant::ForkedParticipantOperationScope,
+        reuse: crate::forked_participant::ForkedParticipantReusePolicy,
+        ttl: std::time::Duration,
+    ) -> Result<crate::forked_participant::ForkedParticipantRef, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::CreateForkedParticipant {
+                    request: Box::new(
+                        super::forked_participant_routing::ForkedParticipantCreateRequest {
+                            source_identity,
+                            expected_profile: Some(expected_profile),
                             request_id,
                             prefix_message_count,
                             scope,

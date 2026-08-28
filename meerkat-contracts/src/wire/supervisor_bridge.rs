@@ -687,6 +687,7 @@ fn bridge_command_minimum_protocol(
         "retire_member" => "RetireMember",
         "create_forked_participant" => "CreateForkedParticipant",
         "revoke_forked_participant" => "RevokeForkedParticipant",
+        "issue_host_binding_descriptor" => "IssueHostBindingDescriptor",
         "hard_cancel_member" => "HardCancelMember",
         "cancel_tracked_member_input" => "CancelTrackedMemberInput",
         "read_member_history" => "ReadMemberHistory",

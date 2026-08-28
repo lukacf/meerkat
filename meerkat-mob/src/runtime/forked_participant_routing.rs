@@ -58,10 +58,13 @@ pub(super) const FORKED_PARTICIPANT_BRIDGE_TIMEOUT: Duration = Duration::from_se
 /// member actually lives, so a caller cannot aim a capability at a realm or
 /// host that does not own the source. There is likewise no tool-policy field —
 /// the branch inherits the source's effective execution context.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ForkedParticipantCreateRequest {
     /// Source member whose conversation is forked.
     pub source_identity: AgentIdentity,
+    /// Optional exact source generation/profile observation. The serialized
+    /// actor validates it immediately before capability creation.
+    pub expected_profile: Option<super::handle::MemberExecutionProfileWitness>,
     /// Caller-stable idempotency identity. The same exact request replays.
     pub request_id: ForkedParticipantRequestId,
     /// Complete-boundary prefix length; `None` selects the whole transcript.

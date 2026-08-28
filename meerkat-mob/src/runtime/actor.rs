@@ -31380,6 +31380,38 @@ impl MobActor {
         let Some(entry) = entry else {
             return Err(MobError::MemberNotFound(source_identity));
         };
+        if let Some(expected) = request.expected_profile.as_ref() {
+            let mut current_profile = match entry.effective_profile_override.clone() {
+                Some(profile) => profile,
+                None => self
+                    .definition
+                    .profiles
+                    .get(&entry.role)
+                    .and_then(crate::profile::ProfileBinding::as_inline)
+                    .cloned()
+                    .ok_or_else(|| MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                        detail: format!(
+                            "source member '{}' has no stable inline execution profile",
+                            entry.agent_identity
+                        ),
+                    })?,
+            };
+            if let Some(model) = &entry.effective_model_override {
+                current_profile.model.clone_from(model);
+            }
+            current_profile.image_generation_provider = current_profile
+                .image_generation_provider
+                .or(self.definition.image_generation_provider);
+            if entry.generation != expected.generation || current_profile != expected.profile {
+                return Err(MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                    detail: format!(
+                        "source member '{}' changed generation or execution profile before \
+                         capability creation",
+                        entry.agent_identity
+                    ),
+                });
+            }
+        }
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&source_identity);
         let placement = self
             .dsl_authority

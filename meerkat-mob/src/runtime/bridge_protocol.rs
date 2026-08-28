@@ -758,6 +758,62 @@ mod tests {
     }
 
     #[test]
+    fn delegated_host_bind_proof_binds_the_target_not_source_supervisor() {
+        let raw_token = "host-token";
+        let source = BridgePeerSpec {
+            name: "source/supervisor".to_string(),
+            peer_id: "peer-source".to_string(),
+            address: "inproc://source".to_string(),
+            pubkey: [3; 32],
+        };
+        let target = BridgePeerSpec {
+            name: "council/supervisor".to_string(),
+            peer_id: "peer-council".to_string(),
+            address: "inproc://council".to_string(),
+            pubkey: [7; 32],
+        };
+        let proof = derive_delegated_host_bind_proof(
+            raw_token,
+            &target,
+            "council--123",
+            "peer-host",
+            "tcp://127.0.0.1:9000",
+        );
+        assert_eq!(
+            proof,
+            derive_delegated_host_bind_proof(
+                raw_token,
+                &target,
+                "council--123",
+                "peer-host",
+                "tcp://127.0.0.1:9000",
+            )
+        );
+        assert_ne!(
+            proof,
+            derive_delegated_host_bind_proof(
+                raw_token,
+                &source,
+                "council--123",
+                "peer-host",
+                "tcp://127.0.0.1:9000",
+            ),
+            "a proof issued for the target supervisor must reject the source supervisor"
+        );
+        assert_ne!(
+            proof,
+            derive_delegated_host_bind_proof(
+                raw_token,
+                &target,
+                "council--other",
+                "peer-host",
+                "tcp://127.0.0.1:9000",
+            ),
+            "a proof cannot be replayed into another temporary mob"
+        );
+    }
+
+    #[test]
     fn host_bind_wire_and_debug_never_contain_raw_bootstrap_token() {
         let raw_token = "raw-host-token-kept-out-of-band";
         let command = BridgeCommand::BindHost(seal_host_bind_bootstrap_proof(

@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.31] - 2026-08-28
+
 ### Breaking
 
 - **Rust hook contracts gained committed-observation variants and payloads.**
@@ -9274,7 +9276,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.30...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.31...HEAD
+[0.8.31]: https://github.com/lukacf/meerkat/compare/v0.8.30...v0.8.31
 [0.8.30]: https://github.com/lukacf/meerkat/compare/v0.8.29...v0.8.30
 [0.8.29]: https://github.com/lukacf/meerkat/compare/v0.8.28...v0.8.29
 [0.8.28]: https://github.com/lukacf/meerkat/compare/v0.8.27...v0.8.28

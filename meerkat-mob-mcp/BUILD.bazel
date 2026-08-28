@@ -58,7 +58,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_PKG_VERSION": "0.8.31",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -104,7 +104,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_PKG_VERSION": "0.8.31",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -148,7 +148,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_PKG_VERSION": "0.8.31",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
     },
     tags = [
@@ -201,7 +201,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_PKG_VERSION": "0.8.31",
         "CARGO_BIN_NAME": "rkat-mob-mcp",
         "CARGO_MANIFEST_DIR": "meerkat-mob-mcp",
     },
@@ -252,7 +252,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_PKG_VERSION": "0.8.31",
         "CARGO_BIN_NAME": "temporary_council",
         "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
     },
@@ -290,72 +290,10 @@ rust_test(
     ),
 )
 
-rust_test(
-    name = "temporary_council_surface_test",
-    aliases = aliases(
-        package_name = "meerkat-mob-mcp",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "temporary_council_surface",
-    crate_root = "tests/temporary_council_surface.rs",
-    crate_features = [
-        "experimental-gpt-live",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/public_mcp.rs",
-    ],
-    srcs = [
-        "tests/support/mod.rs",
-        "tests/temporary_council_surface.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.30",
-        "CARGO_BIN_NAME": "temporary_council_surface",
-        "CARGO_MANIFEST_DIR": "./meerkat-mob-mcp",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "33554432",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mob-mcp",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
-        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_live_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
-        "//meerkat:meerkat_schedule_agent_factory_build",
-        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
-        "//meerkat:meerkat_store_agent_factory_build",
-        "//meerkat:meerkat_with_runtime_test_support",
-    ] + all_crate_deps(
-        package_name = "meerkat-mob-mcp",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
 test_suite(
     name = "fast_tests",
     tests = [
         ":meerkat_mob_mcp_unit_test",
-        ":temporary_council_surface_test",
         ":temporary_council_test",
     ],
 )

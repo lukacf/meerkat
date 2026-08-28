@@ -108,6 +108,23 @@ them.
                         `FactoryError`, `interaction_id`, `RealtimeSessionEvent`.
   - `meerkat-mob`: `LifecycleOperationProgressStalled`, `MobError`, `MobSessionService`,
                    `enqueue_committed_parent_session_boundary_after_runtime_turn`.
+
+    This ledger entry was appended after `v0.8.30` was tagged. The immutable
+    tag's changelog therefore omits it; the GitHub Release body links to this
+    corrected declaration. Published package source remains the original,
+    qualified tag.
+
+    `MobSessionService::enqueue_committed_parent_session_boundary_after_runtime_turn`
+    is now required; its `Ok(0)`/`Unsupported` default is removed. A wrapper
+    around a persistent inner service must forward to that inner service, or
+    answer for itself while guarded by `supports_persistent_sessions()` - never
+    return a bare `Ok(0)`. Cargo reports the method through both public trait
+    paths, but they are one required implementation change.
+
+    `MobError::LifecycleOperationProgressStalled { intent, member_id, stage }`
+    is a new variant. Exhaustive matches on `MobError` must add an arm. It
+    replaces fixed explicit-resume expiry with a typed stall naming the member
+    and lifecycle stage that stopped making progress.
   - `meerkat-machine-kernels`: `AbandonLiveInteraction`, `AbandonLiveInteractionAttached`,
                                `AbandonLiveInteractionIdle`,
                                `AbandonLiveInteractionPreservingEarlierDelegationAttached`,

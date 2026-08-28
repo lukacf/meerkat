@@ -646,7 +646,17 @@ jobs:
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
           for pkg in "${PACKAGES[@]}"; do
-            ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+            if [[ "${{ runner.os }}" == "Linux" ]]; then
+              # The immutable v0.8.30 wrapper asks Git for
+              # `rev-parse --path-format=absolute`, which predates the
+              # Bullseye container's Git 2.30. The release job already owns an
+              # isolated target directory and installs the stable toolchain,
+              # so use that exact toolchain directly only on this legacy
+              # container. Non-Linux release builds retain repo-cargo.
+              rustup run stable cargo build --locked -p "$pkg" --release --target "${{ matrix.target }}"
+            else
+              ./scripts/repo-cargo build --locked -p "$pkg" --release --target "${{ matrix.target }}"
+            fi
           done
 
       - name: Ad-hoc codesign macOS binaries

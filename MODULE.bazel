@@ -3,7 +3,7 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "rules_rust", version = "0.73.0")
 
 # crate_universe records in-tree [patch.crates-io] path dependencies with the
 # absolute path of whichever checkout last evaluated the extension, which

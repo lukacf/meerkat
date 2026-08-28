@@ -22,6 +22,12 @@ fn manifest_script_path() -> PathBuf {
     path
 }
 
+fn asset_verifier_path() -> PathBuf {
+    let mut path = manifest_script_path();
+    path.set_file_name("verify-release-assets.py");
+    path
+}
+
 fn read_workflow(path: &Path) -> serde_yaml::Value {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
@@ -117,7 +123,9 @@ fn published_assets_are_manifest_authority_on_reruns() {
         "gh release download",
         "--pattern '*.tar.gz'",
         "--pattern '*.zip'",
-        "scripts/release-build-asset-manifest published-release-artifacts",
+        "scripts/verify-release-assets.py prepare",
+        "--source-dir published-release-downloads",
+        "--output-dir published-release-artifacts",
     ] {
         assert!(
             final_download.contains(contract),
@@ -163,13 +171,19 @@ fn release_asset_manifest_contract_stays_flat_and_collision_checked() {
         &workflow,
         &path,
         "publish_github_release",
-        "Build checksum manifest",
+        "Prepare and verify complete release asset set",
     );
-    assert!(
-        script
-            .contains("scripts/release-build-asset-manifest release-artifacts \"${RELEASE_TAG}\""),
-        "release workflow must delegate to the manifest authority; script:\n{script}"
-    );
+    for contract in [
+        "scripts/verify-release-assets.py prepare",
+        "--source-dir release-artifacts",
+        "--output-dir prepared-release-artifacts",
+        "--release-tag \"${RELEASE_TAG}\"",
+    ] {
+        assert!(
+            script.contains(contract),
+            "release workflow must preserve `{contract}`; script:\n{script}"
+        );
+    }
 
     let manifest_path = manifest_script_path();
     let manifest = std::fs::read_to_string(&manifest_path)
@@ -196,6 +210,95 @@ fn release_asset_manifest_contract_stays_flat_and_collision_checked() {
     assert!(
         !manifest.contains("xargs sha256sum"),
         "checksums.sha256 must be rendered from public basenames, not staged paths"
+    );
+}
+
+fn expected_complete_archive_names(version: &str) -> Vec<String> {
+    let binaries = ["rkat", "rkat-mcp", "rkat-rest", "rkat-rpc"];
+    let targets = [
+        ("x86_64-unknown-linux-gnu", "tar.gz"),
+        ("aarch64-unknown-linux-gnu", "tar.gz"),
+        ("aarch64-apple-darwin", "tar.gz"),
+        ("x86_64-apple-darwin", "tar.gz"),
+        ("x86_64-pc-windows-msvc", "zip"),
+    ];
+    let mut names = Vec::new();
+    for binary in binaries {
+        for (target, extension) in targets {
+            names.push(format!("{binary}-{version}-{target}.{extension}"));
+        }
+    }
+    names.sort_unstable();
+    names
+}
+
+fn run_asset_verifier(source: &Path, output: &Path) -> Output {
+    let interpreter = std::env::var_os("PYTHON").unwrap_or_else(|| OsString::from("python3"));
+    Command::new(interpreter)
+        .arg(asset_verifier_path())
+        .arg("prepare")
+        .arg("--source-dir")
+        .arg(source)
+        .arg("--output-dir")
+        .arg(output)
+        .arg("--release-tag")
+        .arg("v0.8.31")
+        .output()
+        .expect("run complete release asset verifier")
+}
+
+#[test]
+fn complete_release_asset_inventory_is_four_binaries_by_five_targets() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("downloaded");
+    let output = temp.path().join("prepared");
+    std::fs::create_dir(&source).expect("create source");
+    let names = expected_complete_archive_names("0.8.31");
+    assert_eq!(names.len(), 20, "release contract must name 20 archives");
+    for (index, name) in names.iter().enumerate() {
+        let lane = source.join(format!("lane-{index}"));
+        std::fs::create_dir(&lane).expect("create staged lane");
+        std::fs::write(lane.join(name), format!("artifact-{index}")).expect("write archive");
+    }
+
+    let result = run_asset_verifier(&source, &output);
+    assert!(
+        result.status.success(),
+        "complete inventory must verify: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_dir(&output).expect("read output").count(),
+        22,
+        "20 archives plus two manifests must be prepared"
+    );
+}
+
+#[test]
+fn complete_release_asset_inventory_rejects_one_missing_archive() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("downloaded");
+    let output = temp.path().join("prepared");
+    std::fs::create_dir(&source).expect("create source");
+    let mut names = expected_complete_archive_names("0.8.31");
+    let missing = names.pop().expect("nonempty release inventory");
+    for (index, name) in names.iter().enumerate() {
+        std::fs::write(source.join(name), format!("artifact-{index}")).expect("write archive");
+    }
+
+    let result = run_asset_verifier(&source, &output);
+    assert!(
+        !result.status.success(),
+        "a partial release must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("downloaded archive set mismatch") && stderr.contains(&missing),
+        "missing archive must be named: {stderr}"
+    );
+    assert!(
+        !output.exists(),
+        "a rejected inventory must not leave a successful-looking output directory"
     );
 }
 

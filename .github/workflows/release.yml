@@ -1209,7 +1209,7 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Build checksum manifest
+      - name: Prepare and verify complete release asset set
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
@@ -1218,14 +1218,17 @@ jobs:
             echo "release_tag is required for release asset recovery" >&2
             exit 1
           fi
-          scripts/release-build-asset-manifest release-artifacts "${RELEASE_TAG}"
+          scripts/verify-release-assets.py prepare \
+            --source-dir release-artifacts \
+            --output-dir prepared-release-artifacts \
+            --release-tag "${RELEASE_TAG}"
 
       - name: Publish release archives
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-artifacts/**/*.tar.gz
-            release-artifacts/**/*.zip
+            prepared-release-artifacts/*.tar.gz
+            prepared-release-artifacts/*.zip
           draft: false
           fail_on_unmatched_files: true
           generate_release_notes: true
@@ -1241,14 +1244,16 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
-          rm -rf published-release-artifacts
-          mkdir -p published-release-artifacts
+          mkdir -p published-release-downloads
           gh release download "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern '*.tar.gz' \
             --pattern '*.zip' \
-            --dir published-release-artifacts
-          scripts/release-build-asset-manifest published-release-artifacts "${RELEASE_TAG}"
+            --dir published-release-downloads
+          scripts/verify-release-assets.py prepare \
+            --source-dir published-release-downloads \
+            --output-dir published-release-artifacts \
+            --release-tag "${RELEASE_TAG}"
 
       # Publish checksums and index.json only after every platform archive is
       # present, keeping the public manifest a complete release authority.

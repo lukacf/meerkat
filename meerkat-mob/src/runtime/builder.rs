@@ -7124,6 +7124,8 @@ struct RuntimeWiring {
     identity: Arc<dyn crate::store::MobIdentityStore>,
     identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
     identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+    #[cfg(not(target_arch = "wasm32"))]
+    identity_status_projection_order: super::actor::IdentityStatusProjectionOrder,
     supervisor_bridge: Arc<MobSupervisorBridge>,
     command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
     command_rx: mpsc::Receiver<super::scope_gate::RoutedMobCommand>,
@@ -7637,6 +7639,8 @@ impl MobBuilder {
                 storage.identity.clone(),
                 storage.identity_member.clone(),
                 storage.identity_status.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
+                storage.identity_status_projection_order.clone(),
                 supervisor_bridge,
                 session_service,
                 runtime_adapter,
@@ -8078,6 +8082,8 @@ impl MobBuilder {
                 identity: storage.identity.clone(),
                 identity_member: storage.identity_member.clone(),
                 identity_status: storage.identity_status.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
+                identity_status_projection_order: storage.identity_status_projection_order.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 command_tx: command_tx.clone(),
                 command_rx,
@@ -9713,6 +9719,8 @@ impl MobBuilder {
         identity: Arc<dyn crate::store::MobIdentityStore>,
         identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
         identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+        #[cfg(not(target_arch = "wasm32"))]
+        identity_status_projection_order: super::actor::IdentityStatusProjectionOrder,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
@@ -9777,6 +9785,8 @@ impl MobBuilder {
                 identity,
                 identity_member,
                 identity_status,
+                #[cfg(not(target_arch = "wasm32"))]
+                identity_status_projection_order,
                 supervisor_bridge,
                 command_tx,
                 command_rx,
@@ -9890,6 +9900,8 @@ impl MobBuilder {
                 identity,
                 identity_member,
                 identity_status,
+                #[cfg(not(target_arch = "wasm32"))]
+                identity_status_projection_order,
                 supervisor_bridge,
                 command_tx,
                 command_rx,
@@ -10127,6 +10139,8 @@ impl MobBuilder {
                 identity,
                 identity_member,
                 identity_status,
+                #[cfg(not(target_arch = "wasm32"))]
+                identity_status_projection_order,
                 identity_reconcile_queue: VecDeque::new(),
                 identity_reconcile_enqueued: BTreeSet::new(),
                 identity_admission_closed: BTreeSet::new(),

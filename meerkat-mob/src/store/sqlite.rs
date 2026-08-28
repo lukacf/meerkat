@@ -2270,6 +2270,10 @@ impl SqliteMobStores {
         }
     }
 
+    pub(crate) fn identity_status_projection_scope(&self) -> String {
+        format!("sqlite:{}", self.identity_store_instance_id)
+    }
+
     pub fn realm_profile_store(&self) -> SqliteRealmProfileStore {
         SqliteRealmProfileStore {
             path: self.path.clone(),

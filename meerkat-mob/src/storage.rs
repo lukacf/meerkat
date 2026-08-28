@@ -41,6 +41,9 @@ pub struct MobStorage {
     pub(crate) identity_member: Option<Arc<dyn MobIdentityMemberStore>>,
     /// Replaceable output-only identity convergence diagnostics.
     pub(crate) identity_status: Arc<dyn MobIdentityStatusStore>,
+    /// Process-owned ordering custody scoped to this exact storage composition.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) identity_status_projection_order: crate::runtime::IdentityStatusProjectionOrder,
     /// Realm-scoped reusable profile store.
     pub(crate) realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
@@ -63,6 +66,9 @@ impl MobStorage {
             identity: Arc::new(identity),
             identity_member: Some(identity_member),
             identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            identity_status_projection_order:
+                crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -86,6 +92,9 @@ impl MobStorage {
             identity: Arc::new(InMemoryMobIdentityStore::new()),
             identity_member: None,
             identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            identity_status_projection_order:
+                crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -105,6 +114,9 @@ impl MobStorage {
             identity: Arc::new(InMemoryMobIdentityStore::new()),
             identity_member: None,
             identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            identity_status_projection_order:
+                crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -136,6 +148,9 @@ impl MobStorage {
         identity: Arc<dyn MobIdentityStore>,
         identity_status: Arc<dyn MobIdentityStatusStore>,
     ) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let identity_status_projection_order =
+            crate::runtime::IdentityStatusProjectionOrder::for_status_store(&identity_status);
         Self {
             events,
             runs: authority_validating_mob_run_store(runs),
@@ -144,6 +159,8 @@ impl MobStorage {
             identity,
             identity_member: None,
             identity_status,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity_status_projection_order,
             realm_profiles: None,
         }
     }
@@ -196,6 +213,10 @@ impl MobStorage {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn persistent(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
         let stores = SqliteMobStores::open(path)?;
+        let identity_status_projection_order =
+            crate::runtime::IdentityStatusProjectionOrder::for_backend_scope(
+                stores.identity_status_projection_scope(),
+            );
         let identity = stores.identity_store();
         let identity_member: Arc<dyn MobIdentityMemberStore> = Arc::new(identity.clone());
         Ok(Self {
@@ -206,6 +227,7 @@ impl MobStorage {
             identity: Arc::new(identity),
             identity_member: Some(identity_member),
             identity_status: Arc::new(stores.identity_status_store()),
+            identity_status_projection_order,
             realm_profiles: Some(Arc::new(stores.realm_profile_store())),
         })
     }

@@ -9404,6 +9404,7 @@ async fn create_test_mob_with_run_store(
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
         identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
         realm_profiles: None,
     };
     let handle = MobBuilder::new(definition, storage)
@@ -11837,6 +11838,7 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
         identity_status: storage.identity_status.clone(),
+        identity_status_projection_order: storage.identity_status_projection_order.clone(),
         realm_profiles: storage.realm_profiles.clone(),
     };
 
@@ -12434,6 +12436,7 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
         identity_status: identity_status.clone(),
+        identity_status_projection_order: Default::default(),
         realm_profiles: None,
     };
     let handle = MobBuilder::new(definition, storage)
@@ -12629,6 +12632,7 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
         identity_status,
+        identity_status_projection_order: Default::default(),
         realm_profiles: None,
     })
     .with_session_service(service.clone())
@@ -12724,6 +12728,7 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
         identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
         realm_profiles: None,
     };
     let handle = MobBuilder::new(definition, storage)
@@ -23136,6 +23141,7 @@ async fn test_cold_running_resume_reestablishes_autonomous_startup_ready_without
         identity,
         identity_member,
         identity_status,
+        identity_status_projection_order: Default::default(),
         realm_profiles,
     })
     .with_session_service(restarted_service.clone())
@@ -23289,6 +23295,7 @@ async fn assert_cold_running_local_resume_fails_closed(
         identity,
         identity_member,
         identity_status,
+        identity_status_projection_order: Default::default(),
         realm_profiles,
     })
     .with_session_service(restarted_service.clone())
@@ -44619,6 +44626,7 @@ async fn test_explicit_fail_step_routes_generated_supervisor_escalation_effect()
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
         identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
         realm_profiles: None,
     };
     let handle = MobBuilder::new(definition.clone(), storage)
@@ -45514,6 +45522,7 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
         identity_status: storage.identity_status.clone(),
+        identity_status_projection_order: storage.identity_status_projection_order.clone(),
         realm_profiles: storage.realm_profiles.clone(),
     };
     let service = Arc::new(MockSessionService::new());
@@ -45627,6 +45636,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
         identity_status: storage.identity_status.clone(),
+        identity_status_projection_order: storage.identity_status_projection_order.clone(),
         realm_profiles: storage.realm_profiles.clone(),
     };
     let service = Arc::new(MockSessionService::new());
@@ -61794,6 +61804,7 @@ async fn create_test_mob_with_realm_store(
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
         identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
         realm_profiles: Some(realm_store),
     };
     let handle = MobBuilder::new(definition, storage)
@@ -61896,6 +61907,7 @@ async fn test_spawn_realm_ref_without_store_returns_error() {
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
         identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
         realm_profiles: None, // no realm store
     };
     let handle = MobBuilder::new(sample_definition_with_realm_ref_profile(), storage)

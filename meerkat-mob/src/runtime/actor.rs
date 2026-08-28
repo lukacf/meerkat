@@ -855,6 +855,438 @@ pub(super) struct IdentityReconcileFailureState {
     detail: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type IdentityStatusProjectionKey = (MobId, AgentIdentity);
+#[cfg(not(target_arch = "wasm32"))]
+type IdentityStatusProjectionLanes =
+    BTreeMap<IdentityStatusProjectionKey, Arc<IdentityStatusProjectionLane>>;
+#[cfg(not(target_arch = "wasm32"))]
+type SharedIdentityStatusProjectionLanes = Arc<std::sync::Mutex<IdentityStatusProjectionLanes>>;
+#[cfg(not(target_arch = "wasm32"))]
+type IdentityStatusProjectionScopeRegistry = BTreeMap<String, IdentityStatusProjectionScopeEntry>;
+
+#[cfg(not(target_arch = "wasm32"))]
+enum IdentityStatusProjectionScopeEntry {
+    Active(std::sync::Weak<std::sync::Mutex<IdentityStatusProjectionLanes>>),
+    Parked(SharedIdentityStatusProjectionLanes),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn identity_status_projection_scope_registry()
+-> &'static std::sync::Mutex<IdentityStatusProjectionScopeRegistry> {
+    static SCOPES: std::sync::OnceLock<std::sync::Mutex<IdentityStatusProjectionScopeRegistry>> =
+        std::sync::OnceLock::new();
+    SCOPES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub(crate) struct IdentityStatusProjectionOrder {
+    lanes: SharedIdentityStatusProjectionLanes,
+    backend_scope: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct IdentityStatusProjectionLane {
+    state: std::sync::Mutex<IdentityStatusProjectionLaneState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct IdentityStatusProjectionLaneState {
+    next_ticket: u64,
+    phase: IdentityStatusProjectionLanePhase,
+    pending: Option<IdentityStatusProjectionPayload>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum IdentityStatusProjectionLanePhase {
+    #[default]
+    Idle,
+    Running,
+    Parked,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct IdentityStatusProjectionPayload {
+    ticket: u64,
+    identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+    mob_id: MobId,
+    status: crate::identity::IdentityConvergenceStatus,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for IdentityStatusProjectionPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IdentityStatusProjectionPayload")
+            .field("ticket", &self.ticket)
+            .field("mob_id", &self.mob_id)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, thiserror::Error)]
+enum IdentityStatusProjectionError {
+    #[error("identity status projection registry lock is poisoned")]
+    RegistryPoisoned,
+    #[error("identity status projection lane lock is poisoned")]
+    LanePoisoned,
+    #[error(
+        "identity status projection ticket exhausted for mob '{mob_id}', identity '{identity}'"
+    )]
+    TicketExhausted {
+        mob_id: MobId,
+        identity: AgentIdentity,
+    },
+    #[error("identity status projection lane is parked for mob '{mob_id}', identity '{identity}'")]
+    LaneParked {
+        mob_id: MobId,
+        identity: AgentIdentity,
+    },
+    #[error("identity status projection executor is unavailable: {detail}")]
+    ExecutorUnavailable { detail: String },
+    #[error("identity status projection executor is closed")]
+    ExecutorClosed,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for IdentityStatusProjectionOrder {
+    fn default() -> Self {
+        Self {
+            lanes: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            backend_scope: None,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IdentityStatusProjectionOrder {
+    pub(crate) fn for_status_store(
+        identity_status: &Arc<dyn crate::store::MobIdentityStatusStore>,
+    ) -> Self {
+        Self::for_backend_scope(format!("status-store:{:p}", Arc::as_ptr(identity_status)))
+    }
+
+    pub(crate) fn for_backend_scope(scope: String) -> Self {
+        let registry = identity_status_projection_scope_registry();
+        let mut scopes = match registry.lock() {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "identity status projection backend-scope registry lock poisoned"
+                );
+                error.into_inner()
+            }
+        };
+        scopes.retain(|_, entry| match entry {
+            IdentityStatusProjectionScopeEntry::Active(lanes) => lanes.strong_count() > 0,
+            IdentityStatusProjectionScopeEntry::Parked(_) => true,
+        });
+        let lanes = match scopes.get(&scope) {
+            Some(IdentityStatusProjectionScopeEntry::Active(lanes)) => lanes.upgrade(),
+            Some(IdentityStatusProjectionScopeEntry::Parked(lanes)) => Some(Arc::clone(lanes)),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            let lanes = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+            scopes.insert(
+                scope.clone(),
+                IdentityStatusProjectionScopeEntry::Active(Arc::downgrade(&lanes)),
+            );
+            lanes
+        });
+        Self {
+            lanes,
+            backend_scope: Some(scope),
+        }
+    }
+
+    fn submit(
+        &self,
+        identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+        mob_id: MobId,
+        status: crate::identity::IdentityConvergenceStatus,
+    ) -> Result<(), IdentityStatusProjectionError> {
+        let executor = identity_status_projection_executor().map_err(|error| {
+            IdentityStatusProjectionError::ExecutorUnavailable {
+                detail: error.to_string(),
+            }
+        })?;
+        let key = (mob_id.clone(), status.identity.clone());
+        let payload = IdentityStatusProjectionPayload {
+            ticket: 0,
+            identity_status,
+            mob_id,
+            status,
+        };
+        let (superseded, rejected) = {
+            let mut lanes = self
+                .lanes
+                .lock()
+                .map_err(|_| IdentityStatusProjectionError::RegistryPoisoned)?;
+            let lane = Arc::clone(lanes.entry(key.clone()).or_insert_with(|| {
+                Arc::new(IdentityStatusProjectionLane {
+                    state: std::sync::Mutex::new(IdentityStatusProjectionLaneState::default()),
+                })
+            }));
+            let mut state = lane
+                .state
+                .lock()
+                .map_err(|_| IdentityStatusProjectionError::LanePoisoned)?;
+            if state.phase == IdentityStatusProjectionLanePhase::Parked {
+                drop(state);
+                drop(lanes);
+                drop(payload);
+                return Err(IdentityStatusProjectionError::LaneParked {
+                    mob_id: key.0,
+                    identity: key.1,
+                });
+            }
+            let ticket = state.next_ticket.checked_add(1).ok_or_else(|| {
+                IdentityStatusProjectionError::TicketExhausted {
+                    mob_id: key.0.clone(),
+                    identity: key.1.clone(),
+                }
+            })?;
+            state.next_ticket = ticket;
+            let superseded = state
+                .pending
+                .replace(IdentityStatusProjectionPayload { ticket, ..payload });
+            if state.phase == IdentityStatusProjectionLanePhase::Running {
+                (superseded, None)
+            } else {
+                state.phase = IdentityStatusProjectionLanePhase::Running;
+                let activation = IdentityStatusProjectionActivation {
+                    key: key.clone(),
+                    lane: Arc::clone(&lane),
+                    lanes: Arc::clone(&self.lanes),
+                    backend_scope: self.backend_scope.clone(),
+                };
+                match executor.sender.send(activation) {
+                    Ok(()) => (superseded, None),
+                    Err(_) => {
+                        state.phase = IdentityStatusProjectionLanePhase::Idle;
+                        let rejected = state.pending.take();
+                        lanes.remove(&key);
+                        (superseded, rejected)
+                    }
+                }
+            }
+        };
+        drop(superseded);
+        if let Some(rejected) = rejected {
+            drop(rejected);
+            return Err(IdentityStatusProjectionError::ExecutorClosed);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct IdentityStatusProjectionActivation {
+    key: IdentityStatusProjectionKey,
+    lane: Arc<IdentityStatusProjectionLane>,
+    lanes: SharedIdentityStatusProjectionLanes,
+    backend_scope: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for IdentityStatusProjectionActivation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IdentityStatusProjectionActivation")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IdentityStatusProjectionActivation {
+    async fn run(self) {
+        loop {
+            let payload = {
+                let mut state = match self.lane.state.lock() {
+                    Ok(state) => state,
+                    Err(error) => {
+                        tracing::error!(
+                            mob_id = %self.key.0,
+                            agent_identity = %self.key.1,
+                            error = %error,
+                            "identity status projection lane lock poisoned"
+                        );
+                        return;
+                    }
+                };
+                match state.pending.take() {
+                    Some(payload) => payload,
+                    None => {
+                        state.phase = IdentityStatusProjectionLanePhase::Idle;
+                        drop(state);
+                        self.remove_if_idle();
+                        return;
+                    }
+                }
+            };
+            let ticket = payload.ticket;
+            let mob_id = payload.mob_id.clone();
+            let projected_identity = payload.status.identity.clone();
+            let result = std::panic::AssertUnwindSafe(
+                payload
+                    .identity_status
+                    .replace_identity_convergence_status(&payload.mob_id, &payload.status),
+            )
+            .catch_unwind()
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        agent_identity = %projected_identity,
+                        ticket,
+                        error = %error,
+                        "identity convergence status projection failed"
+                    );
+                }
+                Err(_) => {
+                    let pending = match self.lane.state.lock() {
+                        Ok(mut state) => {
+                            state.phase = IdentityStatusProjectionLanePhase::Parked;
+                            state.pending.take()
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                mob_id = %mob_id,
+                                agent_identity = %projected_identity,
+                                error = %error,
+                                "identity status projection panic could not park poisoned lane"
+                            );
+                            None
+                        }
+                    };
+                    drop(pending);
+                    self.retain_parked_scope();
+                    tracing::error!(
+                        mob_id = %mob_id,
+                        agent_identity = %projected_identity,
+                        ticket,
+                        "identity convergence status projection panicked; lane parked"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    fn remove_if_idle(&self) {
+        let mut lanes = match self.lanes.lock() {
+            Ok(lanes) => lanes,
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %self.key.0,
+                    agent_identity = %self.key.1,
+                    error = %error,
+                    "identity status projection registry cleanup lock poisoned"
+                );
+                return;
+            }
+        };
+        let idle = match self.lane.state.lock() {
+            Ok(state) => {
+                state.phase == IdentityStatusProjectionLanePhase::Idle && state.pending.is_none()
+            }
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %self.key.0,
+                    agent_identity = %self.key.1,
+                    error = %error,
+                    "identity status projection idle check lock poisoned"
+                );
+                return;
+            }
+        };
+        if idle
+            && lanes
+                .get(&self.key)
+                .is_some_and(|lane| Arc::ptr_eq(lane, &self.lane))
+        {
+            lanes.remove(&self.key);
+        }
+    }
+
+    fn retain_parked_scope(&self) {
+        let Some(scope) = self.backend_scope.as_ref() else {
+            return;
+        };
+        let registry = identity_status_projection_scope_registry();
+        let replaced = match registry.lock() {
+            Ok(mut scopes) => scopes.insert(
+                scope.clone(),
+                IdentityStatusProjectionScopeEntry::Parked(Arc::clone(&self.lanes)),
+            ),
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %self.key.0,
+                    agent_identity = %self.key.1,
+                    error = %error,
+                    "identity status projection could not retain parked backend scope"
+                );
+                return;
+            }
+        };
+        drop(replaced);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct IdentityStatusProjectionExecutor {
+    sender: tokio::sync::mpsc::UnboundedSender<IdentityStatusProjectionActivation>,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn identity_status_projection_executor()
+-> Result<&'static IdentityStatusProjectionExecutor, &'static IdentityStatusProjectionError> {
+    static EXECUTOR: std::sync::OnceLock<
+        Result<IdentityStatusProjectionExecutor, IdentityStatusProjectionError>,
+    > = std::sync::OnceLock::new();
+    EXECUTOR
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| IdentityStatusProjectionError::ExecutorUnavailable {
+                    detail: format!("could not build runtime: {error}"),
+                })?;
+            let (sender, mut receiver) =
+                tokio::sync::mpsc::unbounded_channel::<IdentityStatusProjectionActivation>();
+            let thread = std::thread::Builder::new()
+                .name("rkat-identity-status".to_string())
+                .spawn(move || {
+                    runtime.block_on(async move {
+                        while let Some(activation) = receiver.recv().await {
+                            tokio::spawn(activation.run());
+                        }
+                    });
+                })
+                .map_err(|error| IdentityStatusProjectionError::ExecutorUnavailable {
+                    detail: format!("could not start thread: {error}"),
+                })?;
+            Ok(IdentityStatusProjectionExecutor {
+                sender,
+                _thread: thread,
+            })
+        })
+        .as_ref()
+}
+
 fn identity_reconcile_backoff_delay(consecutive_failures: u32) -> Duration {
     // 250ms base, doubling per consecutive failure, capped at 60s. The shift
     // is clamped well below the cap-saturating exponent so it cannot overflow.
@@ -5097,11 +5529,13 @@ pub(super) struct MobActor {
     ///
     /// Pending-spawn, flow-run, and autonomous-initial-turn tasks have their
     /// own keyed ownership tables; the two wasm Send shims are immediately
-    /// awaited by their caller. Every other task spawned from actor code
+    /// awaited by their caller. Every actor-owned task spawned from actor code
     /// (live read/close I/O, host probes/releases, detached replies, and placed
     /// turn delivery) lives here so fail-stop and every other actor exit can
-    /// abort and join it before publishing command-channel closure. Mutating
-    /// live Open/Control work uses `member_live_mutation_tasks` below.
+    /// abort and join it before publishing command-channel closure. Replaceable
+    /// identity-status projections use their dedicated process-lifetime
+    /// executor instead. Mutating live Open/Control work uses
+    /// `member_live_mutation_tasks` below.
     pub(super) actor_io_tasks: tokio::task::JoinSet<()>,
     /// Mutating member-live operations (Open/Control) have their own actor-owned
     /// lane. Lifecycle admission drains this set before publishing its durable
@@ -5168,6 +5602,10 @@ pub(super) struct MobActor {
     pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
     /// Replaceable output-only identity convergence diagnostics.
     pub(super) identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+    /// Volatile per-identity write ordering for replaceable status projections.
+    /// It never enters classifier input or persisted identity authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) identity_status_projection_order: IdentityStatusProjectionOrder,
     /// Volatile scheduling only. Desired state and progress are always
     /// re-observed from their owning stores before one obligation executes.
     pub(super) identity_reconcile_queue: VecDeque<AgentIdentity>,
@@ -18096,26 +18534,23 @@ impl MobActor {
         };
         let identity_status = Arc::clone(&self.identity_status);
         let mob_id = self.definition.id.clone();
-        let projected_identity = identity.clone();
-
-        // Status is deliberately output-only. Queue its best-effort projection
-        // on actor-owned I/O custody so a slow, unavailable, or corrupt status
-        // store cannot delay the actuator or the causal re-observation that
-        // follows it. Shutdown may abort this replaceable diagnostic write.
+        // Status is deliberately output-only. The process-lifetime executor
+        // outlives actor and application-runtime replacement, so blocking store
+        // work retains its per-identity lane until it actually returns. Store
+        // latency never delays reconciliation, queued stale projections are
+        // discarded, and different identities remain independent.
         #[cfg(not(target_arch = "wasm32"))]
-        self.actor_io_tasks.spawn(async move {
-            if let Err(error) = identity_status
-                .replace_identity_convergence_status(&mob_id, &status)
-                .await
-            {
-                tracing::warn!(
-                    mob_id = %mob_id,
-                    agent_identity = %projected_identity,
-                    error = %error,
-                    "identity convergence status projection failed"
-                );
-            }
-        });
+        if let Err(error) =
+            self.identity_status_projection_order
+                .submit(identity_status, mob_id, status)
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                error = %error,
+                "identity convergence status projection submission failed"
+            );
+        }
 
         // wasm has no Send task executor in this crate. Keep the same
         // output-only error semantics there without changing the native actor
@@ -18127,7 +18562,7 @@ impl MobActor {
         {
             tracing::warn!(
                 mob_id = %mob_id,
-                agent_identity = %projected_identity,
+                agent_identity = %identity,
                 error = %error,
                 "identity convergence status projection failed"
             );
@@ -18329,35 +18764,16 @@ impl MobActor {
         request
             .validate()
             .map_err(|error| MobError::WiringError(error.to_string()))?;
-        let actual_active_revision = if let Some(revision) = self
+        let actual_active_revision = self
             .identity_active_intent_revisions
             .get(&request.agent_identity)
             .copied()
-        {
-            revision
-        } else {
-            match self
-                .identity_status
-                .load_identity_convergence_status(&self.definition.id, &request.agent_identity)
-                .await
-                .map_err(MobError::from)?
-            {
-                crate::identity::IdentityStoredObservation::Valid(status) => {
-                    status.active_intent_revision.ok_or_else(|| {
-                        MobError::WiringError(
-                            "identity convergence resolution has no active revision observation"
-                                .to_string(),
-                        )
-                    })?
-                }
-                _ => {
-                    return Err(MobError::WiringError(
-                        "identity convergence resolution has no active revision observation"
-                            .to_string(),
-                    ));
-                }
-            }
-        };
+            .ok_or_else(|| {
+                MobError::WiringError(
+                    "identity convergence resolution has no authoritative active revision observation"
+                        .to_string(),
+                )
+            })?;
         let outcome = self
             .identity
             .resolve_identity_convergence_block(&request, actual_active_revision)
@@ -53015,6 +53431,393 @@ mod fence_token_allocator_tests {
         );
         assert!(MobActor::preview_fence_token(&counter).is_err());
         assert!(MobActor::allocate_fence_token(&counter).is_err());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used)]
+mod identity_status_projection_tests {
+    use super::{IdentityStatusProjectionError, IdentityStatusProjectionOrder};
+    use crate::identity::{
+        IdentityConvergenceStatus, IdentityReconcileDecision, IdentityStoredObservation,
+    };
+    use crate::store::{MobIdentityStatusStore, MobStoreError};
+    use crate::{AgentIdentity, MobId};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::{Notify, RwLock};
+
+    #[derive(Default)]
+    struct DelayedIdentityStatusStore {
+        statuses: RwLock<BTreeMap<(MobId, AgentIdentity), IdentityConvergenceStatus>>,
+        blocked_write_started: Notify,
+        latest_write_started: Notify,
+        independent_write_started: Notify,
+        panic_write_started: Notify,
+        release_blocked_write: Notify,
+        write_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl MobIdentityStatusStore for DelayedIdentityStatusStore {
+        async fn load_identity_convergence_status(
+            &self,
+            mob_id: &MobId,
+            identity: &AgentIdentity,
+        ) -> Result<IdentityStoredObservation<IdentityConvergenceStatus>, MobStoreError> {
+            Ok(self
+                .statuses
+                .read()
+                .await
+                .get(&(mob_id.clone(), identity.clone()))
+                .cloned()
+                .map_or(
+                    IdentityStoredObservation::Missing,
+                    IdentityStoredObservation::Valid,
+                ))
+        }
+
+        async fn list_identity_convergence_statuses(
+            &self,
+            mob_id: &MobId,
+        ) -> Result<
+            BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityConvergenceStatus>>,
+            MobStoreError,
+        > {
+            Ok(self
+                .statuses
+                .read()
+                .await
+                .iter()
+                .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+                .map(|((_, identity), status)| {
+                    (
+                        identity.clone(),
+                        IdentityStoredObservation::Valid(status.clone()),
+                    )
+                })
+                .collect())
+        }
+
+        async fn replace_identity_convergence_status(
+            &self,
+            mob_id: &MobId,
+            status: &IdentityConvergenceStatus,
+        ) -> Result<(), MobStoreError> {
+            match status.detail.as_deref() {
+                Some("blocked") => {
+                    self.blocked_write_started.notify_one();
+                    self.release_blocked_write.notified().await;
+                }
+                Some("latest") => self.latest_write_started.notify_one(),
+                Some("independent") => self.independent_write_started.notify_one(),
+                Some("panic") => {
+                    self.panic_write_started.notify_one();
+                    panic!("injected identity status projection panic");
+                }
+                _ => {}
+            }
+            self.write_count.fetch_add(1, Ordering::Relaxed);
+            self.statuses
+                .write()
+                .await
+                .insert((mob_id.clone(), status.identity.clone()), status.clone());
+            Ok(())
+        }
+    }
+
+    fn status(
+        identity: &AgentIdentity,
+        observed_at_ms: u64,
+        detail: &'static str,
+    ) -> IdentityConvergenceStatus {
+        IdentityConvergenceStatus {
+            identity: identity.clone(),
+            intent_revision: Some(1),
+            active_intent_revision: Some(1),
+            lease_epoch: Some(1),
+            decision: Some(IdentityReconcileDecision::Converged),
+            observed_at_ms,
+            detail: Some(detail.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn same_identity_projection_survives_actor_replacement_without_clock_ordering() {
+        let mob_id = MobId::from("projection-order");
+        let identity = AgentIdentity::from("member-a");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let first_status = status(&identity, 2, "blocked");
+        let storage_order = IdentityStatusProjectionOrder::default();
+
+        let first_submission = std::thread::spawn({
+            let store = Arc::clone(&store);
+            let mob_id = mob_id.clone();
+            let first_actor_order = storage_order.clone();
+            move || first_actor_order.submit(store, mob_id, first_status)
+        })
+        .join()
+        .expect("source thread must submit projection");
+        assert!(first_submission.is_ok());
+        store.blocked_write_started.notified().await;
+
+        let replacement_actor_order = storage_order.clone();
+        let latest_status = status(&identity, 1, "latest");
+        let latest_submission =
+            replacement_actor_order.submit(store.clone(), mob_id.clone(), latest_status);
+        assert!(latest_submission.is_ok());
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                store.latest_write_started.notified(),
+            )
+            .await
+            .is_err(),
+            "a later same-identity write must wait for the in-flight predecessor"
+        );
+        store.release_blocked_write.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    store
+                        .load_identity_convergence_status(&mob_id, &identity)
+                        .await
+                        .unwrap(),
+                    IdentityStoredObservation::Valid(status)
+                        if status.observed_at_ms == 1
+                            && status.detail.as_deref() == Some("latest")
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("process-owned executor must store the replacement projection");
+    }
+
+    #[tokio::test]
+    async fn queued_superseded_projection_is_coalesced_before_store_io() {
+        let mob_id = MobId::from("projection-coalesce");
+        let identity = AgentIdentity::from("member-a");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let order = IdentityStatusProjectionOrder::default();
+
+        order
+            .submit(
+                store.clone(),
+                mob_id.clone(),
+                status(&identity, 1, "blocked"),
+            )
+            .unwrap();
+        store.blocked_write_started.notified().await;
+        order
+            .submit(store.clone(), mob_id.clone(), status(&identity, 2, "stale"))
+            .unwrap();
+        order
+            .submit(
+                store.clone(),
+                mob_id.clone(),
+                status(&identity, 3, "latest"),
+            )
+            .unwrap();
+        store.release_blocked_write.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    store
+                        .load_identity_convergence_status(&mob_id, &identity)
+                        .await
+                        .unwrap(),
+                    IdentityStoredObservation::Valid(status)
+                        if status.observed_at_ms == 3
+                            && status.detail.as_deref() == Some("latest")
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("latest coalesced projection must be stored");
+        assert_eq!(store.write_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn different_identity_projection_lanes_do_not_block_each_other() {
+        let mob_id = MobId::from("projection-independent");
+        let blocked_identity = AgentIdentity::from("member-a");
+        let independent_identity = AgentIdentity::from("member-b");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let order = IdentityStatusProjectionOrder::default();
+
+        order
+            .submit(
+                store.clone(),
+                mob_id.clone(),
+                status(&blocked_identity, 1, "blocked"),
+            )
+            .unwrap();
+        store.blocked_write_started.notified().await;
+
+        order
+            .submit(
+                store.clone(),
+                mob_id,
+                status(&independent_identity, 1, "independent"),
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.independent_write_started.notified(),
+        )
+        .await
+        .expect("different identity must enter its store write independently");
+
+        store.release_blocked_write.notify_one();
+    }
+
+    #[tokio::test]
+    async fn same_identity_in_different_mobs_has_independent_lanes() {
+        let blocked_mob = MobId::from("projection-mob-a");
+        let independent_mob = MobId::from("projection-mob-b");
+        let identity = AgentIdentity::from("member-a");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let order = IdentityStatusProjectionOrder::default();
+        order
+            .submit(store.clone(), blocked_mob, status(&identity, 1, "blocked"))
+            .unwrap();
+        store.blocked_write_started.notified().await;
+
+        order
+            .submit(
+                store.clone(),
+                independent_mob,
+                status(&identity, 1, "independent"),
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.independent_write_started.notified(),
+        )
+        .await
+        .expect("the same identity in another mob must not share a projection lane");
+        store.release_blocked_write.notify_one();
+    }
+
+    #[tokio::test]
+    async fn identical_keys_in_distinct_storage_orders_do_not_cross_coalesce() {
+        let mob_id = MobId::from("projection-storage-scope");
+        let identity = AgentIdentity::from("member-a");
+        let blocked_store = Arc::new(DelayedIdentityStatusStore::default());
+        let independent_store = Arc::new(DelayedIdentityStatusStore::default());
+        let blocked_order = IdentityStatusProjectionOrder::default();
+        let independent_order = IdentityStatusProjectionOrder::default();
+        blocked_order
+            .submit(
+                blocked_store.clone(),
+                mob_id.clone(),
+                status(&identity, 1, "blocked"),
+            )
+            .unwrap();
+        blocked_store.blocked_write_started.notified().await;
+
+        independent_order
+            .submit(
+                independent_store.clone(),
+                mob_id,
+                status(&identity, 1, "independent"),
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            independent_store.independent_write_started.notified(),
+        )
+        .await
+        .expect("distinct storage compositions must not share projection lanes");
+        blocked_store.release_blocked_write.notify_one();
+    }
+
+    #[tokio::test]
+    async fn independently_composed_orders_for_one_backend_share_a_lane() {
+        let mob_id = MobId::from("projection-shared-backend");
+        let identity = AgentIdentity::from("member-a");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let status_store: Arc<dyn MobIdentityStatusStore> = store.clone();
+        let first_order = IdentityStatusProjectionOrder::for_status_store(&status_store);
+        let reopened_order = IdentityStatusProjectionOrder::for_status_store(&status_store);
+        first_order
+            .submit(
+                status_store.clone(),
+                mob_id.clone(),
+                status(&identity, 2, "blocked"),
+            )
+            .unwrap();
+        store.blocked_write_started.notified().await;
+
+        reopened_order
+            .submit(status_store, mob_id, status(&identity, 1, "latest"))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                store.latest_write_started.notified(),
+            )
+            .await
+            .is_err(),
+            "independent compositions over one backend must retain one ordering lane"
+        );
+        store.release_blocked_write.notify_one();
+    }
+
+    #[tokio::test]
+    async fn panicked_projection_parks_lane_and_refuses_false_success() {
+        let mob_id = MobId::from("projection-panic");
+        let identity = AgentIdentity::from("member-a");
+        let store = Arc::new(DelayedIdentityStatusStore::default());
+        let status_store: Arc<dyn MobIdentityStatusStore> = store.clone();
+        let order = IdentityStatusProjectionOrder::for_status_store(&status_store);
+        order
+            .submit(
+                status_store.clone(),
+                mob_id.clone(),
+                status(&identity, 1, "panic"),
+            )
+            .unwrap();
+        store.panic_write_started.notified().await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match order.submit(
+                    status_store.clone(),
+                    mob_id.clone(),
+                    status(&identity, 2, "latest"),
+                ) {
+                    Err(IdentityStatusProjectionError::LaneParked {
+                        mob_id: parked_mob,
+                        identity: parked_identity,
+                    }) => {
+                        assert_eq!(parked_mob, mob_id);
+                        assert_eq!(parked_identity, identity);
+                        break;
+                    }
+                    Ok(()) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected projection submission error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("panicked projection lane must become explicitly parked");
+
+        drop(order);
+        let reopened_order = IdentityStatusProjectionOrder::for_status_store(&status_store);
+        assert!(matches!(
+            reopened_order.submit(status_store, mob_id, status(&identity, 3, "latest"),),
+            Err(IdentityStatusProjectionError::LaneParked { .. })
+        ));
     }
 }
 

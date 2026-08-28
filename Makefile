@@ -688,13 +688,14 @@ semver-breaks:
 	@echo "$(GREEN)Checking public-API breaks vs published baselines...$(NC)"
 	@scripts/check-semver-breaks.sh
 
-# The analyser half of the semver-breaks gate, unit-tested against committed
-# real cargo-semver-checks reports. Runs without the tool installed, so it can
-# run on every PR: a parser that has drifted from the report grammar reports
-# "no breaks" for the same reason a clean release does.
+# The analyser and immutable-tag recovery verifier, unit-tested without the
+# cargo-semver-checks tool so they can run on every PR. A parser that has
+# drifted from the report grammar reports "no breaks" for the same reason a
+# clean release does.
 semver-breaks-selftest:
-	@echo "$(GREEN)Self-testing the semver-breaks analyser...$(NC)"
+	@echo "$(GREEN)Self-testing the semver-breaks gates...$(NC)"
 	@$(PYTHON) scripts/test_check_semver_breaks.py
+	@$(PYTHON) scripts/test_verify_semver_recovery_evidence.py
 
 # Full pre-release checklist
 release-preflight: release-doctor verify-lock-consistency verify-bazel-locks-strict ci verify-schema-freshness check-rust-release-packaging semver-breaks

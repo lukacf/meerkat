@@ -106,6 +106,8 @@ them.
                     `UnwindSafe`.
   - `meerkat-llm-core`: `AssistantTranscriptTruncated`, `ExperimentalModelRequiresLiveChannel`,
                         `FactoryError`, `interaction_id`, `RealtimeSessionEvent`.
+  - `meerkat-mob`: `LifecycleOperationProgressStalled`, `MobError`, `MobSessionService`,
+                   `enqueue_committed_parent_session_boundary_after_runtime_turn`.
   - `meerkat-machine-kernels`: `AbandonLiveInteraction`, `AbandonLiveInteractionAttached`,
                                `AbandonLiveInteractionIdle`,
                                `AbandonLiveInteractionPreservingEarlierDelegationAttached`,

@@ -41,6 +41,16 @@ on:
         required: false
         default: ""
         type: string
+      semver_evidence_run_id:
+        description: "Package recovery: exact failed tag-run id whose completed semver measurement needs only amended declarations"
+        required: false
+        default: ""
+        type: string
+      semver_evidence_job_id:
+        description: "Package recovery: exact failed semver job id from semver_evidence_run_id"
+        required: false
+        default: ""
+        type: string
       release_backend:
         description: "Release backend for validation and binary builds"
         required: false
@@ -444,21 +454,66 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
           fetch-depth: 0
 
+      # A tag is immutable once any artifact is public. If its full semver
+      # measurement completed and failed only because declarations were
+      # missing, a package-recovery dispatch may reuse that exact measurement.
+      # The verifier itself and the amended changelog come from the workflow
+      # ref, while every published source checkout remains the release tag.
+      - name: Checkout semver recovery policy
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id != '' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .semver-recovery-policy
+          persist-credentials: false
+
       - name: Install Rust
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-semver-breaks
 
       - name: Install cargo-semver-checks
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
         uses: taiki-e/install-action@cargo-semver-checks
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Verify every reported break is named and the notes are stamped
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
         run: make semver-breaks
+
+      - name: Verify exact completed semver measurement and amended declarations
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN_ID: ${{ github.event.inputs.semver_evidence_run_id }}
+          EVIDENCE_JOB_ID: ${{ github.event.inputs.semver_evidence_job_id }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${EVIDENCE_RUN_ID}" || -z "${EVIDENCE_JOB_ID}" || -z "${RELEASE_TAG}" ]]; then
+            echo "semver evidence recovery requires release_tag, semver_evidence_run_id, and semver_evidence_job_id" >&2
+            exit 1
+          fi
+          release_sha="$(git rev-parse HEAD)"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EVIDENCE_RUN_ID}" > "${RUNNER_TEMP}/semver-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${EVIDENCE_JOB_ID}" > "${RUNNER_TEMP}/semver-job.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${EVIDENCE_JOB_ID}/logs" > "${RUNNER_TEMP}/semver-job.log"
+          python3 .semver-recovery-policy/scripts/verify_semver_recovery_evidence.py \
+            --run-json "${RUNNER_TEMP}/semver-run.json" \
+            --job-json "${RUNNER_TEMP}/semver-job.json" \
+            --job-log "${RUNNER_TEMP}/semver-job.log" \
+            --evidence-run-id "${EVIDENCE_RUN_ID}" \
+            --evidence-job-id "${EVIDENCE_JOB_ID}" \
+            --release-tag "${RELEASE_TAG}" \
+            --release-sha "${release_sha}" \
+            --changelog .semver-recovery-policy/CHANGELOG.md
 
   build_binaries:
     name: Build and package surface binaries with GitHub-hosted runners

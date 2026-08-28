@@ -6,6 +6,15 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-status.XXXXXX")"
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-harness.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT" "$HARNESS_ROOT"' EXIT
 
+if ! grep -Fq "deterministic-locks/\${stamp_key}.lock" "$REPO_ROOT/scripts/pre-push-unit.sh"; then
+  echo "pre-push deterministic gate must lock only an identical source fingerprint" >&2
+  exit 1
+fi
+if grep -Fq 'HOOK_CACHE_ROOT}/deterministic.lock' "$REPO_ROOT/scripts/pre-push-unit.sh"; then
+  echo "pre-push deterministic gate must not serialize unrelated source fingerprints" >&2
+  exit 1
+fi
+
 git -C "$TEST_ROOT" init -q
 printf 'lock revision 0\n' > "$TEST_ROOT/Cargo.lock"
 printf 'module lock revision 0\n' > "$TEST_ROOT/MODULE.bazel.lock"

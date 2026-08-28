@@ -2,7 +2,7 @@
 # Pre-push deterministic test gate:
 # - validates the exact detached pushed tree selected by pre-push-dispatch.sh
 # - reuses source-test evidence across root lockfile-only commits
-# - serializes runs so repeated pushes don't fight each other
+# - serializes identical source evidence while isolated worktree lanes run in parallel
 # - retries nextest once if discovery hangs
 set -euo pipefail
 
@@ -28,8 +28,9 @@ LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_UNIT_LOCK_WAIT_SECS:-180}"
 GIT_DIR_PATH="$("$GIT_BIN" rev-parse --git-common-dir)"
 HOOK_CACHE_ROOT="${GIT_DIR_PATH}/meerkat-hook-cache"
 HOOK_CACHE_DIR="${HOOK_CACHE_ROOT}/deterministic"
-LOCK_DIR="${HOOK_CACHE_ROOT}/deterministic.lock"
-PID_FILE="${LOCK_DIR}/pid"
+LOCK_DIR=""
+PID_FILE=""
+lock_held=0
 
 mkdir -p "$HOOK_CACHE_DIR"
 
@@ -141,10 +142,14 @@ acquire_lock() {
   done
 
   echo "$$" > "$PID_FILE"
+  lock_held=1
 }
 
 release_lock() {
-  rm -rf "$LOCK_DIR"
+  if [[ "$lock_held" -eq 1 ]]; then
+    rm -rf "$LOCK_DIR"
+    lock_held=0
+  fi
 }
 
 run_with_timeout() {
@@ -193,7 +198,6 @@ retry_lane() {
   run_with_timeout "$timeout_secs" "${lane_cmd[@]}"
 }
 
-acquire_lock
 NEXTEST_REUSE_DIR=""
 
 release_resources() {
@@ -211,7 +215,20 @@ tree="$(tree_key)"
 source_fingerprint="$(source_test_fingerprint)"
 stamp_key="${CACHE_VERSION}-cargo-source-${source_fingerprint}"
 stamp_path="${HOOK_CACHE_DIR}/${stamp_key}.ok"
+LOCK_DIR="${HOOK_CACHE_ROOT}/deterministic-locks/${stamp_key}.lock"
+PID_FILE="${LOCK_DIR}/pid"
 
+if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
+  echo "reusing deterministic source-test evidence for fingerprint ${source_fingerprint}."
+  echo "Current root lock graph was compiled by pre-push Clippy but is not re-tested locally; CI is authoritative."
+  exit 0
+fi
+
+mkdir -p "$(dirname "$LOCK_DIR")"
+acquire_lock
+
+# A peer validating the same source fingerprint may have completed while this
+# process waited. Reuse its evidence instead of rebuilding the same graph.
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
   echo "reusing deterministic source-test evidence for fingerprint ${source_fingerprint}."
   echo "Current root lock graph was compiled by pre-push Clippy but is not re-tested locally; CI is authoritative."

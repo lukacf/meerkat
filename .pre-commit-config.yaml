@@ -3,6 +3,10 @@
 # Setup: make install-hooks
 
 default_stages: [pre-commit]
+# Once any hook has rejected the exact pushed tree, later expensive hooks
+# cannot make that push acceptable. Stop immediately so the operator can fix
+# the named defect without spending another broad validation cycle first.
+fail_fast: true
 
 repos:
   # On commit: auto-format Rust code

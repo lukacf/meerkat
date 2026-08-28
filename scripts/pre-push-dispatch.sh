@@ -105,14 +105,20 @@ hook_cache_dir="${hook_cache_root}/exact-tree"
 # This accelerates identical tracked trees only. CI remains authoritative for
 # toolchain, environment, credential, and other inputs outside the Git tree.
 hook_stamp="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.ok"
-dispatcher_lock_dir="${hook_cache_root}/dispatcher.lock"
+# Each source worktree gets a stable validation lane unless the caller names
+# one explicitly. The detached worktree, Cargo target, Bazel output base, and
+# dispatcher lock are all lane-owned, so unrelated worktrees can validate in
+# parallel without sharing mutable build state. Concurrent pushes from the
+# same source worktree still serialize on the same lane.
+default_validation_lane="pre-push-$(hash_path "${SOURCE_ROOT}")"
+validation_lane="$(sanitize_cache_key "${RUST_LANE_ID:-${default_validation_lane}}")"
+dispatcher_lock_dir="${hook_cache_root}/dispatcher-${validation_lane}.lock"
 dispatcher_lock_pid="${dispatcher_lock_dir}/pid"
-validation_lane="$(sanitize_cache_key "${RUST_LANE_ID:-pre-push}")"
 validation_tree="${hook_cache_root}/worktrees/${validation_lane}"
 validation_run_root=""
 validation_tree_owned=0
 dispatcher_lock_held=0
-export RUST_LANE_ID="${RUST_LANE_ID:-pre-push}"
+export RUST_LANE_ID="${validation_lane}"
 
 release_dispatcher_lock() {
   if [[ "${dispatcher_lock_held}" -eq 1 ]]; then

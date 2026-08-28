@@ -29,6 +29,27 @@ cleanup_harness() {
 }
 trap cleanup_harness EXIT
 
+hash_path() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | cut -c1-16
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | cut -c1-16
+  else
+    printf '%s' "$1" | cksum | cut -d' ' -f1
+  fi
+}
+
+default_lane_for_root() {
+  local canonical_root
+  canonical_root="$(git -C "$1" rev-parse --show-toplevel)"
+  printf 'pre-push-%s' "$(hash_path "$canonical_root")"
+}
+
+if ! grep -Fxq 'fail_fast: true' "$REPO_ROOT/.pre-commit-config.yaml"; then
+  echo "pre-push configuration must stop after the first rejecting hook" >&2
+  exit 1
+fi
+
 git -C "$TEST_ROOT" init -q
 git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   commit --allow-empty -qm "base"
@@ -104,7 +125,7 @@ assert_log_line "to=${head_sha}"
 assert_log_line "from=${base_sha}"
 assert_log_line "remote_name=origin"
 assert_log_line "remote_url=example.invalid"
-assert_log_line "lane=pre-push"
+assert_log_line "lane=$(default_lane_for_root "$TEST_ROOT")"
 if grep -Fq "dirty_source_visible=yes" "$INVOCATION_LOG"; then
   echo "dispatcher exposed dirty source-worktree bytes to validation" >&2
   exit 1
@@ -201,7 +222,8 @@ fi
 # A cache-hit process does not own the stable validation worktree. It must not
 # remove a path that an in-flight dispatcher may be using for another tree.
 cache_common_dir="$(git -C "$CACHE_REPO" rev-parse --path-format=absolute --git-common-dir)"
-active_validation_tree="${cache_common_dir}/meerkat-hook-cache/worktrees/pre-push"
+cache_validation_lane="$(default_lane_for_root "$CACHE_REPO")"
+active_validation_tree="${cache_common_dir}/meerkat-hook-cache/worktrees/${cache_validation_lane}"
 git -C "$CACHE_REPO" worktree add --detach --quiet "$active_validation_tree" "$cache_head_sha"
 run_cached_dispatch \
   "refs/tags/dispatch-cache-test ${cache_tag_object} refs/tags/dispatch-cache-test 0000000000000000000000000000000000000000"
@@ -280,6 +302,66 @@ if [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" != "1" ]]; then
   echo "waiting dispatcher ignored exact-tree evidence from the lock owner" >&2
   exit 1
 fi
+
+# Different source worktrees derive different validation lanes. Their detached
+# worktrees, Cargo targets, Bazel output bases, and dispatcher locks are
+# isolated, so they must be able to enter validation concurrently even though
+# they share one Git common directory.
+printf 'parallel lane proof\n' > "${LOCK_REPO}/parallel.txt"
+git -C "$LOCK_REPO" add parallel.txt
+git -C "$LOCK_REPO" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit -qm "parallel candidate"
+lock_parallel_sha="$(git -C "$LOCK_REPO" rev-parse HEAD)"
+LOCK_PEER_REPO="${LOCK_ROOT}/peer"
+git -C "$LOCK_REPO" worktree add --detach --quiet "$LOCK_PEER_REPO" "$lock_parallel_sha"
+rm -f "$LOCK_ENTERED" "$LOCK_RELEASE" "$LOCK_INVOCATIONS"
+
+run_parallel_dispatch() {
+  local source_repo="$1"
+  local local_ref="$2"
+  (
+    cd "$source_repo"
+    PATH="${LOCK_BIN}:$PATH" \
+      GIT_DIR="$(git -C "$source_repo" rev-parse --absolute-git-dir)" \
+      GIT_WORK_TREE="$source_repo" \
+      MEERKAT_DISPATCH_LOCK_INVOCATIONS="$LOCK_INVOCATIONS" \
+      MEERKAT_DISPATCH_LOCK_ENTERED="$LOCK_ENTERED" \
+      MEERKAT_DISPATCH_LOCK_RELEASE="$LOCK_RELEASE" \
+      RUST_LANE_ID="" \
+      "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
+      <<<"${local_ref} ${lock_parallel_sha} ${local_ref} ${lock_head_sha}"
+  )
+}
+
+run_parallel_dispatch "$LOCK_REPO" refs/heads/parallel-first \
+  >"${LOCK_ROOT}/parallel-first.log" 2>&1 &
+LOCK_FIRST_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$LOCK_ENTERED" ]] && break
+  sleep 0.05
+done
+if [[ ! -f "$LOCK_ENTERED" ]]; then
+  echo "first worktree dispatcher did not enter the validation gate" >&2
+  exit 1
+fi
+run_parallel_dispatch "$LOCK_PEER_REPO" refs/heads/parallel-second \
+  >"${LOCK_ROOT}/parallel-second.log" 2>&1 &
+LOCK_SECOND_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$LOCK_INVOCATIONS" ]] &&
+    [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" == "2" ]] && break
+  sleep 0.05
+done
+if [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" != "2" ]]; then
+  echo "independent source worktrees were serialized by one repository dispatcher lock" >&2
+  exit 1
+fi
+: > "$LOCK_RELEASE"
+wait "$LOCK_FIRST_PID"
+LOCK_FIRST_PID=""
+wait "$LOCK_SECOND_PID"
+LOCK_SECOND_PID=""
+git -C "$LOCK_REPO" worktree remove --force "$LOCK_PEER_REPO"
 
 # The dispatcher-exported output base is useful only if the authoritative
 # Bazel lock gate passes it to bb as a startup option.
@@ -428,7 +510,7 @@ run_attribution_dispatch() {
   attribution_status=$?
   set -e
   attribution_common_dir="$(git -C "$ATTRIBUTION_REPO" rev-parse --path-format=absolute --git-common-dir)"
-  attribution_validation_tree="${attribution_common_dir}/meerkat-hook-cache/worktrees/pre-push"
+  attribution_validation_tree="${attribution_common_dir}/meerkat-hook-cache/worktrees/$(default_lane_for_root "$ATTRIBUTION_REPO")"
   chmod -R u+rwx "$attribution_validation_tree" 2>/dev/null || true
   git -C "$ATTRIBUTION_REPO" worktree remove --force "$attribution_validation_tree" \
     >/dev/null 2>&1 || true

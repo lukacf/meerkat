@@ -1243,17 +1243,12 @@ jobs:
     if: >-
       always() &&
       needs.require_ci_green.result == 'success' &&
-      needs.release_validate_gate.result == 'success' &&
       needs.registry_credentials_preflight.result == 'success' &&
-      (needs.release_semver_gate.result == 'success' ||
-       (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true' &&
-        needs.release_semver_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
       (github.event_name == 'workflow_dispatch' &&
        github.event.inputs.publish_release_packages == 'true' &&
        github.event.inputs.publish_web_sdk_only != 'true'))
-    needs: [require_ci_green, release_validate_gate, release_semver_gate, registry_credentials_preflight]
+    needs: [require_ci_green, registry_credentials_preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:

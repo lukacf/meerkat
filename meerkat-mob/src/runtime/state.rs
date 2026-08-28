@@ -1257,6 +1257,7 @@ pub(super) enum MobCommand {
     IssueHostBindingDescriptor {
         host_id: String,
         target_mob_id: MobId,
+        target_supervisor: super::bridge_protocol::BridgePeerSpec,
         reply_tx: oneshot::Sender<
             Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError>,
         >,

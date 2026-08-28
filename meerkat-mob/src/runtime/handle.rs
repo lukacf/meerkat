@@ -1548,6 +1548,8 @@ pub struct HostBindRequest {
     pub bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
     /// Non-secret source-authorized proof for automatic temporary-mob binding.
     pub delegated_bootstrap_proof: Option<super::bridge_protocol::BridgeHostBootstrapProof>,
+    /// Exact target supervisor tuple the delegated proof is bound to.
+    pub delegated_supervisor: Option<super::bridge_protocol::BridgePeerSpec>,
     /// Advertised ws/wss live base URL from the descriptor; the bind reply's
     /// declaration is authoritative (restart truthfulness, DL5).
     pub live_endpoint: Option<String>,
@@ -1569,6 +1571,7 @@ impl HostBindRequest {
             address: descriptor.address.clone(),
             bootstrap_token: Some(descriptor.bootstrap_token.clone()),
             delegated_bootstrap_proof: None,
+            delegated_supervisor: None,
             live_endpoint: descriptor.live_endpoint.clone(),
         })
     }
@@ -1577,10 +1580,12 @@ impl HostBindRequest {
     pub fn from_delegated_descriptor(
         descriptor: &super::bridge_protocol::WireHostBindingDescriptor,
         delegated_bootstrap_proof: super::bridge_protocol::BridgeHostBootstrapProof,
+        delegated_supervisor: super::bridge_protocol::BridgePeerSpec,
     ) -> Result<Self, MobError> {
         let mut request = Self::from_descriptor(descriptor)?;
         request.bootstrap_token = None;
         request.delegated_bootstrap_proof = Some(delegated_bootstrap_proof);
+        request.delegated_supervisor = Some(delegated_supervisor);
         Ok(request)
     }
 }
@@ -9510,6 +9515,17 @@ impl MobHandle {
         .await?
     }
 
+    #[doc(hidden)]
+    pub async fn host_binding_supervisor_spec(
+        &self,
+    ) -> Result<super::bridge_protocol::BridgePeerSpec, MobError> {
+        Ok(self
+            .supervisor_bridge
+            .routable_supervisor_spec()
+            .await?
+            .into())
+    }
+
     /// Request a fresh one-time binding descriptor from a host already bound to
     /// this mob. Internal orchestration uses this to bind that same host into a
     /// short-lived council without exposing bootstrap material to an agent.
@@ -9518,12 +9534,14 @@ impl MobHandle {
         &self,
         host_id: &str,
         target_mob_id: &MobId,
+        target_supervisor: super::bridge_protocol::BridgePeerSpec,
     ) -> Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError> {
         let host_id = host_id.to_string();
         let target_mob_id = target_mob_id.clone();
         self.send_actor_command(|reply_tx| MobCommand::IssueHostBindingDescriptor {
             host_id,
             target_mob_id,
+            target_supervisor,
             reply_tx,
         })
         .await?

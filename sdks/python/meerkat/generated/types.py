@@ -7639,6 +7639,7 @@ class BridgeCommandIssueHostBindingDescriptor(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
     target_mob_id: Required[str]
+    target_supervisor: Required[BridgePeerSpec]
 
 class BridgeCommandMemberOperatorRequest(TypedDict, total=False):
     agent_identity: Required[str]
@@ -7999,6 +8000,7 @@ class BridgeReplyHostBindingDescriptorIssued(TypedDict, total=False):
     delegated_bootstrap_proof: Required[str]
     descriptor: Required[WireHostBindingDescriptor]
     result: Required[Literal['host_binding_descriptor_issued']]
+    target_supervisor: Required[BridgePeerSpec]
 
 class BridgeReplyMemberLiveChannelOpened(TypedDict, total=False):
     open: Required[LiveOpenResult]

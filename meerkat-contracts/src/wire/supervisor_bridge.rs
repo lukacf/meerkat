@@ -1241,6 +1241,8 @@ pub struct BridgeHostStatusPayload {
 #[serde(deny_unknown_fields)]
 pub struct BridgeIssueHostBindingDescriptorPayload {
     pub supervisor: BridgePeerSpec,
+    /// Target temporary mob supervisor the delegated proof authorizes.
+    pub target_supervisor: BridgePeerSpec,
     pub epoch: u64,
     pub binding_generation: u64,
     pub protocol_version: BridgeProtocolVersion,
@@ -2190,6 +2192,7 @@ pub struct BridgeHostStatusResponse {
 #[serde(deny_unknown_fields)]
 pub struct BridgeHostBindingDescriptorIssuedResponse {
     pub descriptor: WireHostBindingDescriptor,
+    pub target_supervisor: BridgePeerSpec,
     /// Request-bound proof; safe to carry over the signed, unencrypted bridge.
     pub delegated_bootstrap_proof: BridgeHostBootstrapProof,
 }

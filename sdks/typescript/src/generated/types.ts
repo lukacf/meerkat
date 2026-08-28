@@ -4285,6 +4285,7 @@ export interface BridgeCommandIssueHostBindingDescriptor {
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
   target_mob_id: string;
+  target_supervisor: BridgePeerSpec;
 }
 
 export interface BridgeCommandMemberOperatorRequest {
@@ -4680,6 +4681,7 @@ export interface BridgeReplyHostBindingDescriptorIssued {
   delegated_bootstrap_proof: string;
   descriptor: WireHostBindingDescriptor;
   result: "host_binding_descriptor_issued";
+  target_supervisor: BridgePeerSpec;
 }
 
 export interface BridgeReplyMemberLiveChannelOpened {

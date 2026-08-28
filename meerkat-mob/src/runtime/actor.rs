@@ -23423,10 +23423,15 @@ impl MobActor {
                 MobCommand::IssueHostBindingDescriptor {
                     host_id,
                     target_mob_id,
+                    target_supervisor,
                     reply_tx,
                 } => {
                     let result = self
-                        .issue_host_binding_descriptor(&host_id, &target_mob_id)
+                        .issue_host_binding_descriptor(
+                            &host_id,
+                            &target_mob_id,
+                            target_supervisor,
+                        )
                         .await;
                     let _ = reply_tx.send(result);
                 }
@@ -45782,14 +45787,18 @@ impl MobActor {
                 )));
             }
             let authority = self.supervisor_bridge.authority().await;
-            let supervisor_spec = self
-                .supervisor_bridge
-                .supervisor_spec_for_recipient(&peer)
-                .await?;
+            let supervisor_spec = match request.delegated_supervisor.clone() {
+                Some(supervisor) => supervisor,
+                None => self
+                    .supervisor_bridge
+                    .supervisor_spec_for_recipient(&peer)
+                    .await?
+                    .into(),
+            };
             let required_capabilities =
                 Self::required_host_capabilities(self.dsl_authority.state(), &host_id);
             let payload = super::bridge_protocol::BridgeHostBindPayload {
-                supervisor: supervisor_spec.into(),
+                supervisor: supervisor_spec,
                 epoch: authority.epoch,
                 binding_generation,
                 protocol_version: super::bridge_protocol::BridgeProtocolVersion::V4,
@@ -45950,14 +45959,18 @@ impl MobActor {
         // — this handler IS the owner realization). The epoch stamped on the
         // wire is the supervisor authority epoch (DEC-P2-9; no new counter).
         let authority = self.supervisor_bridge.authority().await;
-        let supervisor_spec = self
-            .supervisor_bridge
-            .supervisor_spec_for_recipient(&peer)
-            .await?;
+        let supervisor_spec = match request.delegated_supervisor.clone() {
+            Some(supervisor) => supervisor,
+            None => self
+                .supervisor_bridge
+                .supervisor_spec_for_recipient(&peer)
+                .await?
+                .into(),
+        };
         let required_capabilities =
             Self::required_host_capabilities(self.dsl_authority.state(), &host_id);
         let payload = super::bridge_protocol::BridgeHostBindPayload {
-            supervisor: supervisor_spec.into(),
+            supervisor: supervisor_spec,
             epoch: authority.epoch,
             binding_generation,
             // New-command constructors always stamp V4 explicitly
@@ -46582,6 +46595,7 @@ impl MobActor {
         &mut self,
         host_id: &str,
         target_mob_id: &MobId,
+        target_supervisor: super::bridge_protocol::BridgePeerSpec,
     ) -> Result<super::bridge_protocol::BridgeHostBindingDescriptorIssuedResponse, MobError> {
         let dsl_host = mob_dsl::HostId::from(host_id.to_string());
         let binding_generation = self.current_host_binding_generation(&dsl_host)?;
@@ -46623,6 +46637,7 @@ impl MobActor {
         let command = super::bridge_protocol::BridgeCommand::IssueHostBindingDescriptor(
             super::bridge_protocol::BridgeIssueHostBindingDescriptorPayload {
                 supervisor: supervisor.into(),
+                target_supervisor,
                 epoch: authority.epoch,
                 binding_generation,
                 protocol_version: super::bridge_protocol::BridgeProtocolVersion::V6,

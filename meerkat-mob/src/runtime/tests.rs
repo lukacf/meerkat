@@ -68397,6 +68397,7 @@ impl HostDaemonStub {
                 "host-ceremony-token",
             )),
             delegated_bootstrap_proof: None,
+            delegated_supervisor: None,
             live_endpoint: None,
         }
     }

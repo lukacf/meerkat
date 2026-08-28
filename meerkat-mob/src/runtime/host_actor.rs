@@ -10252,7 +10252,7 @@ impl MobHostActor {
         let delegated_bootstrap_proof =
             crate::runtime::bridge_protocol::derive_delegated_host_bind_proof(
                 self.bootstrap_token.current(),
-                &payload.supervisor,
+                &payload.target_supervisor,
                 &payload.target_mob_id,
                 &expected_host_peer_id,
                 &self.advertised_address,
@@ -10262,6 +10262,7 @@ impl MobHostActor {
             HostBridgeReply::completed(BridgeReply::HostBindingDescriptorIssued(
                 BridgeHostBindingDescriptorIssuedResponse {
                     descriptor,
+                    target_supervisor: payload.target_supervisor,
                     delegated_bootstrap_proof,
                 },
             )),

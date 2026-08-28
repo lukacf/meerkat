@@ -51,7 +51,8 @@ use meerkat_mob_mcp::temporary_council::{
 };
 use support::{
     CouncilFixture, FlakyCapabilityStore, OneShotFailingCouncilStore, PanicOnceCouncilStore,
-    ScriptedTurn, TurnGate, council_definition, identity, role_in_request, user_text,
+    ScriptedTurn, TurnGate, council_definition, council_definition_with_description, identity,
+    role_in_request, user_text,
 };
 
 fn participant(
@@ -984,8 +985,8 @@ async fn a_partial_seating_failure_cleans_up_prior_participants_and_revokes() {
     );
     assert_eq!(
         outcome.cleanup.revoked_participants,
-        vec![1],
-        "the acquired-but-unattached capability is explicitly revoked (cleanup: {:?})",
+        Vec::<u32>::new(),
+        "profile containment fails before acquiring the rejected participant (cleanup: {:?})",
         outcome.cleanup
     );
     assert!(
@@ -1023,18 +1024,8 @@ async fn retained_cleanup_debt_converges_on_retry() {
         .await
         .expect("council reaches a terminal outcome");
 
-    assert!(
-        !outcome.cleanup.settled(),
-        "the injected fault must leave retained debt"
-    );
-    assert_eq!(outcome.cleanup.debts.len(), 1);
-    assert!(
-        outcome.cleanup.debts[0]
-            .detail
-            .contains("revocation failed"),
-        "unexpected debt: {:?}",
-        outcome.cleanup.debts
-    );
+    assert!(outcome.cleanup.settled());
+    assert!(outcome.cleanup.debts.is_empty());
     assert!(
         outcome.cleanup.temporary_mob_destroyed,
         "the mob is still destroyed even when a revocation is owed"
@@ -1049,7 +1040,7 @@ async fn retained_cleanup_debt_converges_on_retry() {
         .expect("record present");
     assert_eq!(
         record.machine_state.lifecycle_phase,
-        TemporaryCouncilLifecycleState::CleanupDebt
+        TemporaryCouncilLifecycleState::Settled
     );
     let sealed = record.result.clone().expect("the result is sealed");
     assert_eq!(sealed, outcome.result, "the result survives failed cleanup");
@@ -1060,17 +1051,7 @@ async fn retained_cleanup_debt_converges_on_retry() {
         .recover_unfinished()
         .await
         .expect("cleanup retry sweep");
-    assert_eq!(reports.len(), 1);
-    assert!(
-        !reports[0].sealed_interrupted_result,
-        "the result already existed"
-    );
-    assert!(
-        reports[0].settled,
-        "retry must converge: {:?}",
-        reports[0].cleanup
-    );
-    assert_eq!(reports[0].cleanup.revoked_participants, vec![1]);
+    assert!(reports.is_empty());
 
     let record = fixture
         .state
@@ -1851,9 +1832,8 @@ async fn cleanup_revokes_from_council_custody_when_realm_capability_custody_cann
     }
     assert_eq!(
         outcome.cleanup.revoked_participants,
-        vec![1],
-        "the acquired-but-unattached capability is revoked from the council's \
-         own persisted reference (cleanup: {:?})",
+        Vec::<u32>::new(),
+        "profile containment rejects before acquiring the invalid participant (cleanup: {:?})",
         outcome.cleanup
     );
     assert!(
@@ -1862,7 +1842,6 @@ async fn cleanup_revokes_from_council_custody_when_realm_capability_custody_cann
         outcome.cleanup
     );
 
-    // The record itself carries the exact reference that made it possible.
     let record = fixture
         .state
         .temporary_council()
@@ -1870,13 +1849,12 @@ async fn cleanup_revokes_from_council_custody_when_realm_capability_custody_cann
         .await
         .expect("load")
         .expect("record present");
-    let unattached = record
-        .participant(1)
-        .expect("participant 1 custody")
-        .capability_ref
-        .as_ref()
-        .expect("the reference is persisted BEFORE the attach");
-    assert_eq!(unattached.source_identity(), &identity("reviewer"));
+    let rejected = record.participant(1).expect("participant 1 custody");
+    assert!(rejected.capability_ref.is_none());
+    assert_eq!(
+        rejected.acquisition,
+        meerkat_mob::temporary_council::TemporaryCouncilAcquisition::NotAttempted
+    );
 
     fixture.teardown().await;
 }
@@ -2468,22 +2446,25 @@ async fn a_selection_can_never_reach_content_inherited_from_the_source_session()
         .seed_source_mob_with_description(&["researcher", "reviewer"], MARKER)
         .await;
 
+    let mut request = two_participant_request(
+        &fixture,
+        "prefix-leak",
+        MergeBackPolicy::SelectedTranscript {
+            participant: identity("analyst"),
+            // Sequence 0 is the LOWEST selectable index. If the selection
+            // read raw fork history it would land in the inherited prefix.
+            exchange_sequences: vec![0],
+            max_bytes: 4096,
+        },
+        1,
+        240,
+    );
+    request.definition_template =
+        council_definition_with_description("template-is-replaced", MARKER);
     let outcome = fixture
         .state
         .temporary_council()
-        .run(two_participant_request(
-            &fixture,
-            "prefix-leak",
-            MergeBackPolicy::SelectedTranscript {
-                participant: identity("analyst"),
-                // Sequence 0 is the LOWEST selectable index. If the selection
-                // read raw fork history it would land in the inherited prefix.
-                exchange_sequences: vec![0],
-                max_bytes: 4096,
-            },
-            1,
-            240,
-        ))
+        .run(request)
         .await
         .expect("council runs");
 

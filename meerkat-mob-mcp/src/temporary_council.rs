@@ -2234,11 +2234,32 @@ impl CouncilRun {
                 let Some(remaining) = self.remaining() else {
                     return Err(TemporaryCouncilExitReason::DeadlineExceeded);
                 };
+                let temporary = match self.temporary_handle().await {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!("temporary mob is unavailable: {error}"),
+                        });
+                    }
+                };
+                let target_supervisor = match temporary.host_binding_supervisor_spec().await {
+                    Ok(supervisor) => supervisor,
+                    Err(error) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!(
+                                "temporary mob supervisor is unavailable for host binding: {error}"
+                            ),
+                        });
+                    }
+                };
                 let descriptor = match tokio::time::timeout(
                     remaining,
                     source.issue_host_binding_descriptor(
                         host_id.as_str(),
                         &self.record.temporary_mob_id,
+                        target_supervisor,
                     ),
                 )
                 .await
@@ -2258,6 +2279,7 @@ impl CouncilRun {
                 let binding = match HostBindRequest::from_delegated_descriptor(
                     &descriptor.descriptor,
                     descriptor.delegated_bootstrap_proof,
+                    descriptor.target_supervisor,
                 ) {
                     Ok(binding) => binding,
                     Err(error) => {
@@ -2267,15 +2289,6 @@ impl CouncilRun {
                                 "source host descriptor handoff was invalid for '{}': {error}",
                                 host_id.as_str()
                             ),
-                        });
-                    }
-                };
-                let temporary = match self.temporary_handle().await {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
-                            participant_order: custody.order,
-                            detail: format!("temporary mob is unavailable: {error}"),
                         });
                     }
                 };

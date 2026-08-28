@@ -3340,11 +3340,16 @@
               "target_mob_id": {
                 "description": "Short-lived target mob the non-secret delegated proof is bound to.",
                 "type": "string"
+              },
+              "target_supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec",
+                "description": "Target temporary mob supervisor the delegated proof authorizes."
               }
             },
             "required": [
               "command",
               "supervisor",
+              "target_supervisor",
               "epoch",
               "binding_generation",
               "protocol_version",
@@ -5688,11 +5693,15 @@
               "result": {
                 "const": "host_binding_descriptor_issued",
                 "type": "string"
+              },
+              "target_supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
               }
             },
             "required": [
               "result",
               "descriptor",
+              "target_supervisor",
               "delegated_bootstrap_proof"
             ],
             "type": "object"

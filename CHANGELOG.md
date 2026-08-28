@@ -60,6 +60,11 @@ them.
 
 ### Added
 
+- Added the first-class `council` agent mob tool for bounded cross-context
+  deliberation using scoped, expiring forked-participant capabilities,
+  source-owned execution context, automatic non-secret remote-host binding,
+  explicit result merging, and cleanup/recovery through generated lifecycle
+  authority.
 - Added typed, observe-only post-commit hooks for runtime input acceptance,
   rejection, and deduplication; peer ingress and egress; and enriched
   interaction completion. Event streams remain the ordered/replay-aware
@@ -67,6 +72,18 @@ them.
 - Added native GitHub Copilot device authentication and account-scoped CAPI
   routing for OpenAI Responses/Chat Completions, Anthropic Messages, and
   Gemini Chat Completions, without a Copilot SDK or CLI dependency.
+
+### Fixed
+
+- Made schedule-host shutdown cancellation-safe: cancelled or dropped shutdown
+  futures stop in-flight work without later delivery, while awaited shutdown
+  retains the durable executor-lease release guarantee.
+- Ordered output-only identity convergence projections by storage authority,
+  mob, and canonical agent identity so delayed writes cannot regress diagnostics
+  or treat presentation timestamps as lifecycle authority.
+- Hardened release publication with exact-tree semver evidence, complete binary
+  asset/provenance checks, concurrent pre-push isolation, and a guarded
+  tag-to-registry critical path.
 
 ## [0.8.30] - 2026-08-26
 

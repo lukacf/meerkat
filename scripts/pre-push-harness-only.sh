@@ -45,6 +45,7 @@ while IFS=$'\t' read -r status path remainder; do
   case "$path" in
     scripts/pre-push-*.sh | \
     scripts/test-pre-push-*.sh | \
+    scripts/release-doctor | \
     scripts/release-projection-only.mjs | \
     scripts/test-release-projection-*.sh)
       ;;

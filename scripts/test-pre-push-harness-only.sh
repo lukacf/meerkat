@@ -10,11 +10,13 @@ git -C "$TEST_ROOT" config user.name Meerkat
 git -C "$TEST_ROOT" config user.email meerkat@example.invalid
 mkdir -p "$TEST_ROOT/scripts"
 printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/scripts/pre-push-unit.sh"
+printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/scripts/release-doctor"
 git -C "$TEST_ROOT" add .
 git -C "$TEST_ROOT" commit -qm base
 base="$(git -C "$TEST_ROOT" rev-parse HEAD)"
 
 printf '# contract update\n' >> "$TEST_ROOT/scripts/pre-push-unit.sh"
+printf '# release SLO contract update\n' >> "$TEST_ROOT/scripts/release-doctor"
 printf '#!/usr/bin/env bash\n' > "$TEST_ROOT/scripts/test-release-projection-new.sh"
 git -C "$TEST_ROOT" add .
 git -C "$TEST_ROOT" commit -qm harness-only

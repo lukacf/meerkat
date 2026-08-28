@@ -237,6 +237,34 @@ else
   bad "Rust crate publish script is missing crates.io rate-limit retry handling"
 fi
 
+semver_job="$(workflow_job release_semver_gate)"
+if grep -Fq 'Verify exact-tree pre-tag semver evidence' <<<"${semver_job}" &&
+  grep -Fq "github.event_name != 'workflow_dispatch'" <<<"${semver_job}" &&
+  grep -Fq "github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == ''" <<<"${semver_job}"; then
+  pass "Tag releases reuse exact-tree pre-tag semver evidence"
+else
+  bad "Tag releases must reuse exact-tree pre-tag semver evidence instead of rerunning the long semver measurement"
+fi
+
+registry_job="$(workflow_job publish_registries)"
+registry_needs="$(grep -m1 '^[[:space:]]*needs:' <<<"${registry_job}" || true)"
+if grep -Fq 'require_ci_green' <<<"${registry_needs}" &&
+  grep -Fq 'release_validate_gate' <<<"${registry_needs}" &&
+  grep -Fq 'release_semver_gate' <<<"${registry_needs}" &&
+  grep -Fq 'registry_credentials_preflight' <<<"${registry_needs}" &&
+  ! grep -Eq 'build_binaries|publish_github_release|publish_web_sdk' <<<"${registry_needs}"; then
+  pass "Rust registry publication is independent of binary and SDK completion"
+else
+  bad "Rust registry publication has an invalid critical-path dependency: ${registry_needs:-missing needs}"
+fi
+
+if grep -Fq 'scripts/verify-rust-release-public.py' <<<"${registry_job}" &&
+  grep -Fq -- '--slo-seconds 1800' <<<"${registry_job}"; then
+  pass "Rust registry publication enforces the 30 minute tag-to-public SLO"
+else
+  bad "Rust registry publication does not enforce the 30 minute tag-to-public SLO"
+fi
+
 if [[ -n "${VERSION:-${RELEASE_TAG:-}}" ]]; then
   tag="${VERSION:-${RELEASE_TAG:-}}"
   case "${tag}" in

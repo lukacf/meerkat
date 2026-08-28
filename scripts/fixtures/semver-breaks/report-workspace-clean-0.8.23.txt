@@ -106,6 +106,18 @@
      Checked [   0.458s] 223 checks: 223 pass, 30 skip
      Summary no semver update required
     Finished [ 138.960s] meerkat-contracts
+    Building meerkat-copilot v0.8.23 (current)
+       Built [   3.000s] (current)
+     Parsing meerkat-copilot v0.8.23 (current)
+      Parsed [   0.010s] (current)
+    Building meerkat-copilot v0.8.23 (baseline)
+       Built [   3.000s] (baseline)
+     Parsing meerkat-copilot v0.8.23 (baseline)
+      Parsed [   0.010s] (baseline)
+    Checking meerkat-copilot v0.8.23 -> v0.8.23 (assume patch change)
+     Checked [   0.003s] 223 checks: 223 pass, 30 skip
+     Summary no semver update required
+    Finished [   6.023s] meerkat-copilot
     Building meerkat-core v0.8.23 (current)
        Built [   9.831s] (current)
      Parsing meerkat-core v0.8.23 (current)

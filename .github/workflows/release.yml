@@ -537,7 +537,7 @@ jobs:
     container: ${{ contains(matrix.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON((github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) && '{"include":[{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}' || '{"include":[{"runs-on":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"macos-15","target":"aarch64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"macos-15-large","target":"x86_64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}') }}
+      matrix: ${{ fromJSON('{"include":[{"runs-on":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","archive_ext":"tar.gz"}]}') }}
 
     steps:
       - name: Checkout

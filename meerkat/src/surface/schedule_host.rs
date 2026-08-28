@@ -23,38 +23,55 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio as schedule_host_tokio;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias as schedule_host_tokio;
 #[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias::sync::oneshot;
+use tokio_with_wasm::alias::sync::{oneshot, watch};
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::task::JoinHandle;
 
 pub struct ScheduleHostHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
-    join: JoinHandle<()>,
+    worker_shutdown: ScheduleHostWorkerShutdown,
+    join: Option<JoinHandle<()>>,
 }
 
 impl ScheduleHostHandle {
+    fn request_shutdown(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        self.worker_shutdown.signal();
+    }
+
     /// Whether the host supervisor task is still alive.
     ///
     /// Worker failures do not flip this while the supervisor is applying its
     /// bounded restart policy. A finished supervisor is observable by surface
     /// owners, which can replace the stale handle.
     pub fn is_running(&self) -> bool {
-        !self.join.is_finished()
+        self.join.as_ref().is_some_and(|join| !join.is_finished())
     }
-
     pub async fn shutdown(mut self) {
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            let _ = shutdown_tx.send(());
-        }
-        if let Err(error) = self.join.await {
+        self.request_shutdown();
+        // Await through the handle still owned by `self`. If this future is
+        // cancelled, Drop can still stop the worker while the detached
+        // supervisor completes executor-lease cleanup.
+        if let Some(join) = self.join.as_mut()
+            && let Err(error) = join.await
+        {
             tracing::error!(%error, "schedule host supervisor task terminated");
         }
+        drop(self.join.take());
+    }
+}
+
+impl Drop for ScheduleHostHandle {
+    fn drop(&mut self) {
+        self.request_shutdown();
     }
 }
 
@@ -1315,6 +1332,32 @@ async fn optional_schedule_host_sleep(delay: Option<Duration>) {
     }
 }
 
+async fn wait_for_worker_shutdown_or<F>(
+    shutdown_rx: &mut watch::Receiver<bool>,
+    operation: F,
+) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    schedule_host_tokio::pin!(operation);
+    schedule_host_tokio::select! {
+        biased;
+        () = wait_for_worker_shutdown(shutdown_rx) => None,
+        output = &mut operation => Some(output),
+    }
+}
+
+async fn wait_for_worker_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown_rx.borrow_and_update() {
+            return;
+        }
+        if shutdown_rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn wait_for_durable_store_wake(
     store: Arc<dyn meerkat_schedule::ScheduleStore>,
     wake_mode: ScheduleStoreWakeMode,
@@ -1331,6 +1374,68 @@ async fn wait_for_durable_store_wake(
 enum ScheduleHostWorkerExit {
     DurableWakeFailed(meerkat_schedule::ScheduleStoreError),
     MutationSignalClosed,
+}
+
+#[derive(Clone)]
+struct ScheduleHostWorkerShutdown {
+    sender: watch::Sender<bool>,
+}
+
+impl Default for ScheduleHostWorkerShutdown {
+    fn default() -> Self {
+        let (sender, _) = watch::channel(false);
+        Self { sender }
+    }
+}
+
+impl ScheduleHostWorkerShutdown {
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.sender.subscribe()
+    }
+
+    fn signal(&self) {
+        self.sender.send_replace(true);
+    }
+}
+
+struct ScheduleHostWorkerTask {
+    join: JoinHandle<Result<(), ScheduleHostWorkerExit>>,
+}
+
+#[derive(Clone, Copy)]
+struct ScheduleHostTiming {
+    wake_mode: ScheduleStoreWakeMode,
+    base_interval: Duration,
+    backoff_cap: Duration,
+    stable_window: Duration,
+}
+
+impl ScheduleHostWorkerTask {
+    fn spawn(
+        schedule_service: ScheduleService,
+        driver: Arc<ScheduleDriver>,
+        timing: ScheduleHostTiming,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            join: schedule_host_tokio::task::spawn(run_schedule_host_worker(
+                schedule_service,
+                driver,
+                timing,
+                shutdown_rx,
+            )),
+        }
+    }
+
+    fn join_mut(&mut self) -> &mut JoinHandle<Result<(), ScheduleHostWorkerExit>> {
+        &mut self.join
+    }
+}
+
+impl Drop for ScheduleHostWorkerTask {
+    fn drop(&mut self) {
+        self.join.abort();
+    }
 }
 
 impl ScheduleHostWorkerExit {
@@ -1351,27 +1456,30 @@ impl ScheduleHostWorkerExit {
 async fn run_schedule_host_worker(
     schedule_service: ScheduleService,
     driver: Arc<ScheduleDriver>,
-    wake_mode: ScheduleStoreWakeMode,
-    base_interval: Duration,
-    backoff_cap: Duration,
-    mut shutdown_rx: oneshot::Receiver<()>,
+    timing: ScheduleHostTiming,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), ScheduleHostWorkerExit> {
     let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
 
-    let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
-    let mut delay = Some(base_interval);
+    let mut backoff = TickBackoff::new(
+        timing.base_interval,
+        timing.backoff_cap,
+        IDLE_TICKS_BEFORE_BACKOFF,
+    );
+    let mut delay = Some(timing.base_interval);
     let mut mutation_rx = schedule_service.subscribe_mutations();
     let store = schedule_service.store();
 
     loop {
         schedule_host_tokio::select! {
-            _ = &mut shutdown_rx => return Ok(()),
+            biased;
+            () = wait_for_worker_shutdown(&mut shutdown_rx) => return Ok(()),
             mutation = mutation_rx.changed() => {
                 if mutation.is_err() {
                     return Err(ScheduleHostWorkerExit::MutationSignalClosed);
                 }
             }
-            durable_wake = wait_for_durable_store_wake(Arc::clone(&store), wake_mode) => {
+            durable_wake = wait_for_durable_store_wake(Arc::clone(&store), timing.wake_mode) => {
                 if let Err(error) = durable_wake {
                     return Err(ScheduleHostWorkerExit::DurableWakeFailed(error));
                 }
@@ -1379,7 +1487,14 @@ async fn run_schedule_host_worker(
             () = optional_schedule_host_sleep(delay) => {}
         }
 
-        let outcome = driver.tick_once().await;
+        let outcome = match driver
+            .tick_once_until_cancelled(wait_for_worker_shutdown(&mut shutdown_rx))
+            .await
+        {
+            Ok(Some(report)) => Ok(report),
+            Ok(None) => return Ok(()),
+            Err(error) => Err(error),
+        };
         let (next_delay, incident) = match outcome {
             Err(error) => {
                 backoff.observe_failure();
@@ -1400,35 +1515,42 @@ async fn run_schedule_host_worker(
                 }
                 (Some(backoff.current), incident)
             }
-            Ok(report) => match store.next_action_time_utc().await {
-                Err(error) => {
-                    backoff.observe_failure();
-                    (
-                        Some(backoff.current),
-                        Some(ScheduleHostIncident::new(
-                            ScheduleHostIncidentClass::NextActionReadFailed,
-                            format!("could not read next durable action time: {error}"),
-                        )),
-                    )
+            Ok(report) => {
+                match wait_for_worker_shutdown_or(&mut shutdown_rx, store.next_action_time_utc())
+                    .await
+                {
+                    None => return Ok(()),
+                    Some(action) => match action {
+                        Err(error) => {
+                            backoff.observe_failure();
+                            (
+                                Some(backoff.current),
+                                Some(ScheduleHostIncident::new(
+                                    ScheduleHostIncidentClass::NextActionReadFailed,
+                                    format!("could not read next durable action time: {error}"),
+                                )),
+                            )
+                        }
+                        Ok(action) => {
+                            let incident = incident_from_tick_report(&report);
+                            if incident.is_some() {
+                                backoff.observe_failure();
+                            } else {
+                                backoff.observe_report(&report);
+                            }
+                            (
+                                idle_delay_for_store_action(
+                                    action,
+                                    timing.wake_mode,
+                                    backoff.current,
+                                    timing.base_interval,
+                                ),
+                                incident,
+                            )
+                        }
+                    },
                 }
-                Ok(action) => {
-                    let incident = incident_from_tick_report(&report);
-                    if incident.is_some() {
-                        backoff.observe_failure();
-                    } else {
-                        backoff.observe_report(&report);
-                    }
-                    (
-                        idle_delay_for_store_action(
-                            action,
-                            wake_mode,
-                            backoff.current,
-                            base_interval,
-                        ),
-                        incident,
-                    )
-                }
-            },
+            }
         };
         log_schedule_host_health(
             health.observe(incident, meerkat_core::time_compat::Instant::now()),
@@ -1441,42 +1563,49 @@ async fn run_schedule_host_worker(
 async fn supervise_schedule_host(
     schedule_service: ScheduleService,
     driver: Arc<ScheduleDriver>,
-    wake_mode: ScheduleStoreWakeMode,
-    base_interval: Duration,
-    backoff_cap: Duration,
-    stable_window: Duration,
+    timing: ScheduleHostTiming,
     mut shutdown_rx: oneshot::Receiver<()>,
+    worker_shutdown: ScheduleHostWorkerShutdown,
 ) {
     let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
-    let mut restart_backoff = RestartBackoff::new(base_interval, backoff_cap);
+    let mut restart_backoff = RestartBackoff::new(timing.base_interval, timing.backoff_cap);
 
     loop {
-        let (worker_shutdown_tx, worker_shutdown_rx) = oneshot::channel();
-        let mut worker = schedule_host_tokio::task::spawn(run_schedule_host_worker(
+        let worker_shutdown_rx = worker_shutdown.subscribe();
+        let mut worker = ScheduleHostWorkerTask::spawn(
             schedule_service.clone(),
             Arc::clone(&driver),
-            wake_mode,
-            base_interval,
-            backoff_cap,
+            timing,
             worker_shutdown_rx,
-        ));
-        let mut worker_shutdown_tx = Some(worker_shutdown_tx);
-        let mut stable_timer = Box::pin(schedule_host_tokio::time::sleep(stable_window));
+        );
+        let mut stable_timer = Box::pin(schedule_host_tokio::time::sleep(timing.stable_window));
         let mut stable = false;
 
         let worker_result = loop {
             schedule_host_tokio::select! {
+                biased;
                 _ = &mut shutdown_rx => {
-                    if let Some(shutdown_tx) = worker_shutdown_tx.take() {
-                        let _ = shutdown_tx.send(());
+                    worker_shutdown.signal();
+                    match worker.join_mut().await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(exit)) => log_schedule_host_health(health.observe(
+                            Some(exit.into_incident()),
+                            meerkat_core::time_compat::Instant::now(),
+                        )),
+                        Err(error) => log_schedule_host_health(health.observe(
+                            Some(ScheduleHostIncident::new(
+                                ScheduleHostIncidentClass::WorkerPanicked,
+                                format!("schedule host worker task terminated during shutdown: {error}"),
+                            )),
+                            meerkat_core::time_compat::Instant::now(),
+                        )),
                     }
-                    let _ = worker.await;
                     if let Err(error) = driver.release_executor_lease().await {
                         tracing::warn!(%error, "failed to release schedule executor lease during shutdown");
                     }
                     return;
                 }
-                result = &mut worker => break result,
+                result = worker.join_mut() => break result,
                 () = &mut stable_timer, if !stable => {
                     stable = true;
                     restart_backoff.reset();
@@ -1504,6 +1633,7 @@ async fn supervise_schedule_host(
 
         let restart_delay = restart_backoff.after_failure();
         schedule_host_tokio::select! {
+            biased;
             _ = &mut shutdown_rx => {
                 if let Err(error) = driver.release_executor_lease().await {
                     tracing::warn!(%error, "failed to release schedule executor lease during shutdown");
@@ -1549,20 +1679,26 @@ pub fn spawn_schedule_host(
             Duration::from_secs(60),
         )
     };
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = schedule_host_tokio::task::spawn(supervise_schedule_host(
-        schedule_service,
-        driver,
+    let timing = ScheduleHostTiming {
         wake_mode,
         base_interval,
         backoff_cap,
         stable_window,
+    };
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let worker_shutdown = ScheduleHostWorkerShutdown::default();
+    let join = schedule_host_tokio::task::spawn(supervise_schedule_host(
+        schedule_service,
+        driver,
+        timing,
         shutdown_rx,
+        worker_shutdown.clone(),
     ));
 
     ScheduleHostHandle {
         shutdown_tx: Some(shutdown_tx),
-        join,
+        worker_shutdown,
+        join: Some(join),
     }
 }
 
@@ -2191,6 +2327,142 @@ pub fn schedule_runtime_correlation_id(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unpolled_schedule_host_shutdown_stops_blocked_supervisor() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TaskDrop(Arc<AtomicBool>);
+
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join = schedule_host_tokio::task::spawn({
+            let task_dropped = Arc::clone(&task_dropped);
+            async move {
+                let _drop = TaskDrop(task_dropped);
+                let _ = started_tx.send(());
+                let _ = shutdown_rx.await;
+            }
+        });
+        started_rx.await.expect("blocked supervisor should start");
+        let handle = ScheduleHostHandle {
+            shutdown_tx: Some(shutdown_tx),
+            worker_shutdown: ScheduleHostWorkerShutdown::default(),
+            join: Some(join),
+        };
+
+        let shutdown = handle.shutdown();
+        drop(shutdown);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !task_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping an unpolled shutdown must stop the supervisor");
+    }
+
+    #[tokio::test]
+    async fn cancelling_polled_shutdown_stops_worker_installed_after_signal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TaskDrop(Arc<AtomicBool>);
+
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let worker_dropped = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = ScheduleHostWorkerShutdown::default();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_observed_tx, shutdown_observed_rx) = oneshot::channel();
+        let (cleanup_tx, cleanup_rx) = oneshot::channel();
+        let (cleanup_complete_tx, cleanup_complete_rx) = oneshot::channel();
+        let join = schedule_host_tokio::task::spawn({
+            let worker_dropped = Arc::clone(&worker_dropped);
+            let worker_shutdown = worker_shutdown.clone();
+            async move {
+                let _ = shutdown_rx.await;
+                let mut worker_shutdown_rx = worker_shutdown.subscribe();
+                {
+                    let _drop = TaskDrop(worker_dropped);
+                    wait_for_worker_shutdown(&mut worker_shutdown_rx).await;
+                }
+                let _ = shutdown_observed_tx.send(());
+                let _ = cleanup_rx.await;
+                let _ = cleanup_complete_tx.send(());
+            }
+        });
+        let handle = ScheduleHostHandle {
+            shutdown_tx: Some(shutdown_tx),
+            worker_shutdown,
+            join: Some(join),
+        };
+
+        let shutdown_task = schedule_host_tokio::task::spawn(handle.shutdown());
+        tokio::time::timeout(Duration::from_secs(1), shutdown_observed_rx)
+            .await
+            .expect("shutdown should reach the supervisor")
+            .expect("supervisor should install the in-flight worker");
+        shutdown_task.abort();
+        let _ = shutdown_task.await;
+
+        assert!(worker_dropped.load(Ordering::Acquire));
+        let _ = cleanup_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), cleanup_complete_rx)
+            .await
+            .expect("detached supervisor cleanup should finish")
+            .expect("supervisor should report cleanup completion");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_next_action_read() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct OperationDrop(Arc<AtomicBool>);
+
+        impl Drop for OperationDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let operation_dropped = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (started_tx, started_rx) = oneshot::channel();
+        let wait_task = schedule_host_tokio::task::spawn({
+            let operation_dropped = Arc::clone(&operation_dropped);
+            async move {
+                wait_for_worker_shutdown_or(&mut shutdown_rx, async move {
+                    let _drop = OperationDrop(operation_dropped);
+                    let _ = started_tx.send(());
+                    std::future::pending::<()>().await;
+                })
+                .await
+            }
+        });
+        started_rx
+            .await
+            .expect("pending next-action read should start");
+
+        shutdown_tx.send_replace(true);
+        let result = tokio::time::timeout(Duration::from_secs(1), wait_task)
+            .await
+            .expect("shutdown should stop the pending next-action read")
+            .expect("wait task should not panic");
+        assert!(result.is_none());
+        assert!(operation_dropped.load(Ordering::Acquire));
+    }
 
     /// Detail churn inside one stable class cannot punch through the incident
     /// rate limit. The latest detail is retained for the next heartbeat.
@@ -3097,7 +3369,7 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A session host that must never be asked to materialize. Any
     /// `materialize_session` call records a hit and returns an error so the
@@ -3105,6 +3377,21 @@ mod tests {
     /// a silent duplicate session.
     struct PanicOnMaterializeHost {
         materialize_calls: Arc<AtomicUsize>,
+    }
+
+    struct BlockingProbeHost {
+        entered: tokio::sync::Notify,
+        probe_calls: Arc<AtomicUsize>,
+        delivery_calls: Arc<AtomicUsize>,
+        probe_future_dropped: Arc<AtomicBool>,
+    }
+
+    struct ProbeFutureDrop(Arc<AtomicBool>);
+
+    impl Drop for ProbeFutureDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
 
     struct IdentityResolvingHost {
@@ -3163,6 +3450,165 @@ mod tests {
                 Some(identity.correlation_id.clone()),
             ))
         }
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for BlockingProbeHost {
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            self.probe_calls.fetch_add(1, Ordering::AcqRel);
+            let _drop = ProbeFutureDrop(Arc::clone(&self.probe_future_dropped));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &Occurrence,
+            _create: &SessionMaterializationSpec,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            panic!("blocked probe must prevent materialization")
+        }
+
+        async fn deliver_prompt(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            _dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.delivery_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            _dispatch: ScheduledEventDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.delivery_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_real_schedule_host_stops_tick_releases_lease_and_prevents_delivery() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(Arc::clone(&store));
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("abort-safe-real-host".to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                    session_id: SessionId::new(),
+                    action: ScheduledSessionAction::Prompt {
+                        prompt: ContentInput::Text("must not outlive shutdown".to_string()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+                misfire_policy: meerkat_schedule::MisfirePolicy::CatchUpWithin {
+                    window_seconds: 60,
+                },
+                overlap_policy: meerkat_schedule::OverlapPolicy::SkipIfRunning,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule create should plan the due occurrence");
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let delivery_calls = Arc::new(AtomicUsize::new(0));
+        let probe_future_dropped = Arc::new(AtomicBool::new(false));
+        let blocking_host = Arc::new(BlockingProbeHost {
+            entered: tokio::sync::Notify::new(),
+            probe_calls: Arc::clone(&probe_calls),
+            delivery_calls: Arc::clone(&delivery_calls),
+            probe_future_dropped: Arc::clone(&probe_future_dropped),
+        });
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = blocking_host.clone();
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+        let handle = spawn_schedule_host(service.clone(), adapter, "abort-safe-owner");
+
+        tokio::time::timeout(Duration::from_secs(1), blocking_host.entered.notified())
+            .await
+            .expect("real driver should block inside target probe");
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(delivery_calls.load(Ordering::Acquire), 0);
+
+        let shutdown = handle.shutdown();
+        drop(shutdown);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !probe_future_dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping shutdown must stop the real blocked tick");
+
+        let replacement_lease = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let request = meerkat_schedule::AcquireScheduleExecutorLeaseRequest {
+                    owner_id: "replacement-owner".to_string(),
+                    lease_duration: ChronoDuration::seconds(60),
+                };
+                match store
+                    .acquire_executor_lease(request)
+                    .await
+                    .expect("replacement lease acquisition should remain readable")
+                {
+                    meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Acquired(lease) => {
+                        break lease;
+                    }
+                    meerkat_schedule::AcquireScheduleExecutorLeaseOutcome::Busy { .. } => {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Drop must let the supervisor release its executor lease");
+        assert_eq!(replacement_lease.owner_id(), "replacement-owner");
+        store
+            .release_executor_lease(replacement_lease)
+            .await
+            .expect("replacement lease should remain releasable");
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(delivery_calls.load(Ordering::Acquire), 0);
+        let occurrences = service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("occurrence should remain inspectable");
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].attempt_count, 1);
     }
 
     #[async_trait]

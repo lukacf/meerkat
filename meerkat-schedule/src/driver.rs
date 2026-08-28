@@ -448,7 +448,42 @@ impl ScheduleDriver {
             return Ok(report);
         };
         report.executor_authorized = true;
+        self.tick_once_authorized(report, executor_lease).await
+    }
 
+    /// Run one tick while allowing a host to cancel only after executor lease
+    /// acquisition or renewal has committed and its local witness is installed.
+    ///
+    /// Cancelling the ordinary [`Self::tick_once`] future can lose that witness
+    /// if a remote store commits acquisition just before the future is dropped.
+    /// Hosts that need bounded shutdown use this seam so later tick work remains
+    /// cancellable without orphaning the executor lease.
+    pub async fn tick_once_until_cancelled<F>(
+        &self,
+        cancellation: F,
+    ) -> Result<Option<ScheduleTickReport>, ScheduleDomainError>
+    where
+        F: std::future::Future,
+    {
+        let _tick = self.tick_gate.lock().await;
+        let mut report = ScheduleTickReport::default();
+        let Some(executor_lease) = self.acquire_or_renew_executor_lease().await? else {
+            return Ok(Some(report));
+        };
+        report.executor_authorized = true;
+        crate::tokio::pin!(cancellation);
+        crate::tokio::select! {
+            biased;
+            _ = &mut cancellation => Ok(None),
+            result = self.tick_once_authorized(report, executor_lease) => result.map(Some),
+        }
+    }
+
+    async fn tick_once_authorized(
+        &self,
+        mut report: ScheduleTickReport,
+        executor_lease: ScheduleExecutorLease,
+    ) -> Result<ScheduleTickReport, ScheduleDomainError> {
         // Per-row tolerance end to end: a poisoned schedule row, a poisoned
         // occurrence row, or one schedule whose refill fails must not starve
         // every other schedule. Every skip is a typed fault in the report —
@@ -1813,6 +1848,55 @@ mod tests {
                 completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_executor_lease_witness_before_stopping_tick() {
+        let store = Arc::new(MemoryScheduleStore::new());
+        let shared_store: Arc<dyn ScheduleStore> = store.clone();
+        let service = ScheduleService::new(Arc::clone(&shared_store));
+        let driver = ScheduleDriver::new(
+            service,
+            shared_store,
+            Arc::new(ReadyProbe),
+            Arc::new(CompletingDelivery::default()),
+            "cancellation-safe-driver",
+            ScheduleDriverConfig {
+                claim_limit: 1,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver
+            .tick_once_until_cancelled(std::future::ready(()))
+            .await
+            .expect("lease acquisition should complete before cancellation");
+        assert!(
+            report.is_none(),
+            "ready cancellation must stop before schedule work"
+        );
+        assert!(
+            store
+                .observe_executor_lease()
+                .await
+                .expect("executor lease should remain observable")
+                .active
+                .is_some(),
+            "cancellation must not strand a committed lease outside the driver witness"
+        );
+
+        driver
+            .release_executor_lease()
+            .await
+            .expect("witnessed executor lease should remain releasable");
+        assert!(
+            store
+                .observe_executor_lease()
+                .await
+                .expect("released executor lease should remain observable")
+                .active
+                .is_none()
+        );
     }
 
     #[derive(Default)]

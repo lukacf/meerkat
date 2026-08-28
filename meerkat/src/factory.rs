@@ -4209,9 +4209,17 @@ impl AgentFactory {
         let Some(auth_binding) = identity.auth_binding.as_ref() else {
             return Ok(None);
         };
-        let target = meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding)
-            .map_err(FactoryError::ConnectionTarget)?;
-        Ok(Some(target.credential_identity))
+        match meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding) {
+            Ok(target) => Ok(Some(target.credential_identity)),
+            Err(
+                meerkat_core::ConnectionTargetError::UnknownRealm(_)
+                | meerkat_core::ConnectionTargetError::BindingInvalid {
+                    source: meerkat_core::ProviderBindingError::UnknownBinding(_),
+                    ..
+                },
+            ) => Ok(None),
+            Err(error) => Err(FactoryError::ConnectionTarget(error)),
+        }
     }
 
     fn llm_identity_uses_copilot(
@@ -6974,10 +6982,16 @@ impl AgentFactory {
         let mut auto_image_generation_executor: Option<
             Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
         > = None;
-        let mut credential_identity = build_config
-            .auth_binding
-            .as_ref()
-            .map(meerkat_core::AuthCredentialIdentity::from_auth_binding);
+        let mut credential_identity = if build_config.agent_llm_client_override.is_some()
+            || build_config.llm_client_override.is_some()
+        {
+            None
+        } else {
+            build_config
+                .auth_binding
+                .as_ref()
+                .map(meerkat_core::AuthCredentialIdentity::from_auth_binding)
+        };
         let llm_client: Option<Arc<dyn LlmClient>> = if build_config
             .agent_llm_client_override
             .is_some()

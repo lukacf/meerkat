@@ -2,10 +2,12 @@
 # If machine-related files changed, run codegen + verify
 set -euo pipefail
 
-ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="${ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 MAKE_BIN="${MAKE_BIN:-make}"
 MACHINE_AUTHORITY_CHANGED="${MACHINE_AUTHORITY_CHANGED:-$ROOT/scripts/machine-authority-changed}"
+RELEASE_PROJECTION_ONLY="${RELEASE_PROJECTION_ONLY:-$SCRIPT_DIR/release-projection-only.mjs}"
 GIT_BIN="${GIT_BIN:-git}"
 cd "$ROOT"
 
@@ -15,6 +17,18 @@ if [[ -z "$from_ref" || -z "$to_ref" ]]; then
     echo "machine pre-push validation requires exact refs from pre-push-dispatch.sh" >&2
     echo "Reinstall repository hooks with: make install-hooks" >&2
     exit 1
+fi
+
+if "$RELEASE_PROJECTION_ONLY" \
+    --base "$from_ref" --head "$to_ref"; then
+    echo "Release projection only; machine authority is unchanged."
+    exit 0
+else
+    release_projection_status=$?
+    if [[ "$release_projection_status" -ne 1 ]]; then
+        echo "release projection classification failed with status ${release_projection_status}" >&2
+        exit "$release_projection_status"
+    fi
 fi
 
 if "$MACHINE_AUTHORITY_CHANGED" --base "$from_ref" --head "$to_ref" >/dev/null; then

@@ -328,4 +328,8 @@ if [[ "$source_stamp_count" -ne $((initial_stamp_count + 1)) ]]; then
   exit 1
 fi
 
+"$REPO_ROOT/scripts/test-release-projection-only.sh"
+"$REPO_ROOT/scripts/test-release-projection-pre-push.sh"
+"$REPO_ROOT/scripts/test-pre-push-harness-only.sh"
+
 echo "pre-push deterministic gate status and source-fingerprint contracts hold"

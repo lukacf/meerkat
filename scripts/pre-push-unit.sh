@@ -6,9 +6,12 @@
 # - retries nextest once if discovery hangs
 set -euo pipefail
 
-ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="${ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 GIT_BIN="${GIT_BIN:-git}"
+RELEASE_PROJECTION_ONLY="${RELEASE_PROJECTION_ONLY:-$SCRIPT_DIR/release-projection-only.mjs}"
+PRE_PUSH_HARNESS_ONLY="${PRE_PUSH_HARNESS_ONLY:-$SCRIPT_DIR/pre-push-harness-only.sh}"
 
 CACHE_VERSION="v10"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-300}"
@@ -43,6 +46,7 @@ tree_key() {
 }
 
 source_test_fingerprint() {
+  local revision="${1:-HEAD}"
   local tree_record tree_path
   # Root dependency locks are validated by the preceding Cargo and Bazel lock
   # gates, while CI remains authoritative for advisories. The always-run
@@ -52,7 +56,7 @@ source_test_fingerprint() {
   # remains fail-closed because tests may read fixtures or configuration with
   # arbitrary extensions. The current lock graph is compiled, not re-tested:
   # reused test evidence was executed against the prior root lock graph.
-  "$GIT_BIN" ls-tree -rz --full-tree HEAD |
+  "$GIT_BIN" ls-tree -rz --full-tree "$revision" |
     while IFS= read -r -d '' tree_record; do
       tree_path="${tree_record#*$'\t'}"
       case "$tree_path" in
@@ -222,6 +226,65 @@ if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; th
   echo "reusing deterministic source-test evidence for fingerprint ${source_fingerprint}."
   echo "Current root lock graph was compiled by pre-push Clippy but is not re-tested locally; CI is authoritative."
   exit 0
+fi
+
+# A cargo-release projection rewrites version-bearing manifests, generated
+# metadata, SDK/schema mirrors, and docs without changing executable source or
+# dependency selection. The fail-closed classifier proves that boundary. Reuse
+# the exact base fingerprint only when its broad source evidence is already
+# present, then record the candidate fingerprint as a derived evidence alias so
+# a later lock-only repair does not rebuild the world either.
+if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && \
+      -n "${PRE_COMMIT_FROM_REF:-}" && -n "${PRE_COMMIT_TO_REF:-}" ]]; then
+  if "$RELEASE_PROJECTION_ONLY" \
+      --base "$PRE_COMMIT_FROM_REF" --head "$PRE_COMMIT_TO_REF"; then
+    base_source_fingerprint="$(source_test_fingerprint "$PRE_COMMIT_FROM_REF")"
+    base_stamp_path="${HOOK_CACHE_DIR}/${CACHE_VERSION}-cargo-source-${base_source_fingerprint}.ok"
+    if [[ -f "$base_stamp_path" ]]; then
+      stamp_tmp="${stamp_path}.tmp.$$"
+      printf 'tree=%s\nsource_fingerprint=%s\nreuse_parent_fingerprint=%s\nclassifier=release-projection-only\nbackend=cargo\nrunners=reused-parent-source-evidence\n' \
+        "$tree" "$source_fingerprint" "$base_source_fingerprint" > "$stamp_tmp"
+      mv "$stamp_tmp" "$stamp_path"
+      echo "Release projection only; reusing deterministic parent source-test evidence ${base_source_fingerprint}."
+      exit 0
+    fi
+    echo "Release projection parent has no reusable source-test evidence; running the deterministic gate."
+  else
+    release_projection_status=$?
+    if [[ "$release_projection_status" -ne 1 ]]; then
+      echo "release projection classification failed with status ${release_projection_status}" >&2
+      exit "$release_projection_status"
+    fi
+  fi
+fi
+
+# Hook-harness edits are validated by the dedicated pre-push dispatcher,
+# machine, unit-status, release-projection, lock, and enumeration contract
+# suites that run before this broad Cargo lane. They do not change Rust test
+# inputs. Reuse parent Rust evidence only for additions/modifications inside
+# that closed harness path set; deletions and every other path fail closed.
+if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && \
+      -n "${PRE_COMMIT_FROM_REF:-}" && -n "${PRE_COMMIT_TO_REF:-}" ]]; then
+  if "$PRE_PUSH_HARNESS_ONLY" \
+      --base "$PRE_COMMIT_FROM_REF" --head "$PRE_COMMIT_TO_REF"; then
+    base_source_fingerprint="$(source_test_fingerprint "$PRE_COMMIT_FROM_REF")"
+    base_stamp_path="${HOOK_CACHE_DIR}/${CACHE_VERSION}-cargo-source-${base_source_fingerprint}.ok"
+    if [[ -f "$base_stamp_path" ]]; then
+      stamp_tmp="${stamp_path}.tmp.$$"
+      printf 'tree=%s\nsource_fingerprint=%s\nreuse_parent_fingerprint=%s\nclassifier=pre-push-harness-only\nbackend=cargo\nrunners=reused-parent-source-evidence\n' \
+        "$tree" "$source_fingerprint" "$base_source_fingerprint" > "$stamp_tmp"
+      mv "$stamp_tmp" "$stamp_path"
+      echo "Pre-push harness only; reusing deterministic parent Rust-test evidence ${base_source_fingerprint}."
+      exit 0
+    fi
+    echo "Pre-push harness parent has no reusable Rust-test evidence; running the deterministic gate."
+  else
+    harness_classifier_status=$?
+    if [[ "$harness_classifier_status" -ne 1 ]]; then
+      echo "pre-push harness classification failed with status ${harness_classifier_status}" >&2
+      exit "$harness_classifier_status"
+    fi
+  fi
 fi
 
 mkdir -p "$(dirname "$LOCK_DIR")"

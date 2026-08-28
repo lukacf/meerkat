@@ -24,10 +24,9 @@ if meerkat_buildbuddy_enabled; then
   exit 0
 fi
 
-# Reuse the same xtask build path as the existing machine-authority
-# pre-push gate so both hooks share the isolated target dir.
-XTASK_TARGET_DIR="${XTASK_TARGET_DIR:-$HOME/.cache/meerkat/xtask-target}"
 CARGO="${CARGO:-./scripts/repo-cargo}"
-
-export CARGO_TARGET_DIR="$XTASK_TARGET_DIR"
-"$CARGO" run -p xtask -- audit-generated-headers
+# Stay in the dispatcher-owned RUST_LANE_ID selected by repo-cargo. The bridge
+# classifier and every other lightweight xtask hook use this same target, so a
+# push compiles the xtask closure once instead of once here and again in the
+# next hook.
+"$CARGO" xtask audit-generated-headers

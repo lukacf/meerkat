@@ -518,7 +518,7 @@ pub enum SpawnMemberAdmission {
 /// The private field makes this unforgeable outside `meerkat-mob`; adaptive
 /// driver code can hold and pass it back to the narrow adaptive seam, but it
 /// cannot manufacture one or write raw machine inputs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdaptiveDriverCapability {
     adaptive_run_id: String,
     _private: (),

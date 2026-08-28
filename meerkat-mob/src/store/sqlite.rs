@@ -3,7 +3,11 @@
 //! SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
+use super::forked_participant::{
+    ForkedParticipantRecord, ForkedParticipantStore, forked_participant_exact_reference,
+};
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
+use super::temporary_council::{TemporaryCouncilRecord, TemporaryCouncilStore};
 use super::{
     BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
     ExternalBindingOverlayRecord, IdentityMemberEventCommitOutcome,
@@ -14,11 +18,12 @@ use super::{
     MobExternalDeliveryFencedResolutionCommit, MobExternalDeliveryIntent, MobExternalDeliveryPhase,
     MobExternalDeliveryRealizationCommit, MobExternalDeliveryRealizerCompletionCommit,
     MobExternalDeliveryRecord, MobExternalDeliveryRepairOutcome, MobExternalDeliveryRepairState,
-    MobExternalDeliveryTerminal, MobHostAuthorityDeletionAuthority,
-    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobIdentityMemberStore,
-    MobIdentityStatusStore, MobIdentityStore, MobIdentityStoreClock, MobMemberEventCursorRecord,
-    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
-    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    MobExternalDeliveryTerminal, MobForkedParticipantMemberAssociation,
+    MobHostAuthorityDeletionAuthority, MobHostAuthorityPersistenceAuthority,
+    MobHostAuthorityRecord, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore,
+    MobIdentityStoreClock, MobMemberEventCursorRecord, MobMemberLiveCleanupRecord,
+    MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin, MobMemberOperatorRequestKey,
+    MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
     MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
     MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
     MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
@@ -41,6 +46,9 @@ use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{
     MobEvent, MobEventKind, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event,
+};
+use crate::forked_participant::{
+    ForkedParticipantCapabilityId, ForkedParticipantRef, ForkedParticipantRequestId,
 };
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
@@ -69,8 +77,10 @@ use crate::run::{
     MobRunProvenanceAuthority, MobRunRemoteTurnIntent, MobRunRemoteTurnReceipt, MobRunStatus,
     StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
+use crate::temporary_council::TemporaryCouncilId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meerkat_core::SessionId;
 use notify::{RecursiveMode, Watcher};
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -272,6 +282,30 @@ CREATE TABLE IF NOT EXISTS realm_profiles (
     name TEXT PRIMARY KEY,
     profile_json BLOB NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_forked_participants (
+    capability_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    record_json BLOB NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX mob_forked_participants_fork_session
+    ON mob_forked_participants (json_extract(record_json, '$.planned_child_session_id'));
+CREATE TABLE IF NOT EXISTS mob_forked_participant_member_associations (
+    mob_id TEXT NOT NULL,
+    association_key TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, association_key)
+);
+CREATE TABLE IF NOT EXISTS mob_temporary_councils (
+    council_id TEXT PRIMARY KEY,
+    temporary_mob_id TEXT NOT NULL UNIQUE,
+    record_json BLOB NOT NULL,
+    revision INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )";
@@ -1148,6 +1182,49 @@ fn migration_0007_identity_adoption_receipts(tx: &Transaction<'_>) -> Result<(),
     )
 }
 
+fn migration_0008_forked_participant_capabilities(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_forked_participants (
+             capability_id TEXT PRIMARY KEY,
+             request_id TEXT NOT NULL UNIQUE,
+             record_json BLOB NOT NULL,
+             revision INTEGER NOT NULL,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE UNIQUE INDEX mob_forked_participants_fork_session
+             ON mob_forked_participants (json_extract(record_json, '$.planned_child_session_id'));",
+    )
+}
+
+fn migration_0009_forked_participant_member_associations(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_forked_participant_member_associations (
+             mob_id TEXT NOT NULL,
+             association_key TEXT NOT NULL,
+             record_json BLOB NOT NULL,
+             PRIMARY KEY (mob_id, association_key)
+         );",
+    )
+}
+
+fn migration_0010_temporary_councils(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_temporary_councils (
+             council_id TEXT PRIMARY KEY,
+             temporary_mob_id TEXT NOT NULL UNIQUE,
+             record_json BLOB NOT NULL,
+             revision INTEGER NOT NULL,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );",
+    )
+}
+
 fn migration_0001_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_SCHEMA_SQL)
 }
@@ -1416,12 +1493,474 @@ fn verify_released_0_8_25_mob_schema(conn: &Connection) -> Result<(), String> {
     )
 }
 
+// Frozen v7 catalog: the shape shipped immediately before the
+// forked-participant capability table. Built from the frozen v4 catalog plus
+// the released 0005/0006/0007 receipt transitions, never from the current
+// initializer, so a v7 database is proven against the exact released shape
+// before the one supported v7 -> v8 transition runs.
+fn build_released_0_8_30_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    build_released_0_8_25_mob_schema(tx)?;
+    migration_0005_identity_intent_mutation_receipts(tx)?;
+    migration_0006_identity_convergence_resolution_receipts(tx)?;
+    migration_0007_identity_adoption_receipts(tx)
+}
+
+const RELEASED_0_8_30_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_external_deliveries",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intent_mutation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_convergence_resolution_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_adoption_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+];
+
+fn verify_released_0_8_30_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_8_30_MOB_OBJECTS,
+        build_released_0_8_30_mob_schema,
+    )
+}
+
+// Frozen v8 catalog: the shape shipped immediately before the
+// forked-participant member-association table. Built from the frozen v7
+// catalog plus the released migration 8, never from the current initializer,
+// so a v8 database is proven against the exact released shape before the one
+// supported v8 -> v9 transition runs.
+fn build_released_0_8_31_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    build_released_0_8_30_mob_schema(tx)?;
+    migration_0008_forked_participant_capabilities(tx)
+}
+
+const RELEASED_0_8_31_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_external_deliveries",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intent_mutation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_convergence_resolution_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_adoption_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_forked_participants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_forked_participants_fork_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+];
+
+fn verify_released_0_8_31_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_8_31_MOB_OBJECTS,
+        build_released_0_8_31_mob_schema,
+    )
+}
+
+// Frozen v9 catalog: the shape shipped immediately before the temporary-council
+// orchestration table. Built from the frozen v8 catalog plus the released
+// migration 9, never from the current initializer, so a v9 database is proven
+// against the exact released shape before the one supported v9 -> v10
+// transition runs.
+fn build_released_0_8_32_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    build_released_0_8_31_mob_schema(tx)?;
+    migration_0009_forked_participant_member_associations(tx)
+}
+
+const RELEASED_0_8_32_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_external_deliveries",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intent_mutation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_convergence_resolution_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_adoption_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_forked_participants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_forked_participant_member_associations",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_forked_participants_fork_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+];
+
+fn verify_released_0_8_32_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_8_32_MOB_OBJECTS,
+        build_released_0_8_32_mob_schema,
+    )
+}
+
 /// The mob store bundle's schema domain in the per-file migration ledger.
 ///
 /// The oldest historical transition admitted by this binary is the exact
 /// released v3 shape. Migrations 0002/0003 remain as frozen history and as
 /// pieces of the direct current/released schema builders; their lower ledger
 /// versions are not eligible predecessors.
+///
+/// # Head versus predecessors
+///
+/// The head version (the highest entry in `migrations`) must appear in
+/// `allowed_existing_versions` and must **not** appear in
+/// `released_predecessors`: `SchemaDomain::validate` requires a frozen
+/// verifier only for allowed versions strictly below the head, and rejects any
+/// verifier naming the head as "not an allowed predecessor". Both failure
+/// directions are pinned by
+/// `tests::ledger_rejects_both_a_head_verifier_and_a_missing_head_floor`.
+///
+/// So when a new migration lands, the version it displaces is what needs
+/// freezing, in this order:
+/// 1. add `build_released_<version>_mob_schema`, composed from the previous
+///    frozen builder plus the migration being frozen — never from
+///    `initialize_current`;
+/// 2. add its `RELEASED_<version>_MOB_OBJECTS` catalog and
+///    `verify_released_<version>_mob_schema`;
+/// 3. register that verifier in `released_predecessors` and add the new head to
+///    `allowed_existing_versions`;
+/// 4. add a `released_v<version>_migrates_to_canonical_current_schema` test and
+///    update the ledger-head assertions.
+///
+/// `tests::ledger_head_needs_no_frozen_verifier_of_its_own` fails the moment
+/// step 3 is skipped, so the missing freeze is reported against the displaced
+/// version rather than misread as a missing verifier for the new head.
 pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "mob",
     migrations: &[
@@ -1460,9 +1999,24 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             name: "identity-adoption-receipts",
             apply: migration_0007_identity_adoption_receipts,
         },
+        meerkat_sqlite::Migration {
+            version: 8,
+            name: "forked-participant-capabilities",
+            apply: migration_0008_forked_participant_capabilities,
+        },
+        meerkat_sqlite::Migration {
+            version: 9,
+            name: "forked-participant-member-associations",
+            apply: migration_0009_forked_participant_member_associations,
+        },
+        meerkat_sqlite::Migration {
+            version: 10,
+            name: "temporary-council-orchestration",
+            apply: migration_0010_temporary_councils,
+        },
     ],
     initialize_current: initialize_current_mob_schema,
-    allowed_existing_versions: &[3, 4, 7],
+    allowed_existing_versions: &[3, 4, 7, 8, 9, 10],
     bridge_recoverable_versions: &[],
     released_predecessors: &[
         meerkat_sqlite::SchemaPredecessor {
@@ -1473,8 +2027,36 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             version: 4,
             verify: verify_released_0_8_25_mob_schema,
         },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 7,
+            verify: verify_released_0_8_30_mob_schema,
+        },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 8,
+            verify: verify_released_0_8_31_mob_schema,
+        },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 9,
+            verify: verify_released_0_8_32_mob_schema,
+        },
     ],
     owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_forked_participants",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_forked_participants_fork_session",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_forked_participant_member_associations",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_temporary_councils",
+        },
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
             name: "mob_events",
@@ -1636,7 +2218,7 @@ mod schema_floor_tests {
         let report =
             meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).expect("upgrade");
         assert_eq!(report.from_version, 3);
-        assert_eq!(report.to_version, 7);
+        assert_eq!(report.to_version, 10);
     }
 
     #[test]
@@ -2237,6 +2819,13 @@ impl SqliteMobStores {
 
     pub fn runtime_metadata_store(&self) -> SqliteMobRuntimeMetadataStore {
         SqliteMobRuntimeMetadataStore {
+            path: self.path.clone(),
+        }
+    }
+
+    /// Durable forked-participant capability store for this database.
+    pub fn forked_participant_store(&self) -> SqliteForkedParticipantStore {
+        SqliteForkedParticipantStore {
             path: self.path.clone(),
         }
     }
@@ -6143,6 +6732,104 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         .await
     }
 
+    async fn list_forked_participant_member_associations(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobForkedParticipantMemberAssociation>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json FROM mob_forked_participant_member_associations
+                     WHERE mob_id = ?1 ORDER BY association_key",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                records.push(decode_json(&row.map_err(se)?)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        record: &MobForkedParticipantMemberAssociation,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let encoded = encode_json(&record)?;
+            tx.execute(
+                "INSERT INTO mob_forked_participant_member_associations
+                     (mob_id, association_key, record_json) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, association_key)
+                     DO UPDATE SET record_json = excluded.record_json",
+                params![mob_id.as_str(), record.association_key.as_str(), encoded],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        expected: &MobForkedParticipantMemberAssociation,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let expected_encoded = encode_json(&expected)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_forked_participant_member_associations
+                     WHERE mob_id = ?1 AND association_key = ?2 AND record_json = ?3",
+                    params![
+                        mob_id.as_str(),
+                        expected.association_key.as_str(),
+                        expected_encoded.as_slice()
+                    ],
+                )
+                .map_err(se)?;
+            if changed == 0 {
+                let existing: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT record_json FROM mob_forked_participant_member_associations
+                         WHERE mob_id = ?1 AND association_key = ?2",
+                        params![mob_id.as_str(), expected.association_key.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(se)?;
+                if existing.is_some_and(|bytes| bytes != expected_encoded) {
+                    return Err(MobStoreError::CasConflict(format!(
+                        "forked participant association '{}' no longer matches the expected record",
+                        expected.association_key
+                    )));
+                }
+            }
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn list_external_binding_overlays(
         &self,
         mob_id: &MobId,
@@ -8657,6 +9344,508 @@ impl MobSpecStore for SqliteMobSpecStore {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+/// SQLite-backed forked-participant capability store.
+///
+/// Follows the bundle conventions exactly: the handle stores only the path,
+/// every operation opens one guarded connection through the shared opener
+/// (schema preflight + ledger migrations already applied there), and writes run
+/// inside one immediate transaction. No DDL runs at operation time and no
+/// connection is retained.
+pub struct SqliteForkedParticipantStore {
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for SqliteForkedParticipantStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteForkedParticipantStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl SqliteForkedParticipantStore {
+    /// Open a durable capability-only store rooted at an explicit path.
+    ///
+    /// This follows [`SqliteMobStores::open`] for schema ledger validation and
+    /// migrations, without constructing a mob event-bus watcher for a database
+    /// that is not itself a mob event log.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
+        let path = path.as_ref().to_path_buf();
+        let _conn = open_connection(&path)?;
+        Ok(Self {
+            path: std::fs::canonicalize(&path).map_err(se)?,
+        })
+    }
+}
+
+fn decode_forked_participant_row(
+    bytes: &[u8],
+    revision: i64,
+) -> Result<ForkedParticipantRecord, MobStoreError> {
+    let mut record: ForkedParticipantRecord = decode_json(bytes)?;
+    // The row's revision column is the CAS authority; the embedded copy is a
+    // projection of it and never the other way round.
+    record.revision = u64::try_from(revision)
+        .map_err(|_| MobStoreError::Serialization("negative capability revision".to_string()))?;
+    Ok(record)
+}
+
+#[async_trait]
+impl ForkedParticipantStore for SqliteForkedParticipantStore {
+    async fn insert_reserved(
+        &self,
+        record: &ForkedParticipantRecord,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let path = self.path.clone();
+        let mut stored = record.clone();
+        stored.revision = 1;
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let capability_id = stored.capability_id.expose_bearer_token().to_string();
+            let request_id = stored.request_id.as_str().to_string();
+            let created_at = stored.created_at.to_rfc3339();
+            let updated_at = stored.updated_at.to_rfc3339();
+            let record_json = encode_json(&stored)?;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_forked_participants \
+                     (capability_id, request_id, record_json, revision, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                    params![
+                        capability_id,
+                        request_id,
+                        record_json,
+                        created_at,
+                        updated_at
+                    ],
+                )
+                .map_err(se)?;
+            if inserted == 0 {
+                return Err(MobStoreError::CasConflict(format!(
+                    "forked participant request {request_id} already reserved a capability"
+                )));
+            }
+            tx.commit().map_err(se)?;
+            Ok(stored)
+        })
+        .await
+    }
+
+    async fn load_by_capability_id(
+        &self,
+        capability_id: &ForkedParticipantCapabilityId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let key = capability_id.expose_bearer_token().to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<(Vec<u8>, i64)> = conn
+                .query_row(
+                    "SELECT record_json, revision FROM mob_forked_participants \
+                     WHERE capability_id = ?1",
+                    params![key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|(bytes, revision)| decode_forked_participant_row(&bytes, revision))
+                .transpose()
+        })
+        .await
+    }
+
+    async fn load_by_request_id(
+        &self,
+        request_id: &ForkedParticipantRequestId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let key = request_id.as_str().to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<(Vec<u8>, i64)> = conn
+                .query_row(
+                    "SELECT record_json, revision FROM mob_forked_participants \
+                     WHERE request_id = ?1",
+                    params![key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|(bytes, revision)| decode_forked_participant_row(&bytes, revision))
+                .transpose()
+        })
+        .await
+    }
+
+    async fn load_by_fork_session_id(
+        &self,
+        fork_session_id: &SessionId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let key = fork_session_id.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<(Vec<u8>, i64)> = conn
+                .query_row(
+                    // Match the PLANNED child id: it is present from insert and
+                    // is the same id the activated `capability_ref` carries, so
+                    // one predicate resolves both an activated fork and a
+                    // durable-but-not-yet-activated planned child. Matching
+                    // `capability_ref` alone would leave the crash window
+                    // between "child saved" and "activation recorded" invisible
+                    // to containment, and that field is omitted entirely before
+                    // activation.
+                    "SELECT record_json, revision FROM mob_forked_participants \
+                     WHERE json_extract(record_json, '$.planned_child_session_id') = ?1",
+                    params![key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|(bytes, revision)| decode_forked_participant_row(&bytes, revision))
+                .transpose()
+        })
+        .await
+    }
+
+    async fn load_exact(
+        &self,
+        capability: &ForkedParticipantRef,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let presented = capability.clone();
+        let record = self
+            .load_by_capability_id(presented.capability_id())
+            .await?
+            .ok_or_else(|| {
+                MobStoreError::NotFound(format!(
+                    "forked participant capability {} not found",
+                    presented.capability_id().correlation_hint()
+                ))
+            })?;
+        forked_participant_exact_reference(record, &presented)
+    }
+
+    async fn commit(
+        &self,
+        record: &ForkedParticipantRecord,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let path = self.path.clone();
+        let expected_revision = record.revision;
+        let Some(next_revision) = expected_revision.checked_add(1) else {
+            return Err(MobStoreError::WriteFailed(format!(
+                "forked participant capability {} revision counter is exhausted",
+                record.capability_id.correlation_hint()
+            )));
+        };
+        let mut next = record.clone();
+        next.revision = next_revision;
+        next.updated_at = Utc::now();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let capability_id = next.capability_id.expose_bearer_token().to_string();
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT revision FROM mob_forked_participants WHERE capability_id = ?1",
+                    params![capability_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let current = current.ok_or_else(|| {
+                MobStoreError::NotFound(format!(
+                    "forked participant capability {} not found",
+                    next.capability_id.correlation_hint()
+                ))
+            })?;
+            let current = u64::try_from(current).map_err(|_| {
+                MobStoreError::Serialization("negative capability revision".to_string())
+            })?;
+            if current != expected_revision {
+                return Err(MobStoreError::CasConflict(format!(
+                    "forked participant capability {} revision conflict: expected {expected_revision}, actual {current}",
+                    next.capability_id.correlation_hint()
+                )));
+            }
+            let updated_at = next.updated_at.to_rfc3339();
+            let next_revision = i64::try_from(next.revision).map_err(|_| {
+                MobStoreError::WriteFailed("capability revision exceeds the column domain".to_string())
+            })?;
+            let expected_revision_column = i64::try_from(expected_revision).map_err(|_| {
+                MobStoreError::WriteFailed(
+                    "expected capability revision exceeds the column domain".to_string(),
+                )
+            })?;
+            let record_json = encode_json(&next)?;
+            // The revision fence and the write live in the same immediate
+            // transaction, and the row count is asserted rather than assumed.
+            let updated_rows = tx
+                .execute(
+                    "UPDATE mob_forked_participants \
+                     SET record_json = ?1, revision = ?2, updated_at = ?3 \
+                     WHERE capability_id = ?4 AND revision = ?5",
+                    params![
+                        record_json,
+                        next_revision,
+                        updated_at,
+                        capability_id,
+                        expected_revision_column
+                    ],
+                )
+                .map_err(se)?;
+            if updated_rows != 1 {
+                return Err(MobStoreError::CasConflict(format!(
+                    "forked participant capability {} update matched {updated_rows} rows",
+                    next.capability_id.correlation_hint()
+                )));
+            }
+            tx.commit().map_err(se)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    async fn list_all(&self) -> Result<Vec<ForkedParticipantRecord>, MobStoreError> {
+        let path = self.path.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json, revision FROM mob_forked_participants \
+                     ORDER BY created_at, request_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (bytes, revision) = row.map_err(se)?;
+                records.push(decode_forked_participant_row(&bytes, revision)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+}
+
+/// Durable temporary-council orchestration custody rooted at an explicit path.
+///
+/// This shares the realm custody database with
+/// [`SqliteForkedParticipantStore`]: both are realm-scoped orchestration
+/// custody rather than per-mob event logs, and a council record's only
+/// capability custody is a REFERENCE to a capability record in that same file.
+#[derive(Clone)]
+pub struct SqliteTemporaryCouncilStore {
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for SqliteTemporaryCouncilStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteTemporaryCouncilStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl SqliteTemporaryCouncilStore {
+    /// Open a durable council-only store rooted at an explicit path.
+    ///
+    /// Follows [`SqliteMobStores::open`] for schema ledger validation and
+    /// migrations, without constructing a mob event-bus watcher for a database
+    /// that is not itself a mob event log.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, MobError> {
+        let path = path.as_ref().to_path_buf();
+        let _conn = open_connection(&path)?;
+        Ok(Self {
+            path: std::fs::canonicalize(&path).map_err(se)?,
+        })
+    }
+}
+
+fn decode_temporary_council_row(
+    bytes: &[u8],
+    revision: i64,
+) -> Result<TemporaryCouncilRecord, MobStoreError> {
+    let mut record: TemporaryCouncilRecord = decode_json(bytes)?;
+    // The row's revision column is the CAS authority; the embedded copy is a
+    // projection of it and never the other way round.
+    record.revision = u64::try_from(revision)
+        .map_err(|_| MobStoreError::Serialization("negative council revision".to_string()))?;
+    Ok(record)
+}
+
+#[async_trait]
+impl TemporaryCouncilStore for SqliteTemporaryCouncilStore {
+    fn durability(&self) -> crate::temporary_council::TemporaryCouncilStoreDurability {
+        crate::temporary_council::TemporaryCouncilStoreDurability::Durable
+    }
+
+    async fn insert_new(
+        &self,
+        record: &TemporaryCouncilRecord,
+    ) -> Result<TemporaryCouncilRecord, MobStoreError> {
+        let path = self.path.clone();
+        let mut stored = record.clone();
+        stored.revision = 1;
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let council_id = stored.council_id.as_str().to_string();
+            let temporary_mob_id = stored.temporary_mob_id.to_string();
+            let created_at = stored.created_at.to_rfc3339();
+            let updated_at = stored.updated_at.to_rfc3339();
+            let record_json = encode_json(&stored)?;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_temporary_councils \
+                     (council_id, temporary_mob_id, record_json, revision, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                    params![
+                        council_id,
+                        temporary_mob_id,
+                        record_json,
+                        created_at,
+                        updated_at
+                    ],
+                )
+                .map_err(se)?;
+            if inserted == 0 {
+                return Err(MobStoreError::CasConflict(format!(
+                    "temporary council {council_id} already exists"
+                )));
+            }
+            tx.commit().map_err(se)?;
+            Ok(stored)
+        })
+        .await
+    }
+
+    async fn load(
+        &self,
+        council_id: &TemporaryCouncilId,
+    ) -> Result<Option<TemporaryCouncilRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let key = council_id.as_str().to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<(Vec<u8>, i64)> = conn
+                .query_row(
+                    "SELECT record_json, revision FROM mob_temporary_councils \
+                     WHERE council_id = ?1",
+                    params![key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|(bytes, revision)| decode_temporary_council_row(&bytes, revision))
+                .transpose()
+        })
+        .await
+    }
+
+    async fn commit(
+        &self,
+        record: &TemporaryCouncilRecord,
+    ) -> Result<TemporaryCouncilRecord, MobStoreError> {
+        let path = self.path.clone();
+        let expected_revision = record.revision;
+        let Some(next_revision) = expected_revision.checked_add(1) else {
+            return Err(MobStoreError::WriteFailed(format!(
+                "temporary council {} revision counter is exhausted",
+                record.council_id
+            )));
+        };
+        let mut next = record.clone();
+        next.revision = next_revision;
+        next.updated_at = Utc::now();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let council_id = next.council_id.as_str().to_string();
+            let current: Option<i64> = tx
+                .query_row(
+                    "SELECT revision FROM mob_temporary_councils WHERE council_id = ?1",
+                    params![council_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let current = current.ok_or_else(|| {
+                MobStoreError::NotFound(format!("temporary council {council_id} not found"))
+            })?;
+            let current = u64::try_from(current).map_err(|_| {
+                MobStoreError::Serialization("negative council revision".to_string())
+            })?;
+            if current != expected_revision {
+                return Err(MobStoreError::CasConflict(format!(
+                    "temporary council {council_id} revision conflict: expected {expected_revision}, actual {current}"
+                )));
+            }
+            let updated_at = next.updated_at.to_rfc3339();
+            let next_revision_column = i64::try_from(next.revision).map_err(|_| {
+                MobStoreError::WriteFailed("council revision exceeds the column domain".to_string())
+            })?;
+            let expected_revision_column = i64::try_from(expected_revision).map_err(|_| {
+                MobStoreError::WriteFailed(
+                    "expected council revision exceeds the column domain".to_string(),
+                )
+            })?;
+            let record_json = encode_json(&next)?;
+            let updated_rows = tx
+                .execute(
+                    "UPDATE mob_temporary_councils \
+                     SET record_json = ?1, revision = ?2, updated_at = ?3 \
+                     WHERE council_id = ?4 AND revision = ?5",
+                    params![
+                        record_json,
+                        next_revision_column,
+                        updated_at,
+                        council_id,
+                        expected_revision_column
+                    ],
+                )
+                .map_err(se)?;
+            if updated_rows != 1 {
+                return Err(MobStoreError::CasConflict(format!(
+                    "temporary council {council_id} update matched {updated_rows} rows"
+                )));
+            }
+            tx.commit().map_err(se)?;
+            Ok(next)
+        })
+        .await
+    }
+
+    async fn list_all(&self) -> Result<Vec<TemporaryCouncilRecord>, MobStoreError> {
+        let path = self.path.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json, revision FROM mob_temporary_councils \
+                     ORDER BY created_at, council_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (bytes, revision) = row.map_err(se)?;
+                records.push(decode_temporary_council_row(&bytes, revision)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+}
+
 pub struct SqliteRealmProfileStore {
     path: PathBuf,
 }
@@ -9227,7 +10416,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            7
+            10
         );
         for retired in [
             "mob_identity_declaration_scopes",
@@ -9318,7 +10507,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            7
+            10
         );
         for table in [
             "mob_identity_intent_mutation_receipts",
@@ -9336,6 +10525,240 @@ mod tests {
                 "{table} must exist after the released-v4 migration"
             );
         }
+    }
+
+    /// Build a database that is byte-shaped like the given frozen predecessor
+    /// and stamp its ledger row, so opening it exercises the real predecessor
+    /// verifier rather than a hand-rolled approximation of it.
+    fn seed_released_predecessor(
+        path: &std::path::Path,
+        version: i64,
+        build: fn(&Transaction<'_>) -> Result<(), rusqlite::Error>,
+    ) {
+        let mut conn = Connection::open(path).unwrap();
+        let tx = conn.transaction().unwrap();
+        build(&tx).unwrap();
+        tx.execute_batch(
+            "CREATE TABLE meerkat_schema (
+                 domain TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO meerkat_schema VALUES ('mob', ?1)",
+            params![version],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn ledger_version(path: &std::path::Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT version FROM meerkat_schema WHERE domain = 'mob'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    }
+
+    fn table_exists(path: &std::path::Path, table: &str) -> bool {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    }
+
+    #[test]
+    fn released_v7_migrates_to_canonical_current_schema() {
+        // v7 is a frozen predecessor: its verifier must accept a v7-shaped file
+        // and the remaining migrations must carry it to the ledger head.
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 7, build_released_0_8_30_mob_schema);
+
+        drop(SqliteMobStores::open(&path).unwrap());
+
+        assert_eq!(ledger_version(&path), 10);
+        for table in [
+            "mob_forked_participants",
+            "mob_forked_participant_member_associations",
+            "mob_temporary_councils",
+        ] {
+            assert!(
+                table_exists(&path, table),
+                "{table} must exist after upgrading a released-v7 file"
+            );
+        }
+        assert_eq!(
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = \
+                     'mob_forked_participants_fork_session'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "the fork-session index must exist after upgrading a released-v7 file"
+        );
+    }
+
+    #[test]
+    fn released_v8_migrates_to_canonical_current_schema() {
+        // v8 became a frozen predecessor when migration 9 landed. This proves
+        // the v8 verifier matches what migration 8 actually produces, which is
+        // the only thing that keeps 9 legal as ledger head without a v9
+        // verifier of its own.
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 8, build_released_0_8_31_mob_schema);
+
+        drop(SqliteMobStores::open(&path).unwrap());
+
+        assert_eq!(ledger_version(&path), 10);
+        assert!(
+            table_exists(&path, "mob_forked_participant_member_associations"),
+            "migration 9 must run when a released-v8 file is opened"
+        );
+    }
+
+    #[test]
+    fn released_v9_migrates_to_canonical_current_schema() {
+        // v9 became a frozen predecessor when migration 10 landed. This proves
+        // the v9 verifier matches what migration 9 actually produces, which is
+        // the only thing that keeps 10 legal as ledger head without a v10
+        // verifier of its own.
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 9, build_released_0_8_32_mob_schema);
+
+        drop(SqliteMobStores::open(&path).unwrap());
+
+        assert_eq!(ledger_version(&path), 10);
+        assert!(
+            table_exists(&path, "mob_temporary_councils"),
+            "migration 10 must run when a released-v9 file is opened"
+        );
+    }
+
+    #[test]
+    fn ledger_head_needs_no_frozen_verifier_of_its_own() {
+        // Reconciliation guard: a frozen verifier is required for every allowed
+        // version strictly below the head, and is *rejected* for the head
+        // itself. Adding a v9 verifier while 9 is head, or dropping 9 from the
+        // allowed set, would both make this domain invalid.
+        let head = MOB_DOMAIN
+            .migrations
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("mob domain has migrations");
+        assert!(
+            MOB_DOMAIN.allowed_existing_versions.contains(&head),
+            "the head version must stay in allowed_existing_versions"
+        );
+        assert!(
+            MOB_DOMAIN
+                .released_predecessors
+                .iter()
+                .all(|predecessor| predecessor.version < head),
+            "no frozen verifier may name the head version"
+        );
+        for &version in MOB_DOMAIN
+            .allowed_existing_versions
+            .iter()
+            .filter(|&&version| version < head)
+        {
+            assert_eq!(
+                MOB_DOMAIN
+                    .released_predecessors
+                    .iter()
+                    .filter(|predecessor| predecessor.version == version)
+                    .count(),
+                1,
+                "allowed predecessor {version} needs exactly one frozen verifier"
+            );
+        }
+        // The version the head just displaced must stay openable, otherwise a
+        // new migration silently strands every file written by the previous
+        // head instead of freezing it.
+        assert!(
+            MOB_DOMAIN.allowed_existing_versions.contains(&(head - 1)),
+            "version {} was displaced by head {head} and must remain openable \
+             with a frozen verifier",
+            head - 1
+        );
+    }
+
+    /// Executable falsification of the recurring "the head needs a frozen
+    /// verifier" claim: both proposed reconciliations are rejected by the
+    /// ledger itself.
+    /// Validation runs inside `apply_domain_migrations`, so this drives the
+    /// real gate rather than restating its source.
+    #[test]
+    fn ledger_rejects_both_a_head_verifier_and_a_missing_head_floor() {
+        const WITH_HEAD_VERIFIER: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+            released_predecessors: &[
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 3,
+                    verify: verify_released_0_8_10_mob_schema,
+                },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 4,
+                    verify: verify_released_0_8_25_mob_schema,
+                },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 7,
+                    verify: verify_released_0_8_30_mob_schema,
+                },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 8,
+                    verify: verify_released_0_8_31_mob_schema,
+                },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 9,
+                    verify: verify_released_0_8_32_mob_schema,
+                },
+                // The requested "exact frozen v10 predecessor verifier".
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 10,
+                    verify: verify_released_0_8_32_mob_schema,
+                },
+            ],
+            ..MOB_DOMAIN
+        };
+        const WITHOUT_HEAD_FLOOR: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+            allowed_existing_versions: &[3, 4, 7, 8, 9],
+            ..MOB_DOMAIN
+        };
+
+        let (_dir, path) = temp_db_path();
+        let mut conn = Connection::open(&path).unwrap();
+
+        let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &WITH_HEAD_VERIFIER)
+            .expect_err("a verifier naming the head version must be refused");
+        assert!(
+            err.to_string().contains("is not an allowed predecessor"),
+            "unexpected error for a head verifier: {err}"
+        );
+
+        let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &WITHOUT_HEAD_FLOOR)
+            .expect_err("dropping the head from the allowed set must be refused");
+        assert!(
+            err.to_string()
+                .contains("must explicitly include current version"),
+            "unexpected error for a missing head floor: {err}"
+        );
+
+        // The shipped domain, by contrast, validates and applies cleanly.
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN)
+            .expect("the shipped mob domain must validate as-is");
     }
 
     fn operator_request(
@@ -11476,6 +12899,189 @@ mod tests {
         let (dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
         (dir, stores.realm_profile_store())
+    }
+
+    use crate::store::forked_participant::contract_tests as forked_participant_contract;
+    use crate::store::temporary_council::contract_tests as temporary_council_contract;
+
+    // --- Temporary council orchestration store conformance ---
+
+    fn sqlite_temporary_council_store() -> (tempfile::TempDir, SqliteTemporaryCouncilStore) {
+        let (dir, path) = temp_db_path();
+        // The realm custody database is shared with capability custody: open
+        // it through the same bundle opener so the ledger runs once.
+        let _stores = SqliteMobStores::open(&path).expect("open");
+        let store = SqliteTemporaryCouncilStore::open(&path).expect("open council store");
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn temporary_council_insert_and_load() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::insert_and_load(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_duplicate_council_id_loses() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::duplicate_council_id_loses(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_commit_is_compare_and_swap() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::commit_is_compare_and_swap(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_unfinished_listing_tracks_settlement() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::unfinished_listing_tracks_settlement(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_shares_the_realm_custody_database_with_capabilities() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).expect("open");
+        let capabilities = stores.forked_participant_store();
+        let councils = SqliteTemporaryCouncilStore::open(&path).expect("open council store");
+
+        let capability = forked_participant_contract::record("shared-custody");
+        capabilities
+            .insert_reserved(&capability)
+            .await
+            .expect("insert capability");
+        let council = temporary_council_contract::record("shared-custody");
+        councils.insert_new(&council).await.expect("insert council");
+
+        assert!(
+            capabilities
+                .load_by_request_id(&capability.request_id)
+                .await
+                .expect("load capability")
+                .is_some(),
+            "council custody must not disturb capability custody in the same file"
+        );
+        assert!(
+            councils
+                .load(&council.council_id)
+                .await
+                .expect("load council")
+                .is_some()
+        );
+    }
+
+    // --- Forked participant capability store conformance ---
+
+    fn sqlite_forked_participant_store() -> (tempfile::TempDir, SqliteForkedParticipantStore) {
+        let (dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).expect("open");
+        (dir, stores.forked_participant_store())
+    }
+
+    #[tokio::test]
+    async fn forked_participant_insert_and_load_by_every_key() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::insert_and_load_by_every_key(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_duplicate_request_id_loses() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::duplicate_request_id_loses(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_commit_is_compare_and_swap() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::commit_is_compare_and_swap(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_load_exact_rejects_a_tampered_reference() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::load_exact_rejects_a_tampered_reference(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_list_all_returns_every_record() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::list_all_returns_every_record(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_load_by_fork_session_id_resolves_planned_and_activated() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::load_by_fork_session_id_resolves_planned_and_activated(&store)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_fork_session_id_is_unique_across_records() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::fork_session_id_is_unique_across_records(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_fork_session_lookup_uses_the_expression_index() {
+        // Containment consults this lookup on every plain resume, so it must be
+        // index-backed rather than a full table scan. The predicate text has to
+        // stay byte-identical to the indexed expression for SQLite to match it.
+        let (_dir, path) = temp_db_path();
+        let _stores = SqliteMobStores::open(&path).expect("open");
+        let conn = open_connection(&path).expect("connection");
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT record_json, revision FROM mob_forked_participants \
+                 WHERE json_extract(record_json, '$.planned_child_session_id') = ?1",
+            )
+            .expect("prepare");
+        let plan: Vec<String> = stmt
+            .query_map(params!["session-plan-probe"], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan rows");
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("mob_forked_participants_fork_session"),
+            "fork session lookup must use the expression index, plan was: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN"),
+            "fork session lookup must not table scan, plan was: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forked_participant_machine_state_and_cleanup_debt_round_trip() {
+        let (_dir, store) = sqlite_forked_participant_store();
+        forked_participant_contract::machine_state_and_cleanup_debt_round_trip(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_records_survive_reopen() {
+        let (dir, path) = temp_db_path();
+        let record = {
+            let stores = SqliteMobStores::open(&path).expect("open");
+            let store = stores.forked_participant_store();
+            let record = forked_participant_contract::record("req-reopen");
+            store.insert_reserved(&record).await.expect("insert")
+        };
+
+        // Reopen the same database file: every lifecycle and idempotency fact
+        // must still be there, and the machine state must still be admissible.
+        let stores = SqliteMobStores::open(&path).expect("reopen");
+        let store = stores.forked_participant_store();
+        let reloaded = store
+            .load_by_capability_id(&record.capability_id)
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(reloaded, record);
+        crate::machines::forked_participant_lifecycle::
+            ForkedParticipantLifecycleMachineAuthority::recover_from_state(reloaded.machine_state)
+            .expect("restored machine state recovers");
+        drop(dir);
     }
 
     #[tokio::test]

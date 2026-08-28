@@ -438,6 +438,7 @@ fn materialized_row(
         resolved_auth_binding: None,
         supervisor_name: "supervisor-a".to_string(),
         supervisor_address: "tcp://127.0.0.1:1".to_string(),
+        forked_participant_attachment: None,
     }
 }
 
@@ -768,6 +769,7 @@ async fn committed_then_error_materialize_and_release_converge_exactly() {
         &materialize,
         &key,
         materialized_row("mob-member-ack-loss", "worker-1", 3, 7),
+        None,
     )
     .await
     .expect("exact durable reread converges lost materialize completion");
@@ -817,6 +819,7 @@ async fn committed_then_error_pending_outcome_and_ack_converge_exactly() {
         &fixture.persistence,
         &key,
         materialized_row("mob-journal-ack-loss", "worker-1", 5, 9),
+        None,
     )
     .await
     .expect("member materializes");
@@ -941,6 +944,7 @@ async fn tracked_cancel_no_effect_blocks_delayed_delivery_across_restart() {
         &fixture.persistence,
         &key,
         materialized_row("mob-cancel-no-effect", "worker-1", 5, 9),
+        None,
     )
     .await
     .expect("member materializes");
@@ -1006,6 +1010,7 @@ async fn accepted_pending_cancel_blocks_delivery_before_runtime_quiescence() {
         &fixture.persistence,
         &key,
         materialized_row("mob-cancel-accepted", "worker-1", 5, 9),
+        None,
     )
     .await
     .expect("member materializes");
@@ -1102,6 +1107,7 @@ async fn tracked_cancel_returns_existing_terminal_verbatim() {
         &fixture.persistence,
         &key,
         materialized_row("mob-cancel-terminal", "worker-1", 5, 9),
+        None,
     )
     .await
     .expect("member materializes");
@@ -1250,6 +1256,7 @@ async fn preexisting_durable_row_blocks_fresh_accept_and_drops_prepared_state() 
         turn_outcome_pending: std::collections::BTreeMap::new(),
         turn_outcome_acknowledged: std::collections::BTreeMap::new(),
         tracked_input_cancellations: std::collections::BTreeMap::new(),
+        forked_participant_obligations: std::collections::BTreeMap::new(),
     };
     let divergent = serde_json::to_vec(&divergent).expect("serialize divergent durable row");
     fixture
@@ -1511,6 +1518,7 @@ async fn release_before_watcher_drops_terminal_without_durable_zombie_row() {
         &fixture.persistence,
         &key,
         materialized_row("mob-1", "worker-1", 1, 1),
+        None,
     )
     .await
     .expect("member materialization records");
@@ -1567,6 +1575,7 @@ async fn same_generation_higher_fence_prunes_old_row_and_old_watcher() {
         &fixture.persistence,
         &key,
         materialized_row("mob-1", "worker-1", 7, 10),
+        None,
     )
     .await
     .expect("old fence materializes");
@@ -1595,6 +1604,7 @@ async fn same_generation_higher_fence_prunes_old_row_and_old_watcher() {
         &fixture.persistence,
         &key,
         materialized_row("mob-1", "worker-1", 7, 11),
+        None,
     )
     .await
     .expect("higher fence rematerializes at the same generation");
@@ -1679,6 +1689,7 @@ async fn repeated_materialization_generations_keep_durable_journal_bounded() {
             &fixture.persistence,
             &key,
             materialized_row("mob-1", "worker-1", generation, fence_token),
+            None,
         )
         .await
         .expect("successive generation materializes");
@@ -1759,6 +1770,7 @@ async fn crash_after_pending_reserve_before_accept_recovers_exact_window() {
         &fixture.persistence,
         &key,
         materialized_row("mob-1", "worker-1", 7, 11),
+        None,
     )
     .await
     .expect("member materializes");
@@ -1803,6 +1815,7 @@ async fn replay_only_arbitration_allows_exact_pending_or_terminal_and_never_comm
         &fixture.persistence,
         &key,
         materialized_row("mob-sequence-exhaustion", "worker-1", 7, 11),
+        None,
     )
     .await
     .expect("member materializes");
@@ -1904,6 +1917,7 @@ async fn mixed_pending_and_terminal_quota_survives_sqlite_restart() {
         &fixture.persistence,
         &key,
         materialized_row("mob-1", "worker-1", 7, 11),
+        None,
     )
     .await
     .expect("current member materializes");
@@ -1971,6 +1985,7 @@ async fn ack_tombstones_are_lifecycle_ledger_not_evicting_live_quota() {
         &fixture.persistence,
         &key,
         materialized_row("mob-ack-ledger", "worker-1", 7, 11),
+        None,
     )
     .await
     .expect("member materializes");
@@ -2116,6 +2131,7 @@ async fn persistence_witness_gates_writes_to_the_accepting_transition() {
         turn_outcomes: std::collections::BTreeMap::new(),
         turn_outcome_acknowledged: std::collections::BTreeMap::new(),
         tracked_input_cancellations: std::collections::BTreeMap::new(),
+        forked_participant_obligations: std::collections::BTreeMap::new(),
     };
     let err = fixture
         .persistence

@@ -1,20 +1,29 @@
 //! Mob store traits and implementations.
 
+mod forked_participant;
 mod in_memory;
 mod realm_profile;
 #[cfg(not(target_arch = "wasm32"))]
 mod sqlite;
+mod temporary_council;
 
+pub use forked_participant::{
+    ForkedParticipantRecord, ForkedParticipantSidecar, ForkedParticipantStore,
+};
 pub use in_memory::{
-    InMemoryMobEventStore, InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore,
-    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
-    InMemoryRealmProfileStore,
+    InMemoryForkedParticipantStore, InMemoryMobEventStore, InMemoryMobIdentityStatusStore,
+    InMemoryMobIdentityStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
+    InMemoryMobSpecStore, InMemoryRealmProfileStore, InMemoryTemporaryCouncilStore,
 };
 pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
-    SqliteMobEventStore, SqliteMobIdentityStatusStore, SqliteMobIdentityStore, SqliteMobRunStore,
-    SqliteMobRuntimeMetadataStore, SqliteMobSpecStore, SqliteMobStores, SqliteRealmProfileStore,
+    SqliteForkedParticipantStore, SqliteMobEventStore, SqliteMobIdentityStatusStore,
+    SqliteMobIdentityStore, SqliteMobRunStore, SqliteMobRuntimeMetadataStore, SqliteMobSpecStore,
+    SqliteMobStores, SqliteRealmProfileStore, SqliteTemporaryCouncilStore,
+};
+pub use temporary_council::{
+    TemporaryCouncilRecord, TemporaryCouncilRecoveryVerdict, TemporaryCouncilStore,
 };
 
 use crate::definition::MobDefinition;
@@ -3266,6 +3275,100 @@ pub struct MobMemberLiveCleanupRecord {
     pub reason: String,
 }
 
+/// Exact target incarnation one capability attachment was seated into.
+///
+/// Routing evidence only. The seated member's own roster/machine facts remain
+/// the lifecycle truth; this tuple exists so a later teardown or a recovered
+/// process can prove that the association it is about to release belongs to
+/// the incarnation it actually admitted, not to a same-identity successor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobForkedParticipantTargetIncarnation {
+    /// Bridge session the attached member resumed — always the capability's
+    /// own fork session.
+    pub session_id: String,
+    /// Roster generation of the seated member.
+    pub generation: u64,
+    /// Fence token of the seated member.
+    pub fence_token: u64,
+}
+
+/// Why one target-side capability attachment is still owed reconciliation.
+///
+/// An obligation is never a lifecycle claim: the source-owner
+/// `ForkedParticipantLifecycleMachine` still owns attach/release truth. It
+/// only records that this mob admitted an attachment and cannot yet prove the
+/// attachment either seated or released, so a blind release would assert an
+/// absence the controller did not observe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobForkedParticipantObligationCause {
+    /// The attach was admitted and the seating spawn has not reported an
+    /// outcome yet. A process that dies here leaves exactly this row.
+    SpawnInFlight,
+    /// The spawn failed in a class that may still have committed member side
+    /// effects, so releasing would assert an absence this mob cannot observe.
+    AmbiguousSpawn,
+    /// The spawn failed definitively, but the compensating release itself did
+    /// not succeed.
+    ReleaseUnproven,
+    /// Session/runtime teardown completed, but the capability release that
+    /// must follow it did not succeed.
+    TeardownReleaseUnproven,
+}
+
+impl MobForkedParticipantObligationCause {
+    /// Fixed, non-secret label for structured diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnInFlight => "spawn_in_flight",
+            Self::AmbiguousSpawn => "ambiguous_spawn",
+            Self::ReleaseUnproven => "release_unproven",
+            Self::TeardownReleaseUnproven => "teardown_release_unproven",
+        }
+    }
+}
+
+/// Durable, mechanical evidence that one target-mob member is the seating of
+/// exactly one LOCAL forked-participant capability attachment.
+///
+/// This is deliberately NOT lifecycle truth, and it needs no MobMachine
+/// authorization: every semantic verdict it depends on is already owned by a
+/// canonical machine elsewhere. Attach/release legality is decided by the
+/// source owner's `ForkedParticipantLifecycleMachine`; the member's own
+/// existence, generation, and fence are decided by MobMachine and published
+/// through the roster event log. The record adds one purely mechanical fact —
+/// WHICH member seats WHICH attachment — so teardown and crash recovery can
+/// route a release back to the exact attachment they admitted instead of
+/// guessing. Adding a machine region for it would create a second authority
+/// for facts two machines already own.
+///
+/// It carries the FULL immutable capability reference rather than a bearer id
+/// so a recovered row can be validated (route, fork session, provenance) and
+/// so a later release presents `load_exact`'s full-reference comparison.
+///
+/// `Debug` is safe to print: the reference's only secret field redacts itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobForkedParticipantMemberAssociation {
+    /// Stable, non-secret key — always
+    /// [`crate::forked_participant::ForkedParticipantAttachmentAssociation::association_key`].
+    pub association_key: String,
+    /// Member identity the attachment was admitted for.
+    pub agent_identity: AgentIdentity,
+    /// The exact admitted association (full reference + attachment id).
+    pub association: crate::forked_participant::ForkedParticipantAttachmentAssociation,
+    /// Seated target incarnation, present once the spawn committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<MobForkedParticipantTargetIncarnation>,
+    /// Why reconciliation is still owed. `None` means the row is ordinary
+    /// routing evidence for a seated member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation: Option<MobForkedParticipantObligationCause>,
+    /// Operator-facing detail of the originating failure. Diagnostics only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
 /// Typed write permit for [`MobOperatorGrantRecord`], constructible only
 /// from a MobMachine transition whose effects carry the matching
 /// `GrantRecorded` fact (grant path) or, via
@@ -4214,6 +4317,50 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
     ) -> Result<bool, MobStoreError> {
         let _ = (mob_id, expected);
         runtime_metadata_capability_unavailable("delete_member_live_cleanup_record")
+    }
+
+    /// Deterministically list every durable target-side capability
+    /// association/obligation for a mob.
+    ///
+    /// Boot recovery reads this before command admission, so a legacy backend
+    /// that never supported the rows answers with an empty set rather than
+    /// failing the actor: it cannot contain rows it never wrote.
+    async fn list_forked_participant_member_associations(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobForkedParticipantMemberAssociation>, MobStoreError> {
+        let _ = mob_id;
+        Ok(Vec::new())
+    }
+
+    /// Write one association row, keyed by `association_key`.
+    ///
+    /// Idempotent by key: re-writing the same key advances the row's seating /
+    /// obligation shape. An exact replay is therefore a no-op write rather
+    /// than a conflict, which is what lets a retried attach converge on one
+    /// association instead of minting a second.
+    async fn put_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        record: &MobForkedParticipantMemberAssociation,
+    ) -> Result<(), MobStoreError> {
+        let _ = (mob_id, record);
+        runtime_metadata_capability_unavailable("put_forked_participant_member_association")
+    }
+
+    /// Delete one association row after its capability release is PROVEN.
+    ///
+    /// The full-record comparison is what makes replay safe: a stale releaser
+    /// cannot delete a successor row that already carries a different seating
+    /// or obligation. `false` means neither the expected row nor any row for
+    /// that key is present, so the release has nothing left to discharge.
+    async fn delete_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        expected: &MobForkedParticipantMemberAssociation,
+    ) -> Result<bool, MobStoreError> {
+        let _ = (mob_id, expected);
+        runtime_metadata_capability_unavailable("delete_forked_participant_member_association")
     }
 
     /// List all external binding compatibility projection records for a mob.

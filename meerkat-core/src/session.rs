@@ -6631,6 +6631,27 @@ impl Session {
         Ok(forked)
     }
 
+    /// Fork at one complete transcript boundary under a caller-chosen child id.
+    ///
+    /// Identical to [`Self::fork_at_complete_boundary`] except the branch
+    /// identity is supplied instead of minted here. Durable fork owners that
+    /// must reserve a *planned* child identity before the branch is persisted
+    /// use this so a crashed create can be retried without ever producing a
+    /// second child for the same request. The existing fork constructors keep
+    /// minting their own identity and are unchanged.
+    pub fn fork_at_complete_boundary_with_identity(
+        &self,
+        index: usize,
+        child_session_id: SessionId,
+    ) -> Result<Self, TranscriptEditError> {
+        let mut forked = self.fork_at_complete_boundary(index)?;
+        forked.realtime_transcript = Box::new(SessionRealtimeTranscriptProjection::empty(
+            &child_session_id,
+        ));
+        forked.id = child_session_id;
+        Ok(forked)
+    }
+
     /// Fork the session and replace the message at `message_index`.
     ///
     /// The returned session contains the original prefix before

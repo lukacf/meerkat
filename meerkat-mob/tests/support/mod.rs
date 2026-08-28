@@ -59,11 +59,15 @@ use meerkat_mob::runtime::HostBindRequest;
 // the integration-tests consumer of this file has no meerkat-contracts
 // dependency (A1 lane owns the re-export block additions).
 use meerkat_mob::runtime::bridge_protocol::{
-    BridgeAck, BridgeCapabilities, BridgeCommand, BridgeHostBindResponse, BridgeHostMemberRecord,
+    BridgeAck, BridgeCapabilities, BridgeCommand, BridgeCreateForkedParticipantPayload,
+    BridgeForkedParticipantCreatedResponse, BridgeForkedParticipantOwnerRoute,
+    BridgeForkedParticipantRef, BridgeForkedParticipantRevocationOutcome,
+    BridgeForkedParticipantRevokedResponse, BridgeHostBindResponse, BridgeHostMemberRecord,
     BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation, BridgeHostStatusResponse,
     BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberIncarnation,
-    BridgeMemberReleasedResponse, BridgePeerTrustPayload, BridgeRejectionCause,
-    BridgeReleasePayload, BridgeReply, MaterializeLaunchMode, MaterializeLaunchOutcome,
+    BridgeMemberReleasedResponse, BridgePeerTrustPayload, BridgeProtocolVersion,
+    BridgeRejectionCause, BridgeReleasePayload, BridgeReply, BridgeRevokeForkedParticipantPayload,
+    MaterializeLaunchMode, MaterializeLaunchOutcome,
     MemberSessionDisposal as WireMemberSessionDisposal, PortableDefinitionExtract,
     PortableMemberSpec, PortableProfile, PortableSpawnOverlay, PortableSystemPrompt,
     PortableToolConfig, WireHostBindingDescriptor, WireMobRuntimeMode, WireSpawnContinuityIntent,
@@ -302,6 +306,22 @@ pub struct HostFixtureOptions {
     /// Phase 3: carry the previous fixture's R8 sqlite dir across a restart
     /// so `runtime_store: Some(..)` keeps its backing file alive.
     pub carry_state_dir: Option<tempfile::TempDir>,
+    /// Issue #159: compose the source-owned capability substrate on this host
+    /// (durable `ForkedParticipantStore` + a capability-minting source runtime
+    /// over the fixture's OWN member session service).
+    ///
+    /// Opt-in on purpose. Legacy fixtures must not pay for a capability store
+    /// they never touch, and — more importantly — a host that composes the
+    /// service starts GATING protected resumes, so switching it on globally
+    /// would silently change what every other fixture is testing.
+    pub forked_participant_substrate: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
+    /// Realm the composed capability service owns. Member sessions land in
+    /// `mob.<mob_id>` (`meerkat_core::mob_realm_id`), and the source-ownership
+    /// check compares realms exactly, so a fixture must name the same one.
+    pub forked_participant_realm: Option<meerkat_core::RealmId>,
+    /// Issue #159: cadence of the actor's own capability maintenance pass.
+    /// `None` keeps the production cadence.
+    pub forked_participant_sweep_interval: Option<std::time::Duration>,
     /// Phase 3: wrap the member session service so the FIRST `create_session`
     /// fails typed (H T12 build-failure rollback row).
     pub failing_first_create_session: bool,
@@ -359,6 +379,9 @@ impl HostFixtureOptions {
             member_substrate: MemberSubstrateOption::None,
             member_realm: None,
             carry_state_dir: None,
+            forked_participant_substrate: None,
+            forked_participant_realm: None,
+            forked_participant_sweep_interval: None,
             failing_first_create_session: false,
             failing_create_session_call: None,
             corrupt_first_create_session_result_identity: false,
@@ -377,6 +400,23 @@ impl HostFixtureOptions {
     /// MobHostActor — everything the phase-3 `MobHostActorConfig.member_host`
     /// extension carries (DEC-P3H-2). Uses a persistent temp-realm service
     /// with an injected TestClient so member turns are deterministic.
+    /// Compose the capability substrate over this fixture's member service.
+    pub fn with_forked_participant_substrate(
+        mut self,
+        store: Arc<dyn meerkat_mob::store::ForkedParticipantStore>,
+        realm: meerkat_core::RealmId,
+    ) -> Self {
+        self.forked_participant_substrate = Some(store);
+        self.forked_participant_realm = Some(realm);
+        self
+    }
+
+    /// Drive the REAL periodic capability maintenance arm on a short cadence.
+    pub fn with_forked_participant_sweep_interval(mut self, interval: std::time::Duration) -> Self {
+        self.forked_participant_sweep_interval = Some(interval);
+        self
+    }
+
     pub fn with_member_build(mut self) -> Self {
         self.member_substrate = MemberSubstrateOption::PersistentTemp;
         self
@@ -1449,6 +1489,10 @@ pub struct HostDaemonFixture {
     pub preflight: Option<Arc<ScriptedPreflightProbe>>,
     /// Present when a create-session or projection-drain fault was requested.
     pub failing_create: Option<Arc<FailingOnceSessionService>>,
+    /// The durable capability store this host composed, when it composed one.
+    pub forked_participant_substrate: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
+    forked_participant_realm: Option<meerkat_core::RealmId>,
+    forked_participant_sweep_interval: Option<std::time::Duration>,
 }
 
 impl HostDaemonFixture {
@@ -1605,6 +1649,9 @@ impl HostDaemonFixture {
             member_substrate,
             member_realm,
             member_observation_recovery,
+            forked_participant_substrate,
+            forked_participant_realm,
+            forked_participant_sweep_interval,
             ..
         } = self;
         let listen_tcp = acceptor.local_addr();
@@ -1621,6 +1668,9 @@ impl HostDaemonFixture {
             member_substrate,
             member_realm,
             listen_tcp,
+            forked_participant_substrate,
+            forked_participant_realm,
+            forked_participant_sweep_interval,
         }
     }
 
@@ -1656,6 +1706,12 @@ pub struct PartitionedHostDaemon {
     member_substrate: MemberSubstrateOption,
     member_realm: Option<Arc<MemberRealm>>,
     listen_tcp: std::net::SocketAddr,
+    /// Retained so a restart recomposes the SAME durable capability store —
+    /// otherwise the successor would boot without protection and the restart
+    /// row would prove nothing.
+    forked_participant_substrate: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
+    forked_participant_realm: Option<meerkat_core::RealmId>,
+    forked_participant_sweep_interval: Option<std::time::Duration>,
 }
 
 impl PartitionedHostDaemon {
@@ -1739,6 +1795,9 @@ impl PartitionedHostDaemon {
             failing_member_region_persistence,
             stop_first_executor_after_ensure,
             listen_tcp: Some(self.listen_tcp),
+            forked_participant_substrate: self.forked_participant_substrate,
+            forked_participant_realm: self.forked_participant_realm,
+            forked_participant_sweep_interval: self.forked_participant_sweep_interval,
             ..HostFixtureOptions::named(&self.name)
         })
         .await
@@ -1790,6 +1849,8 @@ pub async fn spawn_host_daemon_fixture(
     let preflight = Arc::new(ScriptedPreflightProbe::new(
         opts.resolvable_providers.clone(),
     ));
+    let capability_store = opts.forked_participant_substrate.clone();
+    let capability_realm_id = opts.forked_participant_realm.clone();
     let mut member_realm_handle = None;
     let mut member_service: Option<Arc<dyn meerkat_mob::MobSessionService>> = None;
     let mut member_concrete_service: Option<
@@ -1841,6 +1902,9 @@ pub async fn spawn_host_daemon_fixture(
                 realm_backend_persistent: false,
                 member_identity_root: identity_root,
                 preflight_probe: Arc::clone(&preflight) as Arc<dyn MaterializePreflightProbe>,
+                forked_participant_realm: None,
+                forked_participant_store: None,
+                forked_participant_source_runtime: None,
             })
         }
         MemberSubstrateOption::PersistentTemp => {
@@ -1910,6 +1974,18 @@ pub async fn spawn_host_daemon_fixture(
                 realm_backend_persistent: true,
                 member_identity_root: identity_root,
                 preflight_probe: Arc::clone(&preflight) as Arc<dyn MaterializePreflightProbe>,
+                // Issue #159: the capability substrate rides the fixture's OWN
+                // persistent service, so `create` takes a real complete-boundary
+                // fork of a real member session — the same seam production uses.
+                forked_participant_realm: capability_store
+                    .as_ref()
+                    .and_then(|_| capability_realm_id.clone()),
+                forked_participant_store: capability_store.clone(),
+                forked_participant_source_runtime: capability_store.as_ref().and_then(|_| {
+                    member_concrete_service
+                        .clone()
+                        .and_then(meerkat_mob::MobSessionService::forked_participant_source_runtime)
+                }),
             })
         }
     };
@@ -1978,6 +2054,7 @@ pub async fn spawn_host_daemon_fixture(
         descriptor_watch_tx: descriptor_tx,
         descriptor_sink: Arc::new(NoopDescriptorSink),
         member_host,
+        forked_participant_sweep_interval: opts.forked_participant_sweep_interval,
     })
     .await?;
 
@@ -2027,6 +2104,9 @@ pub async fn spawn_host_daemon_fixture(
         member_realm: member_realm_handle,
         preflight: Some(preflight),
         failing_create,
+        forked_participant_substrate: capability_store,
+        forked_participant_realm: capability_realm_id,
+        forked_participant_sweep_interval: opts.forked_participant_sweep_interval,
     })
 }
 
@@ -2056,6 +2136,12 @@ pub struct ScriptedHostPeer {
     /// Phase-4 `InstallPeerTrust`/`RemovePeerTrust` scripting
     /// (DEC-P4H-10 accept/reject/drop failure matrix).
     trust: Arc<std::sync::Mutex<ScriptedPeerTrustState>>,
+    /// V6 source-owned forked-participant capability scripting (issue #159).
+    forked_participants: Arc<std::sync::Mutex<ScriptedForkedParticipantState>>,
+    /// Protocol versions this scripted host advertises at bind AND status.
+    /// Both replies read the same value so a status refresh can never
+    /// contradict the negotiated bind-time capability contract.
+    protocol_versions: Arc<std::sync::Mutex<Vec<BridgeProtocolVersion>>>,
     /// Probe-as-member endpoints (ADJ-P4-10): identities bound here have
     /// accepted trust installs/removals APPLIED to the real test-held
     /// endpoint, so retry rows assert REAL delivery differentials instead
@@ -2076,6 +2162,39 @@ pub struct ScriptedPeerTrustState {
     reject_remove_for_identity: Option<(String, BridgeRejectionCause, String)>,
     drop_next_remove_replies: u32,
     remove_received: Vec<BridgePeerTrustPayload>,
+}
+
+/// Scripted V6 forked-participant responder state.
+///
+/// It mirrors the real host authority's shape closely enough to be worth
+/// asserting against: a replayed `request_id` returns the recorded reference
+/// byte-identical instead of minting a second capability, and a revoked
+/// capability converges on a repeat.
+#[derive(Default)]
+pub struct ScriptedForkedParticipantState {
+    reject_next_create: Option<(BridgeRejectionCause, String)>,
+    reject_next_revoke: Option<(BridgeRejectionCause, String)>,
+    create_received: Vec<BridgeCreateForkedParticipantPayload>,
+    revoke_received: Vec<BridgeRevokeForkedParticipantPayload>,
+    recorded: std::collections::BTreeMap<String, BridgeForkedParticipantRef>,
+    revoked: std::collections::BTreeSet<String>,
+    tamper_next_create: Option<ScriptedForkedParticipantTamper>,
+}
+
+/// One deliberate corruption of a created capability reference, applied on the
+/// wire so the controlling side must catch it in conversion or validation.
+#[derive(Clone)]
+pub enum ScriptedForkedParticipantTamper {
+    /// Replace the bearer with a token that cannot parse.
+    MalformedCapabilityId,
+    /// Detach the revocation handle from the request that minted it.
+    UnboundRevocationId,
+    /// Claim a `Local` owner route from a host-addressed command.
+    LocalOwnerRoute,
+    /// Name a different owning host than the addressed one.
+    ForeignOwnerHost,
+    /// Name a different source member than the command's source incarnation.
+    ForeignSourceIdentity,
 }
 
 /// Scripted materialize-responder state (fault injectors in the
@@ -2190,6 +2309,18 @@ impl ScriptedHostPeer {
         self.materialize_state().drop_next_reply = n;
     }
 
+    /// Number of DISTINCT recorded materializations for one member — the host
+    /// authority's dedup rows. A retried idempotency tuple must not grow this.
+    pub fn materialize_dedup_rows_for(&self, agent_identity: &str) -> usize {
+        self.materialize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recorded
+            .keys()
+            .filter(|(identity, _, _)| identity == agent_identity)
+            .count()
+    }
+
     pub fn materialize_count(&self) -> u64 {
         self.materialize_state().count
     }
@@ -2272,6 +2403,55 @@ impl ScriptedHostPeer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(identity.to_string(), endpoint);
+    }
+
+    fn forked_participants(&self) -> std::sync::MutexGuard<'_, ScriptedForkedParticipantState> {
+        self.forked_participants
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Advertise a capability set that stops below V6 (the pre-V6 host row).
+    /// Applied to BOTH the bind reply and every subsequent status refresh, so
+    /// the negotiated protocol window stays self-consistent.
+    pub fn advertise_protocol_versions(&self, versions: Vec<BridgeProtocolVersion>) {
+        *self
+            .protocol_versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = versions;
+    }
+
+    /// Next `CreateForkedParticipant` replies `Rejected { cause, reason }`.
+    pub fn reject_next_create_forked_participant(&self, cause: BridgeRejectionCause, reason: &str) {
+        self.forked_participants().reject_next_create = Some((cause, reason.to_string()));
+    }
+
+    /// Next `RevokeForkedParticipant` replies `Rejected { cause, reason }`.
+    pub fn reject_next_revoke_forked_participant(&self, cause: BridgeRejectionCause, reason: &str) {
+        self.forked_participants().reject_next_revoke = Some((cause, reason.to_string()));
+    }
+
+    /// Corrupt exactly the next created capability reference on the wire.
+    pub fn tamper_next_created_forked_participant(&self, tamper: ScriptedForkedParticipantTamper) {
+        self.forked_participants().tamper_next_create = Some(tamper);
+    }
+
+    pub fn received_create_forked_participant_payloads(
+        &self,
+    ) -> Vec<BridgeCreateForkedParticipantPayload> {
+        self.forked_participants().create_received.clone()
+    }
+
+    pub fn received_revoke_forked_participant_payloads(
+        &self,
+    ) -> Vec<BridgeRevokeForkedParticipantPayload> {
+        self.forked_participants().revoke_received.clone()
+    }
+
+    /// Number of DISTINCT capabilities the scripted host has minted — a
+    /// replayed `request_id` must not grow this.
+    pub fn minted_forked_participant_count(&self) -> usize {
+        self.forked_participants().recorded.len()
     }
 
     /// Next `InstallPeerTrust` replies `Rejected { cause, reason }` and the
@@ -2460,6 +2640,99 @@ fn scripted_release_reply(
     }))
 }
 
+/// Serve one scripted V6 `CreateForkedParticipant`.
+///
+/// The reference is minted from the command's OWN source incarnation, so the
+/// controlling side's provenance validation is checked against real echoed
+/// facts rather than a constant. A replayed `request_id` returns the recorded
+/// reference byte-identical — the host authority's replay arm.
+fn scripted_create_forked_participant_reply(
+    state: &mut ScriptedForkedParticipantState,
+    payload: &BridgeCreateForkedParticipantPayload,
+) -> BridgeReply {
+    state.create_received.push(payload.clone());
+    if let Some((cause, reason)) = state.reject_next_create.take() {
+        return BridgeReply::Rejected { cause, reason };
+    }
+    let request_id = payload.request_id.clone();
+    let mut capability = state
+        .recorded
+        .entry(request_id.clone())
+        .or_insert_with(|| BridgeForkedParticipantRef {
+            capability_id: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+            source_identity: payload.source_member.agent_identity.clone(),
+            fork_session_id: uuid::Uuid::new_v4().to_string(),
+            owner_route: BridgeForkedParticipantOwnerRoute::Host {
+                realm_id: "global".to_string(),
+                host_id: payload.source_member.host_id.clone(),
+            },
+            source_session_id: payload.source_member.member_session_id.clone(),
+            prefix_message_count: payload.prefix_message_count.unwrap_or(0),
+            prefix_digest: format!("sha256:scripted-prefix-{request_id}"),
+            scope: payload.scope,
+            reuse: payload.reuse,
+            // Inferred from the wire field's own type: this module is also
+            // `#[path]`-included by `meerkat-integration-tests`, which does
+            // not depend on `chrono` directly.
+            expires_at: (std::time::SystemTime::now()
+                + std::time::Duration::from_millis(payload.ttl_millis))
+            .into(),
+            revocation_id: format!("fpr:{request_id}"),
+            cleanup_id: format!("fpk:{request_id}"),
+        })
+        .clone();
+    match state.tamper_next_create.take() {
+        None => {}
+        Some(ScriptedForkedParticipantTamper::MalformedCapabilityId) => {
+            capability.capability_id = "not-a-bearer-token".to_string();
+        }
+        Some(ScriptedForkedParticipantTamper::UnboundRevocationId) => {
+            capability.revocation_id = "fpr:some-other-request".to_string();
+        }
+        Some(ScriptedForkedParticipantTamper::LocalOwnerRoute) => {
+            capability.owner_route = BridgeForkedParticipantOwnerRoute::Local {
+                realm_id: "global".to_string(),
+            };
+        }
+        Some(ScriptedForkedParticipantTamper::ForeignOwnerHost) => {
+            capability.owner_route = BridgeForkedParticipantOwnerRoute::Host {
+                realm_id: "global".to_string(),
+                host_id: "some-other-host".to_string(),
+            };
+        }
+        Some(ScriptedForkedParticipantTamper::ForeignSourceIdentity) => {
+            capability.source_identity = "someone-else".to_string();
+        }
+    }
+    BridgeReply::ForkedParticipantCreated(BridgeForkedParticipantCreatedResponse { capability })
+}
+
+/// Serve one scripted V6 `RevokeForkedParticipant`.
+fn scripted_revoke_forked_participant_reply(
+    state: &mut ScriptedForkedParticipantState,
+    payload: &BridgeRevokeForkedParticipantPayload,
+) -> BridgeReply {
+    state.revoke_received.push(payload.clone());
+    if let Some((cause, reason)) = state.reject_next_revoke.take() {
+        return BridgeReply::Rejected { cause, reason };
+    }
+    let outcome = if state
+        .revoked
+        .insert(payload.capability.capability_id.clone())
+    {
+        BridgeForkedParticipantRevocationOutcome::Revoked {
+            cleanup_pending: false,
+        }
+    } else {
+        BridgeForkedParticipantRevocationOutcome::Converged
+    };
+    BridgeReply::ForkedParticipantRevoked(BridgeForkedParticipantRevokedResponse { outcome })
+}
+
 pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
     let endpoint = Arc::new(spawn_peer_comms_endpoint(name, true, None).await);
     let token = format!("scripted-host-token-{}", uuid::Uuid::new_v4().simple());
@@ -2491,6 +2764,12 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
     let materialize = Arc::new(std::sync::Mutex::new(ScriptedMaterializeState::default()));
     let release = Arc::new(std::sync::Mutex::new(ScriptedReleaseState::default()));
     let trust = Arc::new(std::sync::Mutex::new(ScriptedPeerTrustState::default()));
+    let forked_participants = Arc::new(std::sync::Mutex::new(
+        ScriptedForkedParticipantState::default(),
+    ));
+    let protocol_versions = Arc::new(std::sync::Mutex::new(
+        BridgeProtocolVersion::supported().to_vec(),
+    ));
     let member_endpoints = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<
         String,
         Arc<PeerCommsEndpoint>,
@@ -2506,6 +2785,8 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
     let responder_materialize = Arc::clone(&materialize);
     let responder_release = Arc::clone(&release);
     let responder_trust = Arc::clone(&trust);
+    let responder_forked_participants = Arc::clone(&forked_participants);
+    let responder_protocol_versions = Arc::clone(&protocol_versions);
     let responder_member_endpoints = Arc::clone(&member_endpoints);
     let responder_address = endpoint.runtime.advertised_address();
     let responder_token = token;
@@ -2709,6 +2990,39 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                             serde_json::to_value(reply).expect("scripted remove trust reply")
                         })
                     }
+                    // --- V6 source-owned forked-participant arms (#159) ---
+                    Ok(BridgeCommand::CreateForkedParticipant(payload)) => {
+                        let supervisor_spec =
+                            TrustedPeerDescriptor::try_from(payload.supervisor.clone())
+                                .expect("valid supervisor spec");
+                        responder_endpoint.trust(supervisor_spec).await;
+                        let reply = scripted_create_forked_participant_reply(
+                            &mut responder_forked_participants
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &payload,
+                        );
+                        Some(
+                            serde_json::to_value(reply)
+                                .expect("scripted forked participant create reply"),
+                        )
+                    }
+                    Ok(BridgeCommand::RevokeForkedParticipant(payload)) => {
+                        let supervisor_spec =
+                            TrustedPeerDescriptor::try_from(payload.supervisor.clone())
+                                .expect("valid supervisor spec");
+                        responder_endpoint.trust(supervisor_spec).await;
+                        let reply = scripted_revoke_forked_participant_reply(
+                            &mut responder_forked_participants
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &payload,
+                        );
+                        Some(
+                            serde_json::to_value(reply)
+                                .expect("scripted forked participant revoke reply"),
+                        )
+                    }
                     Ok(BridgeCommand::HostStatus(_)) => {
                         responder_host_status_count.fetch_add(1, Ordering::SeqCst);
                         if responder_drop_next_host_status_replies
@@ -2750,6 +3064,10 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                                         autonomous_members: true,
                                         tracked_input_cancel: true,
                                         engine_version: "scripted-host-test".to_string(),
+                                        supported_protocol_versions: responder_protocol_versions
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .clone(),
                                         ..BridgeCapabilities::default()
                                     },
                                 },
@@ -2808,6 +3126,13 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                                         autonomous_members: true,
                                         tracked_input_cancel: true,
                                         engine_version: "scripted-host-test".to_string(),
+                                        supported_protocol_versions:
+                                            responder_protocol_versions
+                                                .lock()
+                                                .unwrap_or_else(
+                                                    std::sync::PoisonError::into_inner,
+                                                )
+                                                .clone(),
                                         ..BridgeCapabilities::default()
                                     },
                                     live_endpoint: None,
@@ -2921,6 +3246,8 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
         materialize,
         release,
         trust,
+        forked_participants,
+        protocol_versions,
         member_endpoints,
         task,
     }
@@ -3276,6 +3603,10 @@ pub struct ControllingMob {
     /// real persistent MobStorage cannot produce.
     pub storage_runs: Arc<dyn meerkat_mob::store::MobRunStore>,
     pub storage_specs: Arc<dyn meerkat_mob::store::MobSpecStore>,
+    /// Source-owned forked-participant capability records, retained across
+    /// fixture restarts for the same reason as every other store handle: a
+    /// fresh store would model data loss, not a cold restart.
+    pub storage_forked_participants: Arc<dyn meerkat_mob::store::ForkedParticipantStore>,
     pub mob_id: meerkat_mob::MobId,
     pub temp: tempfile::TempDir,
     /// Event-store handle retained so the mob can be rebuilt over the SAME
@@ -3384,6 +3715,19 @@ pub fn add_realtime_worker_profile(definition: &mut meerkat_mob::MobDefinition) 
     );
 }
 
+/// [`create_controlling_mob`] with a raw builder mutation.
+///
+/// Local-only batteries use this to install an actor-level default LLM client
+/// (a stalling one, to hold a local member's runtime in `Running`). Do NOT use
+/// it for placed rows: an installed actor override typed-rejects every placed
+/// spawn (plan §18.9).
+pub async fn create_controlling_mob_with_builder(
+    label: &str,
+    mutate_builder: impl FnOnce(meerkat_mob::MobBuilder) -> meerkat_mob::MobBuilder,
+) -> ControllingMob {
+    create_controlling_mob_composed(label, None, None, |_| {}, mutate_builder).await
+}
+
 async fn create_controlling_mob_composed(
     label: &str,
     customizer: Option<Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer>>,
@@ -3418,6 +3762,11 @@ async fn create_controlling_mob_composed(
         Arc::new(meerkat_mob::store::InMemoryMobRunStore::new());
     let specs: Arc<dyn meerkat_mob::store::MobSpecStore> =
         Arc::new(meerkat_mob::store::InMemoryMobSpecStore::new());
+    // The custom composition has no implicit capability store, so attach one
+    // explicitly: a controlling mob without it cannot own a LOCAL
+    // forked-participant capability at all (issue #159).
+    let forked_participants: Arc<dyn meerkat_mob::store::ForkedParticipantStore> =
+        Arc::new(meerkat_mob::store::InMemoryForkedParticipantStore::new());
     let storage = meerkat_mob::MobStorage::custom_with_runtime_metadata(
         Arc::clone(&events),
         Arc::clone(&runs),
@@ -3425,7 +3774,8 @@ async fn create_controlling_mob_composed(
         Arc::clone(&metadata),
         Arc::clone(&identity),
         Arc::clone(&identity_status),
-    );
+    )
+    .with_forked_participant_store(Some(Arc::clone(&forked_participants)));
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
     let runtime_adapter = mob_service
@@ -3484,6 +3834,7 @@ async fn create_controlling_mob_composed(
         storage_identity_status: identity_status,
         storage_runs: runs,
         storage_specs: specs,
+        storage_forked_participants: forked_participants,
         mob_id,
         temp,
         storage_events: events,
@@ -3631,6 +3982,7 @@ impl ControllingMob {
             storage_identity_status,
             storage_runs,
             storage_specs,
+            storage_forked_participants,
             mob_id,
             temp,
             storage_events,
@@ -3765,7 +4117,8 @@ impl ControllingMob {
             Arc::clone(&storage_metadata),
             Arc::clone(&storage_identity),
             Arc::clone(&storage_identity_status),
-        );
+        )
+        .with_forked_participant_store(Some(Arc::clone(&storage_forked_participants)));
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
         let runtime_adapter = mob_service
             .runtime_adapter()
@@ -3838,6 +4191,7 @@ impl ControllingMob {
             storage_identity_status,
             storage_runs,
             storage_specs,
+            storage_forked_participants,
             mob_id,
             temp,
             storage_events,
@@ -3956,6 +4310,7 @@ pub fn sample_materialize_payload(
         spec,
         spec_digest,
         launch,
+        forked_participant_attachment: None,
     })
 }
 

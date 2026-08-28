@@ -46,6 +46,110 @@ impl std::fmt::Display for RuntimeEffectKind {
     }
 }
 
+/// Why a source member cannot serve one forked-participant capability
+/// operation.
+///
+/// These are controller-side ROUTING refusals decided before any capability
+/// record is touched: the source-owner service and the owning host remain the
+/// only deciders of capability lifecycle legality, so nothing here duplicates
+/// a machine verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForkedParticipantSourceRejection {
+    /// The member holds no canonical bridge session that could be forked.
+    NoSourceSession,
+    /// The member is an unmanaged external peer runtime: this controller owns
+    /// neither its session nor a host route that could own the fork.
+    UnmanagedExternal,
+    /// The member's canonical residency facts do not currently form a usable
+    /// source (stale roster route, retired/destroyed runtime, dormant or
+    /// revoked host binding).
+    SourceRuntimeBroken,
+    /// The source is mid-run. A fork is only defined at a complete boundary.
+    SourceBusy,
+    /// This runtime composes no forked-participant capability store, so it
+    /// cannot own a local capability.
+    CapabilityStoreAbsent,
+    /// This runtime's session service exposes no capability source runtime.
+    SourceRuntimeAbsent,
+    /// The bound member host has not negotiated the V6 capability protocol.
+    HostProtocolUnsupported,
+}
+
+/// Explicit lease verb that cannot be served across a host route on this
+/// surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkedParticipantLeaseOperation {
+    /// Attach a capability to a temporary coordinator.
+    Attach,
+    /// Release an attachment from a temporary coordinator.
+    Release,
+    /// Seat a capability as an ordinary target-mob member.
+    AttachedSpawn,
+}
+
+impl std::fmt::Display for ForkedParticipantLeaseOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Attach => f.write_str("attach"),
+            Self::Release => f.write_str("release"),
+            Self::AttachedSpawn => f.write_str("attached spawn"),
+        }
+    }
+}
+
+/// Why a capability's owning member host cannot seat it in this mob right now.
+///
+/// Every variant is decided from MACHINE-recorded host facts before any bridge
+/// traffic: an unbound or under-versioned host must never learn that a
+/// capability exists by receiving a command it cannot serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForkedParticipantOwnerHostRejection {
+    /// The capability's owner host is not currently bound in this mob.
+    HostNotBound,
+    /// The bound host has not negotiated the V6 capability protocol.
+    ProtocolUnsupported,
+    /// The host is bound but its recorded route facts do not form a peer.
+    RouteUnusable,
+}
+
+impl std::fmt::Display for ForkedParticipantOwnerHostRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostNotBound => f.write_str("host is not bound in this mob"),
+            Self::ProtocolUnsupported => {
+                f.write_str("host does not negotiate supervisor bridge V6")
+            }
+            Self::RouteUnusable => f.write_str("host binding facts do not form a usable route"),
+        }
+    }
+}
+
+impl std::fmt::Display for ForkedParticipantSourceRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSourceSession => f.write_str("source member has no canonical bridge session"),
+            Self::UnmanagedExternal => {
+                f.write_str("source member is an unmanaged external peer runtime")
+            }
+            Self::SourceRuntimeBroken => {
+                f.write_str("source member residency is not currently usable")
+            }
+            Self::SourceBusy => f.write_str("source member is running"),
+            Self::CapabilityStoreAbsent => {
+                f.write_str("this runtime composes no forked-participant capability store")
+            }
+            Self::SourceRuntimeAbsent => {
+                f.write_str("this runtime exposes no forked-participant source runtime")
+            }
+            Self::HostProtocolUnsupported => {
+                f.write_str("bound member host does not negotiate supervisor bridge V6")
+            }
+        }
+    }
+}
+
 /// Mob-owned classification of why a mob operation failed.
 ///
 /// This is the typed owner of "what class of failure does this `MobError`
@@ -464,6 +568,96 @@ pub enum MobError {
     UnsupportedForMode {
         mode: crate::MobRuntimeMode,
         reason: String,
+    },
+
+    /// The named source member cannot serve a forked-participant capability
+    /// operation. Controller-side routing refusal only — the source-owner
+    /// service and the owning host still decide capability lifecycle legality.
+    #[error("forked participant source '{member_id}' is not eligible: {rejection}")]
+    ForkedParticipantSourceIneligible {
+        member_id: AgentIdentity,
+        rejection: ForkedParticipantSourceRejection,
+    },
+
+    /// The source-owner capability service refused the operation. The typed
+    /// service error is retained as the source so callers keep the machine's
+    /// own verdict instead of a display string.
+    #[error("forked participant capability operation refused")]
+    ForkedParticipantRefused(#[source] Box<crate::forked_participant::ForkedParticipantError>),
+
+    /// An ordinary resume named a capability-owned fork session without an
+    /// attachment receipt.
+    #[error(
+        "session {session_id} is owned by a forked-participant capability; use the capability-aware attached spawn"
+    )]
+    ForkedParticipantResumeRequiresAttachment {
+        /// Protected fork session identity.
+        session_id: meerkat_core::SessionId,
+    },
+
+    /// Explicit leases for a host-owned capability must be part of the V6
+    /// host materialization/release protocol, which this local-only surface
+    /// deliberately does not proxy.
+    #[error(
+        "forked participant {operation} on a host route is unsupported: remote attachment must be coupled to V6 Materialize/Release"
+    )]
+    ForkedParticipantRemoteLeaseUnsupported {
+        /// Lease verb that was refused.
+        operation: ForkedParticipantLeaseOperation,
+    },
+
+    /// A host-owned capability cannot be seated because its owning host is not
+    /// usable in this mob. Decided from machine host facts BEFORE any bridge
+    /// traffic, so an unbound or pre-V6 host is never contacted.
+    #[error("forked participant capability owner host '{host_id}' cannot seat it: {rejection}")]
+    ForkedParticipantOwnerHostUnavailable {
+        /// Capability's own owner host identity.
+        host_id: String,
+        /// Typed reason, resolved from recorded MobMachine host facts.
+        rejection: ForkedParticipantOwnerHostRejection,
+    },
+
+    /// The target spawn spec presented to the capability-aware attached spawn
+    /// is not admissible. The branch INHERITS the source's effective execution
+    /// context, so a spec that would widen or re-point it is refused before
+    /// the capability's lifecycle machine is touched.
+    #[error("forked participant attached spawn spec rejected: {detail}")]
+    ForkedParticipantAttachedSpawnSpecRejected {
+        /// What was wrong with the presented target spec.
+        detail: String,
+    },
+
+    /// The capability attachment was admitted, but the mob could not durably
+    /// record the association or its reconciliation obligation.
+    ///
+    /// The attachment is deliberately NOT blind-released here: without a
+    /// durable row, a release that itself fails would leave nothing behind to
+    /// converge from. The typed detail names the exact attachment so an
+    /// operator (or the owner's own pending-attached enumeration) can drive
+    /// reconciliation.
+    #[error(
+        "forked participant attachment '{attachment_id}' could not be durably recorded: {detail}"
+    )]
+    ForkedParticipantAttachmentCustodyUnrecorded {
+        /// Attachment identity that remains outstanding.
+        attachment_id: String,
+        /// Store-reported failure detail.
+        detail: String,
+    },
+
+    /// A capability attachment seated in this mob outlived the teardown that
+    /// should have released it: session/runtime teardown completed but the
+    /// capability release did not, so cleanup must not report completion.
+    #[error(
+        "forked participant attachment '{attachment_id}' release after teardown of '{member_id}' is unproven: {detail}"
+    )]
+    ForkedParticipantAttachmentReleaseUnproven {
+        /// Member whose teardown owed the release.
+        member_id: AgentIdentity,
+        /// Attachment identity that remains outstanding.
+        attachment_id: String,
+        /// Typed failure detail.
+        detail: String,
     },
 
     /// A peer-only lifecycle effect requires the explicit durable supervisor

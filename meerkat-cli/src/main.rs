@@ -14883,7 +14883,7 @@ async fn hydrate_mob_state(
     if let Some(acceptor) = controlling_acceptor {
         state = state.with_controlling_acceptor(acceptor);
     }
-    let state = Arc::new(state);
+    let state = state.into_shared();
     for (mob_id, handle) in &seeded_handles {
         state
             .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())

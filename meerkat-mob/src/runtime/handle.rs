@@ -2073,6 +2073,20 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::ParticipantNameOccupied { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        // Forked-participant capability routing is a source-owner verb, never
+        // a spawn-many provisioning step. Classify as Internal to keep the
+        // match total instead of inventing a spawn cause MobMachine never
+        // observed.
+        MobError::ForkedParticipantSourceIneligible { .. }
+        | MobError::ForkedParticipantOwnerHostUnavailable { .. }
+        | MobError::ForkedParticipantRefused(_)
+        | MobError::ForkedParticipantResumeRequiresAttachment { .. }
+        | MobError::ForkedParticipantRemoteLeaseUnsupported { .. }
+        | MobError::ForkedParticipantAttachedSpawnSpecRejected { .. }
+        | MobError::ForkedParticipantAttachmentCustodyUnrecorded { .. }
+        | MobError::ForkedParticipantAttachmentReleaseUnproven { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
     }
 }
 
@@ -4349,6 +4363,13 @@ pub enum SpawnSource {
     /// `IdentityIntent`. Portable customization has already happened before
     /// apply and must not run again on recovery.
     IdentityReconcile,
+    /// Ordinary Resume provisioning of a LOCAL forked-participant capability's
+    /// own fork session, admitted by the capability-aware attached spawn.
+    ///
+    /// This authorship source is what distinguishes a lease-bearing seating
+    /// from a plain resume that merely named a protected session id: the plain
+    /// path is refused, this one is not.
+    AttachedForkedParticipant,
 }
 
 impl SpawnSource {
@@ -4366,6 +4387,7 @@ impl SpawnSource {
             Self::Fork => "fork",
             Self::PersistedForkResume => "persisted_fork_resume",
             Self::IdentityReconcile => "identity_reconcile",
+            Self::AttachedForkedParticipant => "attached_forked_participant",
         }
     }
 
@@ -4380,6 +4402,14 @@ impl SpawnSource {
                 if matches!(base, Self::PersistedForkResume) =>
             {
                 Self::PersistedForkResume
+            }
+            // A capability-aware seating IS a resume, but its authorship is
+            // what carries the lease evidence past the protected-session
+            // guard. Collapsing it to plain Resume would erase that evidence.
+            crate::launch::MemberLaunchMode::Resume { .. }
+                if matches!(base, Self::AttachedForkedParticipant) =>
+            {
+                Self::AttachedForkedParticipant
             }
             crate::launch::MemberLaunchMode::Resume { .. } => Self::Resume,
             crate::launch::MemberLaunchMode::Fork { .. } => Self::Fork,
@@ -4535,6 +4565,17 @@ pub struct SpawnMemberSpec {
     /// garbage id is a typed `HostNotBound` denial at the spawn ladder,
     /// never a shell-side probe. `None` = controlling host (local member).
     pub placement: Option<crate::machines::mob_machine::HostId>,
+    /// Crate-internal V6 capability attachment carried by exactly one spawn:
+    /// the capability-aware attached spawn of a HOST-owned forked participant.
+    ///
+    /// It is deliberately not public and deliberately not part of
+    /// `PortableMemberSpec`: it is spawn-request authority for one exact
+    /// materialization, not part of the member's portable definition, so it
+    /// never reaches the spec digest and never travels as member state. The
+    /// owning host records the association durably; this controller keeps no
+    /// second copy of that lifecycle truth.
+    pub(crate) forked_participant_attachment:
+        Option<crate::forked_participant::ForkedParticipantAttachmentAssociation>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -4573,6 +4614,13 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("system_prompt_override", &self.system_prompt_override)
             .field("continuity_intent", &self.continuity_intent)
             .field("placement", &self.placement)
+            .field(
+                "forked_participant_attachment",
+                &self
+                    .forked_participant_attachment
+                    .as_ref()
+                    .map(|association| association.association_key()),
+            )
             .finish()
     }
 }
@@ -4607,6 +4655,7 @@ impl SpawnMemberSpec {
             system_prompt_override: None,
             continuity_intent: SpawnContinuityIntent::Ephemeral,
             placement: None,
+            forked_participant_attachment: None,
         }
     }
 
@@ -6625,6 +6674,195 @@ impl MobHandle {
                 from_index,
                 limit,
                 reply_tx,
+            })
+            .await?
+    }
+
+    /// Create one source-owned forked-participant capability (issue #159).
+    ///
+    /// The returned reference is an immutable, authenticated grant to drive a
+    /// complete-boundary FORK of `source_identity`'s conversation. The branch
+    /// inherits the source's effective tool/auth/realm execution context —
+    /// there is deliberately no policy argument that could widen it.
+    ///
+    /// Routing is by CURRENT source residency: a local source is served by this
+    /// runtime's own source-owner service, a placed source by the V6
+    /// `CreateForkedParticipant` command on its owning member host. An
+    /// unmanaged external source is typed unsupported. `SendCommand`-scoped at
+    /// chokepoint (a).
+    ///
+    /// `request_id` is the caller's idempotency identity: replaying the exact
+    /// same request converges on the same capability instead of taking a second
+    /// fork; a materially different request under a bound id is refused by the
+    /// owner's lifecycle machine.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_forked_participant(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        source_identity: AgentIdentity,
+        request_id: crate::forked_participant::ForkedParticipantRequestId,
+        prefix_message_count: Option<usize>,
+        scope: crate::forked_participant::ForkedParticipantOperationScope,
+        reuse: crate::forked_participant::ForkedParticipantReusePolicy,
+        ttl: std::time::Duration,
+    ) -> Result<crate::forked_participant::ForkedParticipantRef, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::CreateForkedParticipant {
+                    request: Box::new(
+                        super::forked_participant_routing::ForkedParticipantCreateRequest {
+                            source_identity,
+                            request_id,
+                            prefix_message_count,
+                            scope,
+                            reuse,
+                            ttl,
+                        },
+                    ),
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
+    /// Revoke one source-owned forked-participant capability (issue #159).
+    ///
+    /// Routing is by the capability's OWN immutable owner route, never by
+    /// current source residency, so a capability can still be revoked after its
+    /// source roster member has retired: a local route is served by this
+    /// runtime's durable record, and a host route by the host named in the
+    /// reference under that host's current bound supervisor authority.
+    /// `Cancel`-scoped at chokepoint (a).
+    pub async fn revoke_forked_participant(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+    ) -> Result<crate::forked_participant::ForkedParticipantRevocationOutcome, MobError> {
+        let capability = Box::new(capability.clone());
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::RevokeForkedParticipant {
+                    capability,
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
+    /// Attach a LOCAL source-owned forked participant to a temporary
+    /// coordinator.
+    ///
+    /// This explicit lease verb is `SendCommand`-scoped at chokepoint (a).
+    /// Host-owned capabilities are deliberately refused: their attachment must
+    /// be coupled to V6 Materialize/Release rather than proxied as a standalone
+    /// bridge command.
+    pub async fn attach_forked_participant(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+        attachment_id: crate::forked_participant::ForkedParticipantAttachmentId,
+    ) -> Result<crate::forked_participant::ForkedParticipantGrant, MobError> {
+        let capability = Box::new(capability.clone());
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::AttachForkedParticipant {
+                    capability,
+                    attachment_id,
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
+    /// Release a LOCAL source-owned forked-participant attachment.
+    ///
+    /// This explicit lease verb is `Cancel`-scoped at chokepoint (a). Releasing
+    /// is explicit: no `Drop` cleanup task is started, so a coordinator retains
+    /// cancellation and recovery custody.
+    pub async fn release_forked_participant(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+        attachment_id: &crate::forked_participant::ForkedParticipantAttachmentId,
+    ) -> Result<crate::forked_participant::ForkedParticipantReleaseOutcome, MobError> {
+        let capability = Box::new(capability.clone());
+        let attachment_id = attachment_id.clone();
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::ReleaseForkedParticipant {
+                    capability,
+                    attachment_id,
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
+    /// Seat a LOCAL source-owned forked participant as an ordinary member of
+    /// this mob (issue #159).
+    ///
+    /// This is the ONLY admitted way to resume a capability-owned fork
+    /// session: an ordinary spawn that merely names the session id visible in
+    /// a reference is refused with
+    /// [`MobError::ForkedParticipantResumeRequiresAttachment`]. Seating the
+    /// branch therefore cannot bypass — or silently keep — the lease.
+    ///
+    /// One actor-serialized command owns the whole admission:
+    ///
+    /// 1. the target spec is validated (no policy widening, no placement, no
+    ///    second fork, no role restamp — the branch INHERITS the source's
+    ///    effective tool/auth/realm execution context);
+    /// 2. the launch mode is set BY THIS API to a `Resume` of the capability's
+    ///    own exact fork session, and a caller-declared launch mode that
+    ///    conflicts with it is rejected rather than overwritten;
+    /// 3. the source owner's lifecycle machine admits `Attach` under
+    ///    `attachment_id`, which is the caller's stable idempotency identity —
+    ///    an exact replay returns the same grant instead of consuming a second
+    ///    use;
+    /// 4. durable attachment custody is recorded BEFORE the spawn, so a crash
+    ///    mid-spawn leaves an explicit reconciliation obligation rather than a
+    ///    silently leaked lease;
+    /// 5. the ordinary Resume pipeline spawns the member, and the association
+    ///    is durably recorded before success is reported.
+    ///
+    /// A definitive spawn failure releases exactly this attachment. A failure
+    /// whose outcome may have committed retains the durable obligation instead
+    /// — never a blind release, which would assert an absence the mob did not
+    /// observe.
+    ///
+    /// Only [`crate::forked_participant::ForkedParticipantOwnerRoute::Local`]
+    /// is served. A host route is typed
+    /// [`MobError::ForkedParticipantRemoteLeaseUnsupported`]: remote seating
+    /// must be coupled to V6 Materialize/Release rather than proxied as a
+    /// standalone command. `SendCommand`-scoped at chokepoint (a).
+    ///
+    /// The returned outcome is explicit and complete: the caller keeps the
+    /// spawn result AND the lease identity it now owns. Releasing the lease
+    /// stays its own explicit act — no `Drop`-spawned async cleanup is started
+    /// anywhere on this path. Ordinary member teardown (retire, respawn,
+    /// destroy, shutdown) releases the exact attachment after the member's
+    /// session/runtime teardown completes.
+    pub async fn spawn_attached_forked_participant(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+        attachment_id: crate::forked_participant::ForkedParticipantAttachmentId,
+        target_spec: SpawnMemberSpec,
+    ) -> Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError> {
+        let capability = Box::new(capability.clone());
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| {
+                super::state::MobCommand::SpawnAttachedForkedParticipant {
+                    capability,
+                    attachment_id,
+                    spec: Box::new(target_spec),
+                    reply_tx,
+                }
             })
             .await?
     }

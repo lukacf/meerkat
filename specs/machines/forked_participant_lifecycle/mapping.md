@@ -1,0 +1,583 @@
+# ForkedParticipantLifecycleMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `ForkedParticipantLifecycleMachine`
+
+### Code Anchors
+- `forked_participant_lifecycle` (machine `ForkedParticipantLifecycleMachine`): `meerkat-mob/src/machines/forked_participant_lifecycle.rs` — ForkedParticipantLifecycleMachine owns one source-owned capability record: reservation identity, durable fork activation identity, bounded single-holder attachment admission, revocation, expiry, and cleanup debt
+
+### Scenarios
+- `forked_participant_reservation_and_activation_identity` — A reservation binds one request fingerprint and a positive reuse budget, exact reserve replay converges, a conflicting fingerprint is a typed reject, and a create-failure keeps the SAME request retryable without letting a different request steal the identity
+- `forked_participant_bounded_single_holder_attachment` — An active capability admits one attachment at a time and increments the use count exactly once, exact attach replay returns the original grant without a second increment, a concurrent attachment is typed busy, an invalid authentication observation changes nothing, and the bounded reuse budget terminalizes to Exhausted on the release that spends it
+- `forked_participant_revocation_expiry_and_cleanup_debt` — Revocation and expiry terminalize a detached capability with cleanup debt, an attached capability instead records a typed pending-attached state whose debt becomes actionable only after the exact release, both observations converge on replay, and CompleteCleanup is admitted only for a terminal detached record that carries debt
+
+### Transitions
+- `ReserveEmpty`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveEmptyMalformed`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveReservedReplay`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveReservedConflict`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveActivationFailedRetry`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveActivationFailedConflict`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReserveAlreadyProvisionedActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReserveAlreadyProvisionedExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReserved`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivateReservedMismatch`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivateReservedMalformed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateActivationFailedRecovery`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivateActivationFailedMismatch`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateActivationFailedMalformed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateActiveReplay`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivateActiveConflict`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivateReplayAfterActivationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReplayAfterActivationRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReplayAfterActivationExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReplayAfterActivationRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReplayAfterActivationExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateReplayAfterActivationExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateAttachedConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateAttachedConflictRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateAttachedConflictExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateTerminalConflictRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateTerminalConflictExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateTerminalConflictExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationReserved`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `FailActivationReservedMismatch`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationReplay`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `FailActivationFailedMismatch`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationAfterActivationActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationAfterActivationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationAfterActivationRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationAfterActivationExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationAfterActivationExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationNotReservedEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationNotReservedRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailActivationNotReservedExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidActive`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachAuthenticationInvalidAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachAuthenticationInvalidExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachNotActiveEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachNotActiveReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachNotActiveActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachActiveMalformed`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachActiveExpired`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachActiveAlreadyReleased`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachActiveGrant`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachActiveBudgetSpent`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachAttachedReplay`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachAttachedAlreadyReleased`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachAttachedBusy`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachRevokedCapabilityRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachRevokedCapabilityRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachExpiredCapabilityExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachExpiredCapabilityExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AttachExhaustedCapabilityExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseAttachedWithBudgetLeft`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseAttachedExhausts`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseRevocationPending`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ReleaseExpiryPending`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ReleaseDuplicateWhileAttachedAttached`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseAttachmentMismatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseDuplicateWhileAttachedRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseAttachmentMismatchRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseDuplicateWhileAttachedExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseAttachmentMismatchExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseDuplicateConvergesActive`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseUnknownAttachmentActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseDuplicateConvergesRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseUnknownAttachmentRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseDuplicateConvergesExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseUnknownAttachmentExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseDuplicateConvergesExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseUnknownAttachmentExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseUnknownAttachmentEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseUnknownAttachmentReserved`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseUnknownAttachmentActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidActive`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeAuthenticationInvalidAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAuthenticationInvalidExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeReserved`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeActive`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeAttached`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeRevocationPendingReplay`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeRevokedReplay`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevokeAlreadyTerminalExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeAlreadyTerminalExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedActive`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpiryNotObservedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryNotObservedExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryObservedEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpireActive`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpireAttached`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpiryPendingReplay`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpiryUnderRevocationPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryAfterTerminalRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryAfterTerminalExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExpiryAfterTerminalExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupPendingDebtRevoked`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CompleteCleanupReplayRevoked`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CompleteCleanupWithoutDebtRevoked`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CompleteCleanupPendingDebtExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupReplayExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupWithoutDebtExpired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupPendingDebtExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupReplayExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupWithoutDebtExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupWhileAttachedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupWhileAttachedRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CompleteCleanupWhileAttachedExpiryPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupNotTerminalEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupNotTerminalReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupNotTerminalActivationFailed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteCleanupNotTerminalActive`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+
+### Effects
+- `CapabilityReserved`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReservationReplayed`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ReservationRejected`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ForkActivated`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ForkActivationReplayed`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ForkActivationFailed`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ForkActivationFailureReplayed`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `ActivationRejected`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `AttachmentGranted`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachmentGrantReplayed`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachDenied`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `AttachmentReleased`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseReplayed`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `ReleaseRejected`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `CapabilityExhausted`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `CapabilityExpired`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpiryPendingRecorded`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `ExpiryObservationIgnored`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CapabilityRevoked`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevocationPendingRecorded`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevocationConverged`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `RevocationDenied`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CleanupCompleted`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CleanupCompletionReplayed`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `CleanupCompletionRejected`
+  - anchors: (unclaimed)
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+
+### Invariants
+- `reserved_capability_has_positive_max_uses`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `use_count_within_max_uses`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `granted_attachments_match_use_count`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `active_holder_is_a_granted_attachment`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `attachment_only_while_attached`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `attached_phase_holds_one_attachment`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`
+- `terminal_capability_is_detached`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_bounded_single_holder_attachment`, `forked_participant_revocation_expiry_and_cleanup_debt`
+- `cleanup_complete_requires_detached_terminal`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `deferred_cleanup_requires_attachment`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_revocation_expiry_and_cleanup_debt`
+- `empty_record_has_no_capability_facts`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `pre_activation_record_has_no_grants`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+- `usable_capability_has_fork_activation`
+  - anchors: `forked_participant_lifecycle`
+  - scenarios: `forked_participant_reservation_and_activation_identity`
+
+
+<!-- GENERATED_COVERAGE_END -->

@@ -38,6 +38,7 @@ use meerkat_runtime::SessionServiceRuntimeExt as _;
 use crate::MobRuntimeMode;
 use crate::build::{BuildAgentConfigParams, BuildResumedAgentConfigParams};
 use crate::definition::{MobDefinition, SkillSource};
+use crate::forked_participant::ForkedParticipantSourceRuntime;
 use crate::ids::ProfileName;
 use crate::profile::{Profile, ProfileBinding, ResumeOverrideField, ToolConfig};
 use crate::runtime::SpawnSystemPromptOverride;
@@ -52,6 +53,7 @@ use crate::runtime::provisioner::{
     revalidate_session_resume_authority_after_machine_prepare,
 };
 use crate::runtime::session_service::MobSessionService;
+use crate::store::ForkedParticipantStore;
 
 const NONSERVING_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -121,6 +123,11 @@ pub struct HostMemberSubstrate {
     pub member_identity_root: std::path::PathBuf,
     /// Tier-2 preflight probe (extends the tier-1 `ProviderPresenceProbe`).
     pub preflight_probe: Arc<dyn MaterializePreflightProbe>,
+    /// Explicit realm-scoped source-owner capability inputs. All three must be
+    /// present to serve V6; legacy hosts omit them and reject V6 typed.
+    pub forked_participant_realm: Option<meerkat_core::RealmId>,
+    pub forked_participant_store: Option<Arc<dyn ForkedParticipantStore>>,
+    pub forked_participant_source_runtime: Option<Arc<dyn ForkedParticipantSourceRuntime>>,
 }
 
 // ---------------------------------------------------------------------------

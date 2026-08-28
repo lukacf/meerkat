@@ -1,0 +1,506 @@
+# TemporaryCouncilLifecycleMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `TemporaryCouncilLifecycleMachine`
+
+### Code Anchors
+- `temporary_council_lifecycle` (machine `TemporaryCouncilLifecycleMachine`): `meerkat-mob/src/machines/temporary_council_lifecycle.rs` — TemporaryCouncilLifecycleMachine owns one temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed or coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict
+
+### Scenarios
+- `temporary_council_request_identity_binding` — One council id binds exactly one canonical request fingerprint: the exact request replays, a materially different request is a typed conflict that never rebinds the identity, and an empty fingerprint is refused outright
+- `temporary_council_advance_and_result_seal` — A council advances Preparing -> Running -> Merging with idempotent replays, seals exactly one immutable result, and refuses a second seal under a different terminal class; a council that never reached a runnable discussion still enters merge so the explicit merge-back policy can produce its typed not-attempted outcome
+- `temporary_council_single_executor_claim_and_fencing` — Exactly one coordinator executes a council at a time: an unheld record grants, the same holder renews, a second coordinator is refused busy while the lease is not observed expired, an observed-expired lease admits a takeover that advances the epoch, and every command carrying the superseded epoch is fenced without mutating anything
+- `temporary_council_interrupted_recovery_and_cleanup_convergence` — A coordinator that dies in any unsealed phase is sealed exactly once as CoordinatorInterrupted and never re-executed, cleanup debt is retained across attempts with a monotonic attempt count, a later attempt converges to Settled, and the recovery sweep verdict comes from the machine rather than a shell phase predicate
+
+### Transitions
+- `OpenEmpty`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenEmptyMalformed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenReplayPreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenReplayMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenReplayConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenReplayCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenReplaySettled`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenConflictPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenConflictMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenConflictConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `OpenConflictCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenConflictSettled`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_request_identity_binding`
+- `ClaimNotOpened`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimSettled`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimMalformedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimMalformedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimMalformedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimMalformedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimMalformedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimGrantPreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimGrantRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimGrantMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimGrantConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimGrantCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimRenewPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimRenewRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimRenewMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimRenewConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimRenewCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimTakeoverPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimTakeoverRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimTakeoverMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimTakeoverConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimTakeoverCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimBusyPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimBusyRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimBusyMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimBusyConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimBusyCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionPreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartDiscussionReplay`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartDiscussionNotOpened`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartDiscussionAlreadyAdvancedMerging`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartDiscussionAlreadyAdvancedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartDiscussionAlreadyAdvancedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionAlreadyAdvancedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergePreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartMergeRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartMergeReplay`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartMergeNotOpened`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartMergeAlreadyAdvancedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `StartMergeAlreadyAdvancedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeAlreadyAdvancedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultMerging`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultReplayConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultReplayCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultReplaySettled`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultConflictConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultConflictCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultConflictSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultNotOpened`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultNotMergingPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealResultNotMergingRunning`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `SealInterruptedPreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedMerging`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedReplayConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedReplayCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedReplaySettled`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedConflictConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `SealInterruptedConflictCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedConflictSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedNotOpened`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledAfterDebt`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledReplay`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledNotSealedEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledNotSealedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledNotSealedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupSettledNotSealedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupDebtRetry`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupDebtAlreadySettled`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupDebtNotSealedEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtNotSealedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecordCleanupDebtNotSealedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtNotSealedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `StartDiscussionFencedRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: (unclaimed)
+- `StartDiscussionFencedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionFencedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartDiscussionFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeFencedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `StartMergeFencedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeFencedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartMergeFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultFencedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultFencedMerging`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `SealResultFencedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealResultFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedResultFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedResultFencedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `SealInterruptedResultFencedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedResultFencedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedResultFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SealInterruptedResultFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledFencedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledFencedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledFencedConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `RecordCleanupSettledFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupSettledFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtFencedPreparing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtFencedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtFencedMerging`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtFencedConcluded`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `RecordCleanupDebtFencedCleanupDebt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCleanupDebtFencedSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveryEmpty`
+  - anchors: (unclaimed)
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoveryPreparing`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoveryRunning`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoveryMerging`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoveryConcluded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoveryCleanupDebt`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClassifyRecoverySettled`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+
+### Effects
+- `CouncilOpened`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `CouncilOpenReplayed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `CouncilOpenRejected`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `DiscussionStarted`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `DiscussionStartReplayed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `MergeStarted`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `MergeStartReplayed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `AdvanceRejected`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `ResultSealed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`, `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ResultSealReplayed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`, `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ResultSealRejected`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`, `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `CleanupSettled`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `CleanupDebtRecorded`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `CleanupSettlementReplayed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `CleanupRejected`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `RecoveryClassified`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `ClaimGranted`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimRenewed`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `ClaimDenied`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `CommandFenced`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+
+### Invariants
+- `empty_record_has_no_council_facts`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `opened_record_is_fingerprint_bound`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_request_identity_binding`
+- `sealed_phase_has_exit_class`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`, `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `unsealed_phase_has_no_exit_class`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_advance_and_result_seal`
+- `cleanup_attempts_require_a_sealed_result`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `debt_and_settlement_have_attempts`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_interrupted_recovery_and_cleanup_convergence`
+- `claim_identity_and_epoch_agree`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+- `only_a_bound_record_is_claimable`
+  - anchors: `temporary_council_lifecycle`
+  - scenarios: `temporary_council_single_executor_claim_and_fencing`
+
+
+<!-- GENERATED_COVERAGE_END -->

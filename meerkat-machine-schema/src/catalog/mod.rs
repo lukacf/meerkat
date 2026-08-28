@@ -53,6 +53,8 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_workgraph_lifecycle_machine(),
         dsl::dsl_work_attention_lifecycle_machine(),
         dsl::dsl_work_execution_lifecycle_machine(),
+        dsl::dsl_forked_participant_lifecycle_machine(),
+        dsl::dsl_temporary_council_lifecycle_machine(),
     ]
 }
 
@@ -136,6 +138,16 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "WorkExecutionLifecycleMachine",
             dsl::WORK_EXECUTION_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::WORK_EXECUTION_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "ForkedParticipantLifecycleMachine",
+            dsl::FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE,
+            dsl::FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "TemporaryCouncilLifecycleMachine",
+            dsl::TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE,
+            dsl::TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE,
         ),
     ]
 }

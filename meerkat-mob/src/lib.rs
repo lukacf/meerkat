@@ -86,6 +86,7 @@ pub mod coordination;
 pub mod definition;
 pub mod error;
 pub mod event;
+pub mod forked_participant;
 #[doc(hidden)]
 pub mod generated;
 pub mod identity;
@@ -104,6 +105,7 @@ mod snapshot;
 pub mod spec;
 pub mod storage;
 pub mod store;
+pub mod temporary_council;
 pub mod validate;
 pub mod workgraph_attention;
 pub mod workgraph_flow;
@@ -122,12 +124,14 @@ pub use coordination::{
 };
 pub use definition::{MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind};
 pub use error::{
-    FlowStepDispatchRejectKind, ForkSourceUnavailableCause, MemberProvisionFailureCause, MobError,
-    MobFailureClass, RuntimeEffectKind,
+    FlowStepDispatchRejectKind, ForkSourceUnavailableCause, ForkedParticipantLeaseOperation,
+    ForkedParticipantOwnerHostRejection, ForkedParticipantSourceRejection,
+    MemberProvisionFailureCause, MobError, MobFailureClass, RuntimeEffectKind,
 };
 pub use event::{
     AttributedEvent, FlowCancelClass, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent,
 };
+pub use forked_participant::ForkedParticipantSourceRuntime;
 pub use identity::{
     AdoptMemberIdentityDeclaration, AdoptMemberIdentityDeclarationResult,
     ApplyMemberToolDeclaration, ApplyMemberToolDeclarationResult, CallbackToolSetDeclaration,
@@ -195,6 +199,20 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::mob_host_binding_authority_schema_metadata()
             .attach_to(
                 crate::machines::mob_host_binding_authority::MobHostBindingAuthorityState::schema(),
+            )
+    }
+
+    pub fn temporary_council_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::temporary_council_lifecycle_schema_metadata()
+            .attach_to(
+                crate::machines::temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState::schema(),
+            )
+    }
+
+    pub fn forked_participant_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::forked_participant_lifecycle_schema_metadata()
+            .attach_to(
+                crate::machines::forked_participant_lifecycle::ForkedParticipantLifecycleMachineState::schema(),
             )
     }
 }

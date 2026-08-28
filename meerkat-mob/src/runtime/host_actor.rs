@@ -62,16 +62,19 @@ use tokio::time::Instant;
 
 use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBootstrapToken, BridgeCapabilities, BridgeCommand, BridgeCommandDecodeError,
+    BridgeCreateForkedParticipantPayload, BridgeForkedParticipantCreatedResponse,
+    BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
     BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostCapabilityRequirements,
     BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
     BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
     BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeMaterializePayload,
     BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
     BridgePeerTrustPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload,
-    BridgeReply, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, MaterializeLaunchMode,
-    MaterializeLaunchOutcome, MemberSessionDisposal as WireMemberSessionDisposal,
-    RuntimeReleaseCause, WireFlowTurnOutcome, WireHostBindingDescriptor,
-    WireHostBindingDescriptorKind, canonicalize_bridge_address, decode_bridge_command,
+    BridgeReply, BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck,
+    BridgeTurnOutcomeRecord, MaterializeLaunchMode, MaterializeLaunchOutcome,
+    MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
+    WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
+    decode_bridge_command,
 };
 use meerkat_contracts::wire::{
     PortableMemberSpec, WireAuthBindingRef, portable_member_spec_digest,
@@ -83,6 +86,13 @@ use meerkat_core::comms::{
 };
 use meerkat_core::interaction::{InteractionContent, PeerIngressFact, PeerInputCandidate};
 
+use crate::forked_participant::{
+    ForkedParticipantAttachmentAssociation, ForkedParticipantAttachmentId,
+    ForkedParticipantCapabilityId, ForkedParticipantError, ForkedParticipantOperationScope,
+    ForkedParticipantOwnerRoute, ForkedParticipantRequest, ForkedParticipantRequestId,
+    ForkedParticipantResumeProof, ForkedParticipantResumeRejection, ForkedParticipantReusePolicy,
+    ForkedParticipantService, adjudicate_protected_resume, bridge_ref, domain_ref,
+};
 use crate::machines::mob_host_binding_authority::{
     AgentIdentity as AuthorityAgentIdentity, FenceToken as AuthorityFenceToken,
     FlowTurnOutcomeKind, Generation as AuthorityGeneration, HostAdmissionRejectKind,
@@ -106,6 +116,7 @@ use crate::runtime::host_observation::{
 };
 use crate::runtime::host_reply::HostBridgeReply;
 
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_runtime::meerkat_machine::PeerEndpointStageError;
 
 // Composition-facing re-export: the substrate bundle is named alongside
@@ -597,6 +608,50 @@ pub struct MobHostBindingRecord {
     /// `turn_outcomes`; release/rematerialization/revoke prune both regions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub turn_outcome_pending: BTreeMap<String, Vec<TurnOutcomePendingRow>>,
+    /// Capability attachments this host admitted but could not prove either
+    /// associated or released (issue #159 phase 3 slice B).
+    ///
+    /// Keyed by [`ForkedParticipantAttachmentAssociation::association_key`].
+    /// An entry is an explicit, durable reconciliation OBLIGATION, not a
+    /// lifecycle claim: the host admitted an attach, then hit a build/record
+    /// outcome that either may have left member side effects behind or left
+    /// the release itself unproven. Blind release would be a lifecycle lie in
+    /// exactly the ambiguous case, so the obligation is retained and
+    /// reconciled conservatively at boot and at revoke instead. Entries are
+    /// discharged atomically by the materialized-row CAS that adopts the same
+    /// association, by a proven later release, or by host revocation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub forked_participant_obligations: BTreeMap<String, ForkedParticipantAttachmentObligation>,
+}
+
+/// Why one capability attachment is still owed reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkedParticipantObligationCause {
+    /// The member build failed in a class that may have left side effects, so
+    /// releasing would assert an absence this host cannot observe.
+    AmbiguousBuild,
+    /// The build failed definitively, but the compensating release itself did
+    /// not succeed.
+    ReleaseUnproven,
+    /// The durable materialized-row write did not commit provably, so neither
+    /// association nor release may be asserted.
+    RecordUncertain,
+}
+
+/// One durable, un-forgettable capability-attachment reconciliation
+/// obligation. Mechanical evidence only — see
+/// [`MobHostBindingRecord::forked_participant_obligations`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForkedParticipantAttachmentObligation {
+    /// Member identity the attachment was admitted for.
+    pub agent_identity: String,
+    /// The exact admitted association.
+    pub association: ForkedParticipantAttachmentAssociation,
+    /// Why reconciliation is still owed.
+    pub cause: ForkedParticipantObligationCause,
+    /// Operator-facing detail of the originating failure. Diagnostics only.
+    pub detail: String,
 }
 
 /// Durable terminal receipt for one completed host revocation.
@@ -741,6 +796,17 @@ pub struct MaterializedMemberRow {
     /// zero bridge traffic (A20), so the endpoint must survive here.
     pub supervisor_name: String,
     pub supervisor_address: String,
+    /// Mechanical routing evidence for the capability attachment this
+    /// residency was materialized under (issue #159 phase 3 slice B).
+    ///
+    /// `None` is the ordinary case AND the shape a released/legacy row
+    /// deserializes to: the field is additive, never required. It is NOT
+    /// lifecycle truth — the source-owner service and its canonical lifecycle
+    /// machine remain the only authority over attachment state. The row keeps
+    /// it so host teardown (release, revoke, supersession) can route back to
+    /// the exact attachment it admitted instead of guessing or forgetting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_participant_attachment: Option<ForkedParticipantAttachmentAssociation>,
 }
 
 const fn default_generation_start_seq() -> u64 {
@@ -1283,6 +1349,369 @@ impl MemberRowPersistenceAuthority {
     }
 }
 
+/// Authority token for one durable capability-attachment obligation
+/// mutation.
+///
+/// Deliberately NOT transition-derived: the obligation region carries no
+/// lifecycle truth (see
+/// [`MobHostBindingRecord::forked_participant_obligations`]) and the generated
+/// `MobHostBindingAuthority` therefore owns no input for it. What the token
+/// does enforce is that a write is shaped by the exact admitted association
+/// the shell is currently holding, so no caller can fabricate, rekey, or
+/// silently drop an obligation while pretending to record one.
+#[derive(Debug)]
+pub enum ForkedParticipantObligationAuthority {
+    /// Retain one obligation under its association key.
+    Retained {
+        mob_id: String,
+        key: String,
+        obligation: ForkedParticipantAttachmentObligation,
+    },
+    /// Discharge one obligation whose reconciliation was proven.
+    Discharged { mob_id: String, key: String },
+}
+
+impl ForkedParticipantObligationAuthority {
+    /// Derive a retention token from the exact admitted association.
+    pub fn retain(
+        mob_id: &str,
+        agent_identity: &str,
+        association: &ForkedParticipantAttachmentAssociation,
+        cause: ForkedParticipantObligationCause,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::Retained {
+            mob_id: mob_id.to_string(),
+            key: association.association_key(),
+            obligation: ForkedParticipantAttachmentObligation {
+                agent_identity: agent_identity.to_string(),
+                association: association.clone(),
+                cause,
+                detail: detail.into(),
+            },
+        }
+    }
+
+    /// Derive a discharge token from the exact reconciled association.
+    pub fn discharge(mob_id: &str, association: &ForkedParticipantAttachmentAssociation) -> Self {
+        Self::Discharged {
+            mob_id: mob_id.to_string(),
+            key: association.association_key(),
+        }
+    }
+
+    /// Apply this token to a record clone, producing the CAS successor.
+    pub fn apply(&self, expected: &MobHostBindingRecord) -> MobHostBindingRecord {
+        let mut next = expected.clone();
+        match self {
+            Self::Retained {
+                key, obligation, ..
+            } => {
+                next.forked_participant_obligations
+                    .insert(key.clone(), obligation.clone());
+            }
+            Self::Discharged { key, .. } => {
+                next.forked_participant_obligations.remove(key);
+            }
+        }
+        next
+    }
+
+    /// Verify `next` realizes exactly this token and nothing else.
+    pub fn verify_next(
+        &self,
+        mob_id: &str,
+        expected: &MobHostBindingRecord,
+        next: &MobHostBindingRecord,
+    ) -> Result<(), MobHostActorError> {
+        let (token_mob, key) = match self {
+            Self::Retained { mob_id, key, .. } | Self::Discharged { mob_id, key } => (mob_id, key),
+        };
+        if token_mob != mob_id {
+            return Err(MobHostActorError::Witness {
+                detail: format!(
+                    "capability obligation witness names mob '{token_mob}', not '{mob_id}'"
+                ),
+            });
+        }
+        match self {
+            Self::Retained { obligation, .. } => {
+                if next.forked_participant_obligations.get(key) != Some(obligation) {
+                    return Err(MobHostActorError::Witness {
+                        detail: format!(
+                            "capability obligation write for mob '{mob_id}' lacks the retained entry"
+                        ),
+                    });
+                }
+            }
+            Self::Discharged { .. } => {
+                if next.forked_participant_obligations.contains_key(key) {
+                    return Err(MobHostActorError::Witness {
+                        detail: format!(
+                            "capability obligation write for mob '{mob_id}' retained a discharged entry"
+                        ),
+                    });
+                }
+            }
+        }
+        if self.apply(expected) != *next {
+            return Err(MobHostActorError::Witness {
+                detail: format!(
+                    "capability obligation write for mob '{mob_id}' altered a sibling region"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Reply-free outcome of one exact member-residency teardown.
+#[derive(Debug)]
+pub enum MemberTeardownOutcome {
+    /// Disposal, capability release, and the durable release receipt all
+    /// committed. Carries the wire disposal a bridge caller acks with.
+    Released { disposal: WireMemberSessionDisposal },
+    /// NOTHING was recorded. The materialized row — and any capability
+    /// association it carries — is retained, and the same tuple stays exactly
+    /// retryable.
+    Retained {
+        cause: BridgeRejectionCause,
+        detail: String,
+    },
+    /// The durable release receipt committed, but a post-commit step did not.
+    /// The row IS released; retry converges through release replay.
+    ReleasedWithResidue {
+        cause: BridgeRejectionCause,
+        detail: String,
+    },
+}
+
+/// One pending capability terminal correlated to the exact durable residency
+/// that holds its attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingForkedParticipantCorrelation {
+    /// Mob whose durable host binding row carries the residency.
+    pub mob_id: String,
+    /// Member identity of the residency.
+    pub agent_identity: String,
+    /// Recorded materialization generation (the release fence).
+    pub generation: u64,
+    /// Recorded materialization fence token (the release fence).
+    pub fence_token: u64,
+    /// Recorded member session the residency owns.
+    pub session_id: String,
+    /// Which terminal the capability is parked on.
+    pub terminal: crate::forked_participant::ForkedParticipantPendingTerminal,
+    /// The exact association both sides agree on.
+    pub association: ForkedParticipantAttachmentAssociation,
+}
+
+/// Correlate parked capability terminals to the durable residencies holding
+/// their attachments.
+///
+/// Correlation is by FULL association equality — the complete immutable
+/// capability reference plus the exact attachment id — never by session id,
+/// member name, or any other reconstructed string. Two rows cannot both match
+/// one pending entry, because a capability admits one active attachment at a
+/// time and the association is recorded verbatim on exactly the residency that
+/// was materialized under it.
+///
+/// A pending entry with no matching row is deliberately NOT returned: this
+/// host does not hold that attachment, so it has nothing to converge and must
+/// not release anything on the strength of a name.
+pub fn correlate_pending_forked_participant_attachments(
+    pending: &[crate::forked_participant::ForkedParticipantPendingAttachment],
+    records: &[(String, MobHostBindingRecord)],
+) -> Vec<PendingForkedParticipantCorrelation> {
+    let mut correlated = Vec::new();
+    for entry in pending {
+        let association = entry.association();
+        for (mob_id, record) in records {
+            for (agent_identity, row) in &record.materialized {
+                if row.forked_participant_attachment.as_ref() != Some(&association) {
+                    continue;
+                }
+                correlated.push(PendingForkedParticipantCorrelation {
+                    mob_id: mob_id.clone(),
+                    agent_identity: agent_identity.clone(),
+                    generation: row.generation,
+                    fence_token: row.fence_token,
+                    session_id: row.session_id.clone(),
+                    terminal: entry.terminal,
+                    association: association.clone(),
+                });
+            }
+        }
+    }
+    correlated
+}
+
+/// Typed tally of one autonomous convergence pass.
+///
+/// Retained work is COUNTED, never silently dropped: an operator reading the
+/// sweep line must be able to see that a capability is still parked and why
+/// the host could not converge it this tick.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForkedParticipantConvergenceCounts {
+    /// Residencies torn down and attachments released this pass.
+    pub converged: usize,
+    /// Correlated residencies whose teardown could not be proven this pass.
+    /// Their rows and associations are retained for the next tick.
+    pub retained: usize,
+    /// Parked capabilities this host holds no residency for. Nothing is
+    /// released for these: another holder owns the attachment.
+    pub unheld: usize,
+    /// Capability records whose parked phase could not be read.
+    pub unreadable: usize,
+}
+
+/// Why one member teardown was withheld, leaving the row exactly retryable.
+#[derive(Debug, Clone)]
+pub struct MemberTeardownRetention {
+    /// Typed wire cause for the caller's rejection.
+    pub cause: BridgeRejectionCause,
+    /// Operator-facing detail. Diagnostics only.
+    pub detail: String,
+    /// The durable outcome could not be classified; the actor must fail-stop.
+    pub durable_uncertainty: bool,
+}
+
+impl std::fmt::Display for MemberTeardownRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+/// The durable half of one member teardown, run after the exact residency has
+/// been proven disposed: release the associated capability attachment, then
+/// record the member release under its transition witness.
+///
+/// The capability release comes FIRST and its failure withholds the receipt.
+/// Once the row moves to the release region the association moves with it, so
+/// a receipt written over an unproven release would strand an attachment with
+/// nothing left pointing at it. Withholding instead keeps the materialized row
+/// and its association intact, and the same tuple stays exactly retryable —
+/// disposal is idempotent, and an already-released attachment converges.
+///
+/// Exact replay after a committed release never reaches here (the machine
+/// answers `ReleaseReplay` from the release region), so no attachment is ever
+/// released twice.
+pub async fn commit_member_release_after_disposal(
+    authority: &mut MobHostBindingAuthorityAuthority,
+    persistence: &dyn MobHostBindingPersistence,
+    forked_participant_service: Option<&ForkedParticipantService>,
+    member_key: &MemberKey,
+    generation: u64,
+    fence_token: u64,
+    disposal: MachineMemberSessionDisposal,
+) -> Result<(ReleasedIdentityWitness, String), MemberTeardownRetention> {
+    let mob_id = member_key.mob_id.0.clone();
+    let agent_identity = member_key.agent_identity.0.clone();
+    let associated_attachment = match persistence.load(&mob_id).await {
+        Ok(Some(record)) => record
+            .materialized
+            .get(&agent_identity)
+            .and_then(|row| row.forked_participant_attachment.clone()),
+        Ok(None) => None,
+        Err(error) => {
+            return Err(MemberTeardownRetention {
+                cause: BridgeRejectionCause::Internal,
+                detail: format!("release capability association load failed: {error}"),
+                durable_uncertainty: false,
+            });
+        }
+    };
+    if let Some(association) = associated_attachment.as_ref()
+        && let Err(failure) =
+            release_forked_participant_association(forked_participant_service, association).await
+    {
+        return Err(MemberTeardownRetention {
+            cause: failure.cause.clone(),
+            detail: format!(
+                "member release withheld: the associated capability attachment could not be \
+                 released ({failure}); the materialized row and its association are retained for \
+                 exact retry"
+            ),
+            durable_uncertainty: false,
+        });
+    }
+    record_member_release(
+        authority,
+        persistence,
+        member_key,
+        generation,
+        fence_token,
+        disposal,
+    )
+    .await
+    .map_err(|error| MemberTeardownRetention {
+        cause: BridgeRejectionCause::Internal,
+        detail: format!("release record persistence failed: {error}"),
+        durable_uncertainty: error.is_durable_uncertainty(),
+    })
+}
+
+/// Thin host conversion shell over THE containment rule.
+///
+/// Wire attachment -> typed proof, owner truth -> admission, typed rejection ->
+/// this surface's wire vocabulary. It holds no comparison of its own: every
+/// presence/reference/route/id decision lives in
+/// [`adjudicate_protected_resume`], so the host and local paths cannot drift.
+///
+/// Refusals map to `ForkedParticipantTampered` rather than "not found": the
+/// capability plainly exists, and what failed is that the caller offered
+/// material which does not authenticate the operation. Route mismatch keeps
+/// its own established cause. Every refusal happens before `attach`, so a
+/// rejected request never consumes a use of the capability it failed to
+/// present.
+pub fn admit_resume_against_fork_protection(
+    session_id: &str,
+    protection: Option<&crate::forked_participant::ForkedParticipantForkProtection>,
+    attachment: Option<
+        &meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantAttachment,
+    >,
+    owner_route: &ForkedParticipantOwnerRoute,
+) -> Result<(), (BridgeRejectionCause, String)> {
+    let proof = match attachment {
+        None => ForkedParticipantResumeProof::Absent,
+        Some(attachment) => match domain_ref(&attachment.capability) {
+            Ok(full_ref) => ForkedParticipantResumeProof::HostCapabilityAttachment {
+                full_ref,
+                attachment_id: attachment.attachment_id.clone(),
+                owner_route: owner_route.clone(),
+            },
+            // A reference that will not even parse cannot be the recorded one.
+            // Presenting it is the same class of failure as presenting a
+            // rewritten one, so it takes the same typed rejection instead of a
+            // second, surface-local verdict.
+            Err(_) => {
+                return Err((
+                    BridgeRejectionCause::ForkedParticipantTampered,
+                    format!(
+                        "resume of session '{session_id}' presented a malformed forked \
+                         participant reference"
+                    ),
+                ));
+            }
+        },
+    };
+    match adjudicate_protected_resume(protection, &proof) {
+        Ok(_) => Ok(()),
+        Err(rejection) => {
+            let cause = match rejection {
+                ForkedParticipantResumeRejection::ForeignRoute { .. } => {
+                    BridgeRejectionCause::ForkedParticipantRouteMismatch
+                }
+                _ => BridgeRejectionCause::ForkedParticipantTampered,
+            };
+            Err((
+                cause,
+                format!("resume of session '{session_id}': {rejection}"),
+            ))
+        }
+    }
+}
+
 /// Witness that a transition (or a validated recovery fold) authorized
 /// installing a member identity on the acceptor registry (DEC-P3H-7:
 /// registration is post-persist/post-commit and re-attempted idempotently by
@@ -1485,6 +1914,25 @@ pub trait MobHostBindingPersistence: Send + Sync {
         let _ = (mob_id, expected, next, authority);
         Err(MobHostActorError::StoreDiverged {
             detail: "tracked-input cancellation persistence is not supported by this binding persistence impl"
+                .to_string(),
+        })
+    }
+    /// CAS of the capability-attachment obligation region, gated by the
+    /// association-shaped token. Fail-closed default: a persistence impl that
+    /// never learned the region refuses the write typed, so the caller
+    /// fail-stops with an unreconciled attachment rather than silently
+    /// forgetting one.
+    async fn compare_and_put_forked_participant_obligations(
+        &self,
+        mob_id: &str,
+        expected: &MobHostBindingRecord,
+        next: &MobHostBindingRecord,
+        authority: &ForkedParticipantObligationAuthority,
+    ) -> Result<bool, MobHostActorError> {
+        let _ = (mob_id, expected, next, authority);
+        Err(MobHostActorError::StoreDiverged {
+            detail: "forked participant obligation persistence is not supported by this binding \
+                     persistence impl"
                 .to_string(),
         })
     }
@@ -1776,6 +2224,24 @@ impl MobHostBindingPersistence for RuntimeStoreHostBindingPersistence {
             .await?)
     }
 
+    async fn compare_and_put_forked_participant_obligations(
+        &self,
+        mob_id: &str,
+        expected: &MobHostBindingRecord,
+        next: &MobHostBindingRecord,
+        authority: &ForkedParticipantObligationAuthority,
+    ) -> Result<bool, MobHostActorError> {
+        authority.verify_next(mob_id, expected, next)?;
+        Ok(self
+            .store
+            .compare_and_put_mob_host_binding(
+                mob_id,
+                &encode_record(expected)?,
+                &encode_record(next)?,
+            )
+            .await?)
+    }
+
     async fn revoke(
         &self,
         mob_id: &str,
@@ -1885,6 +2351,131 @@ fn validate_durable_materialized_member_row(
         ))
     })?;
 
+    if let Some(association) = row.forked_participant_attachment.as_ref() {
+        validate_forked_participant_association_shape(association, Some(&row.session_id))
+            .map_err(corrupt)?;
+        if !matches!(
+            row.launch_outcome,
+            MaterializeLaunchOutcome::ResumedLive | MaterializeLaunchOutcome::ResumedFromSnapshot
+        ) {
+            return Err(corrupt(
+                "capability attachment association is recorded on a residency that did not \
+                 resume its fork session"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate the mechanical shape of one attachment association.
+///
+/// Route OWNERSHIP (does this exact host/realm serve it) is checked separately
+/// where the composed source-owner service is in scope; the shape facts here
+/// are the ones a durable row must corroborate on its own. Deserialization has
+/// already re-run every field's own validator, so what remains is the
+/// cross-field agreement serde cannot express.
+fn validate_forked_participant_association_shape(
+    association: &ForkedParticipantAttachmentAssociation,
+    expected_session_id: Option<&str>,
+) -> Result<(), String> {
+    let capability = &association.capability;
+    if !matches!(
+        capability.owner_route(),
+        ForkedParticipantOwnerRoute::Host { .. }
+    ) {
+        return Err(
+            "capability attachment association names a non-host owner route on a host-materialized \
+             residency"
+                .to_string(),
+        );
+    }
+    if let Some(expected_session_id) = expected_session_id {
+        let fork_session_id = capability.fork_session_id().to_string();
+        if fork_session_id != expected_session_id {
+            return Err(format!(
+                "capability attachment association names fork session '{fork_session_id}', not the \
+                 materialized session '{expected_session_id}'"
+            ));
+        }
+    }
+    let provenance = capability.provenance();
+    if provenance.prefix_digest.trim().is_empty() {
+        return Err("capability attachment association carries an empty prefix digest".to_string());
+    }
+    if provenance.source_session_id == *capability.fork_session_id() {
+        return Err(
+            "capability attachment association names the same session as source and fork"
+                .to_string(),
+        );
+    }
+    if capability.source_identity().as_str().trim().is_empty() {
+        return Err(
+            "capability attachment association carries an empty source identity".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate every recovered association/obligation against the exact route
+/// this daemon serves.
+///
+/// Fail closed on principle: a durable association this host cannot route is
+/// evidence that the row was written by (or moved from) a different owner, and
+/// a host that quietly dropped it would later release nothing on teardown. A
+/// host that recovered associations without composing the capability service
+/// at all is the same class of failure — the residency exists but its
+/// attachment could never be released.
+pub fn validate_recovered_forked_participant_routes(
+    records: &[(String, MobHostBindingRecord)],
+    service: Option<&ForkedParticipantService>,
+) -> Result<(), MobHostActorError> {
+    for (mob_id, record) in records {
+        let check = |agent_identity: &str,
+                     association: &ForkedParticipantAttachmentAssociation,
+                     expected_session_id: Option<&str>|
+         -> Result<(), MobHostActorError> {
+            let corrupt = |detail: String| MobHostActorError::DurableMaterializedRowCorrupt {
+                mob_id: mob_id.clone(),
+                agent_identity: agent_identity.to_string(),
+                detail,
+            };
+            validate_forked_participant_association_shape(association, expected_session_id)
+                .map_err(corrupt)?;
+            let Some(service) = service else {
+                return Err(corrupt(
+                    "recovered capability attachment association has no composed source-owner \
+                     service on this host"
+                        .to_string(),
+                ));
+            };
+            if association.capability.owner_route() != service.owner_route() {
+                return Err(corrupt(
+                    "recovered capability attachment association names another host route"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        };
+        for (agent_identity, row) in &record.materialized {
+            if let Some(association) = row.forked_participant_attachment.as_ref() {
+                check(agent_identity, association, Some(&row.session_id))?;
+            }
+        }
+        for (key, obligation) in &record.forked_participant_obligations {
+            if *key != obligation.association.association_key() {
+                return Err(MobHostActorError::DurableMaterializedRowCorrupt {
+                    mob_id: mob_id.clone(),
+                    agent_identity: obligation.agent_identity.clone(),
+                    detail: format!(
+                        "capability obligation key '{key}' does not match its association"
+                    ),
+                });
+            }
+            check(&obligation.agent_identity, &obligation.association, None)?;
+        }
+    }
     Ok(())
 }
 
@@ -2279,6 +2870,7 @@ fn bridge_rejection_cause(kind: HostAdmissionRejectKind) -> BridgeRejectionCause
         HostAdmissionRejectKind::InvalidBootstrapToken => {
             BridgeRejectionCause::InvalidBootstrapToken
         }
+
         HostAdmissionRejectKind::AddressMismatch => BridgeRejectionCause::AddressMismatch,
         HostAdmissionRejectKind::StaleFence => BridgeRejectionCause::StaleFence,
         HostAdmissionRejectKind::AlreadyBound => BridgeRejectionCause::AlreadyBound,
@@ -2287,6 +2879,325 @@ fn bridge_rejection_cause(kind: HostAdmissionRejectKind) -> BridgeRejectionCause
         // has no dedicated carrier yet — Unsupported is the fail-closed map.
         HostAdmissionRejectKind::Unsupported
         | HostAdmissionRejectKind::TurnDirectiveUnsupported => BridgeRejectionCause::Unsupported,
+    }
+}
+
+fn forked_participant_error_cause(error: &ForkedParticipantError) -> BridgeRejectionCause {
+    use crate::machines::forked_participant_lifecycle::ForkedParticipantAttachDenial;
+    match error {
+        ForkedParticipantError::ForeignRoute { .. } => {
+            BridgeRejectionCause::ForkedParticipantRouteMismatch
+        }
+        ForkedParticipantError::SourceOwnershipRejected { .. } => {
+            BridgeRejectionCause::ForkedParticipantSourceMismatch
+        }
+        ForkedParticipantError::CapabilityRejected { .. } => {
+            BridgeRejectionCause::ForkedParticipantTampered
+        }
+        ForkedParticipantError::AttachDenied { reason } => match reason {
+            ForkedParticipantAttachDenial::Busy => BridgeRejectionCause::ForkedParticipantBusy,
+            ForkedParticipantAttachDenial::Expired => {
+                BridgeRejectionCause::ForkedParticipantExpired
+            }
+            ForkedParticipantAttachDenial::Revoked => {
+                BridgeRejectionCause::ForkedParticipantRevoked
+            }
+            ForkedParticipantAttachDenial::Exhausted => {
+                BridgeRejectionCause::ForkedParticipantExhausted
+            }
+            ForkedParticipantAttachDenial::AuthenticationInvalid
+            | ForkedParticipantAttachDenial::NotActive
+            | ForkedParticipantAttachDenial::MalformedAttachment
+            | ForkedParticipantAttachDenial::AttachmentAlreadyReleased => {
+                BridgeRejectionCause::ForkedParticipantTampered
+            }
+        },
+        ForkedParticipantError::ConcurrentUpdate { .. } => {
+            BridgeRejectionCause::ForkedParticipantBusy
+        }
+        ForkedParticipantError::Store(_) | ForkedParticipantError::Session(_) => {
+            BridgeRejectionCause::Unavailable
+        }
+        _ => BridgeRejectionCause::Internal,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host-side capability attachment association lifecycle (issue #159 phase 3
+// slice B). The source-owner service remains the ONLY lifecycle authority;
+// everything here is mechanical routing plus fail-closed bookkeeping.
+// ---------------------------------------------------------------------------
+
+/// Why one host-side capability release attempt could not be proven.
+#[derive(Debug, Clone)]
+pub struct ForkedParticipantReleaseFailure {
+    /// Typed wire cause for the caller's rejection reply.
+    pub cause: BridgeRejectionCause,
+    /// Operator-facing detail. Diagnostics only; never pattern-matched.
+    pub detail: String,
+}
+
+impl std::fmt::Display for ForkedParticipantReleaseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+/// Release exactly one associated capability attachment through its
+/// source-owner service.
+///
+/// Convergence classes, deliberately explicit because teardown must be able to
+/// finish after a partial earlier attempt:
+///
+/// * a granted release, an exact release replay, and every terminalizing
+///   outcome (exhausted/revoked/expired) are all success — the attachment is
+///   no longer active;
+/// * `NoActiveAttachment` is success for the same reason: an earlier attempt
+///   already released it, so a retry must not deadlock the row;
+/// * `AttachmentMismatch` is NOT success — a different attachment is active
+///   and asserting otherwise would be a lifecycle lie;
+/// * an absent capability record is vacuous success: there is no attachment
+///   left to release, and refusing forever would strand the residency.
+pub async fn release_forked_participant_association(
+    service: Option<&ForkedParticipantService>,
+    association: &ForkedParticipantAttachmentAssociation,
+) -> Result<(), ForkedParticipantReleaseFailure> {
+    let Some(service) = service else {
+        return Err(ForkedParticipantReleaseFailure {
+            cause: BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+            detail: "host holds a capability attachment association but composes no \
+                     forked participant service to release it through"
+                .to_string(),
+        });
+    };
+    if association.capability.owner_route() != service.owner_route() {
+        return Err(ForkedParticipantReleaseFailure {
+            cause: BridgeRejectionCause::ForkedParticipantRouteMismatch,
+            detail: "capability attachment association names another host route".to_string(),
+        });
+    }
+    match service
+        .release(&association.capability, &association.attachment_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ForkedParticipantError::ReleaseRejected {
+            reason: crate::machines::forked_participant_lifecycle::ForkedParticipantReleaseRejection::NoActiveAttachment,
+        }) => Ok(()),
+        Err(ForkedParticipantError::Store(crate::store::MobStoreError::NotFound(detail))) => {
+            tracing::warn!(
+                attachment_id = %association.attachment_id,
+                detail = %detail,
+                "capability attachment association names a record the owner no longer holds; \
+                 treating release as vacuously converged"
+            );
+            Ok(())
+        }
+        // A surviving release rejection (the mismatch arm) is unreconciled
+        // teardown work, not a caller protocol error: the caller must retry
+        // the same tuple, so it gets the cleanup-debt cause rather than the
+        // holder-facing tamper/internal mapping.
+        Err(error @ ForkedParticipantError::ReleaseRejected { .. }) => {
+            Err(ForkedParticipantReleaseFailure {
+                cause: BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                detail: format!("capability attachment release rejected: {error}"),
+            })
+        }
+        Err(error) => Err(ForkedParticipantReleaseFailure {
+            cause: forked_participant_error_cause(&error),
+            detail: format!("capability attachment release failed: {error}"),
+        }),
+    }
+}
+
+/// Compare one incoming wire attachment against the durable association a
+/// materialize REPLAY is answering.
+///
+/// Replay must be answer-only: it returns the already-recorded result and
+/// performs no attach. Any difference — including `Some` against a recorded
+/// `None`, or `None` against a recorded `Some` — means the two commands are
+/// not the same command, so the replay is refused rather than allowed to
+/// mutate capability lifecycle under an idempotency key that never named it.
+pub fn replayed_forked_participant_attachment_matches(
+    incoming: Option<
+        &meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantAttachment,
+    >,
+    durable: Option<&ForkedParticipantAttachmentAssociation>,
+) -> bool {
+    match (incoming, durable) {
+        (None, None) => true,
+        (Some(incoming), Some(durable)) => {
+            incoming.attachment_id == durable.attachment_id.as_str()
+                && bridge_ref(&durable.capability) == incoming.capability
+        }
+        _ => false,
+    }
+}
+
+impl MobHostActor {
+    /// Durably retain one un-forgettable capability reconciliation
+    /// obligation, or report why it could not be retained.
+    ///
+    /// The caller is always already on a failure path, so this returns the
+    /// composed operator detail rather than a second error type: an obligation
+    /// that cannot be written is itself a durable-uncertainty fail-stop, never
+    /// a silently dropped attachment.
+    async fn retain_forked_participant_obligation(
+        &self,
+        mob_id: &str,
+        agent_identity: &str,
+        association: &ForkedParticipantAttachmentAssociation,
+        cause: ForkedParticipantObligationCause,
+        detail: &str,
+    ) -> Result<(), String> {
+        let token = ForkedParticipantObligationAuthority::retain(
+            mob_id,
+            agent_identity,
+            association,
+            cause,
+            detail,
+        );
+        let Some(expected) = self
+            .persistence
+            .load(mob_id)
+            .await
+            .map_err(|error| format!("obligation record load failed: {error}"))?
+        else {
+            return Err(format!(
+                "no durable host binding row for bound mob '{mob_id}'"
+            ));
+        };
+        let next = token.apply(&expected);
+        if next == expected {
+            return Ok(());
+        }
+        match self
+            .persistence
+            .compare_and_put_forked_participant_obligations(mob_id, &expected, &next, &token)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("obligation write lost its compare-and-swap".to_string()),
+            Err(error) => Err(format!("obligation write failed: {error}")),
+        }
+    }
+
+    /// Durably discharge one reconciled obligation.
+    async fn discharge_forked_participant_obligation(
+        &self,
+        mob_id: &str,
+        association: &ForkedParticipantAttachmentAssociation,
+    ) -> Result<(), String> {
+        let token = ForkedParticipantObligationAuthority::discharge(mob_id, association);
+        let Some(expected) = self
+            .persistence
+            .load(mob_id)
+            .await
+            .map_err(|error| format!("obligation record load failed: {error}"))?
+        else {
+            return Ok(());
+        };
+        let next = token.apply(&expected);
+        if next == expected {
+            return Ok(());
+        }
+        match self
+            .persistence
+            .compare_and_put_forked_participant_obligations(mob_id, &expected, &next, &token)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("obligation discharge lost its compare-and-swap".to_string()),
+            Err(error) => Err(format!("obligation discharge failed: {error}")),
+        }
+    }
+
+    /// Boot reconciliation of retained capability obligations.
+    ///
+    /// Conservative by construction: an obligation whose fork session may
+    /// still be present as live or recorded residency is NOT released — it
+    /// keeps its debt and makes the host observably unhealthy. Only definite
+    /// absence (no materialized row naming the fork session, and no live
+    /// session for it) licenses the compensating release.
+    async fn reconcile_forked_participant_obligations(&mut self) {
+        let records = match self.persistence.list_records().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "capability obligation reconciliation could not read durable host rows"
+                );
+                return;
+            }
+        };
+        for (mob_id, record) in records {
+            for obligation in record.forked_participant_obligations.values() {
+                let fork_session_id = obligation
+                    .association
+                    .capability
+                    .fork_session_id()
+                    .to_string();
+                let recorded_residency = record
+                    .materialized
+                    .values()
+                    .any(|row| row.session_id == fork_session_id);
+                let live_residency = match meerkat_core::types::SessionId::parse(&fork_session_id) {
+                    Ok(parsed) => match self.materializer.as_ref() {
+                        Some(materializer) => materializer.session_live(&parsed).await,
+                        None => false,
+                    },
+                    // An unparseable session id is not observable absence.
+                    Err(_) => true,
+                };
+                if recorded_residency || live_residency {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        agent_identity = %obligation.agent_identity,
+                        cause = ?obligation.cause,
+                        "capability attachment obligation retains possible member presence; \
+                         the debt is kept and HostStatus reports the host unhealthy"
+                    );
+                    self.forked_participant_debts
+                        .insert((mob_id.clone(), obligation.association.association_key()));
+                    continue;
+                }
+                match release_forked_participant_association(
+                    self.forked_participant_service.as_ref(),
+                    &obligation.association,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        if let Err(detail) = self
+                            .discharge_forked_participant_obligation(
+                                &mob_id,
+                                &obligation.association,
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                mob_id = %mob_id,
+                                detail = %detail,
+                                "capability attachment obligation was released but its durable \
+                                 record could not be discharged"
+                            );
+                            self.forked_participant_debts
+                                .insert((mob_id.clone(), obligation.association.association_key()));
+                        }
+                    }
+                    Err(failure) => {
+                        tracing::error!(
+                            mob_id = %mob_id,
+                            agent_identity = %obligation.agent_identity,
+                            detail = %failure,
+                            "capability attachment obligation could not be reconciled"
+                        );
+                        self.forked_participant_debts
+                            .insert((mob_id.clone(), obligation.association.association_key()));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2337,6 +3248,9 @@ fn record_from_authority_state(
             .unwrap_or_default(),
         tracked_input_cancellations: member_regions
             .map(|record| record.tracked_input_cancellations.clone())
+            .unwrap_or_default(),
+        forked_participant_obligations: member_regions
+            .map(|record| record.forked_participant_obligations.clone())
             .unwrap_or_default(),
     })
 }
@@ -3112,12 +4026,30 @@ pub fn resolve_materialize_preflight(
 /// drops the prepared authority; the caller quiesces the exact volatile
 /// incarnation while preserving its durable session for explicit resume.
 /// Returns the identity witness that gates acceptor registration.
+///
+/// `forked_participant_attachment` is threaded as its own parameter rather
+/// than pre-installed on `row` so the association cannot be forgotten by a
+/// caller that assembled the row elsewhere: it lands in the SAME durable CAS
+/// as the materialized row, and that same CAS discharges any pre-materialize
+/// reconciliation obligation the association had accrued.
 pub async fn record_materialized_member(
     authority: &mut MobHostBindingAuthorityAuthority,
     persistence: &dyn MobHostBindingPersistence,
     member_key: &MemberKey,
     row: MaterializedMemberRow,
+    forked_participant_attachment: Option<ForkedParticipantAttachmentAssociation>,
 ) -> Result<MaterializedIdentityWitness, MobHostActorError> {
+    let mut row = row;
+    if row.forked_participant_attachment.is_some()
+        && row.forked_participant_attachment != forked_participant_attachment
+    {
+        return Err(MobHostActorError::Internal {
+            detail: "materialized row carries a capability association that disagrees with the \
+                     admitted attachment"
+                .to_string(),
+        });
+    }
+    row.forked_participant_attachment = forked_participant_attachment;
     let mob_id = member_key.mob_id.0.clone();
     let identity = member_key.agent_identity.0.clone();
     let mut prepared = authority.prepare_authority();
@@ -3189,6 +4121,12 @@ pub async fn record_materialized_member(
     }
     // §15.7: the stored spec replaces atomically WITH its dedup row (one
     // CAS blob); a superseding record overwrites the previous row in place.
+    // The association rides the same blob, and adopting it discharges the
+    // pre-materialize obligation the same attachment may have accrued.
+    if let Some(association) = row.forked_participant_attachment.as_ref() {
+        next.forked_participant_obligations
+            .remove(&association.association_key());
+    }
     next.materialized.insert(identity, row);
     let write_outcome = persistence
         .compare_and_put_member_rows(&mob_id, &expected, &next, &row_witness)
@@ -4966,6 +5904,14 @@ pub struct MobHostActorConfig {
     /// Member-build substrate (DEC-P3H-2). `None` ⇒ `MaterializeMember` /
     /// `ReleaseMember` typed-reject `Unavailable` (bind-only composition).
     pub member_host: Option<HostMemberSubstrate>,
+    /// Cadence of the actor's own capability maintenance pass.
+    ///
+    /// `None` uses [`FORKED_PARTICIPANT_SWEEP_INTERVAL`]. This is a composition
+    /// input rather than a hidden constant so a harness can drive the REAL
+    /// periodic arm on a short cadence instead of waiting out production
+    /// timing — no extra task, no test-only loop, the same single `select!`
+    /// arm either way.
+    pub forked_participant_sweep_interval: Option<Duration>,
 }
 
 /// Running mob host actor (single-owner responder task).
@@ -5076,11 +6022,19 @@ pub struct MobHostActor {
     registry_owner: Arc<dyn Any + Send + Sync>,
     /// Member-build substrate (DEC-P3H-2); `None` ⇒ bind-only serving.
     materializer: Option<HostMemberMaterializer>,
+    /// Source-owner capability service, composed once from the exact host
+    /// realm, host id, shared capability store, and session runtime.
+    forked_participant_service: Option<ForkedParticipantService>,
     /// Recorded-but-unrevived members (per-row revival failures at boot, or
     /// dead sessions a replay ensure could not recompose). Shell health
     /// observation only — feeds `HostStatus.healthy: false` (ADJ-19), never
     /// a machine decision.
     unrevived: BTreeSet<(String, String)>,
+    /// Retained capability-attachment reconciliation obligations this boot
+    /// could not conservatively discharge, keyed
+    /// `(mob_id, association_key)`. Shell health observation only — feeds
+    /// `HostStatus.healthy: false`, never a machine decision.
+    forked_participant_debts: BTreeSet<(String, String)>,
     /// Dogma-#13 watch projection of the observation facts the member
     /// drain's serving arms need (session → mob/identity/generation +
     /// retained journal rows). The actor is the sole writer; the daemon's
@@ -5140,6 +6094,7 @@ pub async fn spawn_mob_host_actor(
         descriptor_watch_tx,
         descriptor_sink,
         member_host,
+        forked_participant_sweep_interval,
     } = config;
 
     if host_runtime.public_key() != host_keypair.public_key() {
@@ -5168,11 +6123,48 @@ pub async fn spawn_mob_host_actor(
     } else {
         None
     };
+    let forked_participant_service = match (
+        member_host
+            .as_ref()
+            .and_then(|substrate| substrate.forked_participant_realm.clone()),
+        member_host
+            .as_ref()
+            .and_then(|substrate| substrate.forked_participant_store.clone()),
+        member_host
+            .as_ref()
+            .and_then(|substrate| substrate.forked_participant_source_runtime.clone()),
+        revival_host_id.as_deref(),
+    ) {
+        (Some(realm_id), Some(store), Some(runtime), Some(host_id)) => Some(
+            ForkedParticipantService::new(
+                ForkedParticipantOwnerRoute::Host {
+                    realm_id,
+                    host_id: crate::machines::mob_machine::HostId::from(host_id.to_string()),
+                },
+                store,
+                runtime,
+            )
+            .map_err(|error| MobHostActorError::Internal {
+                detail: format!("forked participant host service composition failed: {error}"),
+            })?,
+        ),
+        (None, None, None, _) => None,
+        _ => {
+            return Err(MobHostActorError::Internal {
+                detail: "forked participant host composition requires realm, store, and source runtime together".to_string(),
+            });
+        }
+    };
     let prepared_recovered_members = prepare_recovered_members(
         &records,
         binding_authority.state(),
         member_substrate_configured,
     )?;
+    // Capability associations are route-scoped facts, so they are validated
+    // against the composed service (or its absence) rather than inside the
+    // route-blind row fold. Startup is still process-private here: an
+    // unroutable association aborts before anything is published.
+    validate_recovered_forked_participant_routes(&records, forked_participant_service.as_ref())?;
 
     // The registry owner IS the generated authority's owner token: acceptor
     // identity mutations are machine-owner-gated, mirroring the comms trust
@@ -5237,7 +6229,9 @@ pub async fn spawn_mob_host_actor(
         registry,
         registry_owner,
         materializer: member_host.map(HostMemberMaterializer::new),
+        forked_participant_service,
         unrevived: BTreeSet::new(),
+        forked_participant_debts: BTreeSet::new(),
         observation_watch_tx,
         observation_record_tx: observation_record_tx.clone(),
         turn_outcome_rows,
@@ -5270,12 +6264,19 @@ pub async fn spawn_mob_host_actor(
     // rollback/commit boundary before the responder observes a closed handle.
     // The readiness watch publishes only after revival and the first
     // projection sync; waiting on it never owns those actor-side effects.
+    let sweep_interval =
+        forked_participant_sweep_interval.unwrap_or(FORKED_PARTICIPANT_SWEEP_INTERVAL);
     let join = tokio::spawn(async move {
         if let Some(host_id) = revival_host_id.as_deref() {
             actor
                 .revive_recovered_members(host_id, prepared_recovered_members)
                 .await;
         }
+        // Retained capability obligations are reconciled after revival so the
+        // observation of "is this fork session actually present" is taken
+        // against the post-revival residency set, not against a half-recovered
+        // host that would look absent to a blind release.
+        actor.reconcile_forked_participant_obligations().await;
         // First projection publish + journal registrations for the revived
         // residency set (materialize/release re-sync per served command).
         actor.sync_member_observation().await;
@@ -5286,6 +6287,7 @@ pub async fn spawn_mob_host_actor(
             observation_pending_rx,
             observation_record_rx,
             observation_ack_rx,
+            sweep_interval,
         )
         .await;
     });
@@ -5302,6 +6304,29 @@ pub async fn spawn_mob_host_actor(
 }
 
 const HOST_OBSERVATION_DRAIN_BATCH_LIMIT: usize = 64;
+const FORKED_PARTICIPANT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Wall-clock budget for the ONE maintenance sweep that runs after the
+/// responder loop has exited.
+///
+/// Shutdown is not the place to finish durable capability work: every step the
+/// sweep performs is idempotent and retried by the next process, so a sweep
+/// that cannot complete promptly must not hold the actor's exit open. The
+/// periodic tick inside the loop is deliberately NOT bounded this way — there
+/// it is ordinary actor-owned work with the whole tick interval to run in.
+const FORKED_PARTICIPANT_FINAL_SWEEP_BUDGET: Duration = Duration::from_secs(2);
+
+/// Run the shutdown-path maintenance sweep under its fixed budget.
+///
+/// Returns `true` when the sweep completed, `false` when the budget elapsed
+/// first and the remaining durable work was left for recovery.
+pub async fn run_final_forked_participant_sweep(
+    sweep: impl std::future::Future<Output = ()>,
+) -> bool {
+    tokio::time::timeout(FORKED_PARTICIPANT_FINAL_SWEEP_BUDGET, sweep)
+        .await
+        .is_ok()
+}
 
 /// Notify-driven responder drain: the non-session analogue of the member
 /// drain's `try_handle_supervisor_bridge_command`, adjudicating through
@@ -5312,8 +6337,11 @@ async fn run_host_responder(
     mut observation_pending_rx: mpsc::Receiver<HostTurnOutcomePendingRequest>,
     mut observation_record_rx: mpsc::Receiver<HostTurnOutcomeRecordRequest>,
     mut observation_ack_rx: mpsc::Receiver<HostTurnOutcomeAckRequest>,
+    forked_participant_sweep_interval: Duration,
 ) {
     let notify = actor.host_runtime.inbox_notify();
+    let mut forked_participant_tick = tokio::time::interval(forked_participant_sweep_interval);
+    forked_participant_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let notified = notify.notified();
         tokio::pin!(notified);
@@ -5343,6 +6371,10 @@ async fn run_host_responder(
                 .map(PendingDescriptorRefresh::retry_at);
             tokio::select! {
                 _ = &mut shutdown_rx => break,
+                _ = forked_participant_tick.tick() => {
+                    actor.sweep_forked_participants().await;
+                    continue;
+                }
                 () = async {
                     if let Some(retry_at) = descriptor_refresh_retry_at {
                         tokio::time::sleep_until(retry_at).await;
@@ -5419,6 +6451,12 @@ async fn run_host_responder(
             Ok(()) | Err(oneshot::error::TryRecvError::Closed) => break,
             Err(oneshot::error::TryRecvError::Empty) => {}
         }
+    }
+
+    if !run_final_forked_participant_sweep(actor.sweep_forked_participants()).await {
+        tracing::warn!(
+            "forked participant final maintenance sweep timed out; durable cleanup remains for recovery"
+        );
     }
 
     // HOST LOSS RELEASES ITS MEMBERS' PARTICIPANT ROUTES. Dropping the actor is
@@ -6297,6 +7335,14 @@ impl MobHostActor {
                 self.serve_release_member_candidate(candidate, payload)
                     .await;
             }
+            BridgeCommand::CreateForkedParticipant(payload) => {
+                self.serve_create_forked_participant(candidate, payload)
+                    .await;
+            }
+            BridgeCommand::RevokeForkedParticipant(payload) => {
+                self.serve_revoke_forked_participant(candidate, payload)
+                    .await;
+            }
             BridgeCommand::InstallPeerTrust(payload) => {
                 self.serve_install_peer_trust_candidate(candidate, payload)
                     .await;
@@ -6380,6 +7426,638 @@ impl MobHostActor {
                 )
                 .await;
                 false
+            }
+        }
+    }
+
+    /// Refuse to serve a capability-protected fork session without its exact
+    /// authenticated capability.
+    ///
+    /// Returns `Ok(())` when the launch may proceed: either it is not a
+    /// `Resume`, or the resumed session belongs to no capability record, or it
+    /// belongs to one AND the payload presents that record's exact immutable
+    /// reference. Every other shape is refused before dedup replay, preflight,
+    /// or any build effect — and, critically, before `attach`, so a refused
+    /// request never consumes a use of the capability it failed to present.
+    ///
+    /// Both failure directions are `ForkedParticipantTampered`. The cause is
+    /// not "not found" (the capability plainly exists) and not a route or
+    /// source mismatch; it is the caller offering material that does not
+    /// authenticate this operation — a visible session id standing in for a
+    /// bearer, or a reference that is not the one the owner recorded. The
+    /// reason string distinguishes the two for operators.
+    async fn enforce_fork_session_containment(
+        &self,
+        payload: &BridgeMaterializePayload,
+    ) -> Result<(), (BridgeRejectionCause, String)> {
+        // Protection is a property of the capability store, and the store is
+        // composed with the service. A host that owns no capability store
+        // holds no fork children, so it protects nothing and cannot be the
+        // owner being bypassed.
+        let Some(service) = self.forked_participant_service.as_ref() else {
+            return Ok(());
+        };
+        let MaterializeLaunchMode::Resume { session_id, .. } = &payload.launch else {
+            // Fresh builds mint their own session; there is no visible id to
+            // ride. A carried attachment on a non-Resume launch is already
+            // refused at the wire boundary.
+            return Ok(());
+        };
+        let Ok(resumed) = meerkat_core::types::SessionId::parse(session_id) else {
+            // Not a session identity at all: no record can claim it, and the
+            // ordinary launch path owns the malformed-id rejection.
+            return Ok(());
+        };
+        let protection = match service.protected_fork_session(&resumed).await {
+            Ok(protection) => protection,
+            Err(error) => {
+                // Fail closed: an unreadable containment answer must never be
+                // read as "unprotected".
+                return Err((
+                    BridgeRejectionCause::Unavailable,
+                    format!("fork session containment check failed: {error}"),
+                ));
+            }
+        };
+        admit_resume_against_fork_protection(
+            session_id,
+            protection.as_ref(),
+            payload.forked_participant_attachment.as_ref(),
+            service.owner_route(),
+        )
+    }
+
+    /// One host maintenance pass over source-owned capabilities.
+    ///
+    /// Ordering matters and is the whole point of the pass:
+    ///   1. observe expiry, so a capability whose TTL has passed records its
+    ///      terminal (parking it when an attachment is still held);
+    ///   2. converge every parked terminal this host actually holds — the
+    ///      autonomous half that survives coordinator loss;
+    ///   3. sweep cleanup, so a capability that step 2 just terminalized has
+    ///      its fork archived in the same pass rather than a tick later.
+    ///
+    /// Step 3 is the ONLY archiver. Convergence never archives a fork itself;
+    /// it releases the attachment and lets the existing terminal/cleanup
+    /// machinery own the rest.
+    async fn sweep_forked_participants(&mut self) {
+        if self.forked_participant_service.is_none() {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let expiry = match self.forked_participant_service.as_ref() {
+            Some(service) => service.sweep_expiry(now).await,
+            None => return,
+        };
+        let convergence = self.converge_pending_forked_participant_attachments().await;
+        let cleanup = match self.forked_participant_service.as_ref() {
+            Some(service) => service.sweep_cleanup(now).await,
+            None => return,
+        };
+        match (expiry, cleanup) {
+            (Ok(expiry), Ok(cleanup)) => {
+                let expired = expiry.expired.len();
+                let pending = expiry.expiry_pending_attached.len();
+                let cleaned = cleanup.completed.len();
+                let retained = cleanup.retained.len();
+                if expired
+                    + pending
+                    + cleaned
+                    + retained
+                    + convergence.converged
+                    + convergence.retained
+                    + convergence.unheld
+                    + convergence.unreadable
+                    > 0
+                {
+                    tracing::info!(
+                        expired,
+                        expiry_pending = pending,
+                        cleaned,
+                        cleanup_retained = retained,
+                        converged = convergence.converged,
+                        convergence_retained = convergence.retained,
+                        convergence_unheld = convergence.unheld,
+                        convergence_unreadable = convergence.unreadable,
+                        "forked participant host maintenance sweep"
+                    );
+                }
+            }
+            (expiry, cleanup) => {
+                tracing::warn!(
+                    expiry_ok = expiry.is_ok(),
+                    cleanup_ok = cleanup.is_ok(),
+                    converged = convergence.converged,
+                    convergence_retained = convergence.retained,
+                    "forked participant host maintenance sweep retained typed work"
+                );
+            }
+        }
+    }
+
+    /// Autonomously converge capability terminals parked behind attachments
+    /// this host holds.
+    ///
+    /// A capability that expires or is revoked while attached stays parked
+    /// until its exact attachment is released. Normally the coordinator that
+    /// took the attachment sends `ReleaseMember` and that release does it. If
+    /// the coordinator never comes back, nothing else would: the residency
+    /// would stay live forever and the fork would never be archived. This pass
+    /// closes that hole from the holder's side.
+    ///
+    /// It does NOT synthesize a controller command. It resolves release
+    /// admission through the generated authority at the residency's own
+    /// recorded `(generation, fence_token)` tuple, then runs the SAME
+    /// reply-free teardown the bridge `ReleaseMember` arm runs. Every fence,
+    /// witness, and durable receipt is the ordinary one.
+    ///
+    /// One residency that cannot be torn down never blocks the rest: each
+    /// correlation is independent, failures are counted and retried on later
+    /// ticks, and the capability release only ever happens after this host has
+    /// proven the residency disposed.
+    async fn converge_pending_forked_participant_attachments(
+        &mut self,
+    ) -> ForkedParticipantConvergenceCounts {
+        let mut counts = ForkedParticipantConvergenceCounts::default();
+        let Some(service) = self.forked_participant_service.as_ref() else {
+            return counts;
+        };
+        let report = match service.list_pending_attached().await {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "capability pending-attached enumeration failed; convergence retries next tick"
+                );
+                return counts;
+            }
+        };
+        if report.pending.is_empty() && report.unreadable.is_empty() {
+            return counts;
+        }
+        counts.unreadable = report.unreadable.len();
+        for (capability_id, detail) in &report.unreadable {
+            tracing::error!(
+                capability = %capability_id.correlation_hint(),
+                detail = %detail,
+                "capability record has an unreadable parked terminal; it cannot converge until repaired"
+            );
+        }
+        let records = match self.persistence.list_records().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "capability convergence could not read durable host rows; retries next tick"
+                );
+                return counts;
+            }
+        };
+        let correlations =
+            correlate_pending_forked_participant_attachments(&report.pending, &records);
+        counts.unheld = report.pending.len().saturating_sub(correlations.len());
+        for correlation in correlations {
+            let member_key = MemberKey::new(
+                AuthorityMobId::from(correlation.mob_id.as_str()),
+                AuthorityAgentIdentity::from(correlation.agent_identity.as_str()),
+            );
+            // The residency must still be the one that holds the attachment.
+            // A row that moved on between the durable read and this step is
+            // not ours to tear down at the tuple we read.
+            let still_recorded = self
+                .binding_authority
+                .state()
+                .materialized_sessions
+                .get(&member_key)
+                .is_some_and(|session| session.0 == correlation.session_id);
+            if !still_recorded {
+                counts.retained += 1;
+                continue;
+            }
+            match resolve_release_admission(
+                &mut self.binding_authority,
+                &member_key,
+                correlation.generation,
+                correlation.fence_token,
+            ) {
+                Ok(ReleaseAdmission::Admitted) => {}
+                // Already released durably: the association went with the row
+                // and there is nothing left for this host to converge.
+                Ok(ReleaseAdmission::Replay { .. }) => continue,
+                Ok(ReleaseAdmission::Rejected { kind }) => {
+                    counts.retained += 1;
+                    tracing::warn!(
+                        mob_id = %correlation.mob_id,
+                        agent_identity = %correlation.agent_identity,
+                        terminal = correlation.terminal.as_str(),
+                        cause = ?kind,
+                        "capability convergence release admission refused; retained for retry"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    counts.retained += 1;
+                    tracing::warn!(
+                        mob_id = %correlation.mob_id,
+                        agent_identity = %correlation.agent_identity,
+                        %error,
+                        "capability convergence release admission failed; retained for retry"
+                    );
+                    continue;
+                }
+            }
+            match self
+                .release_recorded_member_residency(
+                    &member_key,
+                    correlation.generation,
+                    correlation.fence_token,
+                )
+                .await
+            {
+                MemberTeardownOutcome::Released { .. } => {
+                    counts.converged += 1;
+                    tracing::info!(
+                        mob_id = %correlation.mob_id,
+                        agent_identity = %correlation.agent_identity,
+                        terminal = correlation.terminal.as_str(),
+                        "host autonomously converged a parked capability terminal"
+                    );
+                }
+                MemberTeardownOutcome::ReleasedWithResidue { cause, detail } => {
+                    counts.converged += 1;
+                    tracing::warn!(
+                        mob_id = %correlation.mob_id,
+                        agent_identity = %correlation.agent_identity,
+                        cause = ?cause,
+                        detail = %detail,
+                        "capability convergence released the residency but left post-commit residue"
+                    );
+                }
+                MemberTeardownOutcome::Retained { cause, detail } => {
+                    counts.retained += 1;
+                    tracing::warn!(
+                        mob_id = %correlation.mob_id,
+                        agent_identity = %correlation.agent_identity,
+                        terminal = correlation.terminal.as_str(),
+                        cause = ?cause,
+                        detail = %detail,
+                        "capability convergence retained a parked terminal; the row, its \
+                         association, and the attachment all survive for the next tick"
+                    );
+                }
+            }
+        }
+        counts
+    }
+
+    async fn validate_forked_participant_source(
+        &self,
+        source: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        binding_generation: u64,
+    ) -> Result<(), BridgeRejectionCause> {
+        let host_id = self
+            .host_comms
+            .peer_id()
+            .map(|peer| peer.to_string())
+            .ok_or(BridgeRejectionCause::Unavailable)?;
+        if source.host_id != host_id || source.binding_generation != binding_generation {
+            return Err(BridgeRejectionCause::ForkedParticipantRouteMismatch);
+        }
+        let record = self
+            .persistence
+            .load(&source.mob_id)
+            .await
+            .map_err(|_| BridgeRejectionCause::Unavailable)?
+            .ok_or(BridgeRejectionCause::ForkedParticipantSourceMismatch)?;
+        let row = record
+            .materialized
+            .get(&source.agent_identity)
+            .ok_or(BridgeRejectionCause::ForkedParticipantSourceMismatch)?;
+        if row.generation != source.generation
+            || row.fence_token != source.fence_token
+            || row.session_id != source.member_session_id
+        {
+            return Err(BridgeRejectionCause::StaleFence);
+        }
+        let session_id = meerkat_core::SessionId::parse(&source.member_session_id)
+            .map_err(|_| BridgeRejectionCause::ForkedParticipantSourceMismatch)?;
+        let Some(materializer) = self.materializer.as_ref() else {
+            return Err(BridgeRejectionCause::Unavailable);
+        };
+        // A fork is taken at a COMPLETE BOUNDARY, so what must be refused is a
+        // run in progress — not executor attachment. Every host-materialized
+        // member is executor-attached by construction (ADJ-23: the host owns
+        // the residency and holds the session attached between turns), so
+        // demanding `Idle` here would refuse every source this host can
+        // actually serve. `Attached` is precisely "executor attached, runtime
+        // loop alive, waiting for input": a complete boundary.
+        if !matches!(
+            materializer
+                .substrate()
+                .runtime_adapter
+                .runtime_state(&session_id)
+                .await,
+            Ok(meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached)
+        ) {
+            return Err(BridgeRejectionCause::ForkedParticipantBusy);
+        }
+        Ok(())
+    }
+
+    async fn admit_forked_participant_command(
+        &mut self,
+        candidate: &PeerInputCandidate,
+        source: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        epoch: u64,
+        binding_generation: u64,
+        supervisor: &BridgePeerSpec,
+    ) -> bool {
+        if !self
+            .admit_host_command(
+                candidate,
+                &source.mob_id,
+                epoch,
+                binding_generation,
+                &supervisor.address,
+            )
+            .await
+        {
+            return false;
+        }
+        let declared = match BridgePeerIdentity::try_from(supervisor) {
+            Ok(peer) => peer,
+            Err(_) => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::InvalidSupervisorSpec,
+                    "forked participant supervisor identity is malformed",
+                    Some(supervisor.address.as_str()),
+                )
+                .await;
+                return false;
+            }
+        };
+        if !declared_supervisor_matches_recorded_host_authority(
+            self.binding_authority.state(),
+            &source.mob_id,
+            &declared,
+        ) {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::SenderMismatch,
+                "forked participant declared supervisor does not match host authority",
+                Some(supervisor.address.as_str()),
+            )
+            .await;
+            return false;
+        }
+        match self
+            .validate_forked_participant_source(source, binding_generation)
+            .await
+        {
+            Ok(()) => true,
+            Err(cause) => {
+                self.send_failure(
+                    candidate,
+                    cause,
+                    "forked participant source does not match current durable host residency",
+                    Some(supervisor.address.as_str()),
+                )
+                .await;
+                false
+            }
+        }
+    }
+
+    async fn serve_create_forked_participant(
+        &mut self,
+        candidate: &PeerInputCandidate,
+        payload: BridgeCreateForkedParticipantPayload,
+    ) {
+        if payload.protocol_version != BridgeProtocolVersion::V6 {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                "forked participant operations require supervisor bridge V6",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        }
+        if !self
+            .admit_forked_participant_command(
+                candidate,
+                &payload.source_member,
+                payload.epoch,
+                payload.binding_generation,
+                &payload.supervisor,
+            )
+            .await
+        {
+            return;
+        }
+        let Some(service) = self.forked_participant_service.as_ref() else {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                "host does not compose forked participant capability service",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        };
+        let request = match (
+            ForkedParticipantRequestId::new(&payload.request_id),
+            meerkat_core::SessionId::parse(&payload.source_member.member_session_id),
+            payload.prefix_message_count.map(usize::try_from).transpose(),
+        ) {
+            (Ok(request_id), Ok(source_session_id), Ok(prefix_message_count)) => {
+                ForkedParticipantRequest {
+                    request_id,
+                    source_identity: crate::ids::AgentIdentity::from(
+                        payload.source_member.agent_identity.clone(),
+                    ),
+                    source_session_id,
+                    owner_route: service.owner_route().clone(),
+                    prefix_message_count,
+                    scope: match payload.scope {
+                        meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantScope::Invoke => ForkedParticipantOperationScope::Invoke,
+                        meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantScope::Observe => ForkedParticipantOperationScope::Observe,
+                        meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantScope::InvokeAndObserve => ForkedParticipantOperationScope::InvokeAndObserve,
+                    },
+                    reuse: match payload.reuse {
+                        meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantReuse::OneShot => ForkedParticipantReusePolicy::OneShot,
+                        meerkat_contracts::wire::supervisor_bridge::BridgeForkedParticipantReuse::BoundedReuse { max_uses } => ForkedParticipantReusePolicy::BoundedReuse { max_uses },
+                    },
+                    ttl: Duration::from_millis(payload.ttl_millis),
+                }
+            }
+            _ => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::ForkedParticipantTampered,
+                    "forked participant request has invalid identity or count",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+                return;
+            }
+        };
+        match service.create(&request, chrono::Utc::now()).await {
+            Ok(reference) => {
+                self.send_reply(
+                    candidate,
+                    HostBridgeReply::completed(BridgeReply::ForkedParticipantCreated(
+                        BridgeForkedParticipantCreatedResponse {
+                            capability: bridge_ref(&reference),
+                        },
+                    )),
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+            }
+            Err(error) => {
+                self.send_failure(
+                    candidate,
+                    forked_participant_error_cause(&error),
+                    "forked participant create rejected",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn serve_revoke_forked_participant(
+        &mut self,
+        candidate: &PeerInputCandidate,
+        payload: BridgeRevokeForkedParticipantPayload,
+    ) {
+        if payload.protocol_version != BridgeProtocolVersion::V6 {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                "forked participant operations require supervisor bridge V6",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        }
+        if !self
+            .admit_host_command(
+                candidate,
+                &payload.source_member.mob_id,
+                payload.epoch,
+                payload.binding_generation,
+                &payload.supervisor.address,
+            )
+            .await
+        {
+            return;
+        }
+        let declared = match BridgePeerIdentity::try_from(&payload.supervisor) {
+            Ok(peer) => peer,
+            Err(_) => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::InvalidSupervisorSpec,
+                    "forked participant supervisor identity is malformed",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+                return;
+            }
+        };
+        if !declared_supervisor_matches_recorded_host_authority(
+            self.binding_authority.state(),
+            &payload.source_member.mob_id,
+            &declared,
+        ) {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::SenderMismatch,
+                "forked participant declared supervisor does not match host authority",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        }
+        let Some(service) = self.forked_participant_service.as_ref() else {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                "host does not compose forked participant capability service",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        };
+        let reference = match domain_ref(&payload.capability) {
+            Ok(reference) if reference.owner_route() == service.owner_route() => reference,
+            Ok(_) => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::ForkedParticipantRouteMismatch,
+                    "forked participant reference names another owner route",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+                return;
+            }
+            Err(_) => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::ForkedParticipantTampered,
+                    "forked participant reference is malformed or tampered",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+                return;
+            }
+        };
+        if reference.source_identity().as_str() != payload.source_member.agent_identity
+            || reference.provenance().source_session_id.to_string()
+                != payload.source_member.member_session_id
+        {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantSourceMismatch,
+                "forked participant reference names a different source",
+                Some(payload.supervisor.address.as_str()),
+            )
+            .await;
+            return;
+        }
+        match service.revoke(reference.capability_id(), true).await {
+            Ok(outcome) => {
+                let outcome = match outcome {
+                    crate::forked_participant::ForkedParticipantRevocationOutcome::Revoked {
+                        cleanup_pending,
+                    } => BridgeForkedParticipantRevocationOutcome::Revoked { cleanup_pending },
+                    crate::forked_participant::ForkedParticipantRevocationOutcome::PendingAttachedRelease => {
+                        BridgeForkedParticipantRevocationOutcome::PendingAttachedRelease
+                    }
+                    crate::forked_participant::ForkedParticipantRevocationOutcome::Converged => {
+                        BridgeForkedParticipantRevocationOutcome::Converged
+                    }
+                };
+                self.send_reply(
+                    candidate,
+                    HostBridgeReply::completed(BridgeReply::ForkedParticipantRevoked(
+                        BridgeForkedParticipantRevokedResponse { outcome },
+                    )),
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
+            }
+            Err(error) => {
+                self.send_failure(
+                    candidate,
+                    forked_participant_error_cause(&error),
+                    "forked participant revoke rejected",
+                    Some(payload.supervisor.address.as_str()),
+                )
+                .await;
             }
         }
     }
@@ -6492,6 +8170,26 @@ impl MobHostActor {
             AuthorityMobId::from(payload.spec.mob_id.as_str()),
             AuthorityAgentIdentity::from(payload.spec.agent_identity.as_str()),
         );
+
+        // CONTAINMENT GATE (issue #159), ahead of dedup replay, preflight, and
+        // any build effect.
+        //
+        // A fork child's session id is VISIBLE: it rides in the capability's
+        // own provenance, in this host's durable rows, and in every reply that
+        // names the residency. An ordinary `Resume` addresses a session by id
+        // alone, so without this gate a caller who merely LEARNED the id could
+        // materialize the branch and never present the bearer capability at
+        // all — the authenticated attachment would be decorative.
+        //
+        // Protection is decided by OWNER truth (the durable capability record
+        // keyed by fork child session), never by anything the caller supplied.
+        // A session no record claims is not protected and its `Resume` is
+        // completely unchanged.
+        if let Err((cause, reason)) = self.enforce_fork_session_containment(&payload).await {
+            self.send_failure(candidate, cause, reason, Some(reply_address.as_str()))
+                .await;
+            return;
+        }
 
         // Dedup admission (A12: one idempotency key never names two builds).
         let admission = match resolve_materialize_admission(
@@ -6635,6 +8333,36 @@ impl MobHostActor {
             }
         }
 
+        // The association the PREVIOUS residency (if any) was materialized
+        // under, captured before the replacement row can overwrite it. Read
+        // from the pre-filter supersession fact so the same-session ADOPT arm
+        // is covered too: adopting a session under a new generation must not
+        // leave the old generation's attachment active beside a new one.
+        let superseded_association = match superseded_session_id.as_ref() {
+            None => None,
+            Some(old_session_id) => match self.persistence.load(&payload.spec.mob_id).await {
+                Ok(Some(record)) => record
+                    .materialized
+                    .get(&payload.spec.agent_identity)
+                    .filter(|row| &row.session_id == old_session_id)
+                    .and_then(|row| row.forked_participant_attachment.clone()),
+                Ok(None) => None,
+                Err(error) => {
+                    self.send_failure(
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!(
+                            "materialize member failed: superseded row load for capability \
+                             association: {error}"
+                        ),
+                        Some(reply_address.as_str()),
+                    )
+                    .await;
+                    return;
+                }
+            },
+        };
+
         // Superseding admit (the A20 revival re-materialization): make the
         // old incarnation non-serving before the new build, but retain its
         // durable snapshot until the replacement row AND replacement runtime
@@ -6691,6 +8419,166 @@ impl MobHostActor {
             }
         }
 
+        let admitted_forked_attachment = match payload.forked_participant_attachment.as_ref() {
+            None => None,
+            Some(attachment) => {
+                let Some(service) = self.forked_participant_service.as_ref() else {
+                    self.send_failure(
+                        candidate,
+                        BridgeRejectionCause::ForkedParticipantProtocolUnsupported,
+                        "host does not compose forked participant capability service",
+                        Some(reply_address.as_str()),
+                    )
+                    .await;
+                    return;
+                };
+                let reference = match domain_ref(&attachment.capability) {
+                    Ok(reference) if reference.owner_route() == service.owner_route() => reference,
+                    Ok(_) => {
+                        self.send_failure(
+                            candidate,
+                            BridgeRejectionCause::ForkedParticipantRouteMismatch,
+                            "forked participant attachment names another host route",
+                            Some(reply_address.as_str()),
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(_) => {
+                        self.send_failure(
+                            candidate,
+                            BridgeRejectionCause::ForkedParticipantTampered,
+                            "forked participant attachment reference is malformed",
+                            Some(reply_address.as_str()),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let session_matches = matches!(
+                    &payload.launch,
+                    MaterializeLaunchMode::Resume { session_id, .. }
+                        if session_id == reference.fork_session_id().to_string().as_str()
+                );
+                if !session_matches {
+                    self.send_failure(
+                        candidate,
+                        BridgeRejectionCause::ForkedParticipantSourceMismatch,
+                        "forked participant attachment must resume its exact fork session",
+                        Some(reply_address.as_str()),
+                    )
+                    .await;
+                    return;
+                }
+                let attachment_id =
+                    match ForkedParticipantAttachmentId::new(&attachment.attachment_id) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            self.send_failure(
+                                candidate,
+                                BridgeRejectionCause::ForkedParticipantTampered,
+                                "forked participant attachment id is malformed",
+                                Some(reply_address.as_str()),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                let association =
+                    ForkedParticipantAttachmentAssociation::new(reference, attachment_id);
+                // Refuse before the attach, not after: admitting a second
+                // attachment for a capability whose previous residency still
+                // holds one would leave two active attachments for one
+                // capability with no path that releases both.
+                if superseded_association
+                    .as_ref()
+                    .is_some_and(|superseded| superseded == &association)
+                {
+                    self.send_failure(
+                        candidate,
+                        BridgeRejectionCause::ForkedParticipantBusy,
+                        "forked participant attachment is already held by the residency this \
+                         materialization would replace",
+                        Some(reply_address.as_str()),
+                    )
+                    .await;
+                    return;
+                }
+                match service
+                    .attach(
+                        &association.capability,
+                        &association.attachment_id,
+                        true,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        // A capability takes its branch BEFORE any target
+                        // member exists, so the fork child commits with no
+                        // member binding and an ordinary Resume would refuse
+                        // it ("missing durable comms_name"). Seat it as this
+                        // member through the narrow owner-side seam — identity
+                        // only, never tool/auth/realm/transcript state — which
+                        // is idempotent on the exact binding and refuses a
+                        // different one. This happens AFTER the attach is
+                        // admitted, so an unauthenticated caller can never
+                        // reach it, and before the build, so the build sees an
+                        // ordinary resumable member session.
+                        if let Some(runtime) = self
+                            .materializer
+                            .as_ref()
+                            .and_then(|m| m.substrate().forked_participant_source_runtime.clone())
+                            && let Err(error) = runtime
+                                .bind_fork_session_to_member(
+                                    association.capability.fork_session_id(),
+                                    &payload.spec.mob_id,
+                                    payload.spec.profile_name.as_str(),
+                                    &payload.spec.agent_identity,
+                                )
+                                .await
+                        {
+                            let detail = format!(
+                                "forked participant branch could not be seated as a member:                                  {error}"
+                            );
+                            if let Err(failure) =
+                                release_forked_participant_association(Some(service), &association)
+                                    .await
+                            {
+                                self.send_failure(
+                                    candidate,
+                                    BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                                    format!("{detail}; the admitted attachment could not be                                              released either ({failure})"),
+                                    Some(reply_address.as_str()),
+                                )
+                                .await;
+                                return;
+                            }
+                            self.send_failure(
+                                candidate,
+                                BridgeRejectionCause::Internal,
+                                detail,
+                                Some(reply_address.as_str()),
+                            )
+                            .await;
+                            return;
+                        }
+                        Some(association)
+                    }
+                    Err(error) => {
+                        self.send_failure(
+                            candidate,
+                            forked_participant_error_cause(&error),
+                            "forked participant attachment rejected",
+                            Some(reply_address.as_str()),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+        };
+
         // Build (shell effect work, inline on the owner task — DEC-P3H-1).
         let mut outcome = {
             let Some(materializer) = self.materializer.as_mut() else {
@@ -6723,6 +8611,70 @@ impl MobHostActor {
                     let requires_fail_stop = error.requires_actor_fail_stop();
                     tracing::warn!(detail = %error, "member materialization failed locally");
                     let (cause, reason) = error.wire_cause();
+                    // The admitted attachment is compensated ONLY when the
+                    // failure definitively proves no member side effects
+                    // survive. The fail-stop class is exactly the ambiguous
+                    // one, so releasing there would assert an absence this
+                    // host cannot observe; it durably retains the obligation
+                    // instead and lets boot reconciliation decide.
+                    if let Some(association) = admitted_forked_attachment.as_ref() {
+                        let compensation = if requires_fail_stop {
+                            Err(ForkedParticipantReleaseFailure {
+                                cause: BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                                detail: "member build failed in an ambiguous class; the \
+                                         attachment is retained for reconciliation rather than \
+                                         released"
+                                    .to_string(),
+                            })
+                        } else {
+                            release_forked_participant_association(
+                                self.forked_participant_service.as_ref(),
+                                association,
+                            )
+                            .await
+                        };
+                        if let Err(failure) = compensation {
+                            let obligation_cause = if requires_fail_stop {
+                                ForkedParticipantObligationCause::AmbiguousBuild
+                            } else {
+                                ForkedParticipantObligationCause::ReleaseUnproven
+                            };
+                            let retained = self
+                                .retain_forked_participant_obligation(
+                                    &payload.spec.mob_id,
+                                    &payload.spec.agent_identity,
+                                    association,
+                                    obligation_cause,
+                                    &failure.detail,
+                                )
+                                .await;
+                            // The originating typed build error is preserved
+                            // in the reason: cleanup debt is additional truth
+                            // about the same failure, never a replacement for
+                            // why the build failed.
+                            let detail = match retained {
+                                Ok(()) => format!(
+                                    "{reason}; capability attachment reconciliation is durably \
+                                     retained ({failure})"
+                                ),
+                                Err(ref retain_error) => format!(
+                                    "{reason}; capability attachment reconciliation could not be \
+                                     retained ({failure}; {retain_error})"
+                                ),
+                            };
+                            if requires_fail_stop || retained.is_err() {
+                                self.durable_uncertainty_fail_stop = Some(detail.clone());
+                            }
+                            self.send_failure(
+                                candidate,
+                                BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                                detail,
+                                Some(reply_address.as_str()),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
                     if requires_fail_stop {
                         self.durable_uncertainty_fail_stop = Some(reason.clone());
                     }
@@ -6749,7 +8701,77 @@ impl MobHostActor {
             resolved_auth_binding: outcome.resolved_auth_binding.clone(),
             supervisor_name: payload.supervisor.name.clone(),
             supervisor_address: payload.supervisor.address.clone(),
+            forked_participant_attachment: None,
         };
+        // Supersession compensation, immediately before the replacement row
+        // commits: the old residency has already been quiesced, so its
+        // attachment must not outlive it. Failure ABORTS the replacement —
+        // nothing is recorded, and the attachment admitted for the new build
+        // is released again so the abort leaves exactly one (the old) active.
+        if let Some(superseded) = superseded_association
+            .as_ref()
+            .filter(|superseded| Some(*superseded) != admitted_forked_attachment.as_ref())
+            && let Err(failure) = release_forked_participant_association(
+                self.forked_participant_service.as_ref(),
+                superseded,
+            )
+            .await
+        {
+            let mut detail = format!(
+                "materialize member aborted: the superseded residency's capability attachment \
+                 could not be released ({failure})"
+            );
+            if let Some(association) = admitted_forked_attachment.as_ref()
+                && let Err(rollback) = release_forked_participant_association(
+                    self.forked_participant_service.as_ref(),
+                    association,
+                )
+                .await
+            {
+                let retained = self
+                    .retain_forked_participant_obligation(
+                        &payload.spec.mob_id,
+                        &payload.spec.agent_identity,
+                        association,
+                        ForkedParticipantObligationCause::ReleaseUnproven,
+                        &rollback.detail,
+                    )
+                    .await;
+                detail = match retained {
+                    Ok(()) => format!(
+                        "{detail}; the replacement attachment could not be rolled back either \
+                         ({rollback}) and is durably retained for reconciliation"
+                    ),
+                    Err(retain_error) => {
+                        let detail = format!(
+                            "{detail}; the replacement attachment could not be rolled back \
+                             ({rollback}) nor durably retained ({retain_error})"
+                        );
+                        self.durable_uncertainty_fail_stop = Some(detail.clone());
+                        detail
+                    }
+                };
+            }
+            if let Some(publication) = outcome.runtime_publication.take() {
+                if let Err(error) = publication.abort().await {
+                    let aborted =
+                        format!("{detail}; exact unpublished attachment abort failed: {error}");
+                    self.durable_uncertainty_fail_stop = Some(aborted.clone());
+                    detail = aborted;
+                }
+                if let Some(materializer) = self.materializer.as_mut() {
+                    materializer.forget_runtime_after_exact_publication_abort(&outcome.session_id);
+                }
+            }
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                detail,
+                Some(reply_address.as_str()),
+            )
+            .await;
+            return;
+        }
         // The session document is already durable before this host-row CAS.
         // Publication failure or caller loss may quiesce only the exact volatile
         // incarnation; the session remains discoverable and explicitly resumable.
@@ -6772,6 +8794,7 @@ impl MobHostActor {
             self.persistence.as_ref(),
             &member_key,
             row,
+            admitted_forked_attachment.clone(),
         )
         .await
         {
@@ -6797,7 +8820,7 @@ impl MobHostActor {
                 }
                 let cleanup_failure = publication_abort_failure;
                 let cleanup_uncertain = cleanup_failure.is_some();
-                let failure = match (durable_uncertainty, cleanup_failure) {
+                let mut failure = match (durable_uncertainty, cleanup_failure) {
                     (true, Some(cleanup)) => format!(
                         "materialize record became durably uncertain ({error}); attempted runtime quiescence also failed: {cleanup}"
                     ),
@@ -6811,6 +8834,57 @@ impl MobHostActor {
                         "materialize record persistence failed ({error}); exact runtime quiesced and the durable session remains resumable"
                     ),
                 };
+                // The attachment was admitted but no row provably adopted it.
+                // A durably-uncertain CAS may in fact have landed the
+                // association, so releasing would be a guess; retain the
+                // obligation instead. A definite miss licenses compensation,
+                // and an unproven compensation degrades to the same
+                // obligation rather than to silence.
+                if let Some(association) = admitted_forked_attachment.as_ref() {
+                    let compensation = if durable_uncertainty {
+                        Err(ForkedParticipantReleaseFailure {
+                            cause: BridgeRejectionCause::ForkedParticipantCleanupDebt,
+                            detail: "materialized-row write is durably uncertain; the attachment \
+                                     is retained for reconciliation rather than released"
+                                .to_string(),
+                        })
+                    } else {
+                        release_forked_participant_association(
+                            self.forked_participant_service.as_ref(),
+                            association,
+                        )
+                        .await
+                    };
+                    if let Err(release_failure) = compensation {
+                        let obligation_cause = if durable_uncertainty {
+                            ForkedParticipantObligationCause::RecordUncertain
+                        } else {
+                            ForkedParticipantObligationCause::ReleaseUnproven
+                        };
+                        failure = match self
+                            .retain_forked_participant_obligation(
+                                &payload.spec.mob_id,
+                                &payload.spec.agent_identity,
+                                association,
+                                obligation_cause,
+                                &release_failure.detail,
+                            )
+                            .await
+                        {
+                            Ok(()) => format!(
+                                "{failure}; capability attachment reconciliation is durably \
+                                 retained ({release_failure})"
+                            ),
+                            Err(retain_error) => {
+                                self.durable_uncertainty_fail_stop = Some(failure.clone());
+                                format!(
+                                    "{failure}; capability attachment reconciliation could not be \
+                                     retained ({release_failure}; {retain_error})"
+                                )
+                            }
+                        };
+                    }
+                }
                 if durable_uncertainty || cleanup_uncertain {
                     self.durable_uncertainty_fail_stop = Some(failure.clone());
                 }
@@ -7077,6 +9151,28 @@ impl MobHostActor {
                 format!(
                     "durable materialized row for '{identity}' diverged from the machine's \
                      replay record"
+                ),
+                Some(reply_address),
+            )
+            .await;
+            return;
+        }
+        // Replay is answer-only. The recorded association is compared, never
+        // re-attached: a matching command replays its recorded result with
+        // zero capability lifecycle effect, and a differing one (in either
+        // direction, including presence against absence) is refused before it
+        // can mutate anything.
+        if !replayed_forked_participant_attachment_matches(
+            payload.forked_participant_attachment.as_ref(),
+            row.forked_participant_attachment.as_ref(),
+        ) {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::SpecDigestMismatch,
+                format!(
+                    "materialize replay for '{identity}' presents a different capability \
+                     attachment than the recorded residency; the idempotency key names one \
+                     command only"
                 ),
                 Some(reply_address),
             )
@@ -7362,9 +9458,14 @@ impl MobHostActor {
     }
 
     /// §19.L3: OUTER quiesce → exact live-channel absence proof/close plus
-    /// ownership-discriminated archive (through the extracted disposal arc) → record (row move under witness) →
-    /// deregister → reply. A disposal failure records NOTHING and replies
-    /// typed — the release stays retryable at the same tuple.
+    /// ownership-discriminated archive (through the extracted disposal arc) →
+    /// record (row move under witness) → deregister → reply. A disposal
+    /// failure records NOTHING and replies typed — the release stays retryable
+    /// at the same tuple.
+    ///
+    /// The teardown itself is reply-free and shared
+    /// ([`Self::release_recorded_member_residency`]); this arm only projects
+    /// its typed outcome onto the bridge.
     async fn serve_admitted_release(
         &mut self,
         candidate: &PeerInputCandidate,
@@ -7372,6 +9473,43 @@ impl MobHostActor {
         member_key: &MemberKey,
         reply_address: &str,
     ) {
+        match self
+            .release_recorded_member_residency(member_key, payload.generation, payload.fence_token)
+            .await
+        {
+            MemberTeardownOutcome::Released { disposal } => {
+                let reply = BridgeReply::MemberReleased(BridgeMemberReleasedResponse { disposal });
+                self.send_reply(
+                    candidate,
+                    HostBridgeReply::completed(reply),
+                    Some(reply_address),
+                )
+                .await;
+            }
+            MemberTeardownOutcome::Retained { cause, detail }
+            | MemberTeardownOutcome::ReleasedWithResidue { cause, detail } => {
+                self.send_failure(candidate, cause, detail, Some(reply_address))
+                    .await;
+            }
+        }
+    }
+
+    /// Perform one exact, reply-free member-residency teardown at an
+    /// already-admitted `(generation, fence_token)` tuple.
+    ///
+    /// This is THE host-local release path. Both the bridge `ReleaseMember`
+    /// arm and the host's own autonomous convergence sweep run it, so there is
+    /// exactly one ordering of quiesce → disposal → capability release →
+    /// durable receipt → deregistration, and exactly one set of retention
+    /// rules when a step cannot be proven.
+    async fn release_recorded_member_residency(
+        &mut self,
+        member_key: &MemberKey,
+        generation: u64,
+        fence_token: u64,
+    ) -> MemberTeardownOutcome {
+        let mob_id = member_key.mob_id.0.clone();
+        let agent_identity = member_key.agent_identity.0.clone();
         let recorded_session = self
             .binding_authority
             .state()
@@ -7379,26 +9517,18 @@ impl MobHostActor {
             .get(member_key)
             .map(|session| session.0.clone());
         let Some(session_id_str) = recorded_session else {
-            self.send_failure(
-                candidate,
-                BridgeRejectionCause::Internal,
-                "release admitted without a recorded member session",
-                Some(reply_address),
-            )
-            .await;
-            return;
+            return MemberTeardownOutcome::Retained {
+                cause: BridgeRejectionCause::Internal,
+                detail: "release admitted without a recorded member session".to_string(),
+            };
         };
         let session_id = match meerkat_core::types::SessionId::parse(&session_id_str) {
             Ok(session_id) => session_id,
             Err(error) => {
-                self.send_failure(
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("recorded session id is invalid: {error}"),
-                    Some(reply_address),
-                )
-                .await;
-                return;
+                return MemberTeardownOutcome::Retained {
+                    cause: BridgeRejectionCause::Internal,
+                    detail: format!("recorded session id is invalid: {error}"),
+                };
             }
         };
 
@@ -7408,7 +9538,12 @@ impl MobHostActor {
             .is_some_and(|materializer| materializer.substrate().realm_backend_persistent);
         let runtime_adapter = match self.materializer.as_ref() {
             Some(materializer) => Arc::clone(&materializer.substrate().runtime_adapter),
-            None => return,
+            None => {
+                return MemberTeardownOutcome::Retained {
+                    cause: BridgeRejectionCause::Unavailable,
+                    detail: "host composed without a member substrate".to_string(),
+                };
+            }
         };
         // Acquire the stable placed-residency transaction before teardown and
         // retain it through the durable release commit. All delayed effects
@@ -7418,7 +9553,10 @@ impl MobHostActor {
             .begin_member_residency_update(session_id.clone())
             .await;
         let Some(materializer) = self.materializer.as_mut() else {
-            return; // gated by the caller; unreachable by construction
+            return MemberTeardownOutcome::Retained {
+                cause: BridgeRejectionCause::Unavailable,
+                detail: "host composed without a member substrate".to_string(),
+            };
         };
         let (machine_disposal, wire_disposal) = if !realm_backend_persistent {
             // D5 typed degradation, declared at bind: runtime retire + claim
@@ -7433,24 +9571,22 @@ impl MobHostActor {
                 Err(error) => {
                     let retained_stage = crate::runtime::provisioner::MemberSessionDisposalArc::
                         runtime_retirement_progress_stage(&error);
-                    let (cause, reason) = retained_stage.map_or_else(
+                    let (cause, detail) = retained_stage.map_or_else(
                         || (
                             BridgeRejectionCause::Internal,
                             format!("member runtime release failed: {error}"),
                         ),
                         |stage| {
-                            let reason = format!(
+                            let detail = format!(
                                 "member runtime release remains in progress at {stage}; exact teardown authority is retained"
                             );
                             (
                                 BridgeRejectionCause::RuntimeRetirementInProgress { stage },
-                                reason,
+                                detail,
                             )
                         },
                     );
-                    self.send_failure(candidate, cause, reason, Some(reply_address))
-                        .await;
-                    return;
+                    return MemberTeardownOutcome::Retained { cause, detail };
                 }
             }
         } else {
@@ -7483,69 +9619,58 @@ impl MobHostActor {
                 Err(error) => {
                     let retained_stage = crate::runtime::provisioner::MemberSessionDisposalArc::
                         runtime_retirement_progress_stage(&error);
-                    let (cause, reason) = retained_stage.map_or_else(
+                    let (cause, detail) = retained_stage.map_or_else(
                         || (
                             BridgeRejectionCause::Internal,
                             format!("member session disposal failed: {error}"),
                         ),
                         |stage| {
-                            let reason = format!(
+                            let detail = format!(
                                 "member session disposal remains in progress at {stage}; exact teardown authority is retained"
                             );
                             (
                                 BridgeRejectionCause::RuntimeRetirementInProgress { stage },
-                                reason,
+                                detail,
                             )
                         },
                     );
-                    self.send_failure(
-                        candidate,
-                        cause,
-                        reason,
-                        Some(reply_address),
-                    )
-                    .await;
-                    return;
+                    return MemberTeardownOutcome::Retained { cause, detail };
                 }
             }
         };
 
-        let (witness, member_pubkey) = match record_member_release(
+        // Exact disposal has succeeded and the residency is gone. The durable
+        // half — capability release then release receipt — is shared with
+        // every other caller that has proven a disposal.
+        let (witness, member_pubkey) = match commit_member_release_after_disposal(
             &mut self.binding_authority,
             self.persistence.as_ref(),
+            self.forked_participant_service.as_ref(),
             member_key,
-            payload.generation,
-            payload.fence_token,
+            generation,
+            fence_token,
             machine_disposal,
         )
         .await
         {
             Ok(recorded) => recorded,
-            Err(error) => {
-                if error.is_durable_uncertainty() {
-                    self.durable_uncertainty_fail_stop = Some(error.to_string());
+            Err(retention) => {
+                if retention.durable_uncertainty {
+                    self.durable_uncertainty_fail_stop = Some(retention.detail.clone());
                 }
-                self.send_failure(
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("release record persistence failed: {error}"),
-                    Some(reply_address),
-                )
-                .await;
-                return;
+                return MemberTeardownOutcome::Retained {
+                    cause: retention.cause,
+                    detail: retention.detail,
+                };
             }
         };
         let residency_publication = match residency_update.vacate() {
             Ok(publication) => publication,
             Err(error) => {
-                self.send_failure(
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("release residency vacancy publication failed: {error}"),
-                    Some(reply_address),
-                )
-                .await;
-                return;
+                return MemberTeardownOutcome::ReleasedWithResidue {
+                    cause: BridgeRejectionCause::Internal,
+                    detail: format!("release residency vacancy publication failed: {error}"),
+                };
             }
         };
         self.registered_member_incarnations.remove(&session_id);
@@ -7555,27 +9680,15 @@ impl MobHostActor {
         // already released — retry hits ReleaseReplay, which re-attempts
         // removal idempotently.
         if let Err(error) = self.deregister_member_identity(&member_pubkey, &witness) {
-            self.send_failure(
-                candidate,
-                BridgeRejectionCause::Internal,
-                format!("member identity deregistration failed: {error}"),
-                Some(reply_address),
-            )
-            .await;
-            return;
+            return MemberTeardownOutcome::ReleasedWithResidue {
+                cause: BridgeRejectionCause::Internal,
+                detail: format!("member identity deregistration failed: {error}"),
+            };
         }
-        self.unrevived
-            .remove(&(payload.mob_id.clone(), payload.agent_identity.clone()));
-
-        let reply = BridgeReply::MemberReleased(BridgeMemberReleasedResponse {
+        self.unrevived.remove(&(mob_id, agent_identity));
+        MemberTeardownOutcome::Released {
             disposal: wire_disposal,
-        });
-        self.send_reply(
-            candidate,
-            HostBridgeReply::completed(reply),
-            Some(reply_address),
-        )
-        .await;
+        }
     }
 
     /// §10.4 (phase 4): serve `InstallPeerTrust` — rung-0 admission →
@@ -8024,8 +10137,17 @@ impl MobHostActor {
         }
 
         let mut members = Vec::with_capacity(rows.len());
+        let mob_has_capability_debt = self
+            .forked_participant_debts
+            .iter()
+            .any(|(mob_id, _)| mob_id == &payload.mob_id);
         for (identity, generation, fence_token, session_id, spec_digest) in rows {
-            let healthy = if self
+            let healthy = if mob_has_capability_debt {
+                // An unreconciled capability attachment is a host-wide
+                // obligation, not a per-row one: the debt names a fork session
+                // whose owning row may be exactly the one being reported.
+                false
+            } else if self
                 .unrevived
                 .contains(&(payload.mob_id.clone(), identity.clone()))
             {
@@ -8963,6 +11085,24 @@ impl MobHostActor {
     > {
         witness.verify_mob(mob_id)?;
         if record.materialized.is_empty() {
+            // No residency to dispose, but a retained capability obligation
+            // still dies with the record, so it must be reconciled first.
+            for obligation in record.forked_participant_obligations.values() {
+                release_forked_participant_association(
+                    self.forked_participant_service.as_ref(),
+                    &obligation.association,
+                )
+                .await
+                .map_err(|failure| MobHostActorError::Internal {
+                    detail: format!(
+                        "retained capability attachment obligation for '{}' could not be \
+                         reconciled before revocation: {failure}",
+                        obligation.agent_identity
+                    ),
+                })?;
+                self.forked_participant_debts
+                    .remove(&(mob_id.to_string(), obligation.association.association_key()));
+            }
             return Ok(Vec::new());
         }
         let Some(materializer) = self.materializer.as_mut() else {
@@ -8995,11 +11135,16 @@ impl MobHostActor {
                         ),
                     }
                 })?;
-            members.push((identity.clone(), session_id, pubkey));
+            members.push((
+                identity.clone(),
+                session_id,
+                pubkey,
+                row.forked_participant_attachment.clone(),
+            ));
         }
 
         let mut residency_updates = Vec::with_capacity(members.len());
-        for (identity, session_id, pubkey) in members {
+        for (identity, session_id, pubkey, association) in members {
             let update = runtime_adapter
                 .begin_member_residency_update(session_id.clone())
                 .await;
@@ -9017,11 +11162,50 @@ impl MobHostActor {
                         detail: format!("member '{identity}' runtime release failed: {error}"),
                     })?;
             }
+            // Disposal proved this residency gone, so its attachment must go
+            // with it — and it must go BEFORE any revoke receipt, because the
+            // receipt deletes the row that carries the association. A failure
+            // here aborts the revocation: durable rows stay, the receipt is
+            // never written, and the exact retry converges. Revoke REPLAY
+            // answers from the receipt without re-entering this arm, so no
+            // attachment is released twice.
+            if let Some(association) = association.as_ref() {
+                release_forked_participant_association(
+                    self.forked_participant_service.as_ref(),
+                    association,
+                )
+                .await
+                .map_err(|failure| MobHostActorError::Internal {
+                    detail: format!(
+                        "member '{identity}' capability attachment release failed: {failure}"
+                    ),
+                })?;
+            }
             self.registry
                 .remove_identity(&self.registry_owner, &pubkey)?;
             self.unrevived
                 .remove(&(mob_id.to_string(), identity.clone()));
             residency_updates.push((session_id, update));
+        }
+        // Retained reconciliation obligations die with the record, so they are
+        // discharged here or the revocation does not happen. Every member
+        // residency on this binding has just been disposed, so absence is
+        // established rather than assumed.
+        for obligation in record.forked_participant_obligations.values() {
+            release_forked_participant_association(
+                self.forked_participant_service.as_ref(),
+                &obligation.association,
+            )
+            .await
+            .map_err(|failure| MobHostActorError::Internal {
+                detail: format!(
+                    "retained capability attachment obligation for '{}' could not be reconciled \
+                     before revocation: {failure}",
+                    obligation.agent_identity
+                ),
+            })?;
+            self.forked_participant_debts
+                .remove(&(mob_id.to_string(), obligation.association.association_key()));
         }
         Ok(residency_updates)
     }
@@ -9568,6 +11752,7 @@ mod tests {
                 }],
             )]),
             tracked_input_cancellations: BTreeMap::new(),
+            forked_participant_obligations: BTreeMap::new(),
             turn_outcome_pending: BTreeMap::new(),
         };
 
@@ -9611,6 +11796,7 @@ mod tests {
             turn_outcomes: BTreeMap::new(),
             turn_outcome_acknowledged: BTreeMap::new(),
             tracked_input_cancellations: BTreeMap::new(),
+            forked_participant_obligations: BTreeMap::new(),
             turn_outcome_pending: BTreeMap::new(),
         };
 
@@ -9994,6 +12180,7 @@ mod tests {
             turn_outcomes: BTreeMap::new(),
             turn_outcome_acknowledged: BTreeMap::new(),
             tracked_input_cancellations: BTreeMap::new(),
+            forked_participant_obligations: BTreeMap::new(),
         };
         let error = certify_stale_pending_absent(
             &authority,
@@ -10140,6 +12327,7 @@ mod tests {
             descriptor_watch_tx: descriptor_watch_tx.clone(),
             descriptor_sink: sink.clone(),
             member_host: None,
+            forked_participant_sweep_interval: None,
         };
 
         match spawn_mob_host_actor(config()).await {
@@ -10206,6 +12394,7 @@ mod tests {
             descriptor_watch_tx,
             descriptor_sink: sink.clone(),
             member_host: None,
+            forked_participant_sweep_interval: None,
         })
         .await
         {
@@ -10254,6 +12443,7 @@ mod tests {
             descriptor_watch_tx,
             descriptor_sink: sink.clone(),
             member_host: None,
+            forked_participant_sweep_interval: None,
         })
         .await
         {
@@ -10316,6 +12506,7 @@ mod tests {
                 turn_outcomes: BTreeMap::new(),
                 turn_outcome_acknowledged: BTreeMap::new(),
                 tracked_input_cancellations: BTreeMap::new(),
+                forked_participant_obligations: BTreeMap::new(),
             },
         )];
         let state = authority_state_from_records(&records);
@@ -10438,6 +12629,7 @@ mod tests {
                         resolved_auth_binding: None,
                         supervisor_name: "controller".to_string(),
                         supervisor_address: "tcp://127.0.0.1:1".to_string(),
+                        forked_participant_attachment: None,
                     },
                 )]),
                 released: BTreeMap::from([(
@@ -10463,6 +12655,7 @@ mod tests {
                 )]),
                 turn_outcome_acknowledged: BTreeMap::new(),
                 tracked_input_cancellations: BTreeMap::new(),
+                forked_participant_obligations: BTreeMap::new(),
             },
         )];
         let state = authority_state_from_records(&records);
@@ -10559,6 +12752,7 @@ mod tests {
                         resolved_auth_binding: None,
                         supervisor_name: "controller".to_string(),
                         supervisor_address: "tcp://127.0.0.1:7801".to_string(),
+                        forked_participant_attachment: None,
                     },
                 )]),
                 released: BTreeMap::new(),
@@ -10566,6 +12760,7 @@ mod tests {
                 turn_outcomes: BTreeMap::new(),
                 turn_outcome_acknowledged: BTreeMap::new(),
                 tracked_input_cancellations: BTreeMap::new(),
+                forked_participant_obligations: BTreeMap::new(),
             },
         )]
     }

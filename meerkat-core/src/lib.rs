@@ -60,6 +60,7 @@ pub mod panic_payload;
 pub mod peer_correlation;
 pub mod peer_meta;
 pub mod persistence_contract;
+pub mod secret_entropy;
 pub use generated::approval_lifecycle;
 pub use generated::session_document;
 pub mod pending_continuation;

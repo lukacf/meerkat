@@ -1,6 +1,10 @@
 //! In-memory store implementations.
 
+use super::forked_participant::{
+    ForkedParticipantRecord, ForkedParticipantStore, forked_participant_exact_reference,
+};
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
+use super::temporary_council::{TemporaryCouncilRecord, TemporaryCouncilStore};
 use super::{
     BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
     ExternalBindingOverlayRecord, IdentityMemberEventCommitOutcome,
@@ -11,11 +15,11 @@ use super::{
     MobExternalDeliveryIntent, MobExternalDeliveryPhase, MobExternalDeliveryRealizationCommit,
     MobExternalDeliveryRealizerCompletionCommit, MobExternalDeliveryRecord,
     MobExternalDeliveryRepairOutcome, MobExternalDeliveryRepairState, MobExternalDeliveryTerminal,
-    MobHostAuthorityDeletionAuthority, MobHostAuthorityPersistenceAuthority,
-    MobHostAuthorityRecord, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore,
-    MobIdentityStoreClock, MobMemberEventCursorRecord, MobMemberLiveCleanupRecord,
-    MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin, MobMemberOperatorRequestKey,
-    MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    MobForkedParticipantMemberAssociation, MobHostAuthorityDeletionAuthority,
+    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobIdentityMemberStore,
+    MobIdentityStatusStore, MobIdentityStore, MobIdentityStoreClock, MobMemberEventCursorRecord,
+    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
+    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
     MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
     MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
     MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
@@ -36,6 +40,9 @@ use super::{
 };
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, MobEventKind, NewMobEvent};
+use crate::forked_participant::{
+    ForkedParticipantCapabilityId, ForkedParticipantRef, ForkedParticipantRequestId,
+};
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
@@ -63,11 +70,13 @@ use crate::run::{
     LoopSnapshot, MobRun, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
     MobRunRemoteTurnReceipt, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
+use crate::temporary_council::TemporaryCouncilId;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use meerkat_core::SessionId;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -311,6 +320,8 @@ pub struct InMemoryMobRuntimeMetadataStore {
     operator_grants: Arc<RwLock<BTreeMap<(MobId, String), MobOperatorGrantRecord>>>,
     member_event_cursors: Arc<RwLock<BTreeMap<(MobId, String), MobMemberEventCursorRecord>>>,
     member_live_cleanup_records: Arc<RwLock<BTreeMap<(MobId, String), MobMemberLiveCleanupRecord>>>,
+    forked_participant_member_associations:
+        Arc<RwLock<BTreeMap<(MobId, String), MobForkedParticipantMemberAssociation>>>,
     external_binding_overlays: Arc<RwLock<ExternalBindingOverlayMap>>,
 }
 
@@ -2277,6 +2288,53 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
         }
     }
 
+    async fn list_forked_participant_member_associations(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobForkedParticipantMemberAssociation>, MobStoreError> {
+        Ok(self
+            .forked_participant_member_associations
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        record: &MobForkedParticipantMemberAssociation,
+    ) -> Result<(), MobStoreError> {
+        let key = (mob_id.clone(), record.association_key.clone());
+        self.forked_participant_member_associations
+            .write()
+            .await
+            .insert(key, record.clone());
+        Ok(())
+    }
+
+    async fn delete_forked_participant_member_association(
+        &self,
+        mob_id: &MobId,
+        expected: &MobForkedParticipantMemberAssociation,
+    ) -> Result<bool, MobStoreError> {
+        let key = (mob_id.clone(), expected.association_key.clone());
+        let mut records = self.forked_participant_member_associations.write().await;
+        match records.get(&key) {
+            None => Ok(false),
+            Some(current) if current == expected => {
+                records.remove(&key);
+                Ok(true)
+            }
+            Some(_) => Err(MobStoreError::CasConflict(format!(
+                "forked participant association '{}' no longer matches the expected record",
+                expected.association_key
+            ))),
+        }
+    }
+
     async fn list_external_binding_overlays(
         &self,
         mob_id: &MobId,
@@ -3728,6 +3786,243 @@ impl MobSpecStore for InMemoryMobSpecStore {
     }
 }
 
+/// In-memory forked-participant capability store.
+///
+/// Same contract as the SQLite backend: insert is unique on both the bearer
+/// identity and the request identity, `load_exact` compares the FULL immutable
+/// reference, and `commit` is a strict compare-and-swap.
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryForkedParticipantStore {
+    records: Arc<RwLock<BTreeMap<String, ForkedParticipantRecord>>>,
+}
+
+impl InMemoryForkedParticipantStore {
+    /// Create an empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl ForkedParticipantStore for InMemoryForkedParticipantStore {
+    async fn insert_reserved(
+        &self,
+        record: &ForkedParticipantRecord,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let mut records = self.records.write().await;
+        let key = record.capability_id.expose_bearer_token().to_string();
+        if records.contains_key(&key) {
+            return Err(MobStoreError::CasConflict(
+                "forked participant capability already exists".to_string(),
+            ));
+        }
+        if records
+            .values()
+            .any(|existing| existing.request_id == record.request_id)
+        {
+            return Err(MobStoreError::CasConflict(format!(
+                "forked participant request {} already reserved a capability",
+                record.request_id
+            )));
+        }
+        if records
+            .values()
+            .any(|existing| existing.planned_child_session_id == record.planned_child_session_id)
+        {
+            return Err(MobStoreError::CasConflict(
+                "forked participant child session already reserved".to_string(),
+            ));
+        }
+        let mut stored = record.clone();
+        stored.revision = 1;
+        records.insert(key, stored.clone());
+        Ok(stored)
+    }
+
+    async fn load_by_capability_id(
+        &self,
+        capability_id: &ForkedParticipantCapabilityId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        Ok(self
+            .records
+            .read()
+            .await
+            .get(capability_id.expose_bearer_token())
+            .cloned())
+    }
+
+    async fn load_by_request_id(
+        &self,
+        request_id: &ForkedParticipantRequestId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        Ok(self
+            .records
+            .read()
+            .await
+            .values()
+            .find(|record| &record.request_id == request_id)
+            .cloned())
+    }
+
+    async fn load_by_fork_session_id(
+        &self,
+        fork_session_id: &SessionId,
+    ) -> Result<Option<ForkedParticipantRecord>, MobStoreError> {
+        Ok(self
+            .records
+            .read()
+            .await
+            .values()
+            .find(|record| &record.planned_child_session_id == fork_session_id)
+            .cloned())
+    }
+
+    async fn load_exact(
+        &self,
+        capability: &ForkedParticipantRef,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let records = self.records.read().await;
+        let record = records
+            .get(capability.capability_id().expose_bearer_token())
+            .cloned()
+            .ok_or_else(|| {
+                MobStoreError::NotFound(format!(
+                    "forked participant capability {} not found",
+                    capability.capability_id().correlation_hint()
+                ))
+            })?;
+        forked_participant_exact_reference(record, capability)
+    }
+
+    async fn commit(
+        &self,
+        record: &ForkedParticipantRecord,
+    ) -> Result<ForkedParticipantRecord, MobStoreError> {
+        let mut records = self.records.write().await;
+        let key = record.capability_id.expose_bearer_token().to_string();
+        let existing = records.get(&key).ok_or_else(|| {
+            MobStoreError::NotFound(format!(
+                "forked participant capability {} not found",
+                record.capability_id.correlation_hint()
+            ))
+        })?;
+        if existing.revision != record.revision {
+            return Err(MobStoreError::CasConflict(format!(
+                "forked participant capability {} revision conflict: expected {}, actual {}",
+                record.capability_id.correlation_hint(),
+                record.revision,
+                existing.revision
+            )));
+        }
+        let Some(next_revision) = record.revision.checked_add(1) else {
+            return Err(MobStoreError::WriteFailed(format!(
+                "forked participant capability {} revision counter is exhausted",
+                record.capability_id.correlation_hint()
+            )));
+        };
+        let mut next = record.clone();
+        next.revision = next_revision;
+        next.updated_at = Utc::now();
+        let replaced = records.insert(key, next.clone());
+        debug_assert!(
+            replaced.is_some(),
+            "commit must replace exactly one existing row"
+        );
+        Ok(next)
+    }
+
+    async fn list_all(&self) -> Result<Vec<ForkedParticipantRecord>, MobStoreError> {
+        let mut records: Vec<_> = self.records.read().await.values().cloned().collect();
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.request_id.cmp(&right.request_id))
+        });
+        Ok(records)
+    }
+}
+
+/// In-memory temporary-council orchestration store.
+///
+/// Same contract as the SQLite backend: insert is unique on the council id and
+/// `commit` is a strict compare-and-swap.
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryTemporaryCouncilStore {
+    records: Arc<RwLock<BTreeMap<String, TemporaryCouncilRecord>>>,
+}
+
+impl InMemoryTemporaryCouncilStore {
+    /// Create an empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl TemporaryCouncilStore for InMemoryTemporaryCouncilStore {
+    fn durability(&self) -> crate::temporary_council::TemporaryCouncilStoreDurability {
+        crate::temporary_council::TemporaryCouncilStoreDurability::ProcessBound
+    }
+
+    async fn insert_new(
+        &self,
+        record: &TemporaryCouncilRecord,
+    ) -> Result<TemporaryCouncilRecord, MobStoreError> {
+        let mut records = self.records.write().await;
+        let key = record.council_id.as_str().to_string();
+        if records.contains_key(&key) {
+            return Err(MobStoreError::CasConflict(format!(
+                "temporary council {key} already exists"
+            )));
+        }
+        let mut stored = record.clone();
+        stored.revision = 1;
+        records.insert(key, stored.clone());
+        Ok(stored)
+    }
+
+    async fn load(
+        &self,
+        council_id: &TemporaryCouncilId,
+    ) -> Result<Option<TemporaryCouncilRecord>, MobStoreError> {
+        Ok(self.records.read().await.get(council_id.as_str()).cloned())
+    }
+
+    async fn commit(
+        &self,
+        record: &TemporaryCouncilRecord,
+    ) -> Result<TemporaryCouncilRecord, MobStoreError> {
+        let mut records = self.records.write().await;
+        let key = record.council_id.as_str().to_string();
+        let existing = records.get(&key).ok_or_else(|| {
+            MobStoreError::NotFound(format!("temporary council {key} does not exist"))
+        })?;
+        if existing.revision != record.revision {
+            return Err(MobStoreError::CasConflict(format!(
+                "temporary council {key} revision mismatch (expected {}, found {})",
+                record.revision, existing.revision
+            )));
+        }
+        let mut next = record.clone();
+        next.revision = record.revision.saturating_add(1);
+        next.updated_at = Utc::now();
+        records.insert(key, next.clone());
+        Ok(next)
+    }
+
+    async fn list_all(&self) -> Result<Vec<TemporaryCouncilRecord>, MobStoreError> {
+        let mut records: Vec<_> = self.records.read().await.values().cloned().collect();
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.council_id.cmp(&right.council_id))
+        });
+        Ok(records)
+    }
+}
+
 /// In-memory realm profile store with CAS semantics.
 #[derive(Debug, Default)]
 pub struct InMemoryRealmProfileStore {
@@ -5133,6 +5428,59 @@ mod tests {
 
     use crate::store::realm_profile::contract_tests;
 
+    // --- Forked participant capability store conformance ---
+
+    use crate::store::forked_participant::contract_tests as forked_participant_contract;
+
+    #[tokio::test]
+    async fn forked_participant_insert_and_load_by_every_key() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::insert_and_load_by_every_key(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_duplicate_request_id_loses() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::duplicate_request_id_loses(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_commit_is_compare_and_swap() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::commit_is_compare_and_swap(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_load_exact_rejects_a_tampered_reference() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::load_exact_rejects_a_tampered_reference(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_list_all_returns_every_record() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::list_all_returns_every_record(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_load_by_fork_session_id_resolves_planned_and_activated() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::load_by_fork_session_id_resolves_planned_and_activated(&store)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_fork_session_id_is_unique_across_records() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::fork_session_id_is_unique_across_records(&store).await;
+    }
+
+    #[tokio::test]
+    async fn forked_participant_machine_state_and_cleanup_debt_round_trip() {
+        let store = InMemoryForkedParticipantStore::new();
+        forked_participant_contract::machine_state_and_cleanup_debt_round_trip(&store).await;
+    }
+
     #[tokio::test]
     async fn realm_profile_create_and_get() {
         let store = InMemoryRealmProfileStore::new();
@@ -5197,5 +5545,33 @@ mod tests {
     async fn realm_profile_list_empty() {
         let store = InMemoryRealmProfileStore::new();
         contract_tests::test_list_empty(&store).await;
+    }
+
+    // --- Temporary council orchestration store conformance ---
+
+    use crate::store::temporary_council::contract_tests as temporary_council_contract;
+
+    #[tokio::test]
+    async fn temporary_council_insert_and_load() {
+        let store = InMemoryTemporaryCouncilStore::new();
+        temporary_council_contract::insert_and_load(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_duplicate_council_id_loses() {
+        let store = InMemoryTemporaryCouncilStore::new();
+        temporary_council_contract::duplicate_council_id_loses(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_commit_is_compare_and_swap() {
+        let store = InMemoryTemporaryCouncilStore::new();
+        temporary_council_contract::commit_is_compare_and_swap(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_unfinished_listing_tracks_settlement() {
+        let store = InMemoryTemporaryCouncilStore::new();
+        temporary_council_contract::unfinished_listing_tracks_settlement(&store).await;
     }
 }

@@ -5,11 +5,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::SqliteMobStores;
 use crate::store::{
-    InMemoryMobEventStore, InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore,
-    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
-    InMemoryRealmProfileStore, MobEventStore, MobIdentityMemberStore, MobIdentityStatusStore,
-    MobIdentityStore, MobRunStore, MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore,
-    authority_validating_mob_run_store,
+    ForkedParticipantStore, InMemoryForkedParticipantStore, InMemoryMobEventStore,
+    InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore, InMemoryMobRunStore,
+    InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    MobEventStore, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore, MobRunStore,
+    MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore, authority_validating_mob_run_store,
 };
 use crate::{
     MobDefinition,
@@ -46,6 +46,12 @@ pub struct MobStorage {
     pub(crate) identity_status_projection_order: crate::runtime::IdentityStatusProjectionOrder,
     /// Realm-scoped reusable profile store.
     pub(crate) realm_profiles: Option<Arc<dyn RealmProfileStore>>,
+    /// Source-owned forked-participant capability records.
+    ///
+    /// Optional for the same reason as `realm_profiles`: a custom store
+    /// composition cannot provide it implicitly, and a runtime without it
+    /// simply cannot own forked-participant capabilities.
+    pub(crate) forked_participants: Option<Arc<dyn ForkedParticipantStore>>,
 }
 
 impl MobStorage {
@@ -70,6 +76,7 @@ impl MobStorage {
             identity_status_projection_order:
                 crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
+            forked_participants: Some(Arc::new(InMemoryForkedParticipantStore::new())),
         }
     }
 
@@ -96,6 +103,7 @@ impl MobStorage {
             identity_status_projection_order:
                 crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
+            forked_participants: Some(Arc::new(InMemoryForkedParticipantStore::new())),
         }
     }
 
@@ -118,6 +126,7 @@ impl MobStorage {
             identity_status_projection_order:
                 crate::runtime::IdentityStatusProjectionOrder::default(),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
+            forked_participants: Some(Arc::new(InMemoryForkedParticipantStore::new())),
         }
     }
 
@@ -162,6 +171,7 @@ impl MobStorage {
             #[cfg(not(target_arch = "wasm32"))]
             identity_status_projection_order,
             realm_profiles: None,
+            forked_participants: None,
         }
     }
 
@@ -172,6 +182,20 @@ impl MobStorage {
     ) -> Self {
         self.realm_profiles = realm_profiles;
         self
+    }
+
+    /// Attach the source-owned forked-participant capability store.
+    pub fn with_forked_participant_store(
+        mut self,
+        forked_participants: Option<Arc<dyn ForkedParticipantStore>>,
+    ) -> Self {
+        self.forked_participants = forked_participants;
+        self
+    }
+
+    /// Borrow the forked-participant capability store, when composed.
+    pub fn forked_participant_store(&self) -> Option<&Arc<dyn ForkedParticipantStore>> {
+        self.forked_participants.as_ref()
     }
 
     /// Return whether the structural event log is empty.
@@ -229,6 +253,7 @@ impl MobStorage {
             identity_status: Arc::new(stores.identity_status_store()),
             identity_status_projection_order,
             realm_profiles: Some(Arc::new(stores.realm_profile_store())),
+            forked_participants: Some(Arc::new(stores.forked_participant_store())),
         })
     }
 }
@@ -249,6 +274,13 @@ impl std::fmt::Debug for MobStorage {
                     .map(|_| "<dyn MobIdentityMemberStore>"),
             )
             .field("identity_status", &"<dyn MobIdentityStatusStore>")
+            .field(
+                "forked_participants",
+                &self
+                    .forked_participants
+                    .as_ref()
+                    .map(|_| "<dyn ForkedParticipantStore>"),
+            )
             .field(
                 "realm_profiles",
                 &self

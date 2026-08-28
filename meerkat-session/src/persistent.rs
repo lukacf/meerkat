@@ -1142,6 +1142,19 @@ pub enum PreparedActorSessionSeed {
     },
 }
 
+/// Credential-free evidence captured by the persistence owner when it creates
+/// a detached session fork under the source transcript mutation guard.
+#[derive(Debug, Clone)]
+pub struct DurableSessionForkWithProvenance {
+    pub fork: SessionForkResult,
+    /// Revision of the complete source head observed under the mutation guard.
+    pub source_head_revision: String,
+    /// Complete-boundary prefix selected for the child.
+    pub prefix_message_count: usize,
+    pub prefix_digest: String,
+    pub prefix_revision: String,
+}
+
 /// Whether rewrite-persistence tracing is armed.
 fn rewrite_materialize_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -4838,6 +4851,193 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
     ) -> Result<SessionForkResult, SessionError> {
+        Ok(self
+            .fork_durable_session_with_provenance(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+            )
+            .await?
+            .fork)
+    }
+
+    /// Create a durable fork and retain the exact source provenance observed
+    /// under the source transcript mutation guard.
+    pub async fn fork_durable_session_with_provenance(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: Option<meerkat_core::DurableSessionForkTarget>,
+    ) -> Result<DurableSessionForkWithProvenance, SessionError> {
+        self.fork_durable_session_with_optional_planned_identity(
+            source_session_id,
+            message_count,
+            None,
+            tool_access_policy,
+            target,
+        )
+        .await
+    }
+
+    /// Create a durable fork whose child identity was reserved in advance.
+    ///
+    /// Crash-safe durable fork owners reserve `planned_child_session_id` in
+    /// their own record BEFORE calling this, so a create that crashes between
+    /// the child save and the owner's activation record can be retried against
+    /// the exact same child instead of minting a second branch. Behaviour is
+    /// otherwise identical to [`Self::fork_durable_session_with_provenance`].
+    pub async fn fork_durable_session_with_planned_identity(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        planned_child_session_id: SessionId,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: Option<meerkat_core::DurableSessionForkTarget>,
+    ) -> Result<DurableSessionForkWithProvenance, SessionError> {
+        self.fork_durable_session_with_optional_planned_identity(
+            source_session_id,
+            message_count,
+            Some(planned_child_session_id),
+            tool_access_policy,
+            target,
+        )
+        .await
+    }
+
+    /// Stamp one DETACHED fork session with the exact mob member binding it is
+    /// being seated as.
+    ///
+    /// This is the deferred half of the durable fork identity that
+    /// [`Self::fork_durable_session_with_planned_identity`] cannot supply. A
+    /// forked-participant capability takes its branch at CREATE time, when no
+    /// target member exists yet, so the child necessarily commits with no mob
+    /// member binding at all. Seating that branch later as an ordinary member
+    /// therefore needs exactly one durable stamp, and the ordinary resume
+    /// pipeline — which admits a resumed member against its durable binding —
+    /// is what consumes it.
+    ///
+    /// Nothing else about the child changes: the inherited tool/auth/realm
+    /// execution context, the transcript, and the provider identity are all
+    /// untouched, so the stamp cannot widen anything.
+    ///
+    /// The stamp is idempotent on the EXACT binding and refuses a different
+    /// one, so a retry converges while a second target cannot steal a branch
+    /// another member already seats. A live session is refused: the binding
+    /// must be established before the runtime materializes it.
+    pub async fn bind_detached_fork_session_to_mob_member(
+        &self,
+        child_session_id: &SessionId,
+        member_binding: meerkat_core::MobMemberBinding,
+    ) -> Result<(), SessionError> {
+        let comms_name = member_binding
+            .comms_name()
+            .map_err(|error| {
+                SessionError::Agent(AgentError::ConfigError(format!(
+                    "fork seating target for session {child_session_id} has an invalid mob identity: {error}"
+                )))
+            })?
+            .to_string();
+        let mut session = self
+            .load_durable_session_body(child_session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: child_session_id.clone(),
+            })?;
+        let mut metadata = session
+            .try_session_metadata()
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to decode metadata while seating fork session {child_session_id}: {error}"
+                )))
+            })?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "fork session {child_session_id} has no canonical session metadata to seat"
+                )))
+            })?;
+        match (
+            metadata.mob_member_binding.as_ref(),
+            metadata.comms_name.as_deref(),
+        ) {
+            // The exact binding is already durable. Converge BEFORE the
+            // liveness check: an idempotent replay must not be refused merely
+            // because the member it already seats is running.
+            (Some(existing), Some(existing_name))
+                if existing == &member_binding && existing_name == comms_name =>
+            {
+                return Ok(());
+            }
+            (None, None) => {}
+            _ => {
+                return Err(SessionError::Agent(AgentError::ConfigError(format!(
+                    "fork session {child_session_id} is already seated under a different mob member identity"
+                ))));
+            }
+        }
+        // Only an actual mutation needs quiescence: the binding must be
+        // durable before any runtime materializes the session under it.
+        if self.has_live_session(child_session_id).await? {
+            return Err(SessionError::Busy {
+                id: child_session_id.clone(),
+            });
+        }
+        metadata.comms_name = Some(comms_name);
+        metadata.peer_meta = None;
+        metadata.mob_member_binding = Some(member_binding);
+        session.set_session_metadata(metadata).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to stamp seating identity onto fork session {child_session_id}: {error}"
+            )))
+        })?;
+        match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                self.save_normalized_session(session).await?;
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                self.persist_detached_head_canonical_session(session, "fork seating identity")
+                    .await?;
+            }
+            profile => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "unsupported runtime session persistence profile {profile} while seating fork session {child_session_id}"
+                ))));
+            }
+        }
+        Ok(())
+    }
+
+    /// Load one committed durable session body, if it exists.
+    ///
+    /// Read-only seam for planned-fork retry verification: it proves whether
+    /// the exact planned child is already durable and exposes its committed
+    /// body so the caller can verify selected-prefix provenance and inherited
+    /// execution metadata before recording activation. It never mutates,
+    /// persists, or revives anything.
+    pub async fn load_durable_session_body(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        let mut replay = match self
+            .load_authoritative_session_base_with_replay_info(id)
+            .await
+        {
+            Ok(replay) => replay,
+            Err(SessionError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(replay.session.take())
+    }
+
+    async fn fork_durable_session_with_optional_planned_identity(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        planned_child_session_id: Option<SessionId>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: Option<meerkat_core::DurableSessionForkTarget>,
+    ) -> Result<DurableSessionForkWithProvenance, SessionError> {
         let _mutation_guard = self
             .transcript_edit_mutation_guard(source_session_id)
             .await?;
@@ -4849,10 +5049,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "failed to decode source session metadata while forking session {source_session_id}: {error}"
             )))
         })?;
+        let source_head_revision = source.transcript_revision().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to resolve source transcript revision while forking session {source_session_id}: {error}"
+            )))
+        })?;
         let message_count = message_count.unwrap_or_else(|| source.messages().len());
-        let mut forked = source
-            .fork_at_complete_boundary(message_count)
-            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        let mut forked = match planned_child_session_id {
+            Some(child_session_id) => {
+                source.fork_at_complete_boundary_with_identity(message_count, child_session_id)
+            }
+            None => source.fork_at_complete_boundary(message_count),
+        }
+        .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        let prefix_digest = forked.transcript_content_digest().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to digest fork prefix while forking session {source_session_id}: {error}"
+            )))
+        })?;
+        let prefix_revision = forked.transcript_revision().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to resolve fork prefix revision while forking session {source_session_id}: {error}"
+            )))
+        })?;
         let generic_cache_identity = source_metadata
             .as_ref()
             .map(meerkat_core::SessionMetadata::llm_identity);
@@ -4864,15 +5083,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let cache_inheritance =
             Self::prepare_fork_cache_inheritance(&source, &mut forked, target_cache_identity, None);
         self.authorize_transcript_edit(source_session_id, TranscriptEditKind::Fork)?;
-        self.persist_transcript_fork(
-            source_session_id.clone(),
-            forked,
-            source_metadata,
-            tool_access_policy,
-            cache_inheritance,
-            target,
-        )
-        .await
+        let fork = self
+            .persist_transcript_fork(
+                source_session_id.clone(),
+                forked,
+                source_metadata,
+                tool_access_policy,
+                cache_inheritance,
+                target,
+            )
+            .await?;
+        Ok(DurableSessionForkWithProvenance {
+            fork,
+            source_head_revision,
+            prefix_message_count: message_count,
+            prefix_digest,
+            prefix_revision,
+        })
     }
 
     async fn persist_transcript_fork(
@@ -19556,6 +19783,32 @@ mod tests {
             .expect("fork history should be persisted");
         assert_eq!(fork_history.message_count, 2);
         assert_eq!(fork_history.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn durable_fork_provenance_binds_selected_prefix_under_source_guard() {
+        let (service, _store, _runtime_store, parent_id) = transcript_edit_fixture().await;
+        let source = service
+            .load_authoritative_session_base(&parent_id)
+            .await
+            .expect("load authoritative source")
+            .expect("source exists");
+        let expected_head = source.transcript_revision().expect("source head revision");
+        let expected_prefix = source
+            .transcript_prefix_digest(2)
+            .expect("selected prefix digest");
+
+        let forked = service
+            .fork_durable_session_with_provenance(&parent_id, Some(2), None, None)
+            .await
+            .expect("fork with provenance");
+
+        assert_eq!(forked.source_head_revision, expected_head);
+        assert_eq!(forked.prefix_message_count, 2);
+        assert_eq!(forked.prefix_digest, expected_prefix);
+        assert_eq!(forked.prefix_revision, expected_prefix);
+        assert_eq!(forked.fork.message_count, 2);
+        assert_ne!(forked.fork.session_id, parent_id);
     }
 
     #[tokio::test]

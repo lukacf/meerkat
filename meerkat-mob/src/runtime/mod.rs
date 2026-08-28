@@ -217,6 +217,7 @@ mod event_router;
 mod events;
 mod flow;
 pub mod flow_frame_engine;
+pub mod forked_participant_routing;
 mod handle;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -318,6 +319,9 @@ pub use delegation::{
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
+pub use forked_participant_routing::{
+    AttachedForkedParticipantLease, AttachedForkedParticipantSpawn, ForkedParticipantCreateRequest,
+};
 pub use handle::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,

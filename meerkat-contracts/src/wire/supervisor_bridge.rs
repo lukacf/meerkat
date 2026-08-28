@@ -87,15 +87,16 @@ impl BridgeProtocolVersion {
     /// the Mob-owned semantic incarnation and returns the receiving runtime's
     /// exact runtime/session fence; `RetireMember` must present that fence.
     pub const V5: Self = Self(5);
+    /// Source-owner forked-participant capability protocol.
+    pub const V6: Self = Self(6);
     /// Current protocol version implemented by this bridge contract.
-    pub const CURRENT: Self = Self::V5;
+    pub const CURRENT: Self = Self::V6;
     /// Default protocol version for newly minted supervisor authority.
     ///
-    /// V5 adds exact peer-only bind/retire incarnation fencing on top of V4's
-    /// multi-host and durable supervisor-rotation protocol. V2-V4 remain
-    /// decodable for persisted or negotiated legacy command families, but new
-    /// authorities must not omit V5 retirement fencing.
-    pub const DEFAULT: Self = Self::V5;
+    /// V6 adds source-owner forked-participant capabilities on top of V5's
+    /// exact peer-only bind/retire incarnation fencing. V2-V5 remain
+    /// decodable for persisted or negotiated historical command families.
+    pub const DEFAULT: Self = Self::V6;
     /// Protocol versions accepted by this bridge contract.
     ///
     /// V2 is retained so persisted supervisor-authority records and V2 peers
@@ -105,10 +106,10 @@ impl BridgeProtocolVersion {
     /// under-versioned command is rejected with a typed
     /// `UnsupportedProtocolVersion` cause rather than a raw
     /// deserialization error.
-    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3, Self::V4, Self::V5];
+    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3, Self::V4, Self::V5, Self::V6];
 
     pub const fn is_supported(self) -> bool {
-        matches!(self.0, 2..=5)
+        matches!(self.0, 2..=6)
     }
 
     pub const fn same_protocol_as(self, other: Self) -> bool {
@@ -129,6 +130,11 @@ impl BridgeProtocolVersion {
         self.0 >= 4
     }
 
+    /// Whether the peer supports source-owner forked participant operations.
+    pub const fn supports_forked_participants(self) -> bool {
+        self.0 >= 6
+    }
+
     pub fn supported() -> &'static [Self] {
         Self::SUPPORTED
     }
@@ -139,6 +145,7 @@ impl BridgeProtocolVersion {
             3 => Ok(Self::V3),
             4 => Ok(Self::V4),
             5 => Ok(Self::V5),
+            6 => Ok(Self::V6),
             _ => Err(UnsupportedBridgeProtocolVersion {
                 raw,
                 command: None,
@@ -292,6 +299,11 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   stale retirement returns typed presented/current evidence without
 ///   touching a successor runtime. V4 peers cannot safely infer this authority
 ///   from a session id, so both command shapes require V5.
+/// - `6`: host-addressed `CreateForkedParticipant` and
+///   `RevokeForkedParticipant` carry the exact source member incarnation.
+///   `MaterializeMember` may carry a capability attachment only for `Resume`
+///   of that reference's exact fork session. V2-V5 peers reject these fields
+///   and commands with a typed minimum-version failure.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -435,6 +447,10 @@ pub enum BridgeCommand {
     MemberOperatorRequest(BridgeMemberOperatorPayload),
     /// Observe one previously submitted durable supervisor rotation.
     ObserveSupervisorRotation(BridgeSupervisorRotationObserve),
+    /// V6 source-owner capability creation, addressed to the source host.
+    CreateForkedParticipant(BridgeCreateForkedParticipantPayload),
+    /// V6 source-owner capability revocation, addressed to the source host.
+    RevokeForkedParticipant(BridgeRevokeForkedParticipantPayload),
 }
 
 impl BridgeCommand {
@@ -470,6 +486,8 @@ impl BridgeCommand {
             Self::HostStatus(payload) => payload.protocol_version,
             Self::MemberOperatorRequest(payload) => payload.protocol_version,
             Self::ObserveSupervisorRotation(payload) => payload.protocol_version,
+            Self::CreateForkedParticipant(payload) => payload.protocol_version,
+            Self::RevokeForkedParticipant(payload) => payload.protocol_version,
         }
     }
 }
@@ -553,7 +571,36 @@ pub fn decode_bridge_command(
             version.insufficient_for_command(command, minimum),
         ));
     }
-    serde_json::from_value(value).map_err(BridgeCommandDecodeError::Invalid)
+    let command = serde_json::from_value(value).map_err(BridgeCommandDecodeError::Invalid)?;
+    validate_v6_capability_shape(&command)?;
+    Ok(command)
+}
+
+/// Validate cross-field V6 capability invariants which serde's field-level
+/// decoding cannot express. Attachment remains an ordinary Resume extension;
+/// a `Fresh` materialization or a mismatched fork session is never admitted.
+fn validate_v6_capability_shape(command: &BridgeCommand) -> Result<(), BridgeCommandDecodeError> {
+    let BridgeCommand::MaterializeMember(payload) = command else {
+        return Ok(());
+    };
+    let Some(attachment) = payload.forked_participant_attachment.as_ref() else {
+        return Ok(());
+    };
+    let valid_resume = matches!(
+        &payload.launch,
+        MaterializeLaunchMode::Resume { session_id, .. }
+            if session_id == &attachment.capability.fork_session_id
+    );
+    if valid_resume {
+        Ok(())
+    } else {
+        Err(BridgeCommandDecodeError::Invalid(serde_json::Error::io(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "forked participant attachment requires Resume of its exact fork session",
+            ),
+        )))
+    }
 }
 
 /// Minimum wire version for every command family whose shape or semantics was
@@ -569,6 +616,14 @@ fn bridge_command_minimum_protocol(
     let command = value.get("command")?.as_str()?;
     let minimum = match command {
         "bind_member" | "retire_member" => BridgeProtocolVersion::V5,
+        "create_forked_participant" | "revoke_forked_participant" => BridgeProtocolVersion::V6,
+        "materialize_member"
+            if value
+                .get("forked_participant_attachment")
+                .is_some_and(|attachment| !attachment.is_null()) =>
+        {
+            BridgeProtocolVersion::V6
+        }
         "hard_cancel_member"
         | "cancel_tracked_member_input"
         | "read_member_history"
@@ -623,6 +678,8 @@ fn bridge_command_minimum_protocol(
     let command = match command {
         "bind_member" => "BindMember",
         "retire_member" => "RetireMember",
+        "create_forked_participant" => "CreateForkedParticipant",
+        "revoke_forked_participant" => "RevokeForkedParticipant",
         "hard_cancel_member" => "HardCancelMember",
         "cancel_tracked_member_input" => "CancelTrackedMemberInput",
         "read_member_history" => "ReadMemberHistory",
@@ -973,6 +1030,113 @@ pub struct BridgeMaterializePayload {
     /// Canonical digest of `spec` (`portable_member_spec_digest`).
     pub spec_digest: String,
     pub launch: MaterializeLaunchMode,
+    /// V6 attachment carried only with ordinary `Resume` materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_participant_attachment: Option<BridgeForkedParticipantAttachment>,
+}
+
+/// V6 immutable capability reference. It is deliberately metadata-only: no
+/// credentials or transcript content may cross this bridge.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeForkedParticipantRef {
+    pub capability_id: String,
+    pub source_identity: String,
+    pub fork_session_id: String,
+    pub owner_route: BridgeForkedParticipantOwnerRoute,
+    pub source_session_id: String,
+    pub prefix_message_count: u64,
+    pub prefix_digest: String,
+    pub scope: BridgeForkedParticipantScope,
+    pub reuse: BridgeForkedParticipantReuse,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub revocation_id: String,
+    pub cleanup_id: String,
+}
+
+impl fmt::Debug for BridgeForkedParticipantRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BridgeForkedParticipantRef")
+            .field("capability_id", &"[REDACTED]")
+            .field("source_identity", &self.source_identity)
+            .field("fork_session_id", &self.fork_session_id)
+            .field("owner_route", &self.owner_route)
+            .field("source_session_id", &self.source_session_id)
+            .field("prefix_message_count", &self.prefix_message_count)
+            .field("prefix_digest", &self.prefix_digest)
+            .field("scope", &self.scope)
+            .field("reuse", &self.reuse)
+            .field("expires_at", &self.expires_at)
+            .field("revocation_id", &self.revocation_id)
+            .field("cleanup_id", &self.cleanup_id)
+            .finish()
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BridgeForkedParticipantOwnerRoute {
+    Local { realm_id: String },
+    Host { realm_id: String, host_id: String },
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeForkedParticipantScope {
+    Invoke,
+    Observe,
+    InvokeAndObserve,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BridgeForkedParticipantReuse {
+    OneShot,
+    BoundedReuse { max_uses: u32 },
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeForkedParticipantAttachment {
+    pub attachment_id: String,
+    pub capability: BridgeForkedParticipantRef,
+}
+
+/// V6 creation request. `source_member` supplies the exact source
+/// generation/fence/session proof; payload fields contain no source body.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeCreateForkedParticipantPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub binding_generation: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub source_member: BridgeMemberIncarnation,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_message_count: Option<u64>,
+    pub scope: BridgeForkedParticipantScope,
+    pub reuse: BridgeForkedParticipantReuse,
+    pub ttl_millis: u64,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRevokeForkedParticipantPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub binding_generation: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub source_member: BridgeMemberIncarnation,
+    pub capability: BridgeForkedParticipantRef,
 }
 
 /// Launch mode for `MaterializeMember`. CLOSED — `Fork` is deliberately
@@ -1656,6 +1820,31 @@ pub enum BridgeReply {
     },
     MemberLiveChannelControlled(BridgeLiveControlledResponse),
     MemberOperatorReply(MemberOperatorReply),
+    ForkedParticipantCreated(BridgeForkedParticipantCreatedResponse),
+    ForkedParticipantRevoked(BridgeForkedParticipantRevokedResponse),
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeForkedParticipantCreatedResponse {
+    pub capability: BridgeForkedParticipantRef,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BridgeForkedParticipantRevocationOutcome {
+    Revoked { cleanup_pending: bool },
+    PendingAttachedRelease,
+    Converged,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeForkedParticipantRevokedResponse {
+    pub outcome: BridgeForkedParticipantRevocationOutcome,
 }
 
 /// Response to `OpenMemberLiveChannel`.
@@ -2094,6 +2283,19 @@ pub enum BridgeRejectionCause {
     InvalidBootstrapToken,
     /// The wire protocol version is not supported by this runtime.
     UnsupportedProtocolVersion,
+    /// A V6 capability operation was sent to a peer that does not implement
+    /// the forked-participant protocol family.
+    ForkedParticipantProtocolUnsupported,
+    ForkedParticipantNotFound,
+    ForkedParticipantTampered,
+    ForkedParticipantExpired,
+    ForkedParticipantRevoked,
+    ForkedParticipantExhausted,
+    ForkedParticipantBusy,
+    ForkedParticipantSourceMismatch,
+    ForkedParticipantRouteMismatch,
+    /// Capability cleanup remains durable reconciliation work.
+    ForkedParticipantCleanupDebt,
     /// The embedded supervisor peer spec failed validation.
     InvalidSupervisorSpec,
     /// The embedded trusted-peer spec failed validation.
@@ -2114,7 +2316,10 @@ pub enum BridgeRejectionCause {
     StaleFence,
     /// The event cursor overran the host's retained window; the reply
     /// carries the current position so the poller can restart cleanly.
-    StaleCursor { watermark: u64, generation: u64 },
+    StaleCursor {
+        watermark: u64,
+        generation: u64,
+    },
     /// One durable event envelope cannot fit the bridge reply budget. The
     /// poller must record the typed gap and resume at `next_seq`; retrying the
     /// same cursor would livelock forever on the poison row.
@@ -2141,7 +2346,9 @@ pub enum BridgeRejectionCause {
     /// observation window. The controller may retry the same exact
     /// `ReleaseMember` tuple; this cause is never used for generic host
     /// unavailability.
-    RuntimeRetirementInProgress { stage: String },
+    RuntimeRetirementInProgress {
+        stage: String,
+    },
     /// Plane-(b) control-scope denial (A9).
     ScopeDenied {
         required: WireControlScope,
@@ -2153,26 +2360,45 @@ pub enum BridgeRejectionCause {
     SpecDigestMismatch,
     /// The host could not build the member; the typed cause taxonomy is
     /// §14.4's table.
-    MaterializeBuildRejected { cause: MemberBuildRejection },
+    MaterializeBuildRejected {
+        cause: MemberBuildRejection,
+    },
     /// Model unknown to the host's registry with no provider override.
-    ModelUnresolvable { model: String },
+    ModelUnresolvable {
+        model: String,
+    },
     /// The named realm/binding does not resolve on the host's realm chain.
-    AuthBindingUnresolvable { realm: String, binding: String },
+    AuthBindingUnresolvable {
+        realm: String,
+        binding: String,
+    },
     /// A declared MCP stdio server's command is not present on the host.
-    McpCommandMissing { server: String },
+    McpCommandMissing {
+        server: String,
+    },
     /// The host's realm persistence backend is unavailable.
     RealmBackendUnavailable,
     /// A `required_env_keys` entry cannot be satisfied on the host (values
     /// never travel — R5).
-    EnvKeyMissing { key: String },
+    EnvKeyMissing {
+        key: String,
+    },
     /// The host reports a different engine version than the one recorded
     /// at bind; feeds rebind.
-    HostEngineVersionChanged { bound: String, reported: String },
+    HostEngineVersionChanged {
+        bound: String,
+        reported: String,
+    },
     // --- V4 live-channel causes (§16.4) ---
     /// The member's model has no realtime capability.
-    ModelNotRealtime { model: String, provider: String },
+    ModelNotRealtime {
+        model: String,
+        provider: String,
+    },
     /// No live adapter is available for the member's provider.
-    LiveAdapterUnavailable { provider: String },
+    LiveAdapterUnavailable {
+        provider: String,
+    },
     /// The host has no live transport configured/advertised.
     LiveTransportUnavailable,
     /// The member already has a bound live channel.
@@ -2180,7 +2406,9 @@ pub enum BridgeRejectionCause {
     /// The addressed live channel does not exist.
     LiveChannelNotFound,
     /// The requested live transport is not supported by the host.
-    LiveTransportUnsupported { requested: String },
+    LiveTransportUnsupported {
+        requested: String,
+    },
     // --- V4 launch causes (§19.L1) ---
     /// `Resume` named a session with no live runtime and no resumable snapshot.
     /// Archived/Retired rows are intentionally non-resumable and use this same
@@ -2190,7 +2418,9 @@ pub enum BridgeRejectionCause {
     /// A capability the launch path requires is absent on the host (e.g.
     /// interaction-event injector for autonomous mode, `durable_sessions`
     /// for snapshot restore).
-    CapabilityMissing { capability: String },
+    CapabilityMissing {
+        capability: String,
+    },
     /// The launch mode reached admission but is not supported there.
     LaunchModeUnsupported,
     /// A `Resume` session id is bound to a different placement than the
@@ -2199,7 +2429,9 @@ pub enum BridgeRejectionCause {
     /// The requested durable session is already owned by another
     /// `(mob_id, agent_identity)` row on this host. The host rejects before
     /// rebinding any live runtime or recording an alias.
-    SessionOwnershipConflict { session_id: String },
+    SessionOwnershipConflict {
+        session_id: String,
+    },
 }
 
 /// Typed "host cannot build the member" taxonomy (§14.4). Closed — every
@@ -2927,6 +3159,9 @@ pub struct BridgeCapabilities {
     /// Host forwards member approval requests to the controlling host.
     #[serde(default, skip_serializing_if = "bool_is_false")]
     pub approval_forwarding: bool,
+    /// Host can serve the V6 source-owner forked-participant family.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub forked_participants: bool,
     /// Providers the host can resolve credentials for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolvable_providers: Vec<meerkat_core::Provider>,
@@ -2953,6 +3188,7 @@ impl Default for BridgeCapabilities {
             mcp: false,
             engine_version: String::new(),
             approval_forwarding: false,
+            forked_participants: false,
             resolvable_providers: Vec::new(),
         }
     }
@@ -4452,18 +4688,18 @@ mod tests {
                 BridgeProtocolVersion::V3,
                 BridgeProtocolVersion::V4,
                 BridgeProtocolVersion::V5,
+                BridgeProtocolVersion::V6,
             ]
         );
-        // V5 is current/default because peer-only bind and retire now require
-        // exact controller-member incarnation fencing. V2-V4 remain explicitly
-        // decodable for their negotiated legacy command families.
+        // V6 is current/default. V2-V5 remain explicitly decodable only for
+        // their negotiated historical command families.
         assert_eq!(
             supervisor_bridge_current_protocol_version(),
-            BridgeProtocolVersion::V5
+            BridgeProtocolVersion::V6
         );
         assert_eq!(
             supervisor_bridge_default_protocol_version(),
-            BridgeProtocolVersion::V5
+            BridgeProtocolVersion::V6
         );
         assert!(supervisor_bridge_protocol_version_supported(
             BridgeProtocolVersion::V2
@@ -4503,6 +4739,7 @@ mod tests {
                 BridgeProtocolVersion::V3,
                 BridgeProtocolVersion::V4,
                 BridgeProtocolVersion::V5,
+                BridgeProtocolVersion::V6,
             ]
         );
         // V4 host-capability facts default to the incapable/unreported
@@ -4544,6 +4781,7 @@ mod tests {
                 BridgeProtocolVersion::V3,
                 BridgeProtocolVersion::V4,
                 BridgeProtocolVersion::V5,
+                BridgeProtocolVersion::V6,
             ]
         );
         assert!(capabilities.deliver_member_input);
@@ -5105,6 +5343,7 @@ mod tests {
                         BridgeProtocolVersion::V3,
                         BridgeProtocolVersion::V4,
                         BridgeProtocolVersion::V5,
+                        BridgeProtocolVersion::V6,
                     ],
                     "deliver_member_input": false,
                     "observe_member": false,
@@ -5552,6 +5791,7 @@ mod tests {
                     session_id: "sess-9".to_string(),
                     resume_from_role: None,
                 },
+                forked_participant_attachment: None,
             })),
             BridgeCommand::ReleaseMember(BridgeReleasePayload {
                 supervisor: sample_peer_spec(),
@@ -5619,7 +5859,7 @@ mod tests {
             value
                 .as_object_mut()
                 .expect("command object")
-                .insert("protocol_version".to_string(), json!(6));
+                .insert("protocol_version".to_string(), json!(7));
             let err = decode_bridge_command(value)
                 .expect_err("future protocol version must reject pre-serde");
             assert!(
@@ -5824,6 +6064,7 @@ mod tests {
             spec: crate::wire::portable_spec::sample_portable_member_spec(),
             spec_digest: "d".repeat(64),
             launch: MaterializeLaunchMode::Fresh {},
+            forked_participant_attachment: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -5853,6 +6094,7 @@ mod tests {
             spec: crate::wire::portable_spec::sample_portable_member_spec(),
             spec_digest: "d".repeat(64),
             launch: MaterializeLaunchMode::Fresh {},
+            forked_participant_attachment: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -6801,5 +7043,160 @@ mod tests {
             envelope: row.envelope.clone(),
         };
         assert_ne!(row, other, "different durable seq must compare unequal");
+    }
+
+    #[test]
+    fn v6_forked_participant_command_round_trips_without_credentials_or_body() {
+        let command =
+            BridgeCommand::CreateForkedParticipant(BridgeCreateForkedParticipantPayload {
+                supervisor: sample_peer_spec(),
+                epoch: 42,
+                binding_generation: 7,
+                protocol_version: BridgeProtocolVersion::V6,
+                source_member: sample_member_incarnation(),
+                request_id: "fork-request-1".to_string(),
+                prefix_message_count: Some(3),
+                scope: BridgeForkedParticipantScope::InvokeAndObserve,
+                reuse: BridgeForkedParticipantReuse::BoundedReuse { max_uses: 2 },
+                ttl_millis: 60_000,
+            });
+        let bytes = serde_json::to_vec(&command).expect("serialize V6 command");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("command JSON");
+        assert_eq!(value["command"], json!("create_forked_participant"));
+        assert_eq!(value["protocol_version"], json!(6));
+        assert!(value.get("credentials").is_none());
+        assert!(value.get("transcript").is_none());
+        assert!(value.get("body").is_none());
+        let decoded = decode_bridge_command(value).expect("decode V6 command");
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn v6_capability_commands_are_typed_version_gated_on_v5() {
+        let pubkey = vec![0_u8; 32];
+        let value = json!({
+            "command": "create_forked_participant",
+            "supervisor": {
+                "name": "member-a", "peer_id": "peer-abc",
+                "address": "tcp://127.0.0.1:7000", "pubkey": pubkey
+            },
+            "epoch": 42,
+            "binding_generation": 7,
+            "protocol_version": 5,
+            "source_member": {
+                "mob_id": "mob-1", "agent_identity": "worker-1", "host_id": "host-1",
+                "binding_generation": 7, "member_session_id": "session-1",
+                "generation": 1, "fence_token": 3
+            },
+            "request_id": "fork-request-1",
+            "scope": "observe",
+            "reuse": {"kind": "one_shot"},
+            "ttl_millis": 60000
+        });
+        assert!(matches!(
+            decode_bridge_command(value),
+            Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(error))
+                if error.to_string().contains("minimum 6")
+        ));
+    }
+
+    #[test]
+    fn v6_capability_reply_round_trips_with_immutable_metadata_only() {
+        let reply = BridgeReply::ForkedParticipantCreated(BridgeForkedParticipantCreatedResponse {
+            capability: BridgeForkedParticipantRef {
+                capability_id: "a".repeat(64),
+                source_identity: "worker-1".to_string(),
+                fork_session_id: "00000000-0000-0000-0000-000000000001".to_string(),
+                owner_route: BridgeForkedParticipantOwnerRoute::Host {
+                    realm_id: "global".to_string(),
+                    host_id: "host-1".to_string(),
+                },
+                source_session_id: "00000000-0000-0000-0000-000000000002".to_string(),
+                prefix_message_count: 3,
+                prefix_digest: "sha256:prefix".to_string(),
+                scope: BridgeForkedParticipantScope::Observe,
+                reuse: BridgeForkedParticipantReuse::OneShot,
+                expires_at: "2026-08-27T12:00:00Z".parse().expect("timestamp"),
+                revocation_id: "fpr:req-1".to_string(),
+                cleanup_id: "fpk:req-1".to_string(),
+            },
+        });
+        let value = serde_json::to_value(&reply).expect("serialize V6 reply");
+        assert_eq!(value["result"], json!("forked_participant_created"));
+        assert!(value.get("credentials").is_none());
+        assert!(value.get("transcript").is_none());
+        assert!(value.get("body").is_none());
+        let decoded: BridgeReply = serde_json::from_value(value).expect("strict decode");
+        assert_eq!(decoded, reply);
+        let debug = format!("{reply:?}");
+        assert!(
+            !debug.contains(&"a".repeat(64)),
+            "capability bearer leaked in Debug"
+        );
+    }
+
+    #[test]
+    fn v6_attachment_is_version_gated_and_requires_exact_resume_session() {
+        let attachment = BridgeForkedParticipantAttachment {
+            attachment_id: "attachment-1".to_string(),
+            capability: BridgeForkedParticipantRef {
+                capability_id: "b".repeat(64),
+                source_identity: "worker-1".to_string(),
+                fork_session_id: "fork-session".to_string(),
+                owner_route: BridgeForkedParticipantOwnerRoute::Host {
+                    realm_id: "global".to_string(),
+                    host_id: "host-1".to_string(),
+                },
+                source_session_id: "source-session".to_string(),
+                prefix_message_count: 0,
+                prefix_digest: "sha256:empty".to_string(),
+                scope: BridgeForkedParticipantScope::Invoke,
+                reuse: BridgeForkedParticipantReuse::OneShot,
+                expires_at: "2026-08-27T12:00:00Z".parse().expect("timestamp"),
+                revocation_id: "fpr:req-1".to_string(),
+                cleanup_id: "fpk:req-1".to_string(),
+            },
+        };
+        let payload = BridgeMaterializePayload {
+            supervisor: sample_peer_spec(),
+            epoch: 1,
+            binding_generation: 1,
+            protocol_version: BridgeProtocolVersion::V5,
+            generation: 1,
+            fence_token: 1,
+            spec: crate::wire::portable_spec::sample_portable_member_spec(),
+            spec_digest: "d".repeat(64),
+            launch: MaterializeLaunchMode::Resume {
+                session_id: "fork-session".to_string(),
+                resume_from_role: None,
+            },
+            forked_participant_attachment: Some(attachment.clone()),
+        };
+        let v5 = serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
+            .expect("serialize V5 materialize");
+        assert!(matches!(
+            decode_bridge_command(v5),
+            Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(_))
+        ));
+
+        let invalid = BridgeMaterializePayload {
+            protocol_version: BridgeProtocolVersion::V6,
+            launch: MaterializeLaunchMode::Fresh {},
+            forked_participant_attachment: Some(attachment),
+            supervisor: sample_peer_spec(),
+            epoch: 1,
+            binding_generation: 1,
+            generation: 1,
+            fence_token: 1,
+            spec: crate::wire::portable_spec::sample_portable_member_spec(),
+            spec_digest: "d".repeat(64),
+        };
+        assert!(matches!(
+            decode_bridge_command(
+                serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(invalid)))
+                    .expect("serialize invalid attachment")
+            ),
+            Err(BridgeCommandDecodeError::Invalid(_))
+        ));
     }
 }

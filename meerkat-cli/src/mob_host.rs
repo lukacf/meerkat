@@ -31,6 +31,7 @@ use meerkat_core::connection::{
 use meerkat_core::service::SessionBuildOptions;
 use meerkat_core::{Config, Provider, RealmId};
 use meerkat_core::{RealmConfig, RealmSelection};
+use meerkat_mob::ForkedParticipantSourceRuntime;
 use meerkat_mob::runtime::host_actor::{
     HostCapabilityFacts, HostDescriptorSink, MobHostActorConfig, ProviderPresenceProbe,
     ProviderPresenceProbeError, RuntimeStoreHostBindingPersistence, build_host_comms_runtime,
@@ -771,6 +772,13 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     let (manifest, persistence) = crate::create_persistence_bundle(&scope).await?;
     let durable_sessions = matches!(manifest.backend, RealmBackend::Sqlite);
     let store_path = crate::realm_store_path(&manifest, &scope);
+    // Forked-participant authority is realm-scoped host substrate, not a
+    // controller-local registry. It uses the same explicitly rooted custody
+    // database as MobMcpState, never the realm directory or a mob event log.
+    let capability_store: Arc<dyn meerkat_mob::store::ForkedParticipantStore> =
+        Arc::new(meerkat_mob::store::SqliteForkedParticipantStore::open(
+            meerkat_mob_mcp::MobMcpState::persistent_forked_participant_store_path(&realm_root),
+        )?);
     let runtime_store = persistence.runtime_store();
     let session_store = persistence.session_store();
     let schedule_service = ScheduleService::new(persistence.schedule_store());
@@ -852,6 +860,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         None,
     );
     let service = Arc::new(service);
+    let capability_source_runtime: Arc<dyn ForkedParticipantSourceRuntime> = service.clone();
 
     // 6. Live plane (DEC-P2-8, served since 6b): four facade roles over the
     //    daemon's session service; the live bridge responder arms serve the
@@ -1048,7 +1057,11 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
             realm_backend_persistent: durable_sessions,
             member_identity_root,
             preflight_probe: probe as Arc<dyn MaterializePreflightProbe>,
+            forked_participant_realm: Some(realm_id.clone()),
+            forked_participant_store: Some(capability_store),
+            forked_participant_source_runtime: Some(capability_source_runtime),
         }),
+        forked_participant_sweep_interval: None,
     })
     .await?;
     // The constructor transfers revival into the actor's owned task before

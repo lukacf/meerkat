@@ -3473,6 +3473,7 @@ dependencies = [
  "chrono",
  "futures",
  "indexmap",
+ "jsonschema",
  "meerkat",
  "meerkat-client",
  "meerkat-contracts",

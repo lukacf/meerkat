@@ -35,6 +35,7 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
 pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod detached_job;
+pub mod forked_participant_lifecycle;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
@@ -44,6 +45,7 @@ pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_persistence_version_authority;
 pub mod session_turn_admission;
+pub mod temporary_council_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod workgraph_lifecycle;
@@ -106,6 +108,12 @@ pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
 pub const DETACHED_JOB_PRODUCTION_RUST_CRATE: &str = "meerkat-jobs";
 pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
+pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::forked_participant_lifecycle";
+pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::temporary_council_lifecycle";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
 pub const MEERKAT_MACHINE_PRODUCTION_RUST_MODULE: &str = "meerkat_machine::dsl";
 pub const RUNTIME_DELIVERY_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
@@ -4382,6 +4390,166 @@ pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
 pub fn dsl_work_attention_lifecycle_machine() -> MachineSchema {
     work_attention_lifecycle_schema_metadata()
         .attach_to(work_attention_lifecycle::WorkAttentionLifecycleMachineState::schema())
+}
+
+pub fn dsl_forked_participant_lifecycle_machine() -> MachineSchema {
+    forked_participant_lifecycle_schema_metadata()
+        .attach_to(forked_participant_lifecycle::ForkedParticipantLifecycleMachineState::schema())
+}
+
+pub fn dsl_forked_participant_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_forked_participant_lifecycle_machine(),
+        FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the forked-participant capability record machine.
+///
+/// Every `Enum<..>` the machine names — its phase enum plus the typed
+/// rejection/denial/ignore reason vocabularies — is bound here; the schema
+/// validator rejects any unbound named type.
+pub fn forked_participant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantLifecycleState",
+                &[
+                    "Empty",
+                    "Reserved",
+                    "ActivationFailed",
+                    "Active",
+                    "Attached",
+                    "RevocationPendingAttached",
+                    "ExpiryPendingAttached",
+                    "Revoked",
+                    "Expired",
+                    "Exhausted",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantCleanupState",
+                &["NotRequired", "Deferred", "Pending", "Complete"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantReservationRejection",
+                &[
+                    "MalformedRequest",
+                    "FingerprintConflict",
+                    "AlreadyProvisioned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantActivationRejection",
+                &[
+                    "NotReserved",
+                    "FingerprintMismatch",
+                    "MalformedActivation",
+                    "ActivationConflict",
+                    "CapabilityTerminal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantAttachDenial",
+                &[
+                    "AuthenticationInvalid",
+                    "NotActive",
+                    "MalformedAttachment",
+                    "Busy",
+                    "AttachmentAlreadyReleased",
+                    "Expired",
+                    "Revoked",
+                    "Exhausted",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantReleaseRejection",
+                &["NoActiveAttachment", "AttachmentMismatch"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantRevocationDenial",
+                &["AuthenticationInvalid", "NotProvisioned", "AlreadyTerminal"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantExpiryIgnore",
+                &[
+                    "NotExpired",
+                    "NotProvisioned",
+                    "AlreadyRecorded",
+                    "Terminal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ForkedParticipantCleanupRejection",
+                &["NotTerminal", "AttachmentOutstanding", "NoCleanupDebt"],
+            ),
+        ],
+        vec![],
+    )
+}
+
+pub fn dsl_temporary_council_lifecycle_machine() -> MachineSchema {
+    temporary_council_lifecycle_schema_metadata()
+        .attach_to(temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState::schema())
+}
+
+pub fn dsl_temporary_council_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_temporary_council_lifecycle_machine(),
+        TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the temporary-council record machine.
+pub fn temporary_council_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilLifecycleState",
+                &[
+                    "Empty",
+                    "Preparing",
+                    "Running",
+                    "Merging",
+                    "Concluded",
+                    "CleanupDebt",
+                    "Settled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilExitClass",
+                &["Unsealed", "Executed", "CoordinatorInterrupted"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilClaimDenial",
+                &[
+                    "MalformedClaim",
+                    "NotOpened",
+                    "HeldByAnotherCoordinator",
+                    "AlreadySettled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilOpenRejection",
+                &["MalformedRequest", "FingerprintConflict"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilAdvanceRejection",
+                &["NotOpened", "AlreadyAdvanced"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilSealRejection",
+                &["NotOpened", "NotMerging", "AlreadySealed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TemporaryCouncilCleanupRejection",
+                &["ResultNotSealed", "AlreadySettled"],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_work_execution_lifecycle_machine() -> MachineSchema {

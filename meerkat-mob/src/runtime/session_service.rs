@@ -970,6 +970,20 @@ pub trait MobSessionService:
         Err(super::LiveBridgeOperationStartError::Unavailable)
     }
 
+    /// Expose this service as the source runtime for source-owned
+    /// forked-participant capabilities, when it can be one.
+    ///
+    /// The seam is deliberately an accessor rather than a supertrait: a
+    /// session service that cannot prove sanitized execution evidence and take
+    /// a planned complete-boundary fork must not be able to claim capability
+    /// source authority just by being a session service. Absence is the honest
+    /// realization, not a degraded fallback.
+    fn forked_participant_source_runtime(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn crate::forked_participant::ForkedParticipantSourceRuntime>> {
+        None
+    }
+
     /// Create while the caller already owns this session's stable runtime-turn
     /// finalization boundary. Persistent implementations override this to use
     /// their non-reentrant boundary-aware admission seam; simple/mock services
@@ -2149,6 +2163,14 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    /// The persistent service owns durable session bodies, so it IS the
+    /// capability source runtime (the impl lives at the bottom of this file).
+    fn forked_participant_source_runtime(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn crate::forked_participant::ForkedParticipantSourceRuntime>> {
+        Some(self)
+    }
+
     #[cfg(feature = "experimental-gpt-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
@@ -3029,4 +3051,180 @@ where
     async fn rearm_all_checkpointers(&self) {
         meerkat_session::PersistentSessionService::<B>::rearm_all_checkpointers(self).await;
     }
+}
+
+/// Source-runtime seam for forked-participant capabilities.
+///
+/// The capability service never talks to a session store directly: it asks the
+/// runtime that owns the source member to prove a session's execution
+/// evidence, to take the planned fork, to prove a planned child's sanitized
+/// durable evidence, and to archive a fork session during cleanup.
+///
+/// Inheritance is enforced here, not requested: the fork carries no tool-policy
+/// replacement, so the branch keeps the source's effective tool/auth/realm
+/// configuration, and the fork is refused unless the source session really
+/// belongs to the named member and realm.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl<B> crate::forked_participant::ForkedParticipantSourceRuntime
+    for meerkat_session::PersistentSessionService<B>
+where
+    B: meerkat_session::SessionAgentBuilder + 'static,
+{
+    async fn session_execution_evidence(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<crate::forked_participant::SessionExecutionEvidence>, SessionError> {
+        let Some(session) =
+            meerkat_session::PersistentSessionService::<B>::load_durable_session_body(
+                self, session_id,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(session_execution_evidence_of(&session, session_id)?))
+    }
+
+    async fn fork_planned_child(
+        &self,
+        request: crate::forked_participant::PlannedForkRequest,
+    ) -> Result<crate::forked_participant::PlannedForkOutcome, SessionError> {
+        // Ownership is proven before the fork, never after: a fork is a durable
+        // grant of the source's execution context.
+        let source = meerkat_session::PersistentSessionService::<B>::load_durable_session_body(
+            self,
+            &request.source_session_id,
+        )
+        .await?
+        .ok_or_else(|| SessionError::NotFound {
+            id: request.source_session_id.clone(),
+        })?;
+        let evidence = session_execution_evidence_of(&source, &request.source_session_id)?;
+        if evidence.agent_identity.as_ref() != Some(&request.source_identity) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::ConfigError(format!(
+                    "session {} does not belong to member {}",
+                    request.source_session_id, request.source_identity
+                )),
+            ));
+        }
+        if evidence.realm_id.as_ref() != Some(&request.owner_realm) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::ConfigError(format!(
+                    "session {} does not belong to realm {}",
+                    request.source_session_id,
+                    request.owner_realm.as_str()
+                )),
+            ));
+        }
+
+        // No tool-access-policy argument: `None` retains the source's effective
+        // policy, which is exactly the inheritance issue #159 requires.
+        let provenance = meerkat_session::PersistentSessionService::<B>::
+            fork_durable_session_with_planned_identity(
+                self,
+                &request.source_session_id,
+                request.prefix_message_count,
+                request.planned_child_session_id,
+                None,
+                None,
+            )
+            .await?;
+        Ok(crate::forked_participant::PlannedForkOutcome {
+            child_session_id: provenance.fork.session_id.clone(),
+            prefix_message_count: provenance.prefix_message_count,
+            prefix_digest: provenance.prefix_digest,
+        })
+    }
+
+    async fn planned_child_evidence(
+        &self,
+        child_session_id: &SessionId,
+    ) -> Result<Option<crate::forked_participant::PlannedChildEvidence>, SessionError> {
+        let Some(child) =
+            meerkat_session::PersistentSessionService::<B>::load_durable_session_body(
+                self,
+                child_session_id,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let prefix_message_count = child.messages().len();
+        let prefix_digest = child.transcript_content_digest().map_err(|error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to digest planned fork child {child_session_id}: {error}"
+            )))
+        })?;
+        Ok(Some(crate::forked_participant::PlannedChildEvidence {
+            prefix_digest,
+            prefix_message_count,
+            execution: session_execution_evidence_of(&child, child_session_id)?,
+        }))
+    }
+
+    async fn archive_fork_session(&self, child_session_id: &SessionId) -> Result<(), SessionError> {
+        match <Self as MobSessionService>::load_session_for_resume(self, child_session_id).await? {
+            ResumeSessionLoad::ArchivedNotRevivable { .. } | ResumeSessionLoad::Absent => {
+                return Ok(());
+            }
+            ResumeSessionLoad::Active(_) | ResumeSessionLoad::Revivable(_) => {}
+        }
+        <Self as MobSessionService>::archive_with_mob_lifecycle_authority(self, child_session_id)
+            .await
+    }
+
+    async fn bind_fork_session_to_member(
+        &self,
+        child_session_id: &SessionId,
+        mob_id: &str,
+        role: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::bind_detached_fork_session_to_mob_member(
+            self,
+            child_session_id,
+            meerkat_core::MobMemberBinding {
+                mob_id: mob_id.to_string(),
+                role: role.to_string(),
+                member: member.to_string(),
+            },
+        )
+        .await
+    }
+}
+
+/// Project one session's sanitized execution evidence.
+///
+/// References only: the member identity, the realm, the effective tool access
+/// policy, and the auth BINDING reference. No credential material and no
+/// transcript body leave this function.
+#[cfg(not(target_arch = "wasm32"))]
+fn session_execution_evidence_of(
+    session: &Session,
+    session_id: &SessionId,
+) -> Result<crate::forked_participant::SessionExecutionEvidence, SessionError> {
+    let metadata = session.try_session_metadata().map_err(|error| {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+            "failed to decode session metadata for {session_id}: {error}"
+        )))
+    })?;
+    let Some(metadata) = metadata else {
+        return Ok(crate::forked_participant::SessionExecutionEvidence {
+            agent_identity: None,
+            realm_id: None,
+            tool_access_policy: None,
+            auth_binding: None,
+        });
+    };
+    Ok(crate::forked_participant::SessionExecutionEvidence {
+        agent_identity: metadata
+            .mob_member_binding
+            .as_ref()
+            .map(|binding| crate::ids::AgentIdentity::from(binding.member.clone())),
+        realm_id: metadata.realm_id.clone(),
+        tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+        auth_binding: metadata.auth_binding.clone(),
+    })
 }

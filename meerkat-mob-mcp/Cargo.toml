@@ -37,6 +37,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 sha2 = { workspace = true }
+jsonschema = { workspace = true }
 
 [features]
 default = []
@@ -58,12 +59,18 @@ tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tempfile = { workspace = true }
 meerkat-mob = { workspace = true, features = ["test-support"] }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 meerkat-schedule = { workspace = true }
-meerkat-store = { workspace = true, features = ["sqlite"] }
+meerkat-session = { workspace = true, features = ["session-store"] }
+meerkat-store = { workspace = true, features = ["sqlite", "jsonl"] }
+# The temporary-council fixture composes the production persistent session
+# service over a Jsonl session store. Enabling `meerkat-store/jsonl` alone
+# would add a `RealmBackend` variant the facade's own cfg-gated match does not
+# cover, so the facade's matching feature is enabled with it.
+meerkat = { workspace = true, features = ["session-store", "jsonl-store"] }
 
 [package.metadata.cargo-machete]
 ignored = ["chrono", "meerkat-client", "thiserror", "tempfile"]  # proc macros / transitive

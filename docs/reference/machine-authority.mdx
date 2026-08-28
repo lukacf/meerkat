@@ -48,6 +48,8 @@ The canonical registry is `canonical_machine_schemas()` in
 | `WorkGraphLifecycleMachine` | `meerkat-workgraph::machines::workgraph_lifecycle` | Work item lifecycle, readiness, dependency eligibility, claim leases, terminal state, and evidence revision handling. |
 | `WorkAttentionLifecycleMachine` | `meerkat-workgraph::machines::work_attention_lifecycle` | Goal attention binding lifecycle, pause/resume/supersession/stop state, and binding revision handling. |
 | `WorkExecutionLifecycleMachine` | `meerkat-workgraph::execution_machine` | Durable WorkGraph-to-executor binding lifecycle, launch uncertainty, terminal evidence projection, closure feedback, and retry eligibility. |
+| `ForkedParticipantLifecycleMachine` | `meerkat-mob::machines::forked_participant_lifecycle` | One source-owned forked-participant capability record: reservation identity, durable fork activation identity, bounded single-holder attachment admission, revocation, expiry, and cleanup debt. Record-scoped (one machine state per capability), clock-free (expiry arrives as an observation), and credential-free (authentication arrives as an observation). |
+| `TemporaryCouncilLifecycleMachine` | `meerkat-mob::machines::temporary_council_lifecycle` | One temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed versus coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict. Record-scoped (one machine state per council) and clock-free. |
 
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. The other
 canonical machines protect narrower domain facts: auth and approval, schedules

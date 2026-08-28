@@ -11,25 +11,29 @@ use sha2::Sha256;
 pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeBootstrapToken,
     BridgeBoundedResultSpec, BridgeBoundedTurnResult, BridgeCapabilities, BridgeCommand,
-    BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
-    BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeDirectMemberFence, BridgeDirectMemberFenceEvidence, BridgeDirectMemberIncarnation,
-    BridgeDirectRuntimeSessionToken, BridgeEventCursor, BridgeHardCancelPayload,
-    BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostBootstrapProof,
-    BridgeHostCapabilityRequirements, BridgeHostMemberRecord, BridgeHostRebindPayload,
-    BridgeHostReboundResponse, BridgeHostRevokePayload, BridgeHostRevokedResponse,
-    BridgeHostRuntimeIncarnation, BridgeHostStatusPayload, BridgeHostStatusResponse,
-    BridgeInterruptPayload, BridgeLiveChannelPayload, BridgeLiveControlOutcome,
-    BridgeLiveControlPayload, BridgeLiveControlVerb, BridgeLiveControlledResponse,
-    BridgeLiveOpenPayload, BridgeLiveOpenedResponse, BridgeLiveStatusPayload,
-    BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberEventsPage,
-    BridgeMemberHistoryPage, BridgeMemberIncarnation, BridgeMemberOperatorPayload,
-    BridgeMemberReleasedResponse, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
-    BridgeObservationResponse, BridgeOutboundTaintPayload, BridgeOutboundTaintTarget,
-    BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerSpec, BridgePeerTrustPayload,
-    BridgePeerWiringPayload, BridgePollEventsPayload, BridgeProtocolVersion,
-    BridgeReadHistoryPayload, BridgeRejectionCause, BridgeRejectionReply, BridgeReleasePayload,
-    BridgeReply, BridgeRetireOutcome, BridgeRetirePayload, BridgeRetireResponse,
+    BridgeCommandDecodeError, BridgeCreateForkedParticipantPayload, BridgeDeliveryOutcome,
+    BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
+    BridgeDestroyResponse, BridgeDirectMemberFence, BridgeDirectMemberFenceEvidence,
+    BridgeDirectMemberIncarnation, BridgeDirectRuntimeSessionToken, BridgeEventCursor,
+    BridgeForkedParticipantAttachment, BridgeForkedParticipantCreatedResponse,
+    BridgeForkedParticipantOwnerRoute, BridgeForkedParticipantRef, BridgeForkedParticipantReuse,
+    BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
+    BridgeForkedParticipantScope, BridgeHardCancelPayload, BridgeHostBindPayload,
+    BridgeHostBindResponse, BridgeHostBootstrapProof, BridgeHostCapabilityRequirements,
+    BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
+    BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
+    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeInterruptPayload,
+    BridgeLiveChannelPayload, BridgeLiveControlOutcome, BridgeLiveControlPayload,
+    BridgeLiveControlVerb, BridgeLiveControlledResponse, BridgeLiveOpenPayload,
+    BridgeLiveOpenedResponse, BridgeLiveStatusPayload, BridgeMaterializePayload,
+    BridgeMaterializedResponse, BridgeMemberEventsPage, BridgeMemberHistoryPage,
+    BridgeMemberIncarnation, BridgeMemberOperatorPayload, BridgeMemberReleasedResponse,
+    BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
+    BridgeOutboundTaintPayload, BridgeOutboundTaintTarget, BridgeOutcomeTracking,
+    BridgePeerConnectivity, BridgePeerSpec, BridgePeerTrustPayload, BridgePeerWiringPayload,
+    BridgePollEventsPayload, BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeRejectionCause,
+    BridgeRejectionReply, BridgeReleasePayload, BridgeReply, BridgeRetireOutcome,
+    BridgeRetirePayload, BridgeRetireResponse, BridgeRevokeForkedParticipantPayload,
     BridgeSupervisorDelivery, BridgeSupervisorPayload, BridgeSupervisorRotationObservation,
     BridgeSupervisorRotationObserve, BridgeSupervisorRotationOperationReceipt,
     BridgeSupervisorRotationPendingPhase, BridgeSupervisorRotationRejectionCause,
@@ -230,6 +234,16 @@ macro_rules! impl_from_bridge_reply {
 
 impl_from_bridge_reply!(BridgeBindResponse, BindMember, "bind_member");
 impl_from_bridge_reply!(BridgeAck, Ack, "ack");
+impl_from_bridge_reply!(
+    BridgeForkedParticipantCreatedResponse,
+    ForkedParticipantCreated,
+    "forked_participant_created"
+);
+impl_from_bridge_reply!(
+    BridgeForkedParticipantRevokedResponse,
+    ForkedParticipantRevoked,
+    "forked_participant_revoked"
+);
 impl_from_bridge_reply!(BridgeObservationResponse, Observation, "observation");
 impl_from_bridge_reply!(BridgeDeliveryResponse, Delivery, "delivery");
 impl_from_bridge_reply!(
@@ -356,6 +370,8 @@ enum ExpectedBridgeReply {
     MemberLiveChannelStatusReport,
     MemberLiveChannelControlled,
     SupervisorRotation,
+    ForkedParticipantCreated,
+    ForkedParticipantRevoked,
     Rejected,
     Unknown,
 }
@@ -384,6 +400,8 @@ impl ExpectedBridgeReply {
             Self::MemberLiveChannelStatusReport => "member_live_channel_status_report",
             Self::MemberLiveChannelControlled => "member_live_channel_controlled",
             Self::SupervisorRotation => "supervisor_rotation",
+            Self::ForkedParticipantCreated => "forked_participant_created",
+            Self::ForkedParticipantRevoked => "forked_participant_revoked",
             Self::Rejected => "rejected",
             Self::Unknown => "unknown",
         }
@@ -433,6 +451,8 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
             ExpectedBridgeReply::MemberLiveChannelControlled
         }
         BridgeCommand::ObserveSupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
+        BridgeCommand::CreateForkedParticipant(_) => ExpectedBridgeReply::ForkedParticipantCreated,
+        BridgeCommand::RevokeForkedParticipant(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
         _ => ExpectedBridgeReply::Unknown,
     }
 }
@@ -464,6 +484,8 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
             ExpectedBridgeReply::MemberLiveChannelControlled
         }
         BridgeReply::SupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
+        BridgeReply::ForkedParticipantCreated(_) => ExpectedBridgeReply::ForkedParticipantCreated,
+        BridgeReply::ForkedParticipantRevoked(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
         BridgeReply::Rejected { .. } => ExpectedBridgeReply::Rejected,
         _ => ExpectedBridgeReply::Unknown,
     }
@@ -902,6 +924,7 @@ mod tests {
             spec: minimal_portable_spec(),
             spec_digest: "d".repeat(64),
             launch: MaterializeLaunchMode::Fresh {},
+            forked_participant_attachment: None,
         }))
     }
 

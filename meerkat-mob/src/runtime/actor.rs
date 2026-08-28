@@ -110,6 +110,30 @@ use crate::control_policy::{
     ResolvedControlPolicy, ScopeDenial,
 };
 use crate::event::MobEvent;
+use crate::forked_participant::{
+    ForkedParticipantAttachmentId, ForkedParticipantGrant, ForkedParticipantOwnerRoute,
+    ForkedParticipantRef, ForkedParticipantReleaseOutcome, ForkedParticipantRequest,
+    ForkedParticipantRevocationOutcome, ForkedParticipantService,
+};
+
+/// Actor-owned custody for one in-flight capability-aware attached spawn.
+///
+/// This is a carrier, not authority: every field is already durable (the
+/// association row) or already decided by the source owner's lifecycle machine
+/// (the grant). It exists so the spawn completion can be reconciled on the
+/// serialized actor task without re-deriving anything the admission half
+/// already proved.
+#[derive(Debug)]
+pub(super) struct AttachedForkedParticipantCustody {
+    /// Full immutable capability reference the attachment was admitted under.
+    pub(super) capability: ForkedParticipantRef,
+    /// The exact admitted attachment identity.
+    pub(super) attachment_id: ForkedParticipantAttachmentId,
+    /// Typed grant the owner's lifecycle machine returned for the attach.
+    pub(super) grant: ForkedParticipantGrant,
+    /// Durable association row written BEFORE the spawn started.
+    pub(super) record: crate::store::MobForkedParticipantMemberAssociation,
+}
 use crate::generated::protocol_mob_destroying_session_ingress::MobDestroyingSessionIngressObligation;
 use crate::ids::{AgentIdentity, AgentRuntimeId, RespawnTopologyPeerId, StepId};
 use crate::machines::mob_machine as mob_dsl;
@@ -5709,6 +5733,10 @@ pub(super) struct MobActor {
         Option<Arc<dyn super::spec_compiler::SpawnBasePromptSource>>,
     pub(super) spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+    /// Durable records for source-owned forked-participant capabilities whose
+    /// source member lives in THIS runtime. Absent when the composition never
+    /// supplied one: such a runtime simply cannot own a local capability.
+    pub(super) forked_participant_store: Option<Arc<dyn crate::store::ForkedParticipantStore>>,
     /// Typed composition binding for the `meerkat_mob_seam` composition
     /// (wave-c C-6p). Every routed effect emitted by the mob DSL travels
     /// through `CompositionDispatcher::dispatch` via this binding rather
@@ -12068,6 +12096,7 @@ impl MobActor {
                 session_id: binding.0.clone(),
                 resume_from_role: None,
             },
+            forked_participant_attachment: None,
         });
 
         // §19.L5: the ops owner for a placed member is the owner bridge
@@ -23397,6 +23426,83 @@ impl MobActor {
                     self.handle_member_history(agent_identity, from_index, limit, reply_tx)
                         .await;
                 }
+                MobCommand::CreateForkedParticipant {
+                    request,
+                    reply_tx,
+                } => {
+                    let result = self.handle_create_forked_participant(*request).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RevokeForkedParticipant {
+                    capability,
+                    reply_tx,
+                } => {
+                    let result = self.handle_revoke_forked_participant(&capability).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::AttachForkedParticipant {
+                    capability,
+                    attachment_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .handle_attach_forked_participant(&capability, &attachment_id)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ReleaseForkedParticipant {
+                    capability,
+                    attachment_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .handle_release_forked_participant(&capability, &attachment_id)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::SpawnAttachedForkedParticipant {
+                    capability,
+                    attachment_id,
+                    spec,
+                    reply_tx,
+                } => {
+                    Box::pin(self.handle_spawn_attached_forked_participant(
+                        *capability,
+                        attachment_id,
+                        *spec,
+                        reply_tx,
+                    ))
+                    .await;
+                }
+                MobCommand::CompleteHostForkedParticipantSpawn {
+                    capability,
+                    attachment_id,
+                    host_id,
+                    agent_identity,
+                    spawn,
+                    reply_tx,
+                } => {
+                    let result = Box::pin(self.handle_complete_host_forked_participant_spawn(
+                        *capability,
+                        attachment_id,
+                        host_id,
+                        agent_identity,
+                        *spawn,
+                    ))
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CompleteAttachedForkedParticipantSpawn {
+                    custody,
+                    spawn,
+                    reply_tx,
+                } => {
+                    let result = Box::pin(
+                        self.handle_complete_attached_forked_participant_spawn(*custody, *spawn),
+                    )
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::MemberLiveOpen {
                     agent_identity,
                     turning_mode,
@@ -23803,6 +23909,22 @@ impl MobActor {
                 mob_id = %self.definition.id,
                 error = %error,
                 "durable member-live Open cleanup recovery failed; fail-stopping before command admission"
+            );
+            self.quiesce_volatile_producers_after_fail_stop().await;
+            return false;
+        }
+        // Durable capability associations are rehydrated before command
+        // admission so an orphaned lease cannot survive a restart unnoticed,
+        // and so a still-seated branch keeps the association its later
+        // teardown will release.
+        if let Err(error) = self
+            .reconcile_forked_participant_member_associations()
+            .await
+        {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "durable forked-participant association recovery failed; fail-stopping before command admission"
             );
             self.quiesce_volatile_producers_after_fail_stop().await;
             return false;
@@ -25098,6 +25220,38 @@ impl MobActor {
                 )
             );
         }
+        // Spawn-source classification for the V6 capability attachment: the
+        // association is authority for exactly one materialization, so only
+        // the capability-aware attached spawn may carry it, and only onto the
+        // placed lane that can deliver it to the owning host. Anything else
+        // would be an association travelling on a command that never proves
+        // it.
+        if spec.forked_participant_attachment.is_some() {
+            if !matches!(
+                spawn_source,
+                super::handle::SpawnSource::AttachedForkedParticipant
+            ) {
+                reject_spawn_before_custody!(
+                    "forked_participant_attachment_source",
+                    MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                        detail: format!(
+                            "spawn source '{}' may not carry a forked-participant attachment",
+                            spawn_source.as_str()
+                        ),
+                    }
+                );
+            }
+            if spec.placement.is_none() {
+                reject_spawn_before_custody!(
+                    "forked_participant_attachment_placement",
+                    MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                        detail: "a forked-participant attachment is carried only to the \
+                                 capability's owning member host"
+                            .to_string(),
+                    }
+                );
+            }
+        }
         // Multi-host §7.3: a placed spawn takes the remote materialization
         // lane wholesale (compile → digest-authorized ladder open at enqueue
         // → bridge dispatch → ack-fed remote commit).
@@ -25161,6 +25315,10 @@ impl MobActor {
             system_prompt_override,
             continuity_intent,
             placement: _,
+            // Only the capability-aware attached spawn of a HOST-owned
+            // capability carries an association, and that spawn always takes
+            // the placed lane above.
+            forked_participant_attachment: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -25281,6 +25439,56 @@ impl MobActor {
             // straight to finalization. The bridge session must already exist
             // and be usable.
             if let Some(resume_id) = resume_bridge_session_id {
+                // Fork-session identity is unique capability custody: a caller
+                // that merely READ a session id out of a reference has proved
+                // nothing. What this surface can prove is its OWN durable
+                // custody — the attach-admitting spawn, or a member that still
+                // holds the association. The verdict itself is not decided
+                // here: the proof is handed to the one containment rule the
+                // host path uses too, so the two surfaces cannot drift.
+                if let Some(store) = self.forked_participant_store.as_ref() {
+                    let protection = store
+                        .load_by_fork_session_id(&resume_id)
+                        .await?
+                        .map(|record| crate::forked_participant::ForkedParticipantForkProtection {
+                            capability_hint: record.capability_id.correlation_hint(),
+                            owner_route: record.sidecar.owner_route.clone(),
+                            capability: record.sidecar.capability_ref.clone(),
+                        });
+                    let association = if matches!(
+                        spawn_source,
+                        super::handle::SpawnSource::AttachedForkedParticipant
+                    ) {
+                        // The attach was admitted in this same operation; its
+                        // association row is written as part of it.
+                        None
+                    } else {
+                        self.forked_participant_association_evidence(&resume_id).await?
+                    };
+                    let proof = if association.is_none()
+                        && !matches!(
+                            spawn_source,
+                            super::handle::SpawnSource::AttachedForkedParticipant
+                        ) {
+                        crate::forked_participant::ForkedParticipantResumeProof::Absent
+                    } else {
+                        crate::forked_participant::ForkedParticipantResumeProof::LocalAttachedSpawn {
+                            member: agent_identity.clone(),
+                            session: resume_id.clone(),
+                            association,
+                        }
+                    };
+                    if crate::forked_participant::adjudicate_protected_resume(
+                        protection.as_ref(),
+                        &proof,
+                    )
+                    .is_err()
+                    {
+                        return Err(MobError::ForkedParticipantResumeRequiresAttachment {
+                            session_id: resume_id,
+                        });
+                    }
+                }
                 let member_ref = MemberRef::from_bridge_session_id(resume_id.clone());
 
                 // A role migration is a cold, one-shot restamp of durable
@@ -26907,6 +27115,7 @@ impl MobActor {
             system_prompt_override,
             continuity_intent,
             placement,
+            forked_participant_attachment,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -27497,16 +27706,33 @@ impl MobActor {
             },
             None => super::bridge_protocol::MaterializeLaunchMode::Fresh {},
         };
+        // The ONLY producer of a non-None slot is the capability-aware attached
+        // spawn of a HOST-owned capability. Every ordinary placed spawn leaves
+        // it absent, and the owning host refuses a protected Resume that
+        // arrives without it.
+        let forked_participant_attachment = forked_participant_attachment
+            .as_ref()
+            .map(super::forked_participant_routing::wire_attachment);
+        // Carrying the V6 field IS a V6 command. The ordinary placed spawn
+        // keeps its V4 shape, so a pre-V6 host is unaffected; a capability
+        // seating declares the version whose shape it actually uses, and the
+        // receiving host's minimum-version gate is what proves it.
+        let protocol_version = if forked_participant_attachment.is_some() {
+            super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
+        } else {
+            super::bridge_protocol::BridgeProtocolVersion::V4
+        };
         let payload = Box::new(super::bridge_protocol::BridgeMaterializePayload {
             supervisor: supervisor_spec.into(),
             epoch: authority.epoch,
             binding_generation,
-            protocol_version: super::bridge_protocol::BridgeProtocolVersion::V4,
+            protocol_version,
             generation: effect_generation.0,
             fence_token: effect_fence.0,
             spec: compiled.spec,
             spec_digest: effect_digest,
             launch,
+            forked_participant_attachment,
         });
 
         // Callers that don't carry an owner ops context (the embedder
@@ -28378,6 +28604,7 @@ impl MobActor {
             system_prompt_override,
             continuity_intent,
             placement: _,
+            forked_participant_attachment: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -30737,6 +30964,1350 @@ impl MobActor {
             };
             let _ = reply_tx.send(result);
         });
+    }
+
+    // -----------------------------------------------------------------
+    // Source-owned forked-participant capabilities (issue #159, phase 2)
+    // -----------------------------------------------------------------
+
+    fn forked_participant_ineligible(
+        member_id: &AgentIdentity,
+        rejection: crate::ForkedParticipantSourceRejection,
+    ) -> MobError {
+        MobError::ForkedParticipantSourceIneligible {
+            member_id: member_id.clone(),
+            rejection,
+        }
+    }
+
+    fn forked_participant_refused(
+        error: crate::forked_participant::ForkedParticipantError,
+    ) -> MobError {
+        MobError::ForkedParticipantRefused(Box::new(error))
+    }
+
+    /// Compose the source-owner service for one exact LOCAL owner route.
+    ///
+    /// The service is built from the mob's shared capability store and the
+    /// session service that already owns the source's durable body — there is
+    /// no second store and no controller-side registry mirroring the record.
+    fn local_forked_participant_service(
+        &self,
+        source_identity: &AgentIdentity,
+        realm_id: meerkat_core::connection::RealmId,
+    ) -> Result<ForkedParticipantService, MobError> {
+        let store = self.forked_participant_store.clone().ok_or_else(|| {
+            Self::forked_participant_ineligible(
+                source_identity,
+                crate::ForkedParticipantSourceRejection::CapabilityStoreAbsent,
+            )
+        })?;
+        let runtime = self
+            .session_service
+            .clone()
+            .forked_participant_source_runtime()
+            .ok_or_else(|| {
+                Self::forked_participant_ineligible(
+                    source_identity,
+                    crate::ForkedParticipantSourceRejection::SourceRuntimeAbsent,
+                )
+            })?;
+        ForkedParticipantService::new(
+            ForkedParticipantOwnerRoute::Local { realm_id },
+            store,
+            runtime,
+        )
+        .map_err(Self::forked_participant_refused)
+    }
+
+    /// Admit one local source only at a complete boundary.
+    ///
+    /// `Idle`/`Attached` are the quiescent shapes of a seated local member.
+    /// `Running` (and the not-yet-seated `Initializing`) are refused as busy
+    /// rather than silently forking a stale durable prefix under a live run;
+    /// every other state — and an absent runtime record — is broken residency.
+    async fn require_quiescent_local_fork_source(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+            let Some(adapter) = self.runtime_adapter.as_ref() else {
+                return Err(Self::forked_participant_ineligible(
+                    source_identity,
+                    crate::ForkedParticipantSourceRejection::SourceRuntimeAbsent,
+                ));
+            };
+            return match adapter.runtime_state(source_session_id).await {
+                Ok(
+                    meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached,
+                ) => Ok(()),
+                Ok(
+                    meerkat_runtime::RuntimeState::Running
+                    | meerkat_runtime::RuntimeState::Initializing,
+                ) => Err(Self::forked_participant_ineligible(
+                    source_identity,
+                    crate::ForkedParticipantSourceRejection::SourceBusy,
+                )),
+                Ok(_) | Err(_) => Err(Self::forked_participant_ineligible(
+                    source_identity,
+                    crate::ForkedParticipantSourceRejection::SourceRuntimeBroken,
+                )),
+            };
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = source_session_id;
+            Err(Self::forked_participant_ineligible(
+                source_identity,
+                crate::ForkedParticipantSourceRejection::SourceRuntimeAbsent,
+            ))
+        }
+    }
+
+    /// Resolve the exact local source session and its owning realm.
+    ///
+    /// Three independent authorities must agree before anything is reserved:
+    /// the MobMachine's current session binding, the roster's transport route,
+    /// and the durable session's OWN sanitized execution evidence. The realm is
+    /// read from that evidence rather than assumed, so the owner route names
+    /// the realm the source actually executes in.
+    async fn local_forked_participant_source(
+        &self,
+        entry: &RosterEntry,
+    ) -> Result<(SessionId, meerkat_core::connection::RealmId), MobError> {
+        let identity = &entry.agent_identity;
+        let ineligible = |rejection| Self::forked_participant_ineligible(identity, rejection);
+        // An unplaced peer-shaped member is an unmanaged external runtime: this
+        // controller owns neither its conversation nor a host that could.
+        if !matches!(entry.member_ref, MemberRef::Session { .. }) {
+            return Err(ineligible(
+                crate::ForkedParticipantSourceRejection::UnmanagedExternal,
+            ));
+        }
+        let session_id = self
+            .machine_bridge_session_id_for_identity(identity)?
+            .ok_or_else(|| ineligible(crate::ForkedParticipantSourceRejection::NoSourceSession))?;
+        if entry.member_ref.bridge_session_id() != Some(&session_id) {
+            return Err(ineligible(
+                crate::ForkedParticipantSourceRejection::SourceRuntimeBroken,
+            ));
+        }
+        {
+            // The marker map is sparse: absent IS the canonical active shape,
+            // and an explicit Retiring marker closes source admission.
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let state = self.dsl_authority.state();
+            if state
+                .identity_to_runtime
+                .get(&dsl_identity)
+                .and_then(|runtime_id| state.member_state_markers.get(runtime_id))
+                == Some(&mob_dsl::MobMemberState::Retiring)
+            {
+                return Err(ineligible(
+                    crate::ForkedParticipantSourceRejection::SourceRuntimeBroken,
+                ));
+            }
+        }
+        self.require_quiescent_local_fork_source(identity, &session_id)
+            .await?;
+        let runtime = self
+            .session_service
+            .clone()
+            .forked_participant_source_runtime()
+            .ok_or_else(|| {
+                ineligible(crate::ForkedParticipantSourceRejection::SourceRuntimeAbsent)
+            })?;
+        let evidence = runtime
+            .session_execution_evidence(&session_id)
+            .await
+            .map_err(MobError::SessionError)?
+            .ok_or_else(|| {
+                ineligible(crate::ForkedParticipantSourceRejection::SourceRuntimeBroken)
+            })?;
+        if evidence.agent_identity.as_ref() != Some(identity) {
+            return Err(ineligible(
+                crate::ForkedParticipantSourceRejection::SourceRuntimeBroken,
+            ));
+        }
+        let realm_id = evidence.realm_id.ok_or_else(|| {
+            ineligible(crate::ForkedParticipantSourceRejection::SourceRuntimeBroken)
+        })?;
+        Ok((session_id, realm_id))
+    }
+
+    /// Resolve the bound host route for one capability command.
+    ///
+    /// Returns the host peer descriptor and the host's current durable binding
+    /// generation, refusing a host that has not negotiated the V6 capability
+    /// protocol family. Nothing here reads member residency: the same helper
+    /// serves creation (where residency is checked separately) and revocation
+    /// (where it deliberately must not be).
+    fn bound_forked_participant_host_route(
+        &self,
+        member_id: &AgentIdentity,
+        host_id: &mob_dsl::HostId,
+    ) -> Result<(TrustedPeerDescriptor, u64), MobError> {
+        {
+            let state = self.dsl_authority.state();
+            let negotiated = state
+                .host_protocol_min
+                .get(host_id)
+                .is_some_and(|minimum| *minimum <= 6)
+                && state
+                    .host_protocol_max
+                    .get(host_id)
+                    .is_some_and(|maximum| *maximum >= 6);
+            if !negotiated {
+                return Err(Self::forked_participant_ineligible(
+                    member_id,
+                    crate::ForkedParticipantSourceRejection::HostProtocolUnsupported,
+                ));
+            }
+        }
+        let binding_generation = self.current_host_binding_generation(host_id)?;
+        let (endpoint, pubkey) = {
+            let state = self.dsl_authority.state();
+            (
+                state.host_endpoints.get(host_id).cloned(),
+                state.host_public_keys.get(host_id).copied(),
+            )
+        };
+        let (Some(endpoint), Some(pubkey)) = (endpoint, pubkey) else {
+            return Err(MobError::Internal(format!(
+                "bound host '{}' has no recorded binding facts for a forked participant command",
+                host_id.as_str()
+            )));
+        };
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            host_id.as_str(),
+            host_id.as_str(),
+            pubkey.0,
+            endpoint.0.as_str(),
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "bound host '{}' facts do not form a canonical peer descriptor: {error}",
+                host_id.as_str()
+            ))
+        })?;
+        Ok((peer, binding_generation))
+    }
+
+    /// Create one capability whose source lives on a bound member host.
+    ///
+    /// The command carries the EXACT current source incarnation, so a stale
+    /// controller view is fenced by the host rather than papered over here, and
+    /// the returned reference is validated against the incarnation that was
+    /// actually sent before it is handed to a caller.
+    async fn create_placed_forked_participant(
+        &mut self,
+        entry: &RosterEntry,
+        host_id: mob_dsl::HostId,
+        request: &super::forked_participant_routing::ForkedParticipantCreateRequest,
+    ) -> Result<ForkedParticipantRef, MobError> {
+        let identity = entry.agent_identity.clone();
+        let (peer, binding_generation) =
+            self.bound_forked_participant_host_route(&identity, &host_id)?;
+        let source_member = self.placed_member_incarnation(entry)?;
+        let authority = self.supervisor_bridge.authority().await;
+        let supervisor = self
+            .supervisor_bridge
+            .supervisor_spec_for_authority_and_recipient(&authority, &peer)
+            .await?;
+        let payload = super::forked_participant_routing::create_payload(
+            supervisor.into(),
+            authority.epoch,
+            binding_generation,
+            source_member.clone(),
+            request,
+        )
+        .ok_or_else(|| {
+            Self::forked_participant_refused(
+                crate::forked_participant::ForkedParticipantError::InvalidRequest {
+                    detail: "request prefix count or time-to-live is not wire representable"
+                        .to_string(),
+                },
+            )
+        })?;
+        let command = super::bridge_protocol::BridgeCommand::CreateForkedParticipant(payload);
+        let created: super::bridge_protocol::BridgeForkedParticipantCreatedResponse = self
+            .send_bridge_command_typed(
+                &peer,
+                &command,
+                super::forked_participant_routing::FORKED_PARTICIPANT_BRIDGE_TIMEOUT,
+            )
+            .await?;
+        let capability = crate::forked_participant::domain_ref(&created.capability)
+            .map_err(Self::forked_participant_refused)?;
+        let route_matches = matches!(
+            capability.owner_route(),
+            ForkedParticipantOwnerRoute::Host {
+                host_id: owner_host,
+                ..
+            } if owner_host.as_str() == host_id.as_str()
+        );
+        if !route_matches
+            || capability.source_identity() != &identity
+            || capability.provenance().source_session_id.to_string()
+                != source_member.member_session_id
+        {
+            return Err(Self::forked_participant_refused(
+                crate::forked_participant::ForkedParticipantError::CapabilityRejected {
+                    detail: "host returned a capability for another owner route or source"
+                        .to_string(),
+                },
+            ));
+        }
+        Ok(capability)
+    }
+
+    /// Route one capability creation by CURRENT source residency.
+    ///
+    /// Both capability verbs run INLINE on the actor loop, like the host
+    /// reconciliation sweep and the bind ceremony: the bridge send needs the
+    /// actor's own recipient-trust obligation accounting (`&mut self`), and a
+    /// detached copy of that accounting would be a second authority for the
+    /// same fact. Ordering is a feature here — a capability command must not
+    /// interleave with the roster/placement transitions it just read.
+    async fn handle_create_forked_participant(
+        &mut self,
+        request: super::forked_participant_routing::ForkedParticipantCreateRequest,
+    ) -> Result<ForkedParticipantRef, MobError> {
+        let source_identity = request.source_identity.clone();
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&source_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            return Err(MobError::MemberNotFound(source_identity));
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&source_identity);
+        let placement = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .get(&dsl_identity)
+            .cloned();
+        match placement {
+            Some(host_id) => {
+                self.create_placed_forked_participant(&entry, host_id, &request)
+                    .await
+            }
+            None => {
+                let (source_session_id, realm_id) =
+                    self.local_forked_participant_source(&entry).await?;
+                let service =
+                    self.local_forked_participant_service(&source_identity, realm_id.clone())?;
+                service
+                    .create(
+                        &ForkedParticipantRequest {
+                            request_id: request.request_id.clone(),
+                            source_identity,
+                            source_session_id,
+                            owner_route: ForkedParticipantOwnerRoute::Local { realm_id },
+                            prefix_message_count: request.prefix_message_count,
+                            scope: request.scope,
+                            reuse: request.reuse,
+                            ttl: request.ttl,
+                        },
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .map_err(Self::forked_participant_refused)
+            }
+        }
+    }
+
+    /// Route one capability revocation by the capability's OWN owner route.
+    ///
+    /// Deliberately no roster or residency lookup: a capability outlives its
+    /// source member, so revocation keys on the immutable reference's owner
+    /// route plus (for a host route) that host's current bound authority.
+    async fn handle_revoke_forked_participant(
+        &mut self,
+        capability: &ForkedParticipantRef,
+    ) -> Result<ForkedParticipantRevocationOutcome, MobError> {
+        let source_identity = capability.source_identity().clone();
+        match capability.owner_route().clone() {
+            ForkedParticipantOwnerRoute::Local { realm_id } => {
+                let service = self.local_forked_participant_service(&source_identity, realm_id)?;
+                service
+                    .revoke(capability.capability_id(), true)
+                    .await
+                    .map_err(Self::forked_participant_refused)
+            }
+            ForkedParticipantOwnerRoute::Host { host_id, .. } => {
+                let host_id = mob_dsl::HostId(host_id.as_str().to_string());
+                let (peer, binding_generation) =
+                    self.bound_forked_participant_host_route(&source_identity, &host_id)?;
+                let authority = self.supervisor_bridge.authority().await;
+                let supervisor = self
+                    .supervisor_bridge
+                    .supervisor_spec_for_authority_and_recipient(&authority, &peer)
+                    .await?;
+                let command = super::bridge_protocol::BridgeCommand::RevokeForkedParticipant(
+                    super::forked_participant_routing::revoke_payload(
+                        supervisor.into(),
+                        authority.epoch,
+                        &self.definition.id,
+                        host_id.as_str(),
+                        binding_generation,
+                        capability,
+                    ),
+                );
+                let revoked: super::bridge_protocol::BridgeForkedParticipantRevokedResponse = self
+                    .send_bridge_command_typed(
+                        &peer,
+                        &command,
+                        super::forked_participant_routing::FORKED_PARTICIPANT_BRIDGE_TIMEOUT,
+                    )
+                    .await?;
+                Ok(match revoked.outcome {
+                    super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::Revoked {
+                        cleanup_pending,
+                    } => ForkedParticipantRevocationOutcome::Revoked { cleanup_pending },
+                    super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::PendingAttachedRelease => {
+                        ForkedParticipantRevocationOutcome::PendingAttachedRelease
+                    }
+                    super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::Converged => {
+                        ForkedParticipantRevocationOutcome::Converged
+                    }
+                })
+            }
+        }
+    }
+
+    /// Attach an explicit lease only when this runtime is the local source
+    /// owner. The capability reference, not a roster entry, remains authority
+    /// after its source member has retired.
+    async fn handle_attach_forked_participant(
+        &self,
+        capability: &ForkedParticipantRef,
+        attachment_id: &ForkedParticipantAttachmentId,
+    ) -> Result<ForkedParticipantGrant, MobError> {
+        let source_identity = capability.source_identity().clone();
+        match capability.owner_route().clone() {
+            ForkedParticipantOwnerRoute::Local { realm_id } => {
+                let service = self.local_forked_participant_service(&source_identity, realm_id)?;
+                service
+                    .attach(capability, attachment_id, true, chrono::Utc::now())
+                    .await
+                    .map_err(Self::forked_participant_refused)
+            }
+            ForkedParticipantOwnerRoute::Host { .. } => {
+                Err(MobError::ForkedParticipantRemoteLeaseUnsupported {
+                    operation: crate::ForkedParticipantLeaseOperation::Attach,
+                })
+            }
+        }
+    }
+
+    /// Release an explicit lease only when this runtime is the local source
+    /// owner. This deliberately does not inspect current source residency.
+    async fn handle_release_forked_participant(
+        &self,
+        capability: &ForkedParticipantRef,
+        attachment_id: &ForkedParticipantAttachmentId,
+    ) -> Result<ForkedParticipantReleaseOutcome, MobError> {
+        let source_identity = capability.source_identity().clone();
+        match capability.owner_route().clone() {
+            ForkedParticipantOwnerRoute::Local { realm_id } => {
+                let service = self.local_forked_participant_service(&source_identity, realm_id)?;
+                service
+                    .release(capability, attachment_id)
+                    .await
+                    .map_err(Self::forked_participant_refused)
+            }
+            ForkedParticipantOwnerRoute::Host { .. } => {
+                Err(MobError::ForkedParticipantRemoteLeaseUnsupported {
+                    operation: crate::ForkedParticipantLeaseOperation::Release,
+                })
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Capability-aware attached spawn (LOCAL owner route only)
+    // -----------------------------------------------------------------
+
+    /// Seat a LOCAL capability as an ordinary member: admission half.
+    ///
+    /// Everything that decides anything happens here, on the serialized actor
+    /// task: route ownership, spec admissibility, the lifecycle machine's
+    /// `Attach`, and durable attachment custody. Only after all of that does
+    /// the ORDINARY Resume pipeline run — the branch is a normal member, not a
+    /// special residency, and it must not get a bespoke provisioning path.
+    ///
+    /// The spawn pipeline completes asynchronously, so the outcome returns
+    /// through `CompleteAttachedForkedParticipantSpawn`. The forwarding task
+    /// makes no decisions; it only carries the ordinary spawn result back onto
+    /// this task, where release/obligation policy is applied.
+    async fn handle_spawn_attached_forked_participant(
+        &mut self,
+        capability: ForkedParticipantRef,
+        attachment_id: ForkedParticipantAttachmentId,
+        mut spec: super::handle::SpawnMemberSpec,
+        reply_tx: oneshot::Sender<
+            Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError>,
+        >,
+    ) {
+        macro_rules! reject {
+            ($error:expr) => {{
+                let _ = reply_tx.send(Err($error));
+                return;
+            }};
+        }
+
+        // The capability's OWN immutable route decides the owner. A host route
+        // seats through ORDINARY V6 placed materialization: the attachment
+        // rides the materialize command the host already serves, so the two
+        // routes share this one public API without the controller proxying a
+        // second lease protocol.
+        let realm_id = match capability.owner_route().clone() {
+            ForkedParticipantOwnerRoute::Local { realm_id } => realm_id,
+            ForkedParticipantOwnerRoute::Host { host_id, .. } => {
+                Box::pin(self.spawn_host_owned_forked_participant(
+                    capability,
+                    attachment_id,
+                    spec,
+                    host_id,
+                    reply_tx,
+                ))
+                .await;
+                return;
+            }
+        };
+        if let Err(error) = super::forked_participant_routing::validate_attached_spawn_spec(
+            &spec,
+            &capability,
+            None,
+        ) {
+            reject!(error);
+        }
+
+        // The source-owner service is composed against the capability's EXACT
+        // realm, and `attach` resolves the record through `load_exact`, so a
+        // tampered reference or a foreign realm fails full-reference
+        // comparison before any lease is granted. The source member's roster
+        // entry is deliberately never consulted: the capability outlives it.
+        let service =
+            match self.local_forked_participant_service(capability.source_identity(), realm_id) {
+                Ok(service) => service,
+                Err(error) => reject!(error),
+            };
+        let grant = match service
+            .attach(&capability, &attachment_id, true, chrono::Utc::now())
+            .await
+        {
+            Ok(grant) => grant,
+            Err(error) => reject!(Self::forked_participant_refused(error)),
+        };
+
+        let association = crate::forked_participant::ForkedParticipantAttachmentAssociation::new(
+            capability.clone(),
+            attachment_id.clone(),
+        );
+
+        // Exact replay converges on the existing seating instead of spawning
+        // a second one. The owner's machine already answered the replayed
+        // attach with the SAME grant, so re-driving the spawn here would be
+        // the duplication this idempotency is supposed to prevent — and the
+        // resulting failure would look definitive enough to release a lease
+        // the live member still holds.
+        let recorded = match self
+            .runtime_metadata
+            .list_forked_participant_member_associations(&self.definition.id)
+            .await
+        {
+            Ok(records) => records,
+            Err(error) => reject!(MobError::from(error)),
+        };
+        if let Some(existing) = recorded
+            .into_iter()
+            .find(|record| record.association_key == association.association_key())
+        {
+            if existing.agent_identity != spec.identity {
+                reject!(MobError::ForkedParticipantAttachedSpawnSpecRejected {
+                    detail: format!(
+                        "this attachment already seats member '{}'",
+                        existing.agent_identity
+                    ),
+                });
+            }
+            if let Some(target) = existing.target.as_ref() {
+                let seated = {
+                    let roster = self.roster.read().await;
+                    roster.get(&existing.agent_identity).cloned()
+                };
+                if let Some(entry) = seated
+                    && entry.generation.get() == target.generation
+                    && entry.fence_token.get() == target.fence_token
+                {
+                    let _ = reply_tx.send(Ok(
+                        super::forked_participant_routing::AttachedForkedParticipantSpawn {
+                            spawn: super::handle::SpawnResult::new(
+                                entry.agent_identity.clone(),
+                                entry.agent_runtime_id.clone(),
+                                entry.fence_token,
+                            ),
+                            capability,
+                            attachment_id,
+                            lease: super::forked_participant_routing::
+                                AttachedForkedParticipantLease::Local { grant },
+                        },
+                    ));
+                    return;
+                }
+            }
+            reject!(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
+                attachment_id: attachment_id.as_str().to_string(),
+                detail: "an existing attachment association has no matching seated target"
+                    .to_string(),
+            });
+        }
+
+        // Durable custody BEFORE the spawn. A process that dies anywhere in
+        // the seating window must leave an explicit, un-forgettable
+        // reconciliation obligation rather than a silently leaked lease.
+        let record = crate::store::MobForkedParticipantMemberAssociation {
+            association_key: association.association_key(),
+            agent_identity: spec.identity.clone(),
+            association,
+            target: None,
+            obligation: Some(crate::store::MobForkedParticipantObligationCause::SpawnInFlight),
+            detail: "capability attachment admitted; seating spawn outcome not yet observed"
+                .to_string(),
+        };
+        if let Err(error) = self
+            .runtime_metadata
+            .put_forked_participant_member_association(&self.definition.id, &record)
+            .await
+        {
+            // The write may or may not have committed, so this is exactly the
+            // ambiguous case: releasing here would assert an absence this mob
+            // cannot observe. Surface the outstanding attachment instead; the
+            // owner's own pending-attached enumeration and TTL expiry remain
+            // the backstops.
+            reject!(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
+                attachment_id: attachment_id.as_str().to_string(),
+                detail: error.to_string(),
+            });
+        }
+
+        // The API owns the launch mode. A conflicting caller declaration was
+        // already refused above, so this is a completion, never an override.
+        spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: capability.fork_session_id().clone(),
+            resume_from_role: None,
+        };
+
+        // The branch was forked before any target member existed, so it holds
+        // no durable member identity. Ordinary resume admits a member against
+        // exactly that identity, so the owning runtime stamps it now — member
+        // identity only; the inherited execution context is untouched. This
+        // runs AFTER durable custody so a crash between the stamp and the
+        // spawn still leaves the attachment reconcilable.
+        if let Err(error) = self
+            .bind_forked_participant_fork_session_to_member(&capability, &spec)
+            .await
+        {
+            let custody = AttachedForkedParticipantCustody {
+                capability,
+                attachment_id,
+                grant,
+                record,
+            };
+            let outcome = Box::pin(
+                self.handle_complete_attached_forked_participant_spawn(custody, Err(error)),
+            )
+            .await;
+            let _ = reply_tx.send(outcome);
+            return;
+        }
+
+        let custody = AttachedForkedParticipantCustody {
+            capability,
+            attachment_id,
+            grant,
+            record,
+        };
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        let command_tx = self.command_tx.clone();
+        tokio::spawn(async move {
+            let spawn = spawn_rx.await.unwrap_or_else(|_| {
+                Err(MobError::Internal(
+                    "attached forked-participant spawn dropped its reply channel".to_string(),
+                ))
+            });
+            if let Err(send_error) = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::CompleteAttachedForkedParticipantSpawn {
+                        custody: Box::new(custody),
+                        spawn: Box::new(spawn),
+                        reply_tx,
+                    },
+                ))
+                .await
+            {
+                // The actor is gone. The durable obligation row is the only
+                // honest custody left; never release from a detached task.
+                if let MobCommand::CompleteAttachedForkedParticipantSpawn {
+                    custody,
+                    reply_tx,
+                    ..
+                } = send_error.0.cmd
+                {
+                    tracing::warn!(
+                        association_key = %custody.record.association_key,
+                        agent_identity = %custody.record.agent_identity,
+                        "attached forked-participant spawn completion dropped because the actor is \
+                         gone; the durable reconciliation obligation is retained"
+                    );
+                    let _ = reply_tx.send(Err(MobError::Internal(
+                        "mob actor stopped before the attached forked-participant spawn could be \
+                         reconciled; its durable obligation is retained"
+                            .to_string(),
+                    )));
+                }
+            }
+        });
+
+        Box::pin(self.enqueue_spawn(
+            spec,
+            super::handle::SpawnSource::AttachedForkedParticipant,
+            None,
+            None,
+            None,
+            spawn_tx,
+        ))
+        .await;
+    }
+
+    /// Seat a HOST-owned capability as an ordinary PLACED member.
+    ///
+    /// The controller deliberately admits nothing about the lease here. The
+    /// capability's owner is the member host, so the attachment rides the
+    /// ORDINARY V6 `MaterializeMember` command that host already serves: the
+    /// host validates the reference, adjudicates the protected resume, drives
+    /// its own source-owner `attach`, and records the association in the SAME
+    /// durable CAS as the materialized row. This runtime therefore keeps no
+    /// second copy of that lifecycle truth and issues no separate lease verb —
+    /// ordinary `ReleaseMember` at teardown is what releases it.
+    ///
+    /// Everything decided here is a ROUTING fact read from recorded machine
+    /// state before any bridge traffic: the capability's owner host must be
+    /// bound in this mob and must have negotiated V6.
+    async fn spawn_host_owned_forked_participant(
+        &mut self,
+        capability: ForkedParticipantRef,
+        attachment_id: ForkedParticipantAttachmentId,
+        mut spec: super::handle::SpawnMemberSpec,
+        host_id: crate::machines::mob_machine::HostId,
+        reply_tx: oneshot::Sender<
+            Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError>,
+        >,
+    ) {
+        macro_rules! reject {
+            ($error:expr) => {{
+                let _ = reply_tx.send(Err($error));
+                return;
+            }};
+        }
+
+        let dsl_host = mob_dsl::HostId(host_id.as_str().to_string());
+        // Fail before traffic: an unbound or pre-V6 host must never learn that
+        // this capability exists by receiving a command it cannot serve.
+        if let Err(error) = self.require_forked_participant_owner_host(&dsl_host) {
+            reject!(error);
+        }
+        if let Err(error) = super::forked_participant_routing::validate_attached_spawn_spec(
+            &spec,
+            &capability,
+            Some(&host_id),
+        ) {
+            reject!(error);
+        }
+
+        // Placement and launch mode are owned by this API. A conflicting
+        // caller declaration was already refused above, so these are
+        // completions, never overrides.
+        spec.placement = Some(host_id.clone());
+        spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: capability.fork_session_id().clone(),
+            resume_from_role: None,
+        };
+        spec.forked_participant_attachment = Some(
+            crate::forked_participant::ForkedParticipantAttachmentAssociation::new(
+                capability.clone(),
+                attachment_id.clone(),
+            ),
+        );
+
+        // The ordinary placed ladder from here: compile → digest-authorized
+        // open → `MaterializeMember` carrying the attachment → ack-fed remote
+        // commit. That ladder completes on a detached task, so the outcome
+        // returns through `CompleteHostForkedParticipantSpawn`; the forwarding
+        // task makes no decisions.
+        let agent_identity = AgentIdentity::from(spec.identity.as_str());
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        let command_tx = self.command_tx.clone();
+        let forward_capability = capability;
+        let forward_attachment_id = attachment_id;
+        let forward_host_id = host_id;
+        let forward_identity = agent_identity;
+        tokio::spawn(async move {
+            let spawn = spawn_rx.await.unwrap_or_else(|_| {
+                Err(MobError::Internal(
+                    "host-owned forked-participant spawn dropped its reply channel".to_string(),
+                ))
+            });
+            if let Err(send_error) = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::CompleteHostForkedParticipantSpawn {
+                        capability: Box::new(forward_capability),
+                        attachment_id: forward_attachment_id,
+                        host_id: forward_host_id,
+                        agent_identity: forward_identity,
+                        spawn: Box::new(spawn),
+                        reply_tx,
+                    },
+                ))
+                .await
+            {
+                // The actor is gone. There is no controller-side custody to
+                // reconcile — the owning host holds the association — so this
+                // only reports the lost completion.
+                if let MobCommand::CompleteHostForkedParticipantSpawn { reply_tx, .. } =
+                    send_error.0.cmd
+                {
+                    let _ = reply_tx.send(Err(MobError::Internal(
+                        "mob actor stopped before the host-owned forked-participant spawn could \
+                         be reconciled"
+                            .to_string(),
+                    )));
+                }
+            }
+        });
+
+        Box::pin(self.enqueue_spawn(
+            spec,
+            super::handle::SpawnSource::AttachedForkedParticipant,
+            None,
+            None,
+            None,
+            spawn_tx,
+        ))
+        .await;
+    }
+
+    /// Seat a HOST-owned capability: reconciliation half.
+    ///
+    /// There is deliberately no release policy and no durable custody here.
+    /// The owning host admitted the attachment inside the SAME durable CAS
+    /// that recorded the materialized row, so a definitive rejection released
+    /// nothing (the host refuses before `attach`) and an ambiguous outcome is
+    /// reconciled by the host's own obligation plus this mob's ordinary
+    /// placed-carrier reconciliation. Blind-releasing from here would assert
+    /// an absence this controller never observed.
+    async fn handle_complete_host_forked_participant_spawn(
+        &mut self,
+        capability: ForkedParticipantRef,
+        attachment_id: ForkedParticipantAttachmentId,
+        host_id: crate::machines::mob_machine::HostId,
+        agent_identity: AgentIdentity,
+        spawn: Result<super::handle::MemberSpawnReceipt, MobError>,
+    ) -> Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError> {
+        spawn?;
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        // Provisioning reported success, so the roster must show the seated
+        // incarnation. Absence is reported as-is rather than papered over.
+        let Some(entry) = entry else {
+            return Err(MobError::Internal(format!(
+                "host-owned forked-participant spawn reported success but '{agent_identity}' is \
+                 absent from the roster"
+            )));
+        };
+        Ok(
+            super::forked_participant_routing::AttachedForkedParticipantSpawn {
+                spawn: super::handle::SpawnResult::new(
+                    entry.agent_identity.clone(),
+                    entry.agent_runtime_id.clone(),
+                    entry.fence_token,
+                ),
+                capability,
+                attachment_id,
+                lease:
+                    super::forked_participant_routing::AttachedForkedParticipantLease::HostOwned {
+                        host_id,
+                    },
+            },
+        )
+    }
+
+    /// Prove one capability owner host can serve V6 capability work, from
+    /// recorded machine facts only.
+    fn require_forked_participant_owner_host(
+        &self,
+        host_id: &mob_dsl::HostId,
+    ) -> Result<(), MobError> {
+        let unavailable = |rejection| MobError::ForkedParticipantOwnerHostUnavailable {
+            host_id: host_id.as_str().to_string(),
+            rejection,
+        };
+        let state = self.dsl_authority.state();
+        if !state.mob_hosts.contains(host_id)
+            || state.host_bind_phase.get(host_id) != Some(&mob_dsl::HostBindPhase::Bound)
+        {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::HostNotBound,
+            ));
+        }
+        let negotiated = state
+            .host_protocol_min
+            .get(host_id)
+            .is_some_and(|minimum| *minimum <= 6)
+            && state
+                .host_protocol_max
+                .get(host_id)
+                .is_some_and(|maximum| *maximum >= 6);
+        if !negotiated {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::ProtocolUnsupported,
+            ));
+        }
+        if !state.host_endpoints.contains_key(host_id)
+            || !state.host_public_keys.contains_key(host_id)
+        {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::RouteUnusable,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Seat a LOCAL capability as an ordinary member: reconciliation half.
+    ///
+    /// Success records the association (routing evidence: full reference plus
+    /// the seated incarnation) BEFORE reporting success. A definitive failure
+    /// releases exactly this attachment. An ambiguous failure retains the
+    /// durable obligation — a blind release would be a lifecycle lie.
+    async fn handle_complete_attached_forked_participant_spawn(
+        &mut self,
+        custody: AttachedForkedParticipantCustody,
+        spawn: Result<super::handle::MemberSpawnReceipt, MobError>,
+    ) -> Result<super::forked_participant_routing::AttachedForkedParticipantSpawn, MobError> {
+        let spawn_error = match spawn {
+            Ok(_) => {
+                let identity = custody.record.agent_identity.clone();
+                let entry = {
+                    let roster = self.roster.read().await;
+                    roster.get(&identity).cloned()
+                };
+                let Some(entry) = entry else {
+                    // Provisioning reported success but the member is not
+                    // seated. That is exactly the shape whose side effects
+                    // cannot be proven absent.
+                    let detail = format!(
+                        "spawn reported success but '{identity}' is absent from the roster"
+                    );
+                    return Err(self
+                        .retain_attached_spawn_obligation(
+                            &custody,
+                            crate::store::MobForkedParticipantObligationCause::AmbiguousSpawn,
+                            detail.clone(),
+                        )
+                        .await
+                        .unwrap_or(MobError::ForkedParticipantAttachmentReleaseUnproven {
+                            member_id: identity,
+                            attachment_id: custody.attachment_id.as_str().to_string(),
+                            detail,
+                        }));
+                };
+                let mut record = custody.record.clone();
+                record.target = Some(crate::store::MobForkedParticipantTargetIncarnation {
+                    session_id: custody.capability.fork_session_id().to_string(),
+                    generation: entry.generation.get(),
+                    fence_token: entry.fence_token.get(),
+                });
+                record.obligation = None;
+                record.detail = String::new();
+                if let Err(error) = self
+                    .runtime_metadata
+                    .put_forked_participant_member_association(&self.definition.id, &record)
+                    .await
+                {
+                    // The member IS seated, so its attachment must not be
+                    // released. The pre-spawn obligation row remains the
+                    // durable custody and reconciliation converges from it.
+                    return Err(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
+                        attachment_id: custody.attachment_id.as_str().to_string(),
+                        detail: error.to_string(),
+                    });
+                }
+                return Ok(
+                    super::forked_participant_routing::AttachedForkedParticipantSpawn {
+                        spawn: super::handle::SpawnResult::new(
+                            entry.agent_identity.clone(),
+                            entry.agent_runtime_id.clone(),
+                            entry.fence_token,
+                        ),
+                        capability: custody.capability,
+                        attachment_id: custody.attachment_id,
+                        lease: super::forked_participant_routing::
+                            AttachedForkedParticipantLease::Local {
+                                grant: custody.grant,
+                            },
+                    },
+                );
+            }
+            Err(error) => error,
+        };
+
+        if !Self::attached_spawn_failure_is_definitive(&spawn_error) {
+            let refinement_error = self
+                .retain_attached_spawn_obligation(
+                    &custody,
+                    crate::store::MobForkedParticipantObligationCause::AmbiguousSpawn,
+                    spawn_error.to_string(),
+                )
+                .await;
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                association_key = %custody.record.association_key,
+                error = %spawn_error,
+                refinement_error = refinement_error.as_ref().map(ToString::to_string),
+                "attached forked-participant spawn failed ambiguously; the capability attachment \
+                 is retained as a durable reconciliation obligation"
+            );
+            return Err(spawn_error);
+        }
+
+        match self
+            .release_attached_forked_participant_custody(&custody.record)
+            .await
+        {
+            Ok(()) => Err(spawn_error),
+            Err(release_error) => {
+                let refinement_error = self
+                    .retain_attached_spawn_obligation(
+                        &custody,
+                        crate::store::MobForkedParticipantObligationCause::ReleaseUnproven,
+                        format!("{spawn_error}; compensating release failed: {release_error}"),
+                    )
+                    .await;
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    association_key = %custody.record.association_key,
+                    error = %release_error,
+                    refinement_error = refinement_error.as_ref().map(ToString::to_string),
+                    "attached forked-participant compensating release failed; the durable \
+                     obligation is retained"
+                );
+                Err(release_error)
+            }
+        }
+    }
+
+    /// Stamp the capability's fork session with the member identity it is
+    /// being seated as.
+    ///
+    /// Routed through the source-owner runtime seam because that runtime owns
+    /// the fork body. A runtime that cannot serve the stamp says so; the
+    /// seating then fails through the ordinary reconciliation path rather than
+    /// resuming an unbound session under a member identity it never proved.
+    async fn bind_forked_participant_fork_session_to_member(
+        &self,
+        capability: &ForkedParticipantRef,
+        spec: &super::handle::SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        let runtime = self
+            .session_service
+            .clone()
+            .forked_participant_source_runtime()
+            .ok_or_else(|| {
+                Self::forked_participant_ineligible(
+                    capability.source_identity(),
+                    crate::ForkedParticipantSourceRejection::SourceRuntimeAbsent,
+                )
+            })?;
+        runtime
+            .bind_fork_session_to_member(
+                capability.fork_session_id(),
+                self.definition.id.as_str(),
+                spec.role_name.as_str(),
+                spec.identity.as_str(),
+            )
+            .await
+            .map_err(MobError::SessionError)
+    }
+
+    /// Whether this mob already holds a durable association proving that
+    /// `agent_identity` legitimately seats the exact protected fork session.
+    ///
+    /// This is what lets a restart or a cold rebuild re-materialize an
+    /// already-seated branch without re-taking a lease it never gave up, while
+    /// still refusing an unrelated member that merely names the session id.
+    /// The comparison is on the association's own full reference, so a
+    /// tampered row cannot widen the grant it re-admits.
+    /// This process's own durable association evidence for one seat, if any.
+    ///
+    /// Selection is mechanical (which row is about this fork session), never
+    /// adjudication: whether the row AUTHORIZES the seat is decided by
+    /// [`crate::forked_participant::adjudicate_protected_resume`], which owns
+    /// the member/session/reference comparisons for both surfaces.
+    async fn forked_participant_association_evidence(
+        &self,
+        fork_session_id: &SessionId,
+    ) -> Result<Option<crate::forked_participant::LocalAssociationEvidence>, MobError> {
+        // Selection is by fork session alone, and that is exact: one
+        // capability per fork child (durable unique index) and one association
+        // per capability. The member the row names is carried through as
+        // EVIDENCE rather than filtered on here, so a row that belongs to a
+        // different member reaches the adjudicator and is refused there with a
+        // typed reason instead of silently looking like "no custody".
+        Ok(self
+            .runtime_metadata
+            .list_forked_participant_member_associations(&self.definition.id)
+            .await?
+            .into_iter()
+            .find(|record| record.association.capability.fork_session_id() == fork_session_id)
+            .map(
+                |record| crate::forked_participant::LocalAssociationEvidence {
+                    member: record.agent_identity,
+                    capability: record.association.capability,
+                },
+            ))
+    }
+
+    /// Spawn failures that provably happened BEFORE any provisioning task
+    /// could touch the fork session.
+    ///
+    /// The classification is deliberately an allow-list, so an unclassified
+    /// failure is treated as ambiguous and retains its obligation. Fail-closed
+    /// is the safe direction here: retaining an obligation is recoverable,
+    /// while releasing a lease whose member may exist is not.
+    fn attached_spawn_failure_is_definitive(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::MemberAlreadyExists(_)
+                | MobError::ProfileNotFound(_)
+                | MobError::MemberNotFound(_)
+                | MobError::ParticipantNameOccupied { .. }
+                | MobError::ScopeDenied(_)
+                | MobError::ForkedParticipantAttachedSpawnSpecRejected { .. }
+                | MobError::ForkedParticipantResumeRequiresAttachment { .. }
+                | MobError::ForkedParticipantSourceIneligible { .. }
+                | MobError::ForkedParticipantRemoteLeaseUnsupported { .. }
+        )
+    }
+
+    /// Refine one admitted attachment's durable reconciliation obligation.
+    ///
+    /// The pre-spawn row already carries custody, so a failed refinement is
+    /// never a LOST obligation — only a less precise one. That distinction is
+    /// reported honestly: `None` means the refinement committed, `Some(error)`
+    /// carries the typed write failure for a caller that has nothing better to
+    /// surface.
+    async fn retain_attached_spawn_obligation(
+        &self,
+        custody: &AttachedForkedParticipantCustody,
+        cause: crate::store::MobForkedParticipantObligationCause,
+        detail: String,
+    ) -> Option<MobError> {
+        let mut record = custody.record.clone();
+        record.obligation = Some(cause);
+        record.detail = detail;
+        match self
+            .runtime_metadata
+            .put_forked_participant_member_association(&self.definition.id, &record)
+            .await
+        {
+            Ok(()) => None,
+            Err(error) => Some(MobError::ForkedParticipantAttachmentCustodyUnrecorded {
+                attachment_id: custody.attachment_id.as_str().to_string(),
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    /// Release exactly one recorded association and discharge its durable row.
+    ///
+    /// The release presents the FULL immutable reference, so the store's
+    /// exact-reference comparison — not a bare id lookup — is what authorizes
+    /// it. The row is deleted only after the release is PROVEN, which is what
+    /// makes an exact retry converge instead of releasing twice: the machine
+    /// answers a repeated release with `Replayed`, and a row that is already
+    /// gone has nothing left to release.
+    async fn release_attached_forked_participant_custody(
+        &self,
+        record: &crate::store::MobForkedParticipantMemberAssociation,
+    ) -> Result<(), MobError> {
+        let capability = &record.association.capability;
+        let realm_id = match capability.owner_route().clone() {
+            ForkedParticipantOwnerRoute::Local { realm_id } => realm_id,
+            ForkedParticipantOwnerRoute::Host { .. } => {
+                // A target-mob association may only ever name a local owner.
+                return Err(MobError::ForkedParticipantRemoteLeaseUnsupported {
+                    operation: crate::ForkedParticipantLeaseOperation::Release,
+                });
+            }
+        };
+        let service =
+            self.local_forked_participant_service(capability.source_identity(), realm_id)?;
+        service
+            .release(capability, &record.association.attachment_id)
+            .await
+            .map_err(Self::forked_participant_refused)?;
+        self.runtime_metadata
+            .delete_forked_participant_member_association(&self.definition.id, record)
+            .await
+            .map_err(MobError::from)?;
+        Ok(())
+    }
+
+    /// Release every capability attachment seated by one member, AFTER that
+    /// member's session/runtime teardown has completed.
+    ///
+    /// Placement in the teardown order is the whole contract: the release runs
+    /// once the session is archived and the runtime is gone, and BEFORE the
+    /// durable retirement completion boundary. A release failure therefore
+    /// cannot produce a false "cleanup completed": the retirement anchor is
+    /// retained, the durable obligation is refined, and an exact retry
+    /// converges.
+    async fn release_forked_participant_attachments_for_member(
+        &mut self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let records = self
+            .runtime_metadata
+            .list_forked_participant_member_associations(&self.definition.id)
+            .await?;
+        for record in records
+            .into_iter()
+            .filter(|record| record.agent_identity == *agent_identity)
+        {
+            if let Err(error) = self
+                .release_attached_forked_participant_custody(&record)
+                .await
+            {
+                let mut retained = record.clone();
+                retained.obligation = Some(
+                    crate::store::MobForkedParticipantObligationCause::TeardownReleaseUnproven,
+                );
+                retained.detail = error.to_string();
+                if let Err(write_error) = self
+                    .runtime_metadata
+                    .put_forked_participant_member_association(&self.definition.id, &retained)
+                    .await
+                {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %agent_identity,
+                        error = %write_error,
+                        "failed to refine a capability release obligation after teardown; the \
+                         pre-existing durable row remains custody"
+                    );
+                }
+                return Err(MobError::ForkedParticipantAttachmentReleaseUnproven {
+                    member_id: agent_identity.clone(),
+                    attachment_id: record.association.attachment_id.as_str().to_string(),
+                    detail: error.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconcile durable capability associations at actor startup.
+    ///
+    /// Two shapes are discharged, both of which have already passed the
+    /// "release only after teardown" bar because their member does not exist:
+    ///
+    /// * an ORPHAN — a row whose member is absent from the roster, i.e. a
+    ///   crash between the member's teardown and its release; and
+    /// * a NEVER-SEATED attachment — a `SpawnInFlight` row whose member never
+    ///   reached the roster, i.e. a crash inside the seating window.
+    ///
+    /// A row whose member IS seated is deliberately RETAINED, including across
+    /// a clean shutdown: the member, its fork session, and therefore its lease
+    /// all survive a shutdown, so releasing would assert a teardown that never
+    /// happened. Such a lease stays bounded by the capability's own TTL, whose
+    /// expiry sweep and pending-attached enumeration are owned by the source.
+    ///
+    /// One unreadable or unreleasable row never aborts the sweep: it keeps its
+    /// durable obligation and the remaining rows are still reconciled.
+    async fn reconcile_forked_participant_member_associations(&mut self) -> Result<(), MobError> {
+        let records = self
+            .runtime_metadata
+            .list_forked_participant_member_associations(&self.definition.id)
+            .await?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let seated = {
+            let roster = self.roster.read().await;
+            records
+                .iter()
+                .map(|record| {
+                    (
+                        record.association_key.clone(),
+                        roster.get(&record.agent_identity).is_some(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        for record in records {
+            if seated
+                .get(&record.association_key)
+                .copied()
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    association_key = %record.association_key,
+                    agent_identity = %record.agent_identity,
+                    "retained a durable capability association for a seated member"
+                );
+                continue;
+            }
+            if let Err(error) = self
+                .release_attached_forked_participant_custody(&record)
+                .await
+            {
+                let mut retained = record.clone();
+                retained.obligation = Some(
+                    crate::store::MobForkedParticipantObligationCause::TeardownReleaseUnproven,
+                );
+                retained.detail = error.to_string();
+                if let Err(write_error) = self
+                    .runtime_metadata
+                    .put_forked_participant_member_association(&self.definition.id, &retained)
+                    .await
+                {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        association_key = %record.association_key,
+                        error = %write_error,
+                        "failed to refine an orphaned capability release obligation"
+                    );
+                }
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    association_key = %record.association_key,
+                    agent_identity = %record.agent_identity,
+                    error = %error,
+                    "orphaned capability attachment could not be released; its durable obligation \
+                     is retained for retry"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Phase 6 (DEC-P6E-20/21): the placement-switched member history read.
@@ -38431,6 +40002,15 @@ impl MobActor {
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
             .await?;
 
+        // Session archive and runtime disposal have both succeeded above, so
+        // any capability attachment this member seated is now releasable. It
+        // runs BEFORE the durable completion boundary on purpose: an
+        // unreleasable lease must not be able to publish a completed
+        // retirement. The `MemberRetirementStarted` anchor is retained instead
+        // and an exact retry converges (a repeated release replays).
+        self.release_forked_participant_attachments_for_member(&entry.agent_identity)
+            .await?;
+
         // `MemberRetired` is the durable completion boundary. It is appended
         // only after the routed retire, archive, and every critical local
         // cleanup above has succeeded; failures retain the durable
@@ -38951,6 +40531,7 @@ impl MobActor {
             system_prompt_override: replacement_system_prompt_override,
             continuity_intent: replacement_continuity_intent,
             placement: _,
+            forked_participant_attachment: _,
         } = replacement_spec;
         let replacement_labels = replacement_labels.unwrap_or_default();
 
@@ -42951,6 +44532,21 @@ impl MobActor {
                     report: report.clone(),
                 });
             }
+        }
+        if let Err(error) = self
+            .release_forked_participant_attachments_for_member(&entry.agent_identity)
+            .await
+        {
+            // Destroy has already torn the member down; the lease it seated is
+            // owed a release. Reporting an incomplete destroy keeps the durable
+            // obligation reachable instead of publishing a false teardown.
+            report.push_error(format!(
+                "{}: capability attachment release after destroy teardown failed: {error}",
+                entry.agent_identity
+            ));
+            return Err(super::handle::MobDestroyError::Incomplete {
+                report: report.clone(),
+            });
         }
         if let Err(error) = self.record_destroy_member_retired_event(&entry).await {
             report.push_error(format!(

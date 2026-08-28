@@ -14,6 +14,7 @@ pub mod run_accounting;
 #[cfg(not(target_arch = "wasm32"))]
 mod schedule_host;
 mod surface;
+pub mod temporary_council;
 mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
@@ -26,6 +27,13 @@ pub use public_mcp::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use schedule_host::MobMcpScheduleHost;
 pub use surface::wire_mob_tools;
+pub use temporary_council::{
+    MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,
+    TemporaryCouncilBounds, TemporaryCouncilCoordinator, TemporaryCouncilDeadline,
+    TemporaryCouncilError, TemporaryCouncilHostBootstrap, TemporaryCouncilOutcome,
+    TemporaryCouncilParticipantSpec, TemporaryCouncilRecoveryReport, TemporaryCouncilRequest,
+    TemporaryCouncilStructuredContract,
+};
 pub use workgraph_flow::{
     AbandonUncertainWorkGraphFlowRequest, LaunchWorkGraphFlowRequest, WorkGraphFlowAbandonResult,
     WorkGraphFlowBridgeError, WorkGraphFlowLaunchResult, WorkGraphFlowReconcileResult,
@@ -72,6 +80,12 @@ use meerkat_core::types::{
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::definition::SkillSource;
 use meerkat_mob::machines::mob_machine::ControlScope;
+use meerkat_mob::store::{
+    ForkedParticipantStore, InMemoryForkedParticipantStore, InMemoryTemporaryCouncilStore,
+    TemporaryCouncilStore,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_mob::store::{SqliteForkedParticipantStore, SqliteTemporaryCouncilStore};
 use meerkat_mob::{
     AgentIdentity, CommandAuthority, FlowId, MobBackendKind, MobBuilder, MobControlPrincipal,
     MobDefinition, MobError, MobHandle, MobId, MobRuntimeMode, MobSessionService, MobState,
@@ -312,6 +326,60 @@ impl RealmProfileStoreSelection {
     }
 }
 
+/// Typed provenance of the state-owned, realm-scoped capability custody.
+///
+/// Each variant always contains exactly one store. The state composition layer
+/// replaces only the default in-memory store when an explicit persistent root
+/// is installed; a host-injected store is never silently replaced.
+enum ForkedParticipantStoreSelection {
+    DefaultInMemory(Arc<dyn ForkedParticipantStore>),
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    DefaultDurable(Arc<dyn ForkedParticipantStore>),
+    CallerSupplied(Arc<dyn ForkedParticipantStore>),
+}
+
+impl ForkedParticipantStoreSelection {
+    fn store(&self) -> &Arc<dyn ForkedParticipantStore> {
+        match self {
+            Self::DefaultInMemory(store)
+            | Self::DefaultDurable(store)
+            | Self::CallerSupplied(store) => store,
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn is_default(&self) -> bool {
+        matches!(self, Self::DefaultInMemory(_))
+    }
+}
+
+/// Typed provenance of the state-owned, realm-scoped temporary-council custody.
+///
+/// Mirrors [`ForkedParticipantStoreSelection`] exactly, including the rule that
+/// only the default in-memory store is replaced when an explicit persistent
+/// root is installed.
+enum TemporaryCouncilStoreSelection {
+    DefaultInMemory(Arc<dyn TemporaryCouncilStore>),
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    DefaultDurable(Arc<dyn TemporaryCouncilStore>),
+    CallerSupplied(Arc<dyn TemporaryCouncilStore>),
+}
+
+impl TemporaryCouncilStoreSelection {
+    fn store(&self) -> &Arc<dyn TemporaryCouncilStore> {
+        match self {
+            Self::DefaultInMemory(store)
+            | Self::DefaultDurable(store)
+            | Self::CallerSupplied(store) => store,
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn is_default(&self) -> bool {
+        matches!(self, Self::DefaultInMemory(_))
+    }
+}
+
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
@@ -321,6 +389,10 @@ pub struct MobMcpState {
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     persistent_storage_root: Option<PathBuf>,
+    /// Legacy infallible persistent-root construction records setup failure so
+    /// every managed-mob operation fails closed rather than using ephemeral
+    /// capability custody under a caller-requested durable root.
+    persistent_storage_setup_error: Option<String>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
     /// Bumped whenever the managed-mob handle set gains or loses an entry.
     /// Interval-free observers (e.g. mobkit's agent-event stream reconcilers)
@@ -337,6 +409,40 @@ pub struct MobMcpState {
     /// with its provenance (single source of truth for the persistent-root
     /// auto-upgrade decision).
     realm_profile_store_selection: RealmProfileStoreSelection,
+    /// One source-owned capability custody store shared by every mob built by
+    /// this state. It is realm/state scoped, never a process-global singleton.
+    forked_participant_store_selection: ForkedParticipantStoreSelection,
+    /// Realm-scoped temporary-council orchestration custody (issue #159).
+    temporary_council_store_selection: TemporaryCouncilStoreSelection,
+    /// Serializes council admission: load-or-insert plus single-flight
+    /// registration must be one decision per council id.
+    temporary_council_admission: Mutex<()>,
+    /// Single-flight registry of owned council execution tasks, keyed by
+    /// council id. A `std` mutex because the map is only ever touched without
+    /// awaits, including from the task's drop guard.
+    temporary_council_inflight:
+        std::sync::Mutex<HashMap<String, temporary_council::InflightCouncil>>,
+    /// Weak self-reference, installed the first time an `Arc<Self>` is
+    /// available. Persistent restoration uses it to schedule the council
+    /// recovery sweep automatically instead of requiring a caller to run
+    /// maintenance by hand.
+    self_weak: std::sync::OnceLock<std::sync::Weak<MobMcpState>>,
+    /// Stable per-process coordinator identity. It is the council claim id, so
+    /// a later in-process recovery sweep RENEWS the claim this process already
+    /// holds instead of colliding with itself, while a genuinely different
+    /// process presents a different identity and must go through the machine's
+    /// busy/expiry-takeover path.
+    coordinator_id: String,
+    /// Wall-clock budget the coordinator gives ONE bounded cleanup pass before
+    /// it publishes the already-sealed result with a pending receipt.
+    temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64,
+    /// Offset applied to every clock read the temporary-council coordinator
+    /// makes. Zero in production; the only way to move it is the explicit
+    /// test-clock seam below, which no surface exposes.
+    temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64,
+    /// Set once the automatic post-restore recovery sweep has been scheduled.
+    /// Also what keeps the sweep from re-entering `ensure_restored`.
+    temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
     /// Skill sources seeded from the owning mob definition.
     ///
     /// Realm profiles carry skill names, not the source bodies/paths. When an
@@ -393,6 +499,7 @@ impl MobMcpState {
             default_llm_client_provider: None,
             external_tools_provider: None,
             persistent_storage_root: None,
+            persistent_storage_setup_error: None,
             mobs: RwLock::new(BTreeMap::new()),
             mob_set_epoch: tokio::sync::watch::Sender::new(0),
             implicit_mob_locks: Mutex::new(HashMap::new()),
@@ -403,6 +510,22 @@ impl MobMcpState {
             realm_profile_store_selection: RealmProfileStoreSelection::DefaultInMemory(Arc::new(
                 meerkat_mob::InMemoryRealmProfileStore::new(),
             )),
+            forked_participant_store_selection: ForkedParticipantStoreSelection::DefaultInMemory(
+                Arc::new(InMemoryForkedParticipantStore::new()),
+            ),
+            temporary_council_store_selection: TemporaryCouncilStoreSelection::DefaultInMemory(
+                Arc::new(InMemoryTemporaryCouncilStore::new()),
+            ),
+            temporary_council_admission: Mutex::new(()),
+            temporary_council_inflight: std::sync::Mutex::new(HashMap::new()),
+            self_weak: std::sync::OnceLock::new(),
+            coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
+            temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
+            temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64::new(
+                u64::try_from(temporary_council::TEMPORARY_COUNCIL_CLEANUP_BUDGET.as_millis())
+                    .unwrap_or(30_000),
+            ),
+            temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
             realm_skill_sources: BTreeMap::new(),
             member_live_host: std::sync::RwLock::new(None),
             controlling_acceptor: None,
@@ -446,30 +569,322 @@ impl MobMcpState {
         self.realm_profile_store_selection.store()
     }
 
-    pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
-        self.persistent_storage_root = runtime_root.map(|root| {
-            let mob_root = Self::persistent_mob_root(&root);
-            // Auto-create realm profile store when persistent storage is available.
-            #[cfg(not(target_arch = "wasm32"))]
-            if self.realm_profile_store_selection.is_default() {
-                let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
-                match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
-                    Ok(store) => {
-                        self.realm_profile_store_selection =
-                            RealmProfileStoreSelection::DefaultDurable(
-                                Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>
-                            );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "failed to create realm profile store at {}: {e}",
-                            db_path.display()
-                        );
-                    }
+    /// Inject the single realm-scoped forked-participant custody store.
+    ///
+    /// This affects mobs created or restored by this state only. Handles
+    /// manually inserted with [`Self::mob_insert_handle`] remain foreign and
+    /// retain the store with which their own builder was composed.
+    pub fn with_forked_participant_store(mut self, store: Arc<dyn ForkedParticipantStore>) -> Self {
+        self.forked_participant_store_selection =
+            ForkedParticipantStoreSelection::CallerSupplied(store);
+        self
+    }
+
+    /// Return this state's shared realm-scoped capability store.
+    ///
+    /// This composition seam stays private: public callers inject a store at
+    /// construction, while capability access remains on the authorized mob
+    /// handle/services rather than exposing bearer-oriented store primitives.
+    fn forked_participant_store(&self) -> &Arc<dyn ForkedParticipantStore> {
+        self.forked_participant_store_selection.store()
+    }
+
+    /// Inject the single realm-scoped temporary-council custody store.
+    pub fn with_temporary_council_store(mut self, store: Arc<dyn TemporaryCouncilStore>) -> Self {
+        self.temporary_council_store_selection =
+            TemporaryCouncilStoreSelection::CallerSupplied(store);
+        self
+    }
+
+    /// Return this state's shared realm-scoped temporary-council store.
+    fn temporary_council_store(&self) -> &Arc<dyn TemporaryCouncilStore> {
+        self.temporary_council_store_selection.store()
+    }
+
+    /// Direct access to the realm-scoped council store, for tests that must
+    /// write a crash shape a live coordinator cannot be made to produce.
+    #[doc(hidden)]
+    pub fn temporary_council_store_for_tests(&self) -> Arc<dyn TemporaryCouncilStore> {
+        self.temporary_council_store().clone()
+    }
+
+    /// Direct access to the realm-scoped capability store, for tests that must
+    /// assert what this realm's custody does and does not hold.
+    #[doc(hidden)]
+    pub fn forked_participant_store_for_tests(&self) -> Arc<dyn ForkedParticipantStore> {
+        self.forked_participant_store().clone()
+    }
+
+    /// Trusted in-process temporary-council API (issue #159).
+    ///
+    /// Deliberately Rust-only in this phase: no RPC/REST/SDK/CLI/public-MCP
+    /// handler is wired to it yet.
+    /// Share this state, installing the self-reference that lets persistent
+    /// restoration schedule its own temporary-council recovery sweep.
+    ///
+    /// `Arc::new(state)` still works and keeps every other behaviour, but a
+    /// state shared that way has no way to own a background task, so unfinished
+    /// councils then need an explicit
+    /// [`TemporaryCouncilCoordinator::recover_unfinished`] call.
+    #[must_use]
+    pub fn into_shared(self) -> Arc<Self> {
+        Arc::new_cyclic(|weak| {
+            let _ = self.self_weak.set(weak.clone());
+            self
+        })
+    }
+
+    /// Override the bounded temporary-council cleanup budget.
+    ///
+    /// Cleanup is bounded so a stuck teardown can never hold a joined caller
+    /// past the point where an immutable result already exists; the remaining
+    /// obligations become explicit durable debt that a later sweep retries.
+    #[must_use]
+    pub fn with_temporary_council_cleanup_budget(self, budget: std::time::Duration) -> Self {
+        self.set_temporary_council_cleanup_budget(budget);
+        self
+    }
+
+    /// The clock the temporary-council coordinator reads.
+    ///
+    /// Every wall-clock decision the coordinator makes — deadline resolution,
+    /// deadline expiry, claim-lease expiry, cleanup budget, and receipt
+    /// timestamps — goes through here, so a test can observe an exact expiry
+    /// instead of sleeping and hoping.
+    pub(crate) fn temporary_council_now(&self) -> chrono::DateTime<chrono::Utc> {
+        let offset = self
+            .temporary_council_clock_offset_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        chrono::Utc::now() + chrono::Duration::milliseconds(offset)
+    }
+
+    /// Advance (or rewind) the coordinator's clock by `offset`.
+    ///
+    /// This exists so deadline-expiry and lease-expiry behaviour can be proven
+    /// deterministically. It is deliberately not reachable from any surface,
+    /// and the default offset is zero.
+    #[doc(hidden)]
+    pub fn set_temporary_council_clock_offset(&self, offset: chrono::Duration) {
+        self.temporary_council_clock_offset_ms.store(
+            offset.num_milliseconds(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    /// Adjust the bounded cleanup budget on a live state.
+    pub fn set_temporary_council_cleanup_budget(&self, budget: std::time::Duration) {
+        self.temporary_council_cleanup_budget_ms.store(
+            u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    pub(crate) fn temporary_council_cleanup_budget(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.temporary_council_cleanup_budget_ms
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// Stable per-process coordinator identity used as the council claim id.
+    pub(crate) fn coordinator_id(&self) -> &str {
+        &self.coordinator_id
+    }
+
+    pub fn temporary_council(self: &Arc<Self>) -> TemporaryCouncilCoordinator {
+        let _ = self.self_weak.set(Arc::downgrade(self));
+        TemporaryCouncilCoordinator::new(self.clone())
+    }
+
+    /// Schedule the automatic post-restore council recovery sweep.
+    ///
+    /// Runs at most once per state and always on its OWN task, so it can call
+    /// back into `ensure_restored`/`handle_for` without re-entering the
+    /// restore lock that is held while restoration completes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn schedule_temporary_council_recovery(&self) {
+        use std::sync::atomic::Ordering;
+        if self
+            .temporary_council_recovery_scheduled
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            // No `Arc<Self>` has been observed yet, so nothing can own the
+            // sweep. Allow a later attempt rather than pretending it ran.
+            self.temporary_council_recovery_scheduled
+                .store(false, Ordering::SeqCst);
+            return;
+        };
+        tokio::spawn(async move {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            match state.temporary_council().recover_unfinished().await {
+                Ok(reports) if !reports.is_empty() => {
+                    tracing::info!(
+                        recovered = reports.len(),
+                        "temporary council recovery sweep converged unfinished records"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "temporary council recovery sweep failed; records remain unfinished"
+                    );
                 }
             }
-            mob_root
         });
+    }
+
+    /// The console principal this state serves, for capability verbs that take
+    /// an explicit caller.
+    fn console_principal_snapshot(&self) -> MobControlPrincipal {
+        self.console_principal.clone()
+    }
+
+    /// Any managed mob handle, for placement-blind capability verbs that only
+    /// need a live actor to route through.
+    ///
+    /// Capability routing is decided by the capability's own immutable owner
+    /// route inside the actor, not by which mob was asked, so this is a
+    /// last-resort carrier rather than an authority choice.
+    async fn any_managed_handle(&self) -> Option<MobHandle> {
+        if self.ensure_restored().await.is_err() {
+            return None;
+        }
+        self.mobs.read().await.values().next().map(|managed| {
+            managed
+                .handle
+                .clone()
+                .with_command_authority(CommandAuthority::principal(self.console_principal.clone()))
+        })
+    }
+
+    fn temporary_council_inflight_entry(
+        &self,
+        council_id: &str,
+    ) -> Option<(
+        String,
+        tokio::sync::watch::Receiver<Option<temporary_council::CouncilPublish>>,
+    )> {
+        self.temporary_council_inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(council_id)
+            .map(|entry| (entry.fingerprint.clone(), entry.completion.clone()))
+    }
+
+    fn temporary_council_register_inflight(
+        &self,
+        council_id: String,
+        fingerprint: String,
+        completion: tokio::sync::watch::Receiver<Option<temporary_council::CouncilPublish>>,
+    ) {
+        self.temporary_council_inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                council_id,
+                temporary_council::InflightCouncil {
+                    fingerprint,
+                    completion,
+                },
+            );
+    }
+
+    fn temporary_council_remove_inflight(&self, council_id: &str) {
+        self.temporary_council_inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(council_id);
+    }
+
+    /// Configure durable mob storage, returning a typed error when the
+    /// explicitly rooted capability database cannot pass SQLite ledger
+    /// validation (including a future-schema refusal).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn try_with_persistent_storage_root(
+        mut self,
+        runtime_root: Option<PathBuf>,
+    ) -> Result<Self, MobError> {
+        self.configure_persistent_storage_root(runtime_root)?;
+        Ok(self)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn configure_persistent_storage_root(
+        &mut self,
+        runtime_root: Option<PathBuf>,
+    ) -> Result<(), MobError> {
+        let Some(runtime_root) = runtime_root else {
+            if let Some(existing_root) = &self.persistent_storage_root {
+                return Err(MobError::Internal(format!(
+                    "cannot clear persistent mob root '{}' after state construction",
+                    existing_root.display()
+                )));
+            }
+            self.persistent_storage_root = None;
+            self.persistent_storage_setup_error = None;
+            return Ok(());
+        };
+        let mob_root = Self::persistent_mob_root(&runtime_root);
+        if let Some(existing_root) = &self.persistent_storage_root
+            && existing_root != &mob_root
+        {
+            return Err(MobError::Internal(format!(
+                "cannot change persistent mob root from '{}' to '{}' after state construction",
+                existing_root.display(),
+                mob_root.display()
+            )));
+        }
+        std::fs::create_dir_all(&mob_root).map_err(|error| {
+            MobError::Internal(format!(
+                "failed to create persistent mob root '{}': {error}",
+                mob_root.display()
+            ))
+        })?;
+        if self.forked_participant_store_selection.is_default() {
+            let db_path = Self::persistent_forked_participant_store_path(&runtime_root);
+            let store = SqliteForkedParticipantStore::open(&db_path)?;
+            self.forked_participant_store_selection =
+                ForkedParticipantStoreSelection::DefaultDurable(Arc::new(store));
+        }
+        if self.temporary_council_store_selection.is_default() {
+            // Same explicitly rooted realm custody database as capability
+            // custody: one realm-scoped orchestration file, one schema domain.
+            let db_path = Self::persistent_forked_participant_store_path(&runtime_root);
+            let store = SqliteTemporaryCouncilStore::open(&db_path)?;
+            self.temporary_council_store_selection =
+                TemporaryCouncilStoreSelection::DefaultDurable(Arc::new(store));
+        }
+        if self.realm_profile_store_selection.is_default() {
+            let db_path = mob_root.join(Self::REALM_PROFILE_STORE_FILE_NAME);
+            let store = meerkat_mob::SqliteRealmProfileStore::open(&db_path)?;
+            self.realm_profile_store_selection =
+                RealmProfileStoreSelection::DefaultDurable(Arc::new(store));
+        }
+        self.persistent_storage_root = Some(mob_root);
+        self.persistent_storage_setup_error = None;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
+        if let Err(error) = self.configure_persistent_storage_root(runtime_root.clone()) {
+            tracing::warn!(error = %error, "persistent mob state setup failed");
+            self.persistent_storage_root =
+                runtime_root.map(|root| Self::persistent_mob_root(&root));
+            self.persistent_storage_setup_error = Some(error.to_string());
+        }
+        self
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
+        self.persistent_storage_root = runtime_root.map(|root| Self::persistent_mob_root(&root));
         self
     }
 
@@ -553,9 +968,24 @@ impl MobMcpState {
     /// never treat it as a mob storage candidate.
     #[cfg(not(target_arch = "wasm32"))]
     const REALM_PROFILE_STORE_FILE_NAME: &str = "realm_profiles.db";
+    /// Reserved custody database name; per-mob files are always prefixed with
+    /// [`Self::MOB_STORE_FILE_PREFIX`], so a user MobId can never collide.
+    #[cfg(not(target_arch = "wasm32"))]
+    const REALM_FORKED_PARTICIPANT_STORE_FILE_NAME: &str = "realm_forked_participants.db";
+    #[cfg(not(target_arch = "wasm32"))]
+    const MOB_STORE_FILE_PREFIX: &str = "mob--";
 
     fn persistent_mob_root(runtime_root: &Path) -> PathBuf {
         runtime_root.join("mobs")
+    }
+
+    /// Explicit durable path for realm-scoped forked-participant custody.
+    ///
+    /// Surfaces that host capabilities directly (rather than through this
+    /// state) use this same rooted location; it is not a per-mob database.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn persistent_forked_participant_store_path(runtime_root: &Path) -> PathBuf {
+        Self::persistent_mob_root(runtime_root).join(Self::REALM_FORKED_PARTICIPANT_STORE_FILE_NAME)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -574,7 +1004,11 @@ impl MobMcpState {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn persistent_storage_path(root: &Path, mob_id: &MobId) -> PathBuf {
-        root.join(format!("{}.db", Self::escape_mob_id_for_path(mob_id)))
+        root.join(format!(
+            "{}{}.db",
+            Self::MOB_STORE_FILE_PREFIX,
+            Self::escape_mob_id_for_path(mob_id)
+        ))
     }
 
     fn default_llm_client_snapshot(&self) -> Option<Arc<dyn LlmClient>> {
@@ -612,7 +1046,9 @@ impl MobMcpState {
     }
 
     fn bind_realm_profile_store(&self, storage: MobStorage) -> MobStorage {
-        storage.with_realm_profile_store(self.realm_profile_store_selection.store().cloned())
+        storage
+            .with_realm_profile_store(self.realm_profile_store_selection.store().cloned())
+            .with_forked_participant_store(Some(self.forked_participant_store().clone()))
     }
 
     async fn storage_for_new_mob(
@@ -752,14 +1188,13 @@ impl MobMcpState {
                 {
                     continue;
                 }
-                // The realm-scoped profile store DB lives in this same
-                // directory (see `with_persistent_storage_root`) but is not a
-                // mob event log. Opening it as mob storage spawns a SQLite
-                // event-bus watcher thread and then deletes the file because
-                // its mob_events log is empty — silently destroying realm
-                // profiles. Never treat it as a mob storage candidate.
-                if path.file_name().and_then(|name| name.to_str())
-                    == Some(Self::REALM_PROFILE_STORE_FILE_NAME)
+                // Realm-scoped stores use reserved names. Only the prefixed
+                // per-mob database namespace is eligible for restore or empty
+                // sweep, so custody survives every individual mob lifecycle.
+                if !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(Self::MOB_STORE_FILE_PREFIX))
                 {
                     continue;
                 }
@@ -805,12 +1240,22 @@ impl MobMcpState {
         if self.persistent_storage_root.is_none() {
             return Ok(());
         }
-        let mut restored = self.restore_lock.lock().await;
-        if *restored {
-            return Ok(());
+        if let Some(error) = &self.persistent_storage_setup_error {
+            return Err(MobError::Internal(format!(
+                "persistent mob state setup failed: {error}"
+            )));
         }
-        self.restore_from_persistent_storage().await?;
-        *restored = true;
+        {
+            let mut restored = self.restore_lock.lock().await;
+            if !*restored {
+                self.restore_from_persistent_storage().await?;
+                *restored = true;
+            }
+        }
+        // The restore lock is released BEFORE scheduling, and the sweep runs
+        // on its own task, so recovery can use the ordinary mob verbs (which
+        // call back into `ensure_restored`) without recursion or deadlock.
+        self.schedule_temporary_council_recovery();
         Ok(())
     }
 
@@ -963,7 +1408,12 @@ impl MobMcpState {
         Ok(mob_id)
     }
 
-    /// Register an existing mob handle in this dispatcher state.
+    /// Register an existing foreign mob handle in this dispatcher state.
+    ///
+    /// The handle is not rebuilt and therefore does not participate in this
+    /// state's shared capability custody. Hosts needing shared custody must
+    /// compose it with [`MobStorage::with_forked_participant_store`] before
+    /// building the handle.
     pub async fn mob_insert_handle(&self, mob_id: MobId, handle: MobHandle) {
         self.mobs.write().await.insert(
             mob_id,
@@ -9645,6 +10095,262 @@ mod tests {
         definition
     }
 
+    struct TestForkedParticipantSource;
+
+    #[async_trait]
+    impl meerkat_mob::ForkedParticipantSourceRuntime for TestForkedParticipantSource {
+        async fn session_execution_evidence(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<meerkat_mob::forked_participant::SessionExecutionEvidence>, SessionError>
+        {
+            Ok(Some(
+                meerkat_mob::forked_participant::SessionExecutionEvidence {
+                    agent_identity: Some(AgentIdentity::from("source-member")),
+                    realm_id: Some(
+                        meerkat_core::RealmId::parse("global").expect("valid test realm"),
+                    ),
+                    tool_access_policy: None,
+                    auth_binding: None,
+                },
+            ))
+        }
+
+        async fn fork_planned_child(
+            &self,
+            request: meerkat_mob::forked_participant::PlannedForkRequest,
+        ) -> Result<meerkat_mob::forked_participant::PlannedForkOutcome, SessionError> {
+            Ok(meerkat_mob::forked_participant::PlannedForkOutcome {
+                child_session_id: request.planned_child_session_id,
+                prefix_message_count: request.prefix_message_count.unwrap_or(0),
+                prefix_digest: "test-prefix-digest".to_string(),
+            })
+        }
+
+        async fn planned_child_evidence(
+            &self,
+            _child_session_id: &SessionId,
+        ) -> Result<Option<meerkat_mob::forked_participant::PlannedChildEvidence>, SessionError>
+        {
+            Ok(None)
+        }
+
+        async fn archive_fork_session(
+            &self,
+            _child_session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    async fn mint_local_forked_participant(
+        state: &MobMcpState,
+        request_id: &str,
+        reuse: meerkat_mob::forked_participant::ForkedParticipantReusePolicy,
+    ) -> meerkat_mob::forked_participant::ForkedParticipantRef {
+        let realm_id = meerkat_core::RealmId::parse("global").expect("valid test realm");
+        let service = meerkat_mob::forked_participant::ForkedParticipantService::new(
+            meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Local {
+                realm_id: realm_id.clone(),
+            },
+            state.forked_participant_store().clone(),
+            Arc::new(TestForkedParticipantSource),
+        )
+        .expect("compose source capability service");
+        service
+            .create(
+                &meerkat_mob::forked_participant::ForkedParticipantRequest {
+                    request_id: meerkat_mob::forked_participant::ForkedParticipantRequestId::new(
+                        request_id,
+                    )
+                    .expect("valid request id"),
+                    source_identity: AgentIdentity::from("source-member"),
+                    source_session_id: SessionId::new(),
+                    owner_route:
+                        meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Local {
+                            realm_id,
+                        },
+                    prefix_message_count: None,
+                    scope:
+                        meerkat_mob::forked_participant::ForkedParticipantOperationScope::InvokeAndObserve,
+                    reuse,
+                    ttl: Duration::from_secs(600),
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("mint source capability")
+    }
+
+    #[tokio::test]
+    async fn registry_mobs_share_in_memory_forked_participant_custody() {
+        let state = MobMcpState::new_in_memory();
+        let source_mob = state
+            .mob_create_definition(explicit_definition("capability-source"))
+            .await
+            .expect("create source mob");
+        let target_mob = state
+            .mob_create_definition(explicit_definition("capability-target"))
+            .await
+            .expect("create target mob");
+        let source_storage = state
+            .storage_for_new_mob(&source_mob)
+            .await
+            .expect("compose source storage")
+            .0;
+        let target_storage = state
+            .storage_for_new_mob(&target_mob)
+            .await
+            .expect("compose target storage")
+            .0;
+        assert!(Arc::ptr_eq(
+            source_storage
+                .forked_participant_store()
+                .expect("source capability store"),
+            target_storage
+                .forked_participant_store()
+                .expect("target capability store"),
+        ));
+        let capability = mint_local_forked_participant(
+            &state,
+            "cross-mob-capability",
+            meerkat_mob::forked_participant::ForkedParticipantReusePolicy::BoundedReuse {
+                max_uses: 2,
+            },
+        )
+        .await;
+
+        // Destroying the source mob only removes its event store. The
+        // state-owned custody remains available to another managed mob.
+        state
+            .mob_destroy(&source_mob)
+            .await
+            .expect("destroy source mob");
+        let attachment_id =
+            meerkat_mob::forked_participant::ForkedParticipantAttachmentId::new("target-attach")
+                .expect("valid attachment id");
+        let target_service = meerkat_mob::forked_participant::ForkedParticipantService::new(
+            capability.owner_route().clone(),
+            state.forked_participant_store().clone(),
+            Arc::new(TestForkedParticipantSource),
+        )
+        .expect("compose target capability service");
+        let grant = target_service
+            .attach(&capability, &attachment_id, true, chrono::Utc::now())
+            .await
+            .expect("target must load and attach source capability");
+        assert_eq!(grant.attachment_id, attachment_id);
+        assert!(
+            state
+                .forked_participant_store()
+                .load_exact(&capability)
+                .await
+                .is_ok(),
+            "the state-owned store retains the exact protected reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_registry_capability_custody_survives_mob_and_state_restart() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(
+            MobMcpState::new(svc.clone(), MobControlPrincipal::Owner)
+                .try_with_persistent_storage_root(Some(root.path().to_path_buf()))
+                .expect("open rooted capability custody"),
+        );
+        let source_mob = state
+            .mob_create_definition(explicit_definition("persistent-capability-source"))
+            .await
+            .expect("create source mob");
+        let target_mob = state
+            .mob_create_definition(explicit_definition("persistent-capability-target"))
+            .await
+            .expect("create target mob");
+        let capability = mint_local_forked_participant(
+            &state,
+            "persistent-cross-mob-capability",
+            meerkat_mob::forked_participant::ForkedParticipantReusePolicy::OneShot,
+        )
+        .await;
+
+        let custody_path = MobMcpState::persistent_mob_root(root.path())
+            .join(MobMcpState::REALM_FORKED_PARTICIPANT_STORE_FILE_NAME);
+        assert!(
+            tokio::fs::metadata(&custody_path).await.is_ok(),
+            "realm custody must have an explicitly rooted durable database"
+        );
+        state
+            .mob_destroy(&source_mob)
+            .await
+            .expect("destroy source mob without deleting realm custody");
+        assert!(
+            tokio::fs::metadata(&custody_path).await.is_ok(),
+            "source destruction must not delete shared capability custody"
+        );
+
+        state
+            .handle_for(&target_mob)
+            .await
+            .expect("target mob handle")
+            .shutdown()
+            .await
+            .expect("shutdown target for state restart");
+        drop(state);
+
+        let restored = MobMcpState::new(svc, MobControlPrincipal::Owner)
+            .try_with_persistent_storage_root(Some(root.path().to_path_buf()))
+            .expect("reopen rooted capability custody");
+        assert!(
+            restored
+                .forked_participant_store()
+                .load_exact(&capability)
+                .await
+                .is_ok(),
+            "state restart must reopen the same durable capability record"
+        );
+        assert_eq!(
+            restored
+                .mob_list()
+                .await
+                .expect("restore managed mobs")
+                .len(),
+            1,
+            "only the surviving target mob is restored; custody is not a mob"
+        );
+    }
+
+    #[tokio::test]
+    async fn realm_states_and_direct_mob_storage_remain_isolated() {
+        let first = MobMcpState::new_in_memory();
+        let second = MobMcpState::new_in_memory();
+        assert!(
+            !Arc::ptr_eq(
+                first.forked_participant_store(),
+                second.forked_participant_store()
+            ),
+            "separate state instances are separate realm capability custodies"
+        );
+
+        let direct_first = MobStorage::in_memory();
+        let direct_second = MobStorage::in_memory();
+        let _first_builder =
+            MobBuilder::new(explicit_definition("direct-first"), direct_first.clone());
+        let _second_builder =
+            MobBuilder::new(explicit_definition("direct-second"), direct_second.clone());
+        assert!(
+            !Arc::ptr_eq(
+                direct_first
+                    .forked_participant_store()
+                    .expect("direct storage capability store"),
+                direct_second
+                    .forked_participant_store()
+                    .expect("direct storage capability store"),
+            ),
+            "direct MobBuilder storage remains local unless its caller injects a store"
+        );
+    }
+
     fn sample_realm_profile(model: &str) -> meerkat_mob::Profile {
         meerkat_mob::profile::Profile {
             model: model.to_string(),
@@ -10120,9 +10826,12 @@ mod tests {
         tokio::fs::create_dir_all(&mob_root)
             .await
             .expect("create mob root");
-        tokio::fs::write(mob_root.join("broken.db"), b"not a sqlite database")
-            .await
-            .expect("write invalid mob store");
+        tokio::fs::write(
+            mob_root.join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX)),
+            b"not a sqlite database",
+        )
+        .await
+        .expect("write invalid mob store");
 
         let state = Arc::new(
             MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)

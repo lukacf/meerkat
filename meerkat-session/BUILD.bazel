@@ -382,6 +382,66 @@ rust_test(
 )
 
 rust_test(
+    name = "planned_identity_fork_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "planned_identity_fork",
+    crate_root = "tests/planned_identity_fork.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/planned_identity_fork.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_BIN_NAME": "planned_identity_fork",
+        "CARGO_MANIFEST_DIR": "./meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-session:meerkat_session_with_runtime_test_support",
+        "//meerkat-skills:meerkat_skills",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "regression_lifecycle_test",
     aliases = aliases(
         package_name = "meerkat-session",
@@ -508,6 +568,7 @@ test_suite(
         ":ephemeral_contract_test",
         ":meerkat_session_unit_test",
         ":persistence_compat_test",
+        ":planned_identity_fork_test",
         ":regression_lifecycle_test",
     ],
 )

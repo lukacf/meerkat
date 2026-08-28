@@ -571,6 +571,7 @@ pub fn raw_materialize_member_command(
         spec,
         spec_digest,
         launch,
+        forked_participant_attachment: None,
     }))
 }
 

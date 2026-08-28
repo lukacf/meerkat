@@ -2,6 +2,7 @@
 pub mod approval_lifecycle;
 pub mod auth;
 pub mod detached_job;
+pub mod forked_participant_lifecycle;
 pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;
@@ -9,6 +10,7 @@ pub mod runtime_delivery;
 pub mod schedule_lifecycle;
 pub mod session_document;
 pub mod session_turn_admission;
+pub mod temporary_council_lifecycle;
 pub mod work_attention_lifecycle;
 pub mod work_execution_lifecycle;
 pub mod work_graph_lifecycle;

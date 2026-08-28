@@ -80,6 +80,19 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             "WorkAttentionLifecycleMachine",
             // Work execution owns durable Mob Flow realization lifecycle.
             "WorkExecutionLifecycleMachine",
+            // Forked participant owns ONE source-owned cross-context fork
+            // capability record (issue #159): reservation identity, durable
+            // fork activation identity, bounded single-holder attachment
+            // admission, revocation, expiry, and cleanup debt. Record-scoped,
+            // so the store persists one machine state per capability.
+            "ForkedParticipantLifecycleMachine",
+            // Temporary council owns ONE cross-context council record (issue
+            // #159): request-identity binding, discussion/merge advance,
+            // immutable result sealing (executed vs coordinator-interrupted),
+            // cleanup settlement versus retained debt, and the recovery-sweep
+            // verdict. Record-scoped, so the store persists one machine state
+            // per council.
+            "TemporaryCouncilLifecycleMachine",
         ]
     );
 

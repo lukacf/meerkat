@@ -446,6 +446,56 @@ rust_test(
 )
 
 rust_test(
+    name = "forked_participant_lifecycle_machine_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "forked_participant_lifecycle_machine",
+    crate_root = "tests/forked_participant_lifecycle_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/forked_participant_lifecycle_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_BIN_NAME": "forked_participant_lifecycle_machine",
+        "CARGO_MANIFEST_DIR": "./meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "gpt_live_authority_contract_test",
     aliases = aliases(
         package_name = "meerkat-machine-schema",
@@ -898,6 +948,56 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "temporary_council_lifecycle_machine_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "temporary_council_lifecycle_machine",
+    crate_root = "tests/temporary_council_lifecycle_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/temporary_council_lifecycle_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.30",
+        "CARGO_BIN_NAME": "temporary_council_lifecycle_machine",
+        "CARGO_MANIFEST_DIR": "./meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
@@ -907,6 +1007,7 @@ test_suite(
         ":defer_input_totality_test",
         ":docs_machine_authority_alignment_test",
         ":draining_registration_fence_test",
+        ":forked_participant_lifecycle_machine_test",
         ":identity_roundtrip_test",
         ":meerkat_machine_schema_unit_test",
         ":named_type_binding_covers_catalog_test",
@@ -916,5 +1017,6 @@ test_suite(
         ":schema_construction_cache_test",
         ":schema_contracts_test",
         ":stopped_phase_revival_lattice_test",
+        ":temporary_council_lifecycle_machine_test",
     ],
 )

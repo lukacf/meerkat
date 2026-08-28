@@ -10435,11 +10435,10 @@ impl MultiBackendProvisioner {
             super::bridge_protocol::BridgeBindPayload {
                 supervisor: sup_spec.into(),
                 epoch: authority.epoch,
-                // V5 BindMember is the clean-cut adoption seam for persisted
-                // V4 supervisor authority. The supervisor epoch/spec remain
-                // unchanged; only this exact member-effect command upgrades
-                // to the protocol that carries semantic and opaque fences.
-                protocol_version: super::bridge_protocol::BridgeProtocolVersion::V5,
+                // BindMember requires V5+, but a current authority should
+                // advertise its negotiated version rather than pinning the
+                // first version that introduced the command shape.
+                protocol_version: authority.protocol_version,
                 expected_peer_id: peer_id.to_string(),
                 expected_address: address.to_string(),
                 bootstrap_token,

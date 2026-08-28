@@ -365,13 +365,6 @@ impl TemporaryCouncilHostBootstrap {
     pub fn none() -> Self {
         Self::default()
     }
-
-    /// Bind these hosts into the temporary mob before seating.
-    #[must_use]
-    pub fn with_host_bindings(mut self, bindings: Vec<HostBindRequest>) -> Self {
-        self.host_bindings = bindings;
-        self
-    }
 }
 
 /// The typed contract a `StructuredResult` merge must satisfy.

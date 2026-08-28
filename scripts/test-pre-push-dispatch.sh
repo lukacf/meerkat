@@ -36,6 +36,9 @@ base_sha="$(git -C "$TEST_ROOT" rev-parse HEAD)"
 git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   commit --allow-empty -qm "candidate"
 head_sha="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+git -C "$TEST_ROOT" update-ref refs/remotes/origin/main "$base_sha"
+git -C "$TEST_ROOT" symbolic-ref \
+  refs/remotes/origin/HEAD refs/remotes/origin/main
 
 FAKE_PRE_COMMIT="${HARNESS_ROOT}/pre-commit"
 INVOCATION_LOG="${HARNESS_ROOT}/invocation"
@@ -123,8 +126,8 @@ fi
 
 : > "$INVOCATION_LOG"
 run_dispatch "refs/heads/new ${head_sha} refs/heads/new ${ZERO_SHA:-0000000000000000000000000000000000000000}"
-assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --all-files"
-assert_log_line "from=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --from-ref ${base_sha} --to-ref ${head_sha}"
+assert_log_line "from=${base_sha}"
 second_validated_cwd="$(sed -n 's/^cwd=//p' "$INVOCATION_LOG")"
 second_bazel_output_base="$(sed -n 's/^bazel_output_base=//p' "$INVOCATION_LOG")"
 if [[ "${second_validated_cwd}" != "${validated_cwd}" ]]; then
@@ -138,6 +141,15 @@ if [[ "${second_bazel_output_base}" != "${validated_bazel_output_base}" ]]; then
     "${validated_bazel_output_base}" "${second_bazel_output_base}" >&2
   exit 1
 fi
+
+# If the remote default branch is unavailable, branch creation stays
+# fail-closed on the empty tree rather than guessing a comparison base.
+git -C "$TEST_ROOT" symbolic-ref --delete refs/remotes/origin/HEAD
+git -C "$TEST_ROOT" update-ref -d refs/remotes/origin/main
+: > "$INVOCATION_LOG"
+run_dispatch "refs/heads/fallback ${head_sha} refs/heads/fallback 0000000000000000000000000000000000000000"
+assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --all-files"
+assert_log_line "from=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 tag_object="$(git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   tag -a dispatch-test -m dispatch-test && git -C "$TEST_ROOT" rev-parse dispatch-test)"

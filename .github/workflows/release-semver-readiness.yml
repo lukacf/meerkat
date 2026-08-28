@@ -1,0 +1,148 @@
+name: Release semver readiness
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - CHANGELOG.md
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - Cargo.toml
+      - CHANGELOG.md
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Commit or branch to measure before tagging.
+        required: true
+        type: string
+
+concurrency:
+  group: release-semver-${{ github.event.pull_request.number || github.event.inputs.release_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  semver:
+    name: Measure and attest release semver
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve candidate identity
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          print(workspace["workspace"]["package"]["version"])
+          PY
+          )"
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          commit_sha="$(git rev-parse HEAD)"
+          {
+            echo "version=${version}"
+            echo "tree_sha=${tree_sha}"
+            echo "commit_sha=${commit_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether candidate is unpublished
+        id: unpublished
+        shell: bash
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          endpoint="https://crates.io/api/v1/crates/meerkat-core/${VERSION}"
+          if curl -fsSL \
+            -H 'User-Agent: meerkat-release-readiness (https://github.com/lukacf/meerkat)' \
+            "${endpoint}" >/dev/null 2>&1; then
+            echo "needed=false" >> "${GITHUB_OUTPUT}"
+            echo "meerkat-core ${VERSION} is already public; no pre-tag evidence is needed."
+          else
+            echo "needed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Install Rust
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-semver-breaks
+
+      - name: Install cargo-semver-checks
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: taiki-e/install-action@cargo-semver-checks
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Measure and verify declared breaks
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        env:
+          MEERKAT_SEMVER_REPORT_OUT: ${{ runner.temp }}/semver-evidence/report.txt
+        run: make semver-breaks
+
+      - name: Build exact-tree semver attestation
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        shell: bash
+        env:
+          TREE_SHA: ${{ steps.candidate.outputs.tree_sha }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/semver-evidence"
+          report_sha="$(sha256sum "${evidence}/report.txt" | awk '{print $1}')"
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg tree_sha "${TREE_SHA}" \
+            --arg commit_sha "${{ steps.candidate.outputs.commit_sha }}" \
+            --arg version "${VERSION}" \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg workflow_run_id "${GITHUB_RUN_ID}" \
+            --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg report_sha256 "${report_sha}" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              tree_sha: $tree_sha,
+              commit_sha: $commit_sha,
+              version: $version,
+              workflow: $workflow,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_attempt: $workflow_run_attempt,
+              event: $event,
+              ref: $ref,
+              result: "success",
+              report_sha256: $report_sha256
+            }' > "${evidence}/attestation.json"
+
+      - name: Upload exact-tree semver evidence
+        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event_name == 'push' && format('meerkat-semver-attestation-main-{0}', steps.candidate.outputs.tree_sha) || format('meerkat-semver-attestation-preview-{0}', steps.candidate.outputs.tree_sha) }}
+          path: ${{ runner.temp }}/semver-evidence
+          if-no-files-found: error
+          retention-days: 30

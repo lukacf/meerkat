@@ -222,8 +222,32 @@ git -C "$SOURCE_ROOT" worktree add --detach --quiet "$validation_tree" "$pushed_
 export PRE_COMMIT_REMOTE_NAME="$REMOTE_NAME"
 export PRE_COMMIT_REMOTE_URL="$REMOTE_URL"
 export PRE_COMMIT_TO_REF="$pushed_commit"
+empty_tree="$(git -C "$SOURCE_ROOT" hash-object -t tree /dev/null)"
 if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
-  PRE_COMMIT_FROM_REF="$(git -C "$SOURCE_ROOT" hash-object -t tree /dev/null)"
+  PRE_COMMIT_FROM_REF="$empty_tree"
+  # A newly created branch still has a proven diff base. Use the fetched
+  # remote default branch when available so pre-commit does not reinterpret
+  # branch creation as "every repository file changed" and launch unrelated
+  # machine/TLC lanes. Tags remain fail-closed on the empty tree unless their
+  # exact tree already has reusable evidence from the branch push.
+  if [[ "$local_ref" == refs/heads/* ]]; then
+    remote_default_ref="$(
+      git -C "$SOURCE_ROOT" symbolic-ref --quiet \
+        "refs/remotes/${REMOTE_NAME}/HEAD" 2>/dev/null || true
+    )"
+    if [[ -z "$remote_default_ref" ]] &&
+      git -C "$SOURCE_ROOT" rev-parse --verify \
+        "refs/remotes/${REMOTE_NAME}/main^{commit}" >/dev/null 2>&1; then
+      remote_default_ref="refs/remotes/${REMOTE_NAME}/main"
+    fi
+    if [[ -n "$remote_default_ref" ]] &&
+      git -C "$SOURCE_ROOT" rev-parse --verify \
+        "${remote_default_ref}^{commit}" >/dev/null 2>&1; then
+      PRE_COMMIT_FROM_REF="$(
+        git -C "$SOURCE_ROOT" merge-base "$pushed_commit" "$remote_default_ref"
+      )"
+    fi
+  fi
 else
   PRE_COMMIT_FROM_REF="$remote_sha"
 fi
@@ -249,12 +273,13 @@ dispatch_step="running push-stage validation hooks"
 # the whole PIPESTATUS array at once; any later command resets it.
 trap - ERR
 set +e
-if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
+if [[ "$PRE_COMMIT_FROM_REF" == "$empty_tree" ]]; then
   PYTHONUNBUFFERED=1 pre-commit run --config .pre-commit-config.yaml \
     --hook-stage pre-push --all-files 2>&1 | tee "$gate_log"
 else
   PYTHONUNBUFFERED=1 pre-commit run --config .pre-commit-config.yaml \
-    --hook-stage pre-push --from-ref "$remote_sha" --to-ref "$pushed_commit" \
+    --hook-stage pre-push --from-ref "$PRE_COMMIT_FROM_REF" \
+    --to-ref "$pushed_commit" \
     2>&1 | tee "$gate_log"
 fi
 gate_pipeline_status=("${PIPESTATUS[@]}")

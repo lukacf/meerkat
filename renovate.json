@@ -2,7 +2,16 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "schedule": ["before 9am on Monday"],
+  "branchConcurrentLimit": 1,
+  "prConcurrentLimit": 1,
+  "prHourlyLimit": 1,
   "packageRules": [
+    {
+      "description": "Keep routine dependency updates in one validation train",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
+      "groupName": "routine dependencies",
+      "groupSlug": "routine-dependencies"
+    },
     {
       "matchUpdateTypes": ["patch"],
       "automerge": true

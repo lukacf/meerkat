@@ -1,0 +1,90 @@
+name: Renovate Bazel lock sync
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+concurrency:
+  group: renovate-bazel-lock-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  sync:
+    name: Refresh MODULE.bazel.lock
+    if: >-
+      github.actor == 'renovate[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'renovate/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact Renovate head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Admit only dependency-owned changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > "${RUNNER_TEMP}/changed-files"
+          if grep -qEv '(^|/)Cargo\.toml$|^Cargo\.lock$|^MODULE\.bazel\.lock$' \
+            "${RUNNER_TEMP}/changed-files"; then
+            echo "::error::Refusing privileged lock refresh because the Renovate diff is not Cargo metadata only."
+            grep -Ev '(^|/)Cargo\.toml$|^Cargo\.lock$|^MODULE\.bazel\.lock$' \
+              "${RUNNER_TEMP}/changed-files"
+            exit 1
+          fi
+          if ! grep -qx 'Cargo.lock' "${RUNNER_TEMP}/changed-files"; then
+            echo "Cargo.lock is unchanged; no Bazel module lock refresh is needed."
+            echo "needs_refresh=false" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+          echo "needs_refresh=true" >> "${GITHUB_ENV}"
+
+      - name: Install pinned BuildBuddy CLI from the trusted base
+        if: ${{ env.needs_refresh == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_installer="${RUNNER_TEMP}/install-buildbuddy-cli"
+          git show "${BASE_SHA}:scripts/install-buildbuddy-cli" > "${trusted_installer}"
+          chmod 700 "${trusted_installer}"
+          echo "BB_BIN=$(${trusted_installer})" >> "${GITHUB_ENV}"
+
+      - name: Refresh Bazel module lock
+        if: ${{ env.needs_refresh == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted_checker="${RUNNER_TEMP}/check-bazel-module-lock-inputs.py"
+          git show "${BASE_SHA}:scripts/check_bazel_module_lock_inputs.py" > "${trusted_checker}"
+          "${BB_BIN}" mod deps --lockfile_mode=update
+          python3 "${trusted_checker}" "${GITHUB_WORKSPACE}"
+
+      - name: Commit refreshed lock to Renovate branch
+        if: ${{ env.needs_refresh == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- MODULE.bazel.lock; then
+            echo "MODULE.bazel.lock is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MODULE.bazel.lock
+          git commit -m "chore: refresh Bazel module lock"
+          git push origin "HEAD:refs/heads/${HEAD_REF}"

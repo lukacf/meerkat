@@ -66,6 +66,14 @@ analyser_exit=0
     --tool-exit-code "$tool_exit" \
     "${release_args[@]}" || analyser_exit=$?
 
+# Release-readiness CI preserves the complete measurement as exact-tree
+# evidence. This output path is observational only and cannot relax the
+# analyser verdict.
+if [[ -n "${MEERKAT_SEMVER_REPORT_OUT:-}" ]]; then
+    mkdir -p "$(dirname "$MEERKAT_SEMVER_REPORT_OUT")"
+    cp "$report_file" "$MEERKAT_SEMVER_REPORT_OUT"
+fi
+
 if [[ "$analyser_exit" -ne 0 ]]; then
     echo >&2
     echo "cargo-semver-checks exited ${tool_exit}; last 40 report lines:" >&2

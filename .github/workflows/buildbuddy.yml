@@ -1,12 +1,8 @@
 name: GCP BuildBuddy CI
 
-# RETIRED FROM CI ROUTING (2026-07-03): ci.yml no longer calls this workflow;
-# CI runs on free GitHub-hosted runners via cargo.yml + nightly.yml. This file
-# is `workflow_call`-only, so with no caller it is inert. It is kept as a
-# manual fallback during the transition (restore by re-adding the ci.yml job
-# or `git revert`). DELETE this file — together with the GCP control-plane /
-# executor-pool scripts it drives — once a few releases have shipped cleanly
-# on the GHA-only lane.
+# Authoritative full CI. The top-level workflow calls this reusable lane so
+# compilation and test execution can share BuildBuddy's remote cache and RBE
+# fleet instead of rebuilding overlapping Cargo graphs on fresh runners.
 
 on:
   workflow_call:
@@ -62,9 +58,8 @@ permissions:
 
 concurrency:
   group: buildbuddy-gcp-executors
-  # Keep all pending BuildBuddy runs queued behind the shared GCP executor pool.
-  # GitHub's default single pending slot cancels older PR CI before any steps run.
-  queue: max
+  # One run owns scale-up/scale-down of the shared GCP executor pool at a time.
+  # Renovate is grouped and concurrency-limited so it cannot flood this lane.
   cancel-in-progress: false
 
 env:
@@ -89,8 +84,8 @@ env:
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB || '1000' }}
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE || 'pd-ssd' }}
   MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
-  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '1500' }}
-  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS || '2400' }}
+  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "1200"
+  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "1200"
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
   MEERKAT_HOST_CARGO_HOME: /usr/local/cargo
@@ -431,7 +426,7 @@ jobs:
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
       CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS || '2400' }}
+      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "1200"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -635,7 +630,7 @@ jobs:
         shell: bash
         env:
           CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-          MAX_SECONDS: ${{ needs.wasm-feature-changes.outputs.sdk_changed == 'true' && (vars.MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS || '2400') || (vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '1500') }}
+          MAX_SECONDS: "1200"
         run: |
           if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
             echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"

@@ -2,11 +2,11 @@
 
 //! Pinning tests for the CI workflow contract.
 //!
-//! CI runs a single Cargo lane on free GitHub-hosted runners (the GCP
-//! BuildBuddy lane was retired 2026-07-03). These tests ratchet the load-
-//! bearing invariants: the typed governance gates (rmat-audit set) bind every
-//! run, the per-push lane plus the nightly workflow cover the full `make ci`
-//! target set, and the retired BuildBuddy workflow stays inert until deleted.
+//! CI runs one authoritative GCP BuildBuddy/RBE lane. The GitHub-hosted Cargo
+//! workflow remains a diagnostic fallback, while nightly owns low-churn heavy
+//! coverage. These tests ratchet the load-bearing invariants: the typed
+//! governance gates (rmat-audit set) bind every run, BuildBuddy stays on the
+//! hot path, and the aggregate gate enforces the 20-minute terminal budget.
 
 use std::path::{Path, PathBuf};
 
@@ -47,7 +47,7 @@ fn job_names(doc: &serde_yaml::Value, path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn ci_runs_a_single_free_cargo_lane() {
+fn ci_runs_one_authoritative_buildbuddy_lane() {
     let ci_yml = workflow_yml_path("ci.yml");
     let ci = std::fs::read_to_string(&ci_yml)
         .unwrap_or_else(|e| panic!("read {}: {e}", ci_yml.display()));
@@ -55,19 +55,24 @@ fn ci_runs_a_single_free_cargo_lane() {
 
     assert_eq!(
         job_names(&doc, &ci_yml),
-        vec!["cargo", "gate"],
-        "{} should expose only the Cargo lane and the aggregating gate",
+        vec!["gate", "gcp-buildbuddy"],
+        "{} should expose only BuildBuddy and the aggregating gate",
         ci_yml.display(),
     );
-    assert!(ci.contains("uses: ./.github/workflows/cargo.yml"));
     assert!(
-        !ci.contains("uses: ./.github/workflows/buildbuddy.yml"),
-        "the retired GCP BuildBuddy lane must not be routed from CI"
+        ci.contains("uses: ./.github/workflows/buildbuddy.yml"),
+        "CI must route through the authoritative GCP BuildBuddy lane"
+    );
+    assert!(
+        !ci.contains("uses: ./.github/workflows/cargo.yml"),
+        "the diagnostic Cargo workflow must not duplicate authoritative CI"
     );
     assert!(
         !ci.contains("github.actor"),
         "CI must not route by actor — one lane for everyone"
     );
+    assert!(ci.contains("name: Enforce push-to-terminal budget"));
+    assert!(ci.contains("MAX_SECONDS: \"1200\""));
 }
 
 #[test]
@@ -94,7 +99,7 @@ fn machine_authority_classifier_protects_required_gate_owners() {
 }
 
 #[test]
-fn cargo_workflow_covers_the_full_per_push_gate_set() {
+fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
     let cargo_yml = workflow_yml_path("cargo.yml");
     let cargo = std::fs::read_to_string(&cargo_yml)
         .unwrap_or_else(|e| panic!("read {}: {e}", cargo_yml.display()));
@@ -255,17 +260,13 @@ fn nightly_covers_the_deferred_heavy_lanes() {
 }
 
 #[test]
-fn buildbuddy_workflow_is_retired_and_inert() {
+fn buildbuddy_workflow_is_authoritative_and_single_caller() {
     let ci_yml = workflow_yml_path("ci.yml");
     let cargo_yml = workflow_yml_path("cargo.yml");
     let nightly_yml = workflow_yml_path("nightly.yml");
     let buildbuddy_yml = workflow_yml_path("buildbuddy.yml");
-    if !buildbuddy_yml.exists() {
-        // Fully deleted — the retirement completed; nothing to pin.
-        return;
-    }
-
-    // workflow_call-only: without a caller the workflow can never run.
+    // The implementation stays workflow_call-only so ci.yml remains the one
+    // top-level policy owner and attestation boundary.
     // (YAML 1.1 parses the bare `on` key as boolean true.)
     let doc = read_workflow(&buildbuddy_yml);
     let triggers = doc
@@ -278,19 +279,30 @@ fn buildbuddy_workflow_is_retired_and_inert() {
     assert_eq!(
         names,
         vec!["workflow_call"],
-        "retired buildbuddy.yml must stay workflow_call-only (inert without a caller)"
+        "buildbuddy.yml must stay workflow_call-only behind the CI policy owner"
     );
-    for caller in [&ci_yml, &cargo_yml, &nightly_yml] {
+    let ci = std::fs::read_to_string(&ci_yml)
+        .unwrap_or_else(|e| panic!("read {}: {e}", ci_yml.display()));
+    assert!(
+        ci.lines().any(|line| {
+            line.trim_start().starts_with("uses:") && line.contains("buildbuddy.yml")
+        }),
+        "{} must call the authoritative BuildBuddy workflow",
+        ci_yml.display()
+    );
+    for caller in [&cargo_yml, &nightly_yml] {
         let text = std::fs::read_to_string(caller)
             .unwrap_or_else(|e| panic!("read {}: {e}", caller.display()));
-        // Prose may mention the file (retirement notes); a `uses:` reference
-        // is what would revive it.
         assert!(
             !text.lines().any(|line| {
                 line.trim_start().starts_with("uses:") && line.contains("buildbuddy.yml")
             }),
-            "{} must not call the retired BuildBuddy workflow",
+            "{} must not duplicate the authoritative BuildBuddy caller",
             caller.display()
         );
     }
+    let buildbuddy = std::fs::read_to_string(&buildbuddy_yml)
+        .unwrap_or_else(|e| panic!("read {}: {e}", buildbuddy_yml.display()));
+    assert!(buildbuddy.contains("MAX_SECONDS: \"1200\""));
+    assert!(!buildbuddy.contains("queue: max"));
 }

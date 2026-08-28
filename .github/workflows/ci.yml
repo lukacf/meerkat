@@ -1,15 +1,8 @@
 name: CI
 
-# Single-lane CI on GitHub-hosted runners (free for this public repo).
-#
-# The former GCP BuildBuddy lane (control-plane + 12-executor RBE fleet spun
-# up per run) was retired on 2026-07-03 for cost: every push routed ~360
-# vCPUs of STANDARD-provisioned c3d compute plus a 24/7 control plane. The
-# cargo lane below covers the same gate set; the expensive low-yield lanes
-# (feature matrices, e2e-system, per-package no-unification clippy) moved to
-# the nightly workflow. `buildbuddy.yml` is kept unreferenced as a manual
-# fallback during the transition and should be deleted once a few releases
-# have gone through cleanly.
+# BuildBuddy RBE is the authoritative full CI lane. The GitHub-hosted Cargo
+# workflow remains available for manual diagnostics and nightly coverage, but
+# fresh-runner compilation cannot satisfy the 20-minute push-to-terminal SLO.
 
 on:
   push:
@@ -31,35 +24,62 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  cargo:
-    name: GHA Cargo
-    uses: ./.github/workflows/cargo.yml
+  gcp-buildbuddy:
+    name: GCP BuildBuddy
+    uses: ./.github/workflows/buildbuddy.yml
     with:
-      base_sha: >-
+      mode: changed-paths
+      machine_authority_base_sha: >-
         ${{
           github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
           github.event_name == 'push' && github.event.before ||
           ''
         }}
+      machine_authority_head_sha: ${{ github.sha }}
+    secrets: inherit
 
   gate:
     name: CI gate
     if: ${{ always() }}
     needs:
-      - cargo
+      - gcp-buildbuddy
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
         shell: bash
         env:
-          CARGO_RESULT: ${{ needs.cargo.result }}
+          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
         run: |
-          echo "GHA Cargo result: ${CARGO_RESULT}"
-          if [[ "${CARGO_RESULT}" != "success" ]]; then
+          echo "GCP BuildBuddy result: ${BUILDBUDDY_RESULT}"
+          if [[ "${BUILDBUDDY_RESULT}" != "success" ]]; then
             echo "::error::CI did not complete successfully."
+            exit 1
+          fi
+
+      - name: Enforce push-to-terminal budget
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_SECONDS: "1200"
+        run: |
+          set -euo pipefail
+          created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
+          elapsed="$(python3 - "${created_at}" <<'PY'
+          import datetime
+          import sys
+
+          started = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+          now = datetime.datetime.now(datetime.timezone.utc)
+          print(int((now - started).total_seconds()))
+          PY
+          )"
+          echo "Push-to-full-CI terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
+          if ((elapsed > MAX_SECONDS)); then
+            echo "::error::Full CI exceeded the 20-minute push-to-terminal SLO (${elapsed}s)."
             exit 1
           fi
 
@@ -71,7 +91,7 @@ jobs:
         id: attestation
         shell: bash
         env:
-          CARGO_RESULT: ${{ needs.cargo.result }}
+          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
         run: |
           set -euo pipefail
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
@@ -86,9 +106,9 @@ jobs:
             --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg event "${GITHUB_EVENT_NAME}" \
             --arg ref "${GITHUB_REF}" \
-            --arg cargo_result "${CARGO_RESULT}" \
+            --arg validation_result "${BUILDBUDDY_RESULT}" \
             '{
-              schema_version: 1,
+              schema_version: 2,
               repository: $repository,
               commit_sha: $commit_sha,
               tree_sha: $tree_sha,
@@ -97,7 +117,8 @@ jobs:
               workflow_run_attempt: $workflow_run_attempt,
               event: $event,
               ref: $ref,
-              cargo_result: $cargo_result
+              validation_backend: "gcp-buildbuddy",
+              validation_result: $validation_result
             }' > "${destination}/attestation.json"
           echo "tree_sha=${tree_sha}"
           echo "path=${destination}" >> "${GITHUB_OUTPUT}"

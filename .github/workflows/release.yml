@@ -225,8 +225,7 @@ jobs:
             --arg tree_sha "${RELEASE_TREE}" \
             --arg workflow_run_id "${CI_RUN_ID}" \
             --arg workflow_run_attempt "${CI_RUN_ATTEMPT}" \
-            '.schema_version == 1 and
-             .repository == $repository and
+            '.repository == $repository and
              .commit_sha == $commit_sha and
              .tree_sha == $tree_sha and
              .workflow == "CI" and
@@ -234,7 +233,10 @@ jobs:
              .workflow_run_attempt == $workflow_run_attempt and
              .event == "push" and
              .ref == "refs/heads/main" and
-             .cargo_result == "success"' \
+             ((.schema_version == 1 and .cargo_result == "success") or
+              (.schema_version == 2 and
+               .validation_backend == "gcp-buildbuddy" and
+               .validation_result == "success"))' \
             "${attestation}"
           echo "Verified exact-tree CI attestation for ${RELEASE_SHA} (${RELEASE_TREE})"
 
@@ -440,12 +442,9 @@ jobs:
       github.event.inputs.publish_web_sdk_only != 'true' &&
       github.event.inputs.publish_release_assets_only != 'true'
     runs-on: ubuntu-latest
-    # cargo-semver-checks builds rustdoc JSON for the current and the published
-    # baseline of all 39 publishable library crates. Measured cold on an M-series
-    # laptop with a warm cargo cache: 83 minutes. This is the slowest gate in the
-    # release, and it runs in parallel with the binary builds. The generous
-    # ceiling is deliberate: a timeout kill fails the release for a reason that
-    # has nothing to do with semver.
+    # The 83-minute measurement belongs before the tag. Tag-triggered releases
+    # consume exact-tree evidence from Release semver readiness. Manual recovery
+    # may still run or verify an explicit historical measurement.
     timeout-minutes: 330
     steps:
       - name: Checkout
@@ -468,24 +467,82 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-semver-breaks
 
       - name: Install cargo-semver-checks
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
         uses: taiki-e/install-action@cargo-semver-checks
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Verify every reported break is named and the notes are stamped
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.semver_evidence_job_id == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
         run: make semver-breaks
+
+      - name: Verify exact-tree pre-tag semver evidence
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          version="$(python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          print(workspace["workspace"]["package"]["version"])
+          PY
+          )"
+          artifact_name="meerkat-semver-attestation-main-${tree_sha}"
+          artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100")"
+          artifact_id="$(jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${artifact_json}")"
+          if [[ -z "${artifact_id}" ]]; then
+            echo "::error::No unexpired exact-tree semver evidence exists for ${tree_sha}."
+            echo "Run Release semver readiness before creating the tag."
+            exit 1
+          fi
+          evidence="${RUNNER_TEMP}/semver-evidence"
+          mkdir -p "${evidence}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/semver-evidence.zip"
+          unzip -q "${RUNNER_TEMP}/semver-evidence.zip" -d "${evidence}"
+          workflow_run_id="$(jq -r --argjson artifact_id "${artifact_id}" \
+            '[.artifacts[] | select(.id == $artifact_id)] | first | .workflow_run.id' \
+            <<<"${artifact_json}")"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${workflow_run_id}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg tree_sha "${tree_sha}" \
+            --arg version "${version}" \
+            --arg workflow_run_id "${workflow_run_id}" \
+            '.schema_version == 1 and
+             .repository == $repository and
+             .tree_sha == $tree_sha and
+             .version == $version and
+             .workflow == "Release semver readiness" and
+             .workflow_run_id == $workflow_run_id and
+             .event == "push" and
+             .ref == "refs/heads/main" and
+             .result == "success"' \
+            "${evidence}/attestation.json"
+          jq -e \
+            '.name == "Release semver readiness" and
+             .event == "push" and
+             .head_branch == "main" and
+             .conclusion == "success"' \
+            <<<"${run_json}" >/dev/null
+          expected_report_sha="$(jq -r .report_sha256 "${evidence}/attestation.json")"
+          actual_report_sha="$(sha256sum "${evidence}/report.txt" | awk '{print $1}')"
+          [[ "${actual_report_sha}" == "${expected_report_sha}" ]]
+          echo "Verified exact-tree semver evidence for ${tree_sha} (${version})"
 
       - name: Verify exact completed semver measurement and amended declarations
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id != '' }}
@@ -1288,6 +1345,42 @@ jobs:
         run: |
           MEERKAT_REGISTRY_DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}" \
             scripts/release-publish-rust-crates.sh
+
+      - name: Verify all Rust crates are public within 30 minutes
+        if: >-
+          ${{
+            (github.event_name != 'workflow_dispatch' ||
+             github.event.inputs.registry_dry_run != 'true') &&
+            (github.event_name != 'workflow_dispatch' ||
+             github.event.inputs.publish_web_sdk_only != 'true')
+          }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
+          release_sha="$(git rev-parse HEAD)"
+          tag_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?event=push&head_sha=${release_sha}&per_page=100")"
+          tag_pushed_at="$(jq -r \
+            --arg release_tag "${release_tag}" \
+            --arg release_sha "${release_sha}" \
+            '[.workflow_runs[] |
+              select(.event == "push" and
+                     .head_sha == $release_sha and
+                     .head_branch == $release_tag)] |
+             sort_by(.created_at) | first | .created_at // empty' \
+            <<<"${tag_run_json}")"
+          if [[ -z "${tag_pushed_at}" ]]; then
+            echo "::error::No tag-triggered release run found for ${release_tag} at ${release_sha}."
+            exit 1
+          fi
+          python3 scripts/verify-rust-release-public.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --tag-pushed-at "${tag_pushed_at}" \
+            --deadline-seconds 900 \
+            --slo-seconds 1800
 
       - name: Publish Python SDK
         if: >-

@@ -39,6 +39,98 @@ struct PreparedCommit {
     lifecycle_transition: AuthLeaseTransition,
 }
 
+/// Durably publish directly supplied managed-store credentials under one
+/// canonical credential identity.
+pub async fn save_tokens_and_publish_lifecycle(
+    persistence: ProviderAuthPersistence,
+    auth_lease: GeneratedAuthLeaseHandle,
+    credential_identity: AuthCredentialIdentity,
+    tokens: PersistedTokens,
+) -> Result<PersistedTokens, CredentialMutationError> {
+    let store = persistence.token_store();
+    let coordinator = persistence.refresh_coordinator();
+    let key = TokenKey::from_credential_identity(&credential_identity);
+    let load_key = key.clone();
+    let outcome = coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_credential_identity(&credential_identity);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let previous =
+                        meerkat_core::rehydrate_durable_predecessor_for_mutation_for_identity(
+                            store.as_ref(),
+                            &auth_lease,
+                            &credential_identity,
+                            chrono::Utc::now(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            CredentialMutationError::AuthLifecycle(format!(
+                                "durable credential predecessor rehydrate failed: {error}"
+                            ))
+                        })?;
+                    let previous_lifecycle_restore =
+                        auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+                    let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
+                    let lifecycle_transition =
+                        meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                            &auth_lease,
+                            &credential_identity,
+                            &tokens,
+                        )
+                        .map_err(|error| {
+                            CredentialMutationError::AuthLifecycle(format!(
+                                "AuthMachine lifecycle acquire failed: {error}"
+                            ))
+                        })?;
+                    let commit = PreparedCommit {
+                        key: load_key.clone(),
+                        lease_key,
+                        previous,
+                        previous_lifecycle,
+                        previous_lifecycle_restore,
+                        lifecycle_transition,
+                    };
+                    let marked = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        &commit.key,
+                        &tokens,
+                        &commit.lifecycle_transition,
+                    ) {
+                        Ok(marked) => marked,
+                        Err(error) => {
+                            return Err(compensated_error(
+                                store.as_ref(),
+                                &auth_lease,
+                                &commit,
+                                format!("AuthMachine lifecycle marker handoff failed: {error}"),
+                            )
+                            .await);
+                        }
+                    };
+                    if let Err(error) = store.save(&commit.key, &marked).await {
+                        return Err(compensated_error(
+                            store.as_ref(),
+                            &auth_lease,
+                            &commit,
+                            format!("TokenStore save failed: {error}"),
+                        )
+                        .await);
+                    }
+                    Ok(CredentialMutationOutcome::Persisted(marked))
+                })
+            }),
+        )
+        .await?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(tokens) => Ok(tokens),
+        CredentialMutationOutcome::Cleared => Err(CredentialMutationError::Operation(
+            "credential save transaction returned cleared outcome".to_string(),
+        )),
+    }
+}
+
 /// Atomically consume a one-time browser OAuth flow and publish its credential.
 ///
 /// The persistence capability supplies both the token vault and its

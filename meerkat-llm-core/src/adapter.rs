@@ -7,8 +7,8 @@ use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, Provider,
-    StopReason, ToolDef, Usage,
+    AgentError, AgentEvent, AgentLlmClient, AgentLlmRequestAttempt, LlmStreamResult, Message,
+    OutputSchema, Provider, RequestAttemptAuthority, StopReason, ToolDef, Usage,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::block_assembler::BlockAssembler;
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, PreparedLlmRequest};
 
 /// Shared adapter for streaming LLM clients.
 #[derive(Clone)]
@@ -273,7 +273,7 @@ impl LlmClientAdapter {
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
-    ) -> Result<LlmRequest, AgentError> {
+    ) -> Result<PreparedLlmRequest, AgentError> {
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
             .or_else(|| self.provider_params.clone());
@@ -289,50 +289,9 @@ impl LlmClientAdapter {
         let effective_temperature = provider_params
             .and_then(|params| params.temperature)
             .or(temperature);
-        let projected_messages =
-            self.client
-                .project_replay_messages(messages)
-                .map_err(|error| {
-                    AgentError::llm(
-                        self.provider.as_str(),
-                        error.failure_reason(),
-                        error.to_string(),
-                    )
-                })?;
-
-        Ok(LlmRequest {
-            model: self.model.clone(),
-            messages: projected_messages,
-            tools: tools.to_vec(),
-            max_tokens: effective_max_tokens,
-            temperature: effective_temperature,
-            stop_sequences: None,
-            provider_params: effective_params,
-        })
-    }
-}
-
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
-    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl AgentLlmClient for LlmClientAdapter {
-    async fn stream_response(
-        &self,
-        messages: &[Message],
-        tools: &[Arc<ToolDef>],
-        max_tokens: u32,
-        temperature: Option<f32>,
-        provider_params: Option<&ProviderParamsOverride>,
-    ) -> Result<LlmStreamResult, AgentError> {
-        let request =
-            self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
-        let cache_breakpoint_claims = self
+        let projection = self
             .client
-            .authored_cache_breakpoints(&request, messages)
+            .project_replay_request(messages)
             .map_err(|error| {
                 AgentError::llm(
                     self.provider.as_str(),
@@ -341,8 +300,36 @@ impl AgentLlmClient for LlmClientAdapter {
                 )
             })?;
 
-        let mut stream = self.client.stream(&request);
+        Ok(PreparedLlmRequest::from_projection(
+            LlmRequest {
+                model: self.model.clone(),
+                messages: Vec::new(),
+                tools: tools.to_vec(),
+                max_tokens: effective_max_tokens,
+                temperature: effective_temperature,
+                stop_sequences: None,
+                provider_params: effective_params,
+            },
+            projection,
+        ))
+    }
 
+    async fn stream_prepared_response(
+        &self,
+        request: &PreparedLlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<LlmStreamResult, AgentError> {
+        let cache_breakpoint_claims = self
+            .client
+            .prepared_cache_breakpoints(request, canonical_messages)
+            .map_err(|error| {
+                AgentError::llm(
+                    self.provider.as_str(),
+                    error.failure_reason(),
+                    error.to_string(),
+                )
+            })?;
+        let mut stream = self.client.stream_prepared(request);
         let mut assembler = BlockAssembler::new();
         let mut reasoning_started = false;
         let mut stop_reason = StopReason::EndTurn;
@@ -371,8 +358,8 @@ impl AgentLlmClient for LlmClientAdapter {
                             assembler.on_reasoning_start();
                         }
                         self.mark_visible_stream_output(&delta);
-                        if let Err(e) = assembler.on_reasoning_delta(&delta) {
-                            tracing::warn!(?e, "orphaned reasoning delta");
+                        if let Err(error) = assembler.on_reasoning_delta(&delta) {
+                            tracing::warn!(?error, "orphaned reasoning delta");
                         }
                         meerkat_core::tap_try_send(
                             &self.event_tap,
@@ -390,9 +377,6 @@ impl AgentLlmClient for LlmClientAdapter {
                             assembler.on_reasoning_start();
                             let _ = assembler.on_reasoning_delta(&text);
                         }
-                        // Ordering is intentional: snapshot reasoning text before
-                        // `on_reasoning_complete(meta)` because completion may clear
-                        // the internal reasoning buffer.
                         let reasoning_text = assembler.current_reasoning_text();
                         assembler.on_reasoning_complete(meta);
                         reasoning_started = false;
@@ -416,21 +400,21 @@ impl AgentLlmClient for LlmClientAdapter {
                         name,
                         args_delta,
                     } => {
-                        if let Err(e) =
+                        if let Err(error) =
                             assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
                         {
                             if matches!(
-                                e,
+                                error,
                                 crate::block_assembler::StreamAssemblyError::OrphanedToolDelta(_)
                             ) {
                                 let _ = assembler.on_tool_call_start(id.clone());
-                                if let Err(e) =
+                                if let Err(error) =
                                     assembler.on_tool_call_delta(&id, name.as_deref(), &args_delta)
                                 {
-                                    tracing::warn!(?e, "orphaned tool delta");
+                                    tracing::warn!(?error, "orphaned tool delta");
                                 }
                             } else {
-                                tracing::warn!(?e, "tool delta error");
+                                tracing::warn!(?error, "tool delta error");
                             }
                         }
                     }
@@ -440,15 +424,14 @@ impl AgentLlmClient for LlmClientAdapter {
                         args,
                         meta,
                     } => {
-                        let effective_meta = meta;
                         let args_raw = match serde_json::to_string(&args)
                             .ok()
-                            .and_then(|s| serde_json::value::RawValue::from_string(s).ok())
+                            .and_then(|json| serde_json::value::RawValue::from_string(json).ok())
                         {
                             Some(raw) => raw,
                             None => fallback_raw_value(),
                         };
-                        let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
+                        let _ = assembler.on_tool_call_complete(id, name, args_raw, meta);
                     }
                     LlmEvent::ServerToolContent {
                         id,
@@ -468,17 +451,17 @@ impl AgentLlmClient for LlmClientAdapter {
                                 .await;
                         }
                     }
-                    LlmEvent::UsageUpdate { usage: u } => {
-                        usage = self.project_wildcard_host_declared_usage(u).into_inner();
+                    LlmEvent::UsageUpdate { usage: update } => {
+                        usage = self
+                            .project_wildcard_host_declared_usage(update)
+                            .into_inner();
                     }
-                    LlmEvent::WireLiveness => {
-                        // Liveness is already recorded by the per-item activity
-                        // bump above; it is not output and must not reach the
-                        // assembler, taps, or visible-output observation.
-                    }
+                    LlmEvent::WireLiveness => {}
                     LlmEvent::Done { outcome } => match outcome {
-                        LlmDoneOutcome::Success { stop_reason: sr } => {
-                            stop_reason = sr;
+                        LlmDoneOutcome::Success {
+                            stop_reason: completed_reason,
+                        } => {
+                            stop_reason = completed_reason;
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
@@ -489,11 +472,11 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                     },
                 },
-                Err(e) => {
+                Err(error) => {
                     return Err(AgentError::llm(
                         self.provider.as_str(),
-                        e.failure_reason(),
-                        e.to_string(),
+                        error.failure_reason(),
+                        error.to_string(),
                     ));
                 }
             }
@@ -521,6 +504,85 @@ impl AgentLlmClient for LlmClientAdapter {
                 .with_cache_breakpoint_claims(cache_breakpoint_claims),
         )
     }
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
+
+struct LlmClientAdapterAttempt {
+    adapter: Arc<LlmClientAdapter>,
+    request: PreparedLlmRequest,
+    canonical_messages: Arc<Vec<Message>>,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
+    fn request_pressure(
+        &self,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+        self.adapter
+            .client
+            .prepared_request_pressure(&self.request)
+            .map_err(|error| {
+                AgentError::llm(
+                    self.adapter.provider.as_str(),
+                    error.failure_reason(),
+                    error.to_string(),
+                )
+            })
+    }
+
+    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+        self.adapter
+            .stream_prepared_response(&self.request, &self.canonical_messages)
+            .await
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl AgentLlmClient for LlmClientAdapter {
+    fn prepare_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+        let request = self.build_request(
+            messages.as_slice(),
+            tools.as_ref(),
+            max_tokens,
+            temperature,
+            provider_params.as_ref(),
+        )?;
+        Ok(Arc::new(LlmClientAdapterAttempt {
+            adapter: self,
+            request,
+            canonical_messages: messages,
+        }))
+    }
+
+    fn request_attempt_authority(&self) -> RequestAttemptAuthority {
+        RequestAttemptAuthority::Unified
+    }
+
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        let request =
+            self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
+        self.stream_prepared_response(&request, messages).await
+    }
 
     fn request_pressure(
         &self,
@@ -532,13 +594,15 @@ impl AgentLlmClient for LlmClientAdapter {
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
         let request =
             self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
-        self.client.request_pressure(&request).map_err(|error| {
-            AgentError::llm(
-                self.provider.as_str(),
-                error.failure_reason(),
-                error.to_string(),
-            )
-        })
+        self.client
+            .prepared_request_pressure(&request)
+            .map_err(|error| {
+                AgentError::llm(
+                    self.provider.as_str(),
+                    error.failure_reason(),
+                    error.to_string(),
+                )
+            })
     }
 
     fn target_cache_lowering_capabilities(
@@ -553,7 +617,7 @@ impl AgentLlmClient for LlmClientAdapter {
         let request =
             self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
         self.client
-            .authored_cache_breakpoints(&request, messages)
+            .prepared_cache_breakpoints(&request, messages)
             .map_err(|error| {
                 AgentError::llm(
                     self.provider.as_str(),

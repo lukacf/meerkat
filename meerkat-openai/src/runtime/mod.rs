@@ -25,10 +25,7 @@ use meerkat_auth_core::resolver::{
 use meerkat_auth_core::{
     auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
 };
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(feature = "oauth", feature = "copilot")
-))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "copilot"))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
     NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
@@ -656,6 +653,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     let authorizer = connection
                         .resolved_authorizer()
                         .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    let authorizer = route.bind_authorizer(authorizer);
                     match endpoint {
                         meerkat_copilot::CopilotEndpoint::Responses => Ok(Arc::new(
                             crate::OpenAiClient::new_with_optional_api_key_and_base_url(

@@ -21,9 +21,9 @@ pub use binding_use::{
 };
 pub use error::{AuthError, AuthErrorKind};
 pub use lease::{
-    AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationReceipt,
-    HttpAuthorizationRequest, HttpAuthorizationResponse, HttpAuthorizationResponseAction,
-    HttpAuthorizer, ResolvedAuthEnvelope, ResolvedAuthKind,
+    AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationContent,
+    HttpAuthorizationReceipt, HttpAuthorizationRequest, HttpAuthorizationResponse,
+    HttpAuthorizationResponseAction, HttpAuthorizer, ResolvedAuthEnvelope, ResolvedAuthKind,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{

@@ -122,10 +122,95 @@ pub(crate) fn classify_provider_turn_usage_identity(
     })
 }
 
+/// One request attempt whose provider projection, pressure evidence, cache
+/// claims, and dispatch share the same route authority.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait AgentLlmRequestAttempt: Send + Sync {
+    fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError>;
+
+    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RequestAttemptAuthority {
+    LegacySplit,
+    Unified,
+}
+
+struct DirectAgentLlmRequestAttempt<C: AgentLlmClient + ?Sized> {
+    client: Arc<C>,
+    messages: Arc<Vec<Message>>,
+    tools: Arc<[Arc<ToolDef>]>,
+    max_tokens: u32,
+    temperature: Option<f32>,
+    provider_params: Option<ProviderParamsOverride>,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<C> AgentLlmRequestAttempt for DirectAgentLlmRequestAttempt<C>
+where
+    C: AgentLlmClient + ?Sized + 'static,
+{
+    fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+        self.client.request_pressure(
+            &self.messages,
+            &self.tools,
+            self.max_tokens,
+            self.temperature,
+            self.provider_params.as_ref(),
+        )
+    }
+
+    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+        self.client
+            .stream_response(
+                &self.messages,
+                &self.tools,
+                self.max_tokens,
+                self.temperature,
+                self.provider_params.as_ref(),
+            )
+            .await
+    }
+}
+
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentLlmClient: Send + Sync {
+    /// Prepare one owned request attempt. Adapters with dynamic routing return
+    /// a handle that binds all request-derived facts to one route witness.
+    ///
+    /// Stable custom clients receive one direct attempt by default. Dynamic
+    /// adapters override this and report [`RequestAttemptAuthority::Unified`].
+    fn prepare_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError>
+    where
+        Self: 'static,
+    {
+        Ok(Arc::new(DirectAgentLlmRequestAttempt {
+            client: self,
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+        }))
+    }
+
+    fn request_attempt_authority(&self) -> RequestAttemptAuthority {
+        RequestAttemptAuthority::LegacySplit
+    }
+
     /// Stream a response from the LLM
     async fn stream_response(
         &self,
@@ -337,7 +422,10 @@ pub fn target_cache_lowering_capabilities(
 ///
 /// Factories and runtimes apply this after provider/raw-client adaptation so
 /// embedders can compose cross-cutting behavior without provider-specific
-/// registry hooks.
+/// registry hooks. A wrapper around a unified client must forward
+/// [`AgentLlmClient::prepare_request_attempt`] and
+/// [`AgentLlmClient::request_attempt_authority`]; factory composition rejects
+/// decorators that erase that contract.
 pub type AgentLlmClientDecorator =
     Arc<dyn Fn(Arc<dyn AgentLlmClient>) -> Arc<dyn AgentLlmClient> + Send + Sync + 'static>;
 

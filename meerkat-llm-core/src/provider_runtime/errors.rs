@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Binding-validation errors raised by a provider runtime.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ProviderBindingError {
     #[error("unsupported combination: backend={backend} auth={auth}")]
     UnsupportedCombination { backend: String, auth: String },
@@ -19,7 +19,7 @@ pub enum ProviderBindingError {
 
 /// Resolution-phase errors (fetching credentials, invoking external resolvers,
 /// propagating generic `AuthError`).
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ProviderAuthError {
     #[error("auth error: {0}")]
     Auth(#[from] meerkat_core::AuthError),

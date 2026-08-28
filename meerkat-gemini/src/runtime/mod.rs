@@ -58,6 +58,142 @@ fn configured_or_default_base_url(
         })
 }
 
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+struct GeminiCopilotChatClient {
+    inner: Arc<dyn LlmClient>,
+}
+
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+impl GeminiCopilotChatClient {
+    fn unsupported(field: &str) -> meerkat_llm_core::LlmError {
+        meerkat_llm_core::LlmError::InvalidRequest {
+            message: format!(
+                "Gemini Copilot Chat Completions does not support provider parameter '{field}'"
+            ),
+        }
+    }
+
+    fn lower_request(
+        &self,
+        request: &meerkat_llm_core::LlmRequest,
+    ) -> Result<meerkat_llm_core::LlmRequest, meerkat_llm_core::LlmError> {
+        use meerkat_core::lifecycle::run_primitive::{
+            GeminiThinkingLevel, OpenAiProviderTag, ProviderTag, ReasoningEffort,
+        };
+
+        let Some(provider_params) = request.provider_params.as_ref() else {
+            return Ok(request.clone());
+        };
+        let ProviderTag::Gemini(tag) = provider_params else {
+            return Err(Self::unsupported("non_gemini_provider_tag"));
+        };
+        let unsupported = [
+            (tag.thinking_budget.is_some(), "thinking_budget"),
+            (tag.top_k.is_some(), "top_k"),
+            (tag.top_p.is_some(), "top_p"),
+            (tag.google_search.is_some(), "google_search"),
+            (tag.candidate_count.is_some(), "candidate_count"),
+            (tag.cached_content_name.is_some(), "cached_content_name"),
+        ]
+        .into_iter()
+        .find_map(|(present, field)| present.then_some(field));
+        if let Some(field) = unsupported {
+            return Err(Self::unsupported(field));
+        }
+        let nested_level = if let Some(thinking) = tag.thinking.as_ref() {
+            if thinking.include_thoughts.is_some() {
+                return Err(Self::unsupported("thinking.include_thoughts"));
+            }
+            if thinking.thinking_budget.is_some() {
+                return Err(Self::unsupported("thinking.thinking_budget"));
+            }
+            thinking.thinking_level
+        } else {
+            None
+        };
+        if let (Some(nested), Some(flat)) = (nested_level, tag.thinking_level)
+            && nested != flat
+        {
+            return Err(meerkat_llm_core::LlmError::InvalidRequest {
+                message: "Gemini Copilot thinking levels disagree between typed and flat fields"
+                    .to_string(),
+            });
+        }
+        let reasoning_effort = match nested_level.or(tag.thinking_level) {
+            Some(GeminiThinkingLevel::Minimal) => {
+                return Err(Self::unsupported("thinking_level=minimal"));
+            }
+            Some(GeminiThinkingLevel::Low) => Some(ReasoningEffort::Low),
+            Some(GeminiThinkingLevel::Medium) => Some(ReasoningEffort::Medium),
+            Some(GeminiThinkingLevel::High) => Some(ReasoningEffort::High),
+            None => None,
+        };
+        let mut lowered = request.clone();
+        lowered.provider_params = Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            reasoning_effort,
+            structured_output: tag.structured_output.clone(),
+            supports_reasoning_override: reasoning_effort.map(|_| true),
+            ..Default::default()
+        }));
+        Ok(lowered)
+    }
+}
+
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+#[async_trait]
+impl LlmClient for GeminiCopilotChatClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+        self.inner.project_replay_messages(messages)
+    }
+
+    fn request_pressure(
+        &self,
+        request: &meerkat_llm_core::LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
+        self.inner.request_pressure(&self.lower_request(request)?)
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &meerkat_llm_core::LlmRequest,
+        canonical_messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError> {
+        self.inner
+            .authored_cache_breakpoints(&self.lower_request(request)?, canonical_messages)
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::LlmRequest,
+    ) -> meerkat_llm_core::LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            let lowered = self.lower_request(request)?;
+            let mut stream = self.inner.stream(&lowered);
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                yield event?;
+            }
+        })
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Gemini
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+        self.inner.health_check().await
+    }
+
+    fn compile_schema(
+        &self,
+        output_schema: &meerkat_core::OutputSchema,
+    ) -> Result<meerkat_core::CompiledSchema, meerkat_core::SchemaError> {
+        self.inner.compile_schema(output_schema)
+    }
+}
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -920,16 +1056,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     let authorizer = connection
                         .resolved_authorizer()
                         .ok_or(ProviderClientError::NoCredentialMaterial)?;
-                    chat_factory.build(meerkat_copilot::CopilotChatCompletionsClientSpec::new(
-                        Provider::Gemini,
-                        model.clone(),
-                        route.api_base.clone(),
-                        authorizer,
-                        supports_temperature,
-                        true,
-                        true,
-                        supports_image_tool_results,
-                    ))
+                    let authorizer = route.bind_authorizer(authorizer);
+                    let client = chat_factory.build(
+                        meerkat_copilot::CopilotChatCompletionsClientSpec::new(
+                            Provider::Gemini,
+                            model.clone(),
+                            route.api_base.clone(),
+                            authorizer,
+                            supports_temperature,
+                            true,
+                            true,
+                            supports_image_tool_results,
+                        ),
+                    )?;
+                    Ok(Arc::new(GeminiCopilotChatClient { inner: client }))
                 });
             meerkat_copilot::routed_client(
                 Arc::clone(runtime),
@@ -1045,8 +1185,114 @@ fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    use std::sync::Mutex;
+
     use meerkat_core::{BackendProfile, HttpAuthorizationRequest, HttpAuthorizer};
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
+
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    struct CapturingCopilotChatClient {
+        seen_provider_params:
+            Arc<Mutex<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>,
+    }
+
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for CapturingCopilotChatClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            request: &meerkat_llm_core::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            *self.seen_provider_params.lock().expect("capture lock") =
+                request.provider_params.clone();
+            Ok(None)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Gemini
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn copilot_chat_lowers_gemini_structured_output_for_response_format() {
+        use meerkat_core::lifecycle::run_primitive::{
+            GeminiProviderTag, GeminiThinkingLevel, ProviderTag, ReasoningEffort,
+        };
+
+        let seen = Arc::new(Mutex::new(None));
+        let client = GeminiCopilotChatClient {
+            inner: Arc::new(CapturingCopilotChatClient {
+                seen_provider_params: Arc::clone(&seen),
+            }),
+        };
+        let output_schema = meerkat_core::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"]
+        }))
+        .expect("valid output schema");
+        let mut request = meerkat_llm_core::LlmRequest::new("gemini-test", Vec::new());
+        request.provider_params = Some(ProviderTag::Gemini(GeminiProviderTag {
+            thinking_level: Some(GeminiThinkingLevel::High),
+            structured_output: Some(output_schema),
+            ..Default::default()
+        }));
+
+        client
+            .request_pressure(&request)
+            .expect("Gemini Copilot request lowers");
+
+        let captured = seen.lock().expect("capture lock").clone();
+        let Some(ProviderTag::OpenAi(tag)) = captured else {
+            panic!("Gemini Copilot must lower into the Chat Completions wire tag");
+        };
+        assert!(tag.structured_output.is_some());
+        assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn copilot_chat_rejects_unrepresentable_gemini_parameters() {
+        use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
+
+        let client = GeminiCopilotChatClient {
+            inner: Arc::new(CapturingCopilotChatClient {
+                seen_provider_params: Arc::new(Mutex::new(None)),
+            }),
+        };
+        let mut request = meerkat_llm_core::LlmRequest::new("gemini-test", Vec::new());
+        request.provider_params = Some(ProviderTag::Gemini(GeminiProviderTag {
+            top_p: Some(0.5),
+            ..Default::default()
+        }));
+
+        assert!(matches!(
+            client.request_pressure(&request),
+            Err(meerkat_llm_core::LlmError::InvalidRequest { message })
+                if message.contains("top_p")
+        ));
+    }
 
     #[test]
     fn typed_catalog_covers_three_backends() {

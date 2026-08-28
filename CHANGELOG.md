@@ -34,14 +34,25 @@ them.
   variants.** Exact-pinned downstreams must update exhaustive matches and
   struct literals for `AuthCredentialIdentity`, `CredentialAccountId`,
   `CredentialAccountRef`, `TokenKey`, `ProviderAuthPersistence`,
-  `HttpAuthorizationReceipt`, `HttpAuthorizer::prepare_request`,
+  `HttpAuthorizationContent`, `HttpAuthorizationReceipt`, `LlmRequest::has_images`,
+  `HttpAuthorizer::prepare_request`, `HttpAuthorizer::append_content_headers`,
+  `LlmError::AuthorizationRouteChanged`, `LlmProviderErrorKind::AuthorizationRouteChanged`,
+  `AgentLlmClient::prepare_request_attempt`, `AgentLlmClient::request_attempt_authority`,
+  `AgentLlmRequestAttempt`,
+  `RequestAttemptAuthority`, `LlmClient::project_replay_request`,
+  `LlmClient::prepared_request_pressure`, `LlmClient::prepared_cache_breakpoints`,
+  `LlmClient::stream_prepared`, `LlmReplayProjection`, `PreparedLlmRequest`,
+  `LlmRequestRouteWitness`,
   `HttpAuthorizer::authorize_with_receipt`,
   `HttpAuthorizer::observe_response_with_receipt`, `ProviderBinding`, `ProviderBindingConfig`,
   `ResolvedConnection`, `SessionLlmRequestPolicy`, `OAuthProviderIdentity`,
   `PersistedAuthMode`, `LoginStartParams`, `LoginCompleteParams`,
   `DeviceStartParams`, `DeviceCompleteParams`, `WireLoginStart`,
   `WireLoginReady`, `WireDeviceStart`, `WireDeviceCompleteResult`, and
-  generated Web SDK `WireOAuthProvider`.
+  `OAuthProviderDeclaration::client_secret`, `CredentialAccountBindingCandidates`, and
+  generated Web SDK `WireOAuthProvider`; provider-runtime embedders may use
+  `ProviderRuntimeCatalog::validate_binding_with_credential_identity`, and
+  native hosts gain `HostAuthDeviceStart` / `HostAuthDevicePoll`.
 
 ### Added
 

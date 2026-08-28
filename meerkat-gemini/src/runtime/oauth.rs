@@ -26,7 +26,9 @@ use meerkat_auth_core::auth_store::{
     PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
-use meerkat_auth_core::oauth_flow::{OAuthProviderIdentity, oauth_provider_endpoints};
+use meerkat_auth_core::oauth_flow::{
+    OAuthProviderIdentity, oauth_provider_declaration, oauth_provider_endpoints,
+};
 use meerkat_auth_core::resolver::{
     LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
 };
@@ -50,7 +52,7 @@ pub type TokenPrepareFn = meerkat_auth_core::resolver::ManagedStoreOAuthRefreshP
 /// token-exchange seam consumes it as `Option<&str>` directly (no fail-open
 /// default substitution).
 fn code_assist_client_secret() -> Option<&'static str> {
-    OAuthProviderIdentity::GoogleCodeAssist.client_secret()
+    oauth_provider_declaration(OAuthProviderIdentity::GoogleCodeAssist).client_secret
 }
 
 // ---------------------------------------------------------------------

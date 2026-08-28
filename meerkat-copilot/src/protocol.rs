@@ -9,11 +9,68 @@ pub const COPILOT_TOKEN_API_VERSION: &str = "2025-04-01";
 pub const COPILOT_INFERENCE_API_VERSION: &str = "2026-08-01";
 pub const DEFAULT_COPILOT_API_BASE: &str = "https://api.githubcopilot.com";
 pub const GITHUB_COPILOT_AUTHORIZER_LABEL: &str = "github-copilot";
+pub const GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID: &str = "github_copilot";
 
 const DEFAULT_INTEGRATION_ID: &str = "vscode-chat";
 const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT;
 const DEFAULT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopilotProviderRoute {
+    OpenAi,
+    Anthropic,
+    Gemini,
+}
+
+impl CopilotProviderRoute {
+    pub const ALL: [Self; 3] = [Self::OpenAi, Self::Anthropic, Self::Gemini];
+
+    pub const fn binding_id(self) -> &'static str {
+        match self {
+            Self::OpenAi => "copilot_openai",
+            Self::Anthropic => "copilot_anthropic",
+            Self::Gemini => "copilot_gemini",
+        }
+    }
+
+    pub const fn provider(self) -> Provider {
+        match self {
+            Self::OpenAi => Provider::OpenAI,
+            Self::Anthropic => Provider::Anthropic,
+            Self::Gemini => Provider::Gemini,
+        }
+    }
+
+    pub fn backend_kind(self) -> &'static str {
+        match self {
+            Self::OpenAi => {
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str()
+            }
+            Self::Anthropic => {
+                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str()
+            }
+            Self::Gemini => {
+                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str()
+            }
+        }
+    }
+
+    pub fn auth_method(self) -> &'static str {
+        match self {
+            Self::OpenAi => {
+                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth.as_str()
+            }
+            Self::Anthropic => {
+                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
+                    .as_str()
+            }
+            Self::Gemini => {
+                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth.as_str()
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubCopilotEndpoints {
@@ -203,8 +260,6 @@ pub struct CopilotTokenEndpoints {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct CopilotTokenErrorEnvelope {
     #[serde(default)]
-    pub message: Option<String>,
-    #[serde(default)]
     pub error_details: Option<CopilotTokenErrorDetails>,
 }
 
@@ -239,7 +294,18 @@ pub struct CopilotModel {
     pub supported_endpoints: Vec<CopilotEndpoint>,
 }
 
-impl CopilotModel {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotModelOffering {
+    pub vendor: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub model_picker_enabled: Option<bool>,
+    pub capabilities: CopilotModelCapabilities,
+    pub policy: Option<CopilotModelPolicy>,
+    pub supported_endpoints: Vec<CopilotEndpoint>,
+}
+
+impl CopilotModelOffering {
     pub fn endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
         self.supported_endpoints
             .iter()
@@ -326,34 +392,51 @@ pub struct CopilotModelPolicy {
 
 #[derive(Debug, Clone, Default)]
 pub struct CopilotModelSnapshot {
-    models: BTreeMap<String, CopilotModel>,
+    models: BTreeMap<String, CopilotModelOffering>,
 }
 
 impl CopilotModelSnapshot {
     pub fn from_models(models: Vec<CopilotModel>) -> Result<Self, CopilotProtocolError> {
         let mut indexed = BTreeMap::new();
         for model in models {
-            let id = model.id.clone();
-            if indexed.insert(id.clone(), model).is_some() {
+            let CopilotModel {
+                id,
+                vendor,
+                name,
+                version,
+                model_picker_enabled,
+                capabilities,
+                policy,
+                supported_endpoints,
+            } = model;
+            let offering = CopilotModelOffering {
+                vendor,
+                name,
+                version,
+                model_picker_enabled,
+                capabilities,
+                policy,
+                supported_endpoints,
+            };
+            if indexed.insert(id.clone(), offering).is_some() {
                 return Err(CopilotProtocolError::DuplicateModelId(id));
             }
         }
         Ok(Self { models: indexed })
     }
 
-    pub fn model(&self, id: &str) -> Option<&CopilotModel> {
+    pub fn model(&self, id: &str) -> Option<&CopilotModelOffering> {
         self.models.get(id)
     }
 
-    pub fn models(&self) -> impl Iterator<Item = &CopilotModel> {
+    pub fn models(&self) -> impl Iterator<Item = &CopilotModelOffering> {
         self.models.values()
     }
 
-    pub fn available_model_ids(&self, provider: Provider) -> Vec<String> {
-        self.models()
-            .filter(|model| model.route_for(provider).is_some())
-            .map(|model| model.id.clone())
-            .collect()
+    pub fn available_model_ids(&self, provider: Provider) -> impl Iterator<Item = &str> {
+        self.models.iter().filter_map(move |(id, model)| {
+            model.route_for(provider).is_some().then_some(id.as_str())
+        })
     }
 }
 
@@ -402,6 +485,8 @@ mod tests {
             policy: None,
             supported_endpoints: vec![CopilotEndpoint::ChatCompletions, CopilotEndpoint::Responses],
         };
+        let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
+        let model = snapshot.model("gpt-5").expect("discovered model");
         assert_eq!(
             model.route_for(Provider::OpenAI),
             Some(CopilotEndpoint::Responses)
@@ -425,6 +510,8 @@ mod tests {
             policy: None,
             supported_endpoints: vec![CopilotEndpoint::Messages, CopilotEndpoint::ChatCompletions],
         };
+        let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
+        let model = snapshot.model("claude").expect("discovered model");
         assert_eq!(
             model.route_for(Provider::Anthropic),
             Some(CopilotEndpoint::Messages)
@@ -465,7 +552,12 @@ mod tests {
                 .route_for(Provider::OpenAI),
             None
         );
-        assert!(snapshot.available_model_ids(Provider::OpenAI).is_empty());
+        assert!(
+            snapshot
+                .available_model_ids(Provider::OpenAI)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

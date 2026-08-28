@@ -5714,7 +5714,16 @@ impl LoginProvider {
             Self::Anthropic => "anthropic_oauth",
             Self::OpenAi => "openai_oauth",
             Self::Google => "google_oauth",
-            Self::Copilot => "copilot_openai",
+            Self::Copilot => {
+                #[cfg(feature = "copilot")]
+                {
+                    meerkat_copilot::CopilotProviderRoute::OpenAi.binding_id()
+                }
+                #[cfg(not(feature = "copilot"))]
+                {
+                    "copilot_openai"
+                }
+            }
         }
     }
 
@@ -5723,7 +5732,16 @@ impl LoginProvider {
             Self::Anthropic => meerkat_core::Provider::Anthropic,
             Self::OpenAi => meerkat_core::Provider::OpenAI,
             Self::Google => meerkat_core::Provider::Gemini,
-            Self::Copilot => meerkat_core::Provider::OpenAI,
+            Self::Copilot => {
+                #[cfg(feature = "copilot")]
+                {
+                    meerkat_copilot::CopilotProviderRoute::OpenAi.provider()
+                }
+                #[cfg(not(feature = "copilot"))]
+                {
+                    meerkat_core::Provider::OpenAI
+                }
+            }
         }
     }
 
@@ -5736,7 +5754,7 @@ impl LoginProvider {
             Self::Anthropic => "anthropic_api",
             Self::OpenAi => "openai_chatgpt",
             Self::Google => "google_code_assist",
-            Self::Copilot => "copilot_openai",
+            Self::Copilot => self.binding_id(),
         }
     }
 
@@ -6061,9 +6079,14 @@ fn ensure_cli_interactive_oauth_config(
     let backend_profile_id = provider.backend_profile_id();
     let auth_profile_id = binding_id;
     let credential_account = if provider == LoginProvider::Copilot {
+        #[cfg(not(feature = "copilot"))]
+        anyhow::bail!("GitHub Copilot support is not compiled");
+        #[cfg(feature = "copilot")]
         Some(
-            meerkat_core::CredentialAccountId::parse("github_copilot")
-                .map_err(|error| anyhow::anyhow!("invalid built-in Copilot account id: {error}"))?,
+            meerkat_core::CredentialAccountId::parse(
+                meerkat_copilot::GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID,
+            )
+            .map_err(|error| anyhow::anyhow!("invalid built-in Copilot account id: {error}"))?,
         )
     } else {
         None
@@ -6075,37 +6098,16 @@ fn ensure_cli_interactive_oauth_config(
         })?;
         let canonical_options = section
             .backend
-            .get("copilot_openai")
+            .get(backend_profile_id)
             .map_or(serde_json::Value::Null, |backend| backend.options.clone());
-        for (route_id, route_provider, backend_kind, auth_method) in [
-            (
-                "copilot_openai",
-                meerkat_core::Provider::OpenAI,
-                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-            (
-                "copilot_anthropic",
-                meerkat_core::Provider::Anthropic,
-                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-            (
-                "copilot_gemini",
-                meerkat_core::Provider::Gemini,
-                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-        ] {
+        #[cfg(feature = "copilot")]
+        for route in meerkat_copilot::CopilotProviderRoute::ALL {
             validate_reserved_copilot_route(
                 section,
-                route_id,
-                route_provider,
-                backend_kind,
-                auth_method,
+                route.binding_id(),
+                route.provider(),
+                route.backend_kind(),
+                route.auth_method(),
                 account,
                 &canonical_options,
             )?;
@@ -6193,44 +6195,20 @@ fn ensure_cli_interactive_oauth_config(
     }
 
     if provider == LoginProvider::Copilot {
-        for (route_id, route_provider, default_model) in [
-            (
-                "copilot_anthropic",
-                meerkat_core::Provider::Anthropic,
-                meerkat_models::default_model(meerkat_core::Provider::Anthropic),
-            ),
-            (
-                "copilot_gemini",
-                meerkat_core::Provider::Gemini,
-                meerkat_models::default_model(meerkat_core::Provider::Gemini),
-            ),
-        ] {
-            let backend_kind = match route_provider {
-                meerkat_core::Provider::Anthropic => {
-                    meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str()
-                }
-                meerkat_core::Provider::Gemini => {
-                    meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str()
-                }
-                _ => continue,
-            };
-            let auth_method = match route_provider {
-                meerkat_core::Provider::Anthropic => {
-                    meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
-                        .as_str()
-                }
-                meerkat_core::Provider::Gemini => {
-                    meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
-                        .as_str()
-                }
-                _ => continue,
-            };
+        #[cfg(feature = "copilot")]
+        for route in meerkat_copilot::CopilotProviderRoute::ALL
+            .into_iter()
+            .filter(|route| *route != meerkat_copilot::CopilotProviderRoute::OpenAi)
+        {
+            let route_id = route.binding_id();
+            let route_provider = route.provider();
+            let default_model = meerkat_models::default_model(route_provider);
             if !section.backend.contains_key(route_id) {
                 section.backend.insert(
                     route_id.to_string(),
                     meerkat_core::BackendProfileConfig {
                         provider: route_provider.as_str().to_string(),
-                        backend_kind: backend_kind.to_string(),
+                        backend_kind: route.backend_kind().to_string(),
                         base_url: None,
                         options: copilot_options.clone().ok_or_else(|| {
                             anyhow::anyhow!("Copilot login target is missing backend options")
@@ -6245,7 +6223,7 @@ fn ensure_cli_interactive_oauth_config(
                     route_id.to_string(),
                     meerkat_core::AuthProfileConfig {
                         provider: route_provider.as_str().to_string(),
-                        auth_method: auth_method.to_string(),
+                        auth_method: route.auth_method().to_string(),
                         source: meerkat_core::CredentialSourceSpec::ManagedStore,
                         constraints: meerkat_core::AuthConstraints {
                             allow_interactive_login: true,
@@ -6285,35 +6263,14 @@ fn ensure_cli_interactive_oauth_config(
         let canonical_options = copilot_options
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Copilot login target is missing backend options"))?;
-        for (route_id, route_provider, backend_kind, auth_method) in [
-            (
-                "copilot_openai",
-                meerkat_core::Provider::OpenAI,
-                meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::openai::OpenAiAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-            (
-                "copilot_anthropic",
-                meerkat_core::Provider::Anthropic,
-                meerkat_core::provider_matrix::anthropic::AnthropicBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::anthropic::AnthropicAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-            (
-                "copilot_gemini",
-                meerkat_core::Provider::Gemini,
-                meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot.as_str(),
-                meerkat_core::provider_matrix::google::GoogleAuthMethod::GitHubCopilotOauth
-                    .as_str(),
-            ),
-        ] {
+        #[cfg(feature = "copilot")]
+        for route in meerkat_copilot::CopilotProviderRoute::ALL {
             validate_reserved_copilot_route(
                 section,
-                route_id,
-                route_provider,
-                backend_kind,
-                auth_method,
+                route.binding_id(),
+                route.provider(),
+                route.backend_kind(),
+                route.auth_method(),
                 account,
                 canonical_options,
             )?;
@@ -6399,7 +6356,6 @@ fn resolve_cli_interactive_oauth_target(
     }
 }
 
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn auth_binding_from_token_key(
     key: &meerkat_providers::auth_store::TokenKey,
 ) -> anyhow::Result<AuthBindingRef> {
@@ -7302,11 +7258,11 @@ async fn interactive_login(
     {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
-    if provider == LoginProvider::Copilot {
-        return interactive_copilot_device_login(target, persistence, scope).await;
-    }
     let auth_service =
         meerkat::HostAuthService::new(persistence, scope.provider_auth_authority.clone());
+    if provider == LoginProvider::Copilot {
+        return interactive_copilot_device_login(target, &config, &host_target, auth_service).await;
+    }
     let cli_cmd = current_cli_command_name();
 
     eprintln!();
@@ -7340,34 +7296,14 @@ async fn interactive_login(
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     async fn interactive_copilot_device_login(
         target: CliOAuthLoginTarget,
-        persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
-        scope: &RuntimeScope,
+        config: &Config,
+        host_target: &meerkat::HostAuthTarget,
+        auth_service: meerkat::HostAuthService,
     ) -> anyhow::Result<()> {
-        use meerkat_providers::auth_oauth::{
-            DevicePollOutcome, poll_device_code, request_device_code,
-        };
-
-        let identity = meerkat_core::OAuthProviderIdentity::GitHubCopilot;
-        let endpoints = meerkat_providers::oauth_flow::oauth_provider_endpoints(identity, "");
-        let http = reqwest::Client::new();
-        let device = request_device_code(&http, &endpoints)
+        let device = auth_service
+            .device_start(config, host_target)
             .await
             .map_err(|error| anyhow::anyhow!("GitHub device authorization failed: {error}"))?;
-        let lease_key =
-            meerkat_core::handles::LeaseKey::from_credential_identity(&target.credential_identity);
-        {
-            let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-            scope
-                .provider_auth_authority
-                .oauth_flow_authority()
-                .admit_device_code(
-                    target.credential_identity.clone(),
-                    identity,
-                    device.device_code.clone(),
-                    std::time::Duration::from_secs(device.expires_in),
-                )
-                .map_err(|error| anyhow::anyhow!("OAuth flow admission failed: {error}"))?;
-        }
 
         eprintln!();
         eprintln!("{}", auth_bold("Signing in to GitHub Copilot"));
@@ -7377,62 +7313,30 @@ async fn interactive_login(
         eprintln!();
         print_hint("Waiting for GitHub authorization. Press Ctrl-C to cancel.");
 
-        let poll = scope
-            .provider_auth_authority
-            .oauth_flow_authority()
-            .begin_device_code_poll(&device.device_code, &target.credential_identity, identity)
-            .map_err(|error| anyhow::anyhow!("OAuth device poll admission failed: {error}"))?;
         let mut interval = device.interval.max(1);
-        let result = loop {
+        let completed = loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-            match poll_device_code(&http, &endpoints, &device.device_code, None).await? {
-                DevicePollOutcome::Pending => {}
-                DevicePollOutcome::SlowDown => {
+            match auth_service
+                .device_poll(config, host_target, &device.device_code)
+                .await?
+            {
+                meerkat::HostAuthDevicePoll::Pending => {}
+                meerkat::HostAuthDevicePoll::SlowDown => {
                     interval = interval.saturating_add(5);
                 }
-                DevicePollOutcome::AccessDenied => {
+                meerkat::HostAuthDevicePoll::AccessDenied => {
                     anyhow::bail!("GitHub device authorization was denied");
                 }
-                DevicePollOutcome::Expired => {
+                meerkat::HostAuthDevicePoll::Expired => {
                     anyhow::bail!("GitHub device authorization expired");
                 }
-                DevicePollOutcome::Ready(result) => break result,
+                meerkat::HostAuthDevicePoll::Ready(completed) => break completed,
             }
         };
 
-        let now = chrono::Utc::now();
-        let expires_at = result
-            .expires_at_from(now)
-            .map_err(|error| anyhow::anyhow!("GitHub token expiry is invalid: {error}"))?;
-        let tokens = meerkat_providers::auth_store::PersistedTokens {
-            auth_mode: meerkat_providers::auth_store::PersistedAuthMode::GithubCopilotOauth,
-            primary_secret: Some(result.access_token),
-            refresh_token: result.refresh_token,
-            id_token: result.id_token,
-            expires_at,
-            last_refresh: Some(now),
-            scopes: result
-                .scope
-                .as_deref()
-                .map(|scope| scope.split_whitespace().map(str::to_string).collect())
-                .unwrap_or_default(),
-            account_id: None,
-            metadata: serde_json::Value::Null,
-        };
-        let committed =
-            meerkat_providers::browser_login::save_oauth_tokens_and_consume_device_flow(
-                persistence,
-                scope.auth_lease.clone(),
-                target.credential_identity.clone(),
-                tokens,
-                poll,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("GitHub credential persistence failed: {error}"))?;
-
         print_ok("GitHub Copilot credentials saved.");
         eprintln!("  Credential account: {}", target.credential_identity);
-        if let Some(expires_at) = committed.expires_at {
+        if let Some(expires_at) = completed.expires_at {
             eprintln!("  GitHub token expires: {expires_at}");
         }
         eprintln!(

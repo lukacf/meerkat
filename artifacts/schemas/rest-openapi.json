@@ -9110,6 +9110,11 @@
             "type": "string"
           },
           {
+            "const": "authorization_route_changed",
+            "description": "A dynamic authorization refresh changed the concrete provider route\nbefore dispatch. The caller must rebuild provider projections before\nretrying.",
+            "type": "string"
+          },
+          {
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
             "type": "string"

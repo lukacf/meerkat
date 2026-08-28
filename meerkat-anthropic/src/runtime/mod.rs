@@ -756,6 +756,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     let authorizer = connection
                         .resolved_authorizer()
                         .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    let authorizer = route.bind_authorizer(authorizer);
                     let client = crate::AnthropicClient::builder(String::new())
                         .authorizer(authorizer)
                         .base_url(route.api_base.clone())

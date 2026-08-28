@@ -2197,9 +2197,58 @@ mod tests {
         stream_calls: Arc<AtomicUsize>,
     }
 
+    struct CountingAgentLlmRequestAttempt {
+        inner: Arc<dyn meerkat_core::AgentLlmRequestAttempt>,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentLlmRequestAttempt for CountingAgentLlmRequestAttempt {
+        fn request_pressure(
+            &self,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_core::AgentError>
+        {
+            self.inner.request_pressure()
+        }
+
+        async fn stream_response(
+            &self,
+        ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.stream_response().await
+        }
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl meerkat_core::AgentLlmClient for CountingAgentLlmClient {
+        fn prepare_request_attempt(
+            self: Arc<Self>,
+            messages: Arc<Vec<meerkat_core::Message>>,
+            tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+            max_tokens: u32,
+            temperature: Option<f32>,
+            provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, meerkat_core::AgentError>
+        {
+            let attempt = Arc::clone(&self.inner).prepare_request_attempt(
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                provider_params,
+            )?;
+            Ok(Arc::new(CountingAgentLlmRequestAttempt {
+                inner: attempt,
+                stream_calls: Arc::clone(&self.stream_calls),
+            }))
+        }
+
+        fn request_attempt_authority(&self) -> meerkat_core::RequestAttemptAuthority {
+            self.inner.request_attempt_authority()
+        }
+
         async fn stream_response(
             &self,
             messages: &[meerkat_core::Message],

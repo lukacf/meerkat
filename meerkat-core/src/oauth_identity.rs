@@ -19,13 +19,6 @@ use serde::{Deserialize, Serialize};
 use crate::Provider;
 use crate::auth::token_store::PersistedAuthMode;
 
-/// The Google OAuth client secret for the Code Assist (device-code) flow.
-///
-/// This is the single canonical home for the literal: `client_secret`
-/// (below) returns it, and `meerkat-auth-core` reads it from here when building
-/// the Google login endpoints rather than redeclaring it.
-pub const GOOGLE_CLIENT_SECRET: &str = concat!("GOCSP", "X-4uHgMPm", "-1o7Sk-geV6Cu5clXFsxl");
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OAuthProviderIdentity {
     #[serde(rename = "anthropic_claude_ai")]
@@ -89,16 +82,6 @@ impl OAuthProviderIdentity {
             Self::OpenAiChatGpt => PersistedAuthMode::ChatgptOauth,
             Self::GoogleCodeAssist => PersistedAuthMode::GoogleOauth,
             Self::GitHubCopilot => PersistedAuthMode::GithubCopilotOauth,
-        }
-    }
-
-    pub fn client_secret(self) -> Option<&'static str> {
-        match self {
-            Self::AnthropicClaudeAi
-            | Self::AnthropicConsoleApiKey
-            | Self::OpenAiChatGpt
-            | Self::GitHubCopilot => None,
-            Self::GoogleCodeAssist => Some(GOOGLE_CLIENT_SECRET),
         }
     }
 }

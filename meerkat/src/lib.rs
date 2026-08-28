@@ -53,6 +53,7 @@ pub use meerkat_core::{
     AgentEvent,
     AgentLlmClient,
     AgentLlmClientDecorator,
+    AgentLlmRequestAttempt,
     AgentSessionStore,
     AgentToolDispatcher,
     ArtifactRef,
@@ -112,6 +113,7 @@ pub use meerkat_core::{
     // Provider
     Provider,
     RealmId,
+    RequestAttemptAuthority,
     ResponseStatus,
     ResultShape,
     RetryConfig,
@@ -314,8 +316,8 @@ pub use factory::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_auth::{
-    HostAuthError, HostAuthLoginComplete, HostAuthLoginStart, HostAuthService, HostAuthStatus,
-    HostAuthTarget,
+    HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
+    HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_providers::auth_store::{ProviderAuthPersistence, TokenStoreBackend};

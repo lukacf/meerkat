@@ -180,6 +180,9 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
             }
             LlmFailureReason::ProviderError(provider_error) => match provider_error.kind {
                 LlmProviderErrorKind::InvalidRequest => LlmError::InvalidRequest { message },
+                LlmProviderErrorKind::AuthorizationRouteChanged => {
+                    LlmError::AuthorizationRouteChanged { message }
+                }
                 LlmProviderErrorKind::RequestTooLarge => LlmError::RequestTooLarge {
                     message,
                     encoded_bytes: provider_error

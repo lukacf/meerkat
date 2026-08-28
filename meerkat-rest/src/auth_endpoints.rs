@@ -29,17 +29,14 @@ use meerkat_core::{
     AuthBindingRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
 };
 use meerkat_providers::NormalizedAuthMethod;
-use meerkat_providers::auth_oauth::{
-    DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code_with_state,
-    poll_device_code, request_device_code,
-};
+use meerkat_providers::auth_oauth::{OAuthError, PkcePair, exchange_authorization_code_with_state};
 use meerkat_providers::auth_store::{
     CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
     ProviderAuthPersistence, RefreshCoordinator, TokenKey, TokenStore,
     credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
-    OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider,
+    OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, oauth_provider_resolution,
     validate_oauth_login_binding,
 };
 
@@ -159,33 +156,6 @@ async fn resolve_binding_identity_for_read(
     Ok((target.auth_binding, target.binding, target.auth_profile))
 }
 
-/// Strict-owner WRITE gate (decision 5) for the OAuth credential-persist
-/// endpoints. Credential READS inherit down the realm chain, but WRITES are
-/// strict-owner: a persist that targets a `(requested_realm, binding)` whose
-/// binding is only inherited from an ancestor must be REJECTED (the client must
-/// re-target the owning realm), not silently persisted into the consuming child
-/// — otherwise a child realm could shadow the owner's credential.
-///
-/// `requested_realm` is the realm the client asked for (pre owner-stamping);
-/// the OAuth target resolution owner-stamps `auth_binding.realm` to the owner,
-/// which would mask the inheritance, so this gate runs against the requested
-/// realm. Mirrors the `resolve_binding_identity` mapping: only the typed
-/// `Inherited` verdict is fatal (CONFLICT, naming the owner); `Unknown`/`Chain`
-/// are left to the resolve path that already classified the target as valid.
-async fn ensure_oauth_write_owner(
-    state: &AppState,
-    requested_realm: &RealmId,
-    binding_id: &BindingId,
-) -> Result<(), (StatusCode, String)> {
-    let config = load_config(state).await?;
-    match meerkat_core::connection::resolve_write_owner(&config, requested_realm, binding_id) {
-        Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
-            Err((StatusCode::CONFLICT, inherited.to_string()))
-        }
-        _ => Ok(()),
-    }
-}
-
 fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
     match error {
         ConnectionTargetError::UnknownRealm(_)
@@ -201,50 +171,48 @@ fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
     }
 }
 
-async fn resolve_oauth_target(
-    state: &AppState,
-    provider: Option<Provider>,
-    realm_id: Option<&RealmId>,
-    binding_id: Option<&BindingId>,
-    profile_id: Option<&ProfileId>,
-) -> Result<ResolvedConnectionTarget, (StatusCode, String)> {
-    let config = load_config(state).await?;
-    if let Some(provider) = provider {
-        return meerkat_core::resolve_realm_binding_target_for_provider(
-            &config, provider, realm_id, binding_id, profile_id, None, false,
-        )
-        .map_err(|error| (target_error_status(&error), error.to_string()));
-    }
-    let realm = realm_id.cloned().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "shared OAuth issuers require an explicit realm_id".to_string(),
-        )
-    })?;
-    let binding = binding_id.cloned().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "shared OAuth issuers require an explicit binding_id".to_string(),
-        )
-    })?;
-    meerkat_core::resolve_explicit_auth_binding_target(
-        &config,
-        &AuthBindingRef {
-            realm,
-            binding,
-            profile: profile_id.cloned(),
-            origin: meerkat_core::BindingOrigin::Configured,
-        },
+fn host_auth_service(state: &AppState) -> meerkat::HostAuthService {
+    meerkat::HostAuthService::new(
+        state.provider_auth_persistence.clone(),
+        state.runtime_adapter.provider_auth_runtime_authority(),
     )
-    .map_err(|error| (target_error_status(&error), error.to_string()))
 }
 
-fn validate_resolved_oauth_target(
-    target: &ResolvedConnectionTarget,
-    identity: OAuthProviderIdentity,
-) -> Result<(), String> {
-    meerkat_providers::oauth_flow::validate_oauth_login_connection_target(target, identity)
-        .map_err(|error| error.to_string())
+fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Response {
+    let status = match &error {
+        meerkat::HostAuthError::Target(error) => target_error_status(error),
+        meerkat::HostAuthError::WriteOwner(_)
+        | meerkat::HostAuthError::OAuthTarget(_)
+        | meerkat::HostAuthError::BrowserFlowUnsupported(_)
+        | meerkat::HostAuthError::DeviceFlowUnsupported(_) => StatusCode::BAD_REQUEST,
+        meerkat::HostAuthError::OAuthFlow(
+            OAuthFlowError::Missing
+            | OAuthFlowError::ProviderMismatch { .. }
+            | OAuthFlowError::RedirectUriMismatch
+            | OAuthFlowError::TargetMismatch { .. }
+            | OAuthFlowError::DevicePollInProgress
+            | OAuthFlowError::DeviceCodeAlreadyAdmitted
+            | OAuthFlowError::DeviceExpiryOutOfRange,
+        ) => StatusCode::BAD_REQUEST,
+        meerkat::HostAuthError::OAuthExchange(_) => StatusCode::BAD_GATEWAY,
+        meerkat::HostAuthError::OAuthFlow(
+            OAuthFlowError::RegistryProjectionMissing { .. }
+            | OAuthFlowError::StateGenerationFailed
+            | OAuthFlowError::LifecycleRejected { .. }
+            | OAuthFlowError::PersistenceFailed { .. },
+        )
+        | meerkat::HostAuthError::CredentialMutation(_)
+        | meerkat::HostAuthError::TokenStore(_)
+        | meerkat::HostAuthError::Factory(_)
+        | meerkat::HostAuthError::PersistenceUnavailable
+        | meerkat::HostAuthError::Lifecycle(_)
+        | meerkat::HostAuthError::StatusRehydrate(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 fn require_managed_store_source(
@@ -277,6 +245,7 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn oauth_device_state_error(err: OAuthFlowError) -> (StatusCode, String) {
     match err {
         OAuthFlowError::Missing => (
@@ -294,6 +263,7 @@ fn oauth_device_state_error(err: OAuthFlowError) -> (StatusCode, String) {
     }
 }
 
+#[cfg(test)]
 fn oauth_terminal_device_consume_error(err: OAuthFlowError) -> (StatusCode, String) {
     match err {
         OAuthFlowError::LifecycleRejected { .. } => (
@@ -304,6 +274,7 @@ fn oauth_terminal_device_consume_error(err: OAuthFlowError) -> (StatusCode, Stri
     }
 }
 
+#[cfg(test)]
 fn release_uncredentialed_terminal_oauth_lifecycle(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -314,6 +285,7 @@ fn release_uncredentialed_terminal_oauth_lifecycle(
     );
 }
 
+#[cfg(test)]
 fn release_uncredentialed_terminal_oauth_lifecycle_for_identity(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     credential_identity: &meerkat_core::AuthCredentialIdentity,
@@ -324,6 +296,7 @@ fn release_uncredentialed_terminal_oauth_lifecycle_for_identity(
     }
 }
 
+#[cfg(test)]
 fn consume_terminal_device_flow_for_identity(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     credential_identity: &meerkat_core::AuthCredentialIdentity,
@@ -338,6 +311,7 @@ fn consume_terminal_device_flow_for_identity(
     })
 }
 
+#[cfg(test)]
 fn consume_terminal_device_flow(
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -349,10 +323,12 @@ fn consume_terminal_device_flow(
     })
 }
 
+#[cfg(test)]
 fn finish_device_flow_poll(poll_lease: OAuthDevicePollLease) -> Result<(), (StatusCode, String)> {
     poll_lease.finish().map_err(oauth_device_state_error)
 }
 
+#[cfg(test)]
 fn verify_terminal_device_flow(
     poll_lease: &OAuthDevicePollLease,
 ) -> Result<(), (StatusCode, String)> {
@@ -362,12 +338,14 @@ fn verify_terminal_device_flow(
         .map_err(oauth_device_state_error)
 }
 
+#[cfg(test)]
 struct PreparedTokenCommitSnapshot {
     key: TokenKey,
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<PersistedTokens>,
 }
 
+#[cfg(test)]
 struct TokenCommitSnapshot {
     key: TokenKey,
     lease_key: meerkat_core::handles::LeaseKey,
@@ -377,6 +355,7 @@ struct TokenCommitSnapshot {
     lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
 }
 
+#[cfg(test)]
 async fn prepare_token_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -410,6 +389,7 @@ async fn prepare_token_commit_unlocked(
 /// single durable `TokenStore::save` run. No unmarked token bytes ever reach
 /// the store — on a crash the durable record either carries the
 /// proof-of-acquisition marker or does not exist.
+#[cfg(test)]
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -463,6 +443,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
 /// back via [`rollback_token_commit`] (release + previous credential/lifecycle
 /// restore) so no half-state survives: durable truth keeps the previous
 /// credential and the lease projection matches it.
+#[cfg(test)]
 async fn save_marked_token_commit_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -504,6 +485,7 @@ async fn save_marked_token_commit_unlocked(
     Ok(())
 }
 
+#[cfg(test)]
 async fn save_tokens_and_publish_lifecycle(
     persistence: ProviderAuthPersistence,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -559,6 +541,7 @@ async fn save_tokens_and_publish_lifecycle(
 /// transition so the durable marker stays aligned with the restored lease
 /// generation. The lease release always runs first: even if the durable
 /// restore fails, no freshly acquired lease survives a failed commit.
+#[cfg(test)]
 async fn rollback_token_commit(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -616,6 +599,7 @@ async fn rollback_token_commit(
     Ok(())
 }
 
+#[cfg(test)]
 async fn save_prepared_tokens_after_terminal_consume_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -653,6 +637,7 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
     .await
 }
 
+#[cfg(test)]
 async fn save_tokens_and_consume_device_flow_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -681,6 +666,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     Ok(())
 }
 
+#[cfg(test)]
 async fn save_tokens_and_consume_device_flow(
     persistence: ProviderAuthPersistence,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -733,6 +719,7 @@ async fn save_tokens_and_consume_device_flow(
     }
 }
 
+#[cfg(test)]
 struct BrowserFlowConsume<'a> {
     authority: &'a dyn meerkat_providers::oauth_flow::OAuthFlowAuthority,
     state: &'a str,
@@ -740,6 +727,7 @@ struct BrowserFlowConsume<'a> {
     redirect_uri: &'a str,
 }
 
+#[cfg(test)]
 struct OwnedBrowserFlowConsume {
     authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     state: String,
@@ -747,6 +735,7 @@ struct OwnedBrowserFlowConsume {
     redirect_uri: String,
 }
 
+#[cfg(test)]
 async fn save_tokens_and_consume_browser_flow_unlocked(
     token_store: &dyn TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -787,6 +776,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     Ok(())
 }
 
+#[cfg(test)]
 async fn save_tokens_and_consume_browser_flow(
     persistence: ProviderAuthPersistence,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -844,6 +834,7 @@ async fn save_tokens_and_consume_browser_flow(
     }
 }
 
+#[cfg(test)]
 async fn clear_tokens_and_publish_lifecycle(
     persistence: ProviderAuthPersistence,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
@@ -949,7 +940,7 @@ pub async fn create_auth_profile(
     State(state): State<AppState>,
     Json(body): Json<CreateAuthProfileBody>,
 ) -> impl IntoResponse {
-    let (auth_binding, _binding, auth_profile) = match resolve_binding_identity(
+    let (auth_binding, binding, auth_profile) = match resolve_binding_identity(
         &state,
         &body.realm_id,
         &body.binding_id,
@@ -1030,15 +1021,19 @@ pub async fn create_auth_profile(
         account_id: None,
         metadata: serde_json::Value::Null,
     };
-    if let Err((status, msg)) = save_tokens_and_publish_lifecycle(
+    if let Err(error) = meerkat_providers::browser_login::save_tokens_and_publish_lifecycle(
         state.provider_auth_persistence.clone(),
         state.auth_lease.clone(),
-        auth_binding.clone(),
+        binding.credential_identity(&auth_binding),
         tokens.clone(),
     )
     .await
     {
-        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response();
     }
     tracing::info!(
         target: "meerkat::auth::audit",
@@ -1254,96 +1249,34 @@ pub async fn start_login(
                 .into_response();
         }
     };
-    let resolved = match resolve_oauth_provider(body.provider.as_str(), &body.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    let target = meerkat::HostAuthTarget {
+        provider: body.provider.identity(),
+        realm_id,
+        binding_id,
+        profile_id,
+    };
+    let config = match load_config(&state).await {
+        Ok(config) => config,
+        Err((status, message)) => {
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
         }
     };
-    if !resolved.identity.supports_browser_flow() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "provider '{}' requires /auth/login/device/start",
-                    body.provider
-                )
-            })),
-        )
-            .into_response();
-    }
-    if resolved.identity == OAuthProviderIdentity::GitHubCopilot {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "GitHub Copilot uses the device-code login endpoints"
-            })),
-        )
-            .into_response();
-    }
-    // Strict-owner write gate: reject before starting an OAuth flow that would
-    // persist credentials for a binding inherited from an ancestor realm.
-    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
-        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-    let target = match resolve_oauth_target(
-        &state,
-        resolved.provider,
-        Some(&realm_id),
-        Some(&binding_id),
-        profile_id.as_ref(),
-    )
-    .await
+    match host_auth_service(&state)
+        .login_start(&config, &target, body.redirect_uri)
+        .await
     {
-        Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-        }
-    };
-    if let Err(e) = validate_resolved_oauth_target(&target, resolved.identity) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
+        Ok(started) => (
+            StatusCode::OK,
+            Json(WireLoginStart {
+                authorize_url: started.authorize_url,
+                state: started.state,
+                redirect_uri: started.redirect_uri,
+                provider: body.provider,
+            }),
         )
-            .into_response();
+            .into_response(),
+        Err(error) => host_auth_error_response(error),
     }
-    let credential_identity = target.credential_identity;
-    let pkce = PkcePair::generate_s256();
-    let verifier = pkce.verifier.secret().to_string();
-    let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(&credential_identity);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let state_token = match state.oauth_flow_authority().start(
-        credential_identity,
-        resolved.identity,
-        body.redirect_uri.clone(),
-        verifier,
-    ) {
-        Ok(state) => state,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("oauth state initialization failed: {e}") })),
-            )
-                .into_response();
-        }
-    };
-    let authorize_url = resolved
-        .endpoints
-        .authorize_url_with_pkce(&pkce.challenge, &state_token);
-    (
-        StatusCode::OK,
-        Json(WireLoginStart {
-            authorize_url,
-            state: state_token,
-            redirect_uri: body.redirect_uri,
-            provider: body.provider,
-        }),
-    )
-        .into_response()
 }
 
 /// K20: canonical wire contract for `POST /auth/login/complete`.
@@ -1367,222 +1300,47 @@ pub async fn complete_login(
                 .into_response();
         }
     };
-    let resolved = match resolve_oauth_provider(body.provider.as_str(), &body.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    let target = meerkat::HostAuthTarget {
+        provider: body.provider.identity(),
+        realm_id,
+        binding_id,
+        profile_id,
+    };
+    let config = match load_config(&state).await {
+        Ok(config) => config,
+        Err((status, message)) => {
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
         }
     };
-    if !resolved.identity.supports_browser_flow() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "provider '{}' requires /auth/login/device/complete",
-                    body.provider
-                )
-            })),
-        )
-            .into_response();
-    }
-    if resolved.identity == OAuthProviderIdentity::GitHubCopilot {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "GitHub Copilot uses the device-code login endpoints"
-            })),
-        )
-            .into_response();
-    }
-    let provider = resolved.provider;
-    // Strict-owner write gate: reject persisting credentials for a binding
-    // inherited from an ancestor realm (the client must target the owner).
-    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
-        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-    let target = match resolve_oauth_target(
-        &state,
-        provider,
-        Some(&realm_id),
-        Some(&binding_id),
-        profile_id.as_ref(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-        }
-    };
-    let auth_binding = target.auth_binding.clone();
-    let credential_identity = target.credential_identity.clone();
-    let binding = target.binding;
-    let backend_profile = target.backend;
-    let auth_profile = target.auth_profile;
-    if provider.is_some_and(|provider| provider != auth_profile.provider) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "binding {} resolves provider '{}' not '{}'",
-                    binding.id,
-                    auth_profile.provider.as_str(),
-                    body.provider,
-                ),
-            })),
-        )
-            .into_response();
-    }
-    if let Err(e) = validate_oauth_login_binding(&backend_profile, &auth_profile, resolved.identity)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-
-    let flow = match state.oauth_flow_authority().verify(
-        &body.state,
-        &credential_identity,
-        resolved.identity,
-        &body.redirect_uri,
-    ) {
-        Ok(flow) => flow,
-        Err(OAuthFlowError::Missing) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "oauth state is missing or expired" })),
-            )
-                .into_response();
-        }
-        Err(e @ OAuthFlowError::RegistryProjectionMissing { .. }) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({ "error": format!("oauth registry projection failed: {e}") }),
-                ),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({ "error": format!("oauth state verification failed: {e}") }),
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    let http = reqwest::Client::new();
-    let result = match exchange_authorization_code_with_state(
-        &http,
-        &resolved.endpoints,
-        &body.code,
-        &flow.pkce_verifier,
-        resolved.client_secret,
-        Some(&body.state),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(OAuthError::TokenEndpoint { status, body }) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": "token endpoint rejected code",
-                    "upstream_status": status,
-                    "upstream_body": body,
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Token exchange failed: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let expires_at = match result.expires_at_from(chrono::Utc::now()) {
-        Ok(expires_at) => expires_at,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("token expiry is invalid: {e}") })),
-            )
-                .into_response();
-        }
-    };
-    let tokens = PersistedTokens {
-        auth_mode: resolved.auth_mode,
-        primary_secret: Some(result.access_token),
-        refresh_token: result.refresh_token,
-        id_token: result.id_token,
-        expires_at,
-        last_refresh: Some(chrono::Utc::now()),
-        scopes: result
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default(),
-        account_id: None,
-        metadata: serde_json::Value::Null,
-    };
-
-    let authority = state.oauth_flow_authority();
-    if let Err(error) =
-        meerkat_providers::browser_login::save_oauth_tokens_and_consume_browser_flow(
-            state.provider_auth_persistence.clone(),
-            state.auth_lease.clone(),
-            credential_identity,
-            tokens.clone(),
-            meerkat_providers::browser_login::BrowserOAuthFlowCommit {
-                authority,
-                state: body.state.clone(),
-                provider: resolved.identity,
-                redirect_uri: body.redirect_uri.clone(),
-            },
-        )
+    match host_auth_service(&state)
+        .login_complete(&config, &target, body.redirect_uri, body.state, &body.code)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": error.to_string() })),
-        )
-            .into_response();
+        Ok(completed) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = ?completed.auth_binding,
+                action = "login_oauth_complete",
+                provider = %body.provider,
+                has_refresh_token = %completed.has_refresh_token,
+                "OAuth login completed via REST"
+            );
+            (
+                StatusCode::OK,
+                Json(WireLoginReady {
+                    state: None,
+                    identity: WireBindingIdentity::from(&completed.auth_binding),
+                    profile_id: completed.profile_id,
+                    provider: body.provider,
+                    expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
+                    has_refresh_token: completed.has_refresh_token,
+                    scopes: completed.scopes,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => host_auth_error_response(error),
     }
-
-    tracing::info!(
-        target: "meerkat::auth::audit",
-        binding_key = ?auth_binding,
-        action = "login_oauth_complete",
-        provider = %body.provider,
-        has_refresh_token = %tokens.refresh_token.is_some(),
-        "OAuth login completed via REST"
-    );
-
-    (
-        StatusCode::OK,
-        Json(WireLoginReady {
-            state: None,
-            identity: WireBindingIdentity::from(&auth_binding),
-            profile_id: auth_profile.id.clone(),
-            provider: body.provider,
-            expires_at: expires_at.map(|e| e.to_rfc3339()),
-            has_refresh_token: tokens.refresh_token.is_some(),
-            scopes: tokens.scopes.clone(),
-        }),
-    )
-        .into_response()
 }
 
 /// K20: canonical wire contract for `POST /auth/login/device/start`.
@@ -1606,96 +1364,36 @@ pub async fn start_device_login(
                 .into_response();
         }
     };
-    let resolved = match resolve_oauth_provider(body.provider.as_str(), "") {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
+    let target = meerkat::HostAuthTarget {
+        provider: body.provider.identity(),
+        realm_id,
+        binding_id,
+        profile_id,
+    };
+    let config = match load_config(&state).await {
+        Ok(config) => config,
+        Err((status, message)) => {
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
         }
     };
-    if resolved.endpoints.device_code_url.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "provider '{}' does not support the device-code flow",
-                    body.provider,
-                ),
-            })),
-        )
-            .into_response();
-    }
-    // Strict-owner write gate: reject before starting a device-code flow that
-    // would persist credentials for a binding inherited from an ancestor realm.
-    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
-        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-    let target = match resolve_oauth_target(
-        &state,
-        resolved.provider,
-        Some(&realm_id),
-        Some(&binding_id),
-        profile_id.as_ref(),
-    )
-    .await
+    match host_auth_service(&state)
+        .device_start(&config, &target)
+        .await
     {
-        Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-        }
-    };
-    if let Err(e) = validate_resolved_oauth_target(&target, resolved.identity) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-    let credential_identity = target.credential_identity;
-    let http = reqwest::Client::new();
-    match request_device_code(&http, &resolved.endpoints).await {
-        Ok(resp) => {
-            let lease_key =
-                meerkat_core::handles::LeaseKey::from_credential_identity(&credential_identity);
-            let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-            if let Err(err) = state.oauth_flow_authority().admit_device_code(
-                credential_identity,
-                resolved.identity,
-                resp.device_code.clone(),
-                std::time::Duration::from_secs(resp.expires_in),
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("oauth device state initialization failed: {err}")
-                    })),
-                )
-                    .into_response();
-            }
-            (
-                StatusCode::OK,
-                Json(WireDeviceStart {
-                    device_code: resp.device_code,
-                    user_code: resp.user_code,
-                    verification_uri: resp.verification_uri,
-                    verification_uri_complete: resp.verification_uri_complete,
-                    expires_in: resp.expires_in,
-                    interval: resp.interval,
-                    provider: body.provider,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "error": format!("device-code request failed: {e}"),
-            })),
+        Ok(device) => (
+            StatusCode::OK,
+            Json(WireDeviceStart {
+                device_code: device.device_code,
+                user_code: device.user_code,
+                verification_uri: device.verification_uri,
+                verification_uri_complete: device.verification_uri_complete,
+                expires_in: device.expires_in,
+                interval: device.interval,
+                provider: body.provider,
+            }),
         )
             .into_response(),
+        Err(error) => host_auth_error_response(error),
     }
 }
 
@@ -1728,236 +1426,66 @@ pub async fn complete_device_login(
                 .into_response();
         }
     };
-    let resolved = match resolve_oauth_provider(body.provider.as_str(), "") {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+    let target = meerkat::HostAuthTarget {
+        provider: body.provider.identity(),
+        realm_id,
+        binding_id,
+        profile_id,
     };
-    let provider = resolved.provider;
-    if resolved.endpoints.device_code_url.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "provider '{}' does not support the device-code flow",
-                    body.provider,
-                ),
-            })),
-        )
-            .into_response();
-    }
-    // Strict-owner write gate: reject persisting credentials for a binding
-    // inherited from an ancestor realm (the client must target the owner).
-    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
-        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-    }
-    let target = match resolve_oauth_target(
-        &state,
-        provider,
-        Some(&realm_id),
-        Some(&binding_id),
-        profile_id.as_ref(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-        }
-    };
-    let auth_binding = target.auth_binding.clone();
-    let credential_identity = target.credential_identity.clone();
-    let binding = target.binding;
-    let backend_profile = target.backend;
-    let auth_profile = target.auth_profile;
-    if provider.is_some_and(|provider| provider != auth_profile.provider) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "binding {} resolves provider '{}' not '{}'",
-                    binding.id,
-                    auth_profile.provider.as_str(),
-                    body.provider,
-                ),
-            })),
-        )
-            .into_response();
-    }
-    if let Err(e) = validate_resolved_oauth_target(
-        &ResolvedConnectionTarget {
-            realm: target.realm,
-            auth_binding: auth_binding.clone(),
-            credential_identity: target.credential_identity.clone(),
-            binding: binding.clone(),
-            backend: backend_profile.clone(),
-            auth_profile: auth_profile.clone(),
-        },
-        resolved.identity,
-    ) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response();
-    }
-    let poll_lease = match state.oauth_flow_authority().begin_device_code_poll(
-        &body.device_code,
-        &credential_identity,
-        resolved.identity,
-    ) {
-        Ok(lease) => lease,
-        Err(err) => {
-            let (status, message) = oauth_device_state_error(err);
+    let config = match load_config(&state).await {
+        Ok(config) => config,
+        Err((status, message)) => {
             return (status, Json(serde_json::json!({ "error": message }))).into_response();
         }
     };
-    let http = reqwest::Client::new();
-    let outcome = match poll_device_code(
-        &http,
-        &resolved.endpoints,
-        &body.device_code,
-        resolved.client_secret,
-    )
-    .await
+    match host_auth_service(&state)
+        .device_poll(&config, &target, &body.device_code)
+        .await
     {
-        Ok(o) => o,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("device-code poll failed: {e}"),
-                })),
-            )
-                .into_response();
-        }
-    };
-    match outcome {
-        DevicePollOutcome::Pending => match finish_device_flow_poll(poll_lease) {
-            Ok(()) => (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({ "state": "pending" })),
-            )
-                .into_response(),
-            Err((status, message)) => {
-                (status, Json(serde_json::json!({ "error": message }))).into_response()
-            }
-        },
-        DevicePollOutcome::SlowDown => match finish_device_flow_poll(poll_lease) {
-            Ok(()) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "state": "slow_down" })),
-            )
-                .into_response(),
-            Err((status, message)) => {
-                (status, Json(serde_json::json!({ "error": message }))).into_response()
-            }
-        },
-        DevicePollOutcome::AccessDenied => {
-            match consume_terminal_device_flow_for_identity(
-                &state.auth_lease,
-                &credential_identity,
-                poll_lease,
-            ) {
-                Ok(()) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "state": "access_denied" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
-            }
-        }
-        DevicePollOutcome::Expired => {
-            match consume_terminal_device_flow_for_identity(
-                &state.auth_lease,
-                &credential_identity,
-                poll_lease,
-            ) {
-                Ok(()) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "state": "expired" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
-            }
-        }
-        DevicePollOutcome::Ready(result) => {
-            let expires_at = match result.expires_at_from(chrono::Utc::now()) {
-                Ok(expires_at) => expires_at,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({
-                            "error": format!("token expiry is invalid: {e}")
-                        })),
-                    )
-                        .into_response();
-                }
-            };
-            let tokens = PersistedTokens {
-                auth_mode: resolved.auth_mode,
-                primary_secret: Some(result.access_token),
-                refresh_token: result.refresh_token,
-                id_token: result.id_token,
-                expires_at,
-                last_refresh: Some(chrono::Utc::now()),
-                scopes: result
-                    .scope
-                    .as_deref()
-                    .map(|s| s.split_whitespace().map(String::from).collect())
-                    .unwrap_or_default(),
-                account_id: None,
-                metadata: serde_json::Value::Null,
-            };
-            if let Err(error) =
-                meerkat_providers::browser_login::save_oauth_tokens_and_consume_device_flow(
-                    state.provider_auth_persistence.clone(),
-                    state.auth_lease.clone(),
-                    credential_identity.clone(),
-                    tokens.clone(),
-                    poll_lease,
-                )
-                .await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("device credential commit failed: {error}")
-                    })),
-                )
-                    .into_response();
-            }
+        Ok(meerkat::HostAuthDevicePoll::Pending) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "state": "pending" })),
+        )
+            .into_response(),
+        Ok(meerkat::HostAuthDevicePoll::SlowDown) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "state": "slow_down" })),
+        )
+            .into_response(),
+        Ok(meerkat::HostAuthDevicePoll::AccessDenied) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "state": "access_denied" })),
+        )
+            .into_response(),
+        Ok(meerkat::HostAuthDevicePoll::Expired) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "state": "expired" })),
+        )
+            .into_response(),
+        Ok(meerkat::HostAuthDevicePoll::Ready(completed)) => {
             tracing::info!(
                 target: "meerkat::auth::audit",
-                binding_key = ?auth_binding,
+                binding_key = ?completed.auth_binding,
                 action = "login_device_complete",
                 provider = %body.provider,
-                has_refresh_token = %tokens.refresh_token.is_some(),
+                has_refresh_token = %completed.has_refresh_token,
                 "OAuth device-flow login completed via REST"
             );
             (
                 StatusCode::OK,
                 Json(WireLoginReady {
                     state: Some("ready".to_string()),
-                    identity: WireBindingIdentity::from(&auth_binding),
-                    profile_id: auth_profile.id.clone(),
+                    identity: WireBindingIdentity::from(&completed.auth_binding),
+                    profile_id: completed.profile_id,
                     provider: body.provider,
-                    expires_at: expires_at.map(|e| e.to_rfc3339()),
-                    has_refresh_token: tokens.refresh_token.is_some(),
-                    scopes: tokens.scopes.clone(),
+                    expires_at: completed.expires_at.map(|expires| expires.to_rfc3339()),
+                    has_refresh_token: completed.has_refresh_token,
+                    scopes: completed.scopes,
                 }),
             )
                 .into_response()
         }
+        Err(error) => host_auth_error_response(error),
     }
 }
 

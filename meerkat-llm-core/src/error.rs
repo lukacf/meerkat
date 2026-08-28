@@ -65,6 +65,12 @@ pub enum LlmError {
     #[error("Authentication failed: {message}")]
     AuthenticationFailed { message: String },
 
+    /// A dynamic authorizer refreshed successfully but changed the concrete
+    /// provider route before any response bytes were consumed. The caller must
+    /// retry above request projection so provider-specific lowering is rebuilt.
+    #[error("Authorization route changed: {message}")]
+    AuthorizationRouteChanged { message: String },
+
     #[error("Content filtered: {reason}")]
     ContentFiltered { reason: String },
 
@@ -109,6 +115,17 @@ still compact), reduce retained history or media, and set compaction.max_request
 a custom client that cannot report exact request pressure";
 
 impl LlmError {
+    pub fn from_authorizer(error: meerkat_core::AuthError) -> Self {
+        match error {
+            meerkat_core::AuthError::ResolveRequired(message) => {
+                Self::AuthorizationRouteChanged { message }
+            }
+            other => Self::AuthenticationFailed {
+                message: other.to_string(),
+            },
+        }
+    }
+
     /// Construct a typed request-too-large provider rejection.
     pub fn request_too_large(message: String) -> Self {
         Self::request_too_large_with_pressure(message, None, None)
@@ -192,6 +209,7 @@ impl LlmError {
             | Self::ServerOverloaded
             | Self::NetworkTimeout { .. }
             | Self::ConnectionReset
+            | Self::AuthorizationRouteChanged { .. }
             | Self::Unknown { .. } => true,
             Self::ServerError { status, .. } => *status >= 500,
             _ => false,
@@ -284,6 +302,14 @@ impl LlmError {
                     "max_bytes": max_bytes,
                 }),
             )),
+            Self::AuthorizationRouteChanged { message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                    LlmProviderErrorKind::AuthorizationRouteChanged,
+                    json!({
+                        "message": message,
+                    }),
+                ))
+            }
             Self::InvalidRequest { message }
             | Self::InvalidInputShape { message }
             | Self::InvalidConfig { message } => {
@@ -379,6 +405,12 @@ mod tests {
         assert!(LlmError::NetworkTimeout { duration_ms: 30000 }.is_retryable());
         assert!(LlmError::ConnectionReset.is_retryable());
         assert!(
+            LlmError::AuthorizationRouteChanged {
+                message: "new endpoint".to_string()
+            }
+            .is_retryable()
+        );
+        assert!(
             LlmError::ServerError {
                 status: 500,
                 message: "Internal error".to_string()
@@ -392,6 +424,21 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn authorization_route_change_preserves_typed_retry_class() {
+        let error = LlmError::AuthorizationRouteChanged {
+            message: "new endpoint".to_string(),
+        };
+        let LlmFailureReason::ProviderError(provider_error) = error.failure_reason() else {
+            panic!("route changes must retain a provider-error carrier");
+        };
+        assert_eq!(
+            provider_error.kind,
+            LlmProviderErrorKind::AuthorizationRouteChanged
+        );
+        assert!(provider_error.is_retryable());
     }
 
     #[test]

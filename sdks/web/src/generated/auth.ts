@@ -249,6 +249,7 @@ export interface WireProviderBinding {
   id: string;
   backend_profile: string;
   auth_profile: string;
+  credential_account?: string | null;
   default_model?: string | null;
   allow_auth_override?: boolean;
   require_metadata_account?: boolean;
@@ -550,6 +551,7 @@ export function parseWireProviderBinding(value: unknown, path = 'binding'): Wire
   expectString(record.id, `${path}.id`);
   expectString(record.backend_profile, `${path}.backend_profile`);
   expectString(record.auth_profile, `${path}.auth_profile`);
+  optionalString(record, 'credential_account', `${path}.credential_account`);
   optionalString(record, 'default_model', `${path}.default_model`);
   optionalBoolean(record, 'allow_auth_override', `${path}.allow_auth_override`);
   optionalBoolean(record, 'require_metadata_account', `${path}.require_metadata_account`);

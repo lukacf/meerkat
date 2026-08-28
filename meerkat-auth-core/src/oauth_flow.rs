@@ -78,6 +78,7 @@ const GOOGLE_CLIENT_ID: &str = concat!(
     "09395-oo8ft2oprdrnp9e3aqf6av3hmdib135j",
     ".apps.googleusercontent.com",
 );
+const GOOGLE_CLIENT_SECRET: &str = concat!("GOCSP", "X-4uHgMPm", "-1o7Sk-geV6Cu5clXFsxl");
 const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
@@ -103,6 +104,9 @@ const TEST_OAUTH_BASE_URL_ENV: &str = "MEERKAT_TEST_OAUTH_BASE_URL";
 pub struct OAuthProviderDeclaration {
     /// OAuth client identifier registered with the provider.
     pub client_id: &'static str,
+    /// OAuth client secret when the provider's installed-application contract
+    /// requires one.
+    pub client_secret: Option<&'static str>,
     /// Authorization endpoint (browser consent flow).
     pub authorize_endpoint: &'static str,
     /// Token-exchange endpoint.
@@ -140,6 +144,7 @@ pub fn oauth_provider_declaration(id: OAuthProviderIdentity) -> OAuthProviderDec
     match id {
         OAuthProviderIdentity::AnthropicClaudeAi => OAuthProviderDeclaration {
             client_id: ANTHROPIC_CLIENT_ID,
+            client_secret: None,
             authorize_endpoint: ANTHROPIC_AUTHORIZE_URL,
             token_endpoint: ANTHROPIC_TOKEN_URL,
             scopes: ANTHROPIC_CLAUDE_AI_SCOPES,
@@ -148,6 +153,7 @@ pub fn oauth_provider_declaration(id: OAuthProviderIdentity) -> OAuthProviderDec
         },
         OAuthProviderIdentity::AnthropicConsoleApiKey => OAuthProviderDeclaration {
             client_id: ANTHROPIC_CLIENT_ID,
+            client_secret: None,
             authorize_endpoint: ANTHROPIC_CONSOLE_AUTHORIZE_URL,
             token_endpoint: ANTHROPIC_TOKEN_URL,
             scopes: ANTHROPIC_CONSOLE_SCOPES,
@@ -156,6 +162,7 @@ pub fn oauth_provider_declaration(id: OAuthProviderIdentity) -> OAuthProviderDec
         },
         OAuthProviderIdentity::OpenAiChatGpt => OAuthProviderDeclaration {
             client_id: OPENAI_CLIENT_ID,
+            client_secret: None,
             authorize_endpoint: OPENAI_AUTHORIZE_URL,
             token_endpoint: OPENAI_TOKEN_URL,
             scopes: OPENAI_SCOPES,
@@ -164,6 +171,7 @@ pub fn oauth_provider_declaration(id: OAuthProviderIdentity) -> OAuthProviderDec
         },
         OAuthProviderIdentity::GoogleCodeAssist => OAuthProviderDeclaration {
             client_id: GOOGLE_CLIENT_ID,
+            client_secret: Some(GOOGLE_CLIENT_SECRET),
             authorize_endpoint: GOOGLE_AUTHORIZE_URL,
             token_endpoint: GOOGLE_TOKEN_URL,
             scopes: GOOGLE_SCOPES,
@@ -172,6 +180,7 @@ pub fn oauth_provider_declaration(id: OAuthProviderIdentity) -> OAuthProviderDec
         },
         OAuthProviderIdentity::GitHubCopilot => OAuthProviderDeclaration {
             client_id: GITHUB_COPILOT_CLIENT_ID,
+            client_secret: None,
             authorize_endpoint: GITHUB_COPILOT_AUTHORIZE_URL,
             token_endpoint: GITHUB_COPILOT_TOKEN_URL,
             scopes: GITHUB_COPILOT_SCOPES,
@@ -288,7 +297,7 @@ pub struct OAuthProviderResolution {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("Unknown provider '{provider}'. Supported: anthropic, openai, google.")]
+#[error("Unknown provider '{provider}'. Supported: anthropic, openai, google, copilot.")]
 pub struct OAuthProviderResolutionError {
     pub provider: String,
 }
@@ -302,13 +311,21 @@ pub fn resolve_oauth_provider(
             provider: provider.to_string(),
         }
     })?;
-    Ok(OAuthProviderResolution {
+    Ok(oauth_provider_resolution(identity, redirect_uri))
+}
+
+pub fn oauth_provider_resolution(
+    identity: OAuthProviderIdentity,
+    redirect_uri: impl Into<String>,
+) -> OAuthProviderResolution {
+    let declaration = oauth_provider_declaration(identity);
+    OAuthProviderResolution {
         identity,
         provider: identity.provider(),
         endpoints: oauth_provider_endpoints(identity, redirect_uri),
         auth_mode: identity.auth_mode(),
-        client_secret: identity.client_secret(),
-    })
+        client_secret: declaration.client_secret,
+    }
 }
 
 /// Apply the local OAuth fixture endpoint override used by release-grade auth
@@ -2513,10 +2530,7 @@ mod tests {
 
         assert_eq!(resolved.identity, OAuthProviderIdentity::GoogleCodeAssist);
         assert!(resolved.endpoints.device_code_url.is_some());
-        assert_eq!(
-            resolved.client_secret,
-            Some(meerkat_core::oauth_identity::GOOGLE_CLIENT_SECRET)
-        );
+        assert_eq!(resolved.client_secret, Some(GOOGLE_CLIENT_SECRET));
     }
 
     #[test]

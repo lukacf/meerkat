@@ -71,6 +71,18 @@ impl ModelFallbackClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for ModelFallbackClient {
+    fn prepare_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<meerkat_core::Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
+        let client = Arc::clone(&self.candidates[self.active_index()].client);
+        client.prepare_request_attempt(messages, tools, max_tokens, temperature, provider_params)
+    }
+
     async fn stream_response(
         &self,
         messages: &[meerkat_core::Message],
@@ -118,6 +130,12 @@ impl AgentLlmClient for ModelFallbackClient {
                 temperature,
                 provider_params,
             )
+    }
+
+    fn request_attempt_authority(&self) -> meerkat_core::RequestAttemptAuthority {
+        self.candidates[self.active_index()]
+            .client
+            .request_attempt_authority()
     }
 
     fn provider(&self) -> Provider {

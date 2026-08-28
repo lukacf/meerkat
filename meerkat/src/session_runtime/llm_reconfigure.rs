@@ -744,10 +744,11 @@ impl SessionRuntimeLlmReconfigureHost {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        Ok(AgentFactory::decorate_agent_llm_client(
-            adapter,
-            decorator.as_ref(),
-        ))
+        AgentFactory::decorate_agent_llm_client(adapter, decorator.as_ref()).map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "Failed to preserve request-attempt authority during LLM hot-swap: {error}"
+            ))
+        })
     }
 
     async fn load_config_for_hot_swap(&self) -> Result<Config, RuntimeDriverError> {

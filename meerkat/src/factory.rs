@@ -1374,6 +1374,9 @@ impl CreateSessionModelResolutionError {
                         ..
                     }
                     | meerkat_core::ProviderBindingError::CredentialAccountContractMismatch { .. }
+                    | meerkat_core::ProviderBindingError::CredentialAccountProfileOverrideMismatch {
+                        ..
+                    }
                     | meerkat_core::ProviderBindingError::UnknownProviderName(_)
                     | meerkat_core::ProviderBindingError::InvalidRealmId { .. }
                     | meerkat_core::ProviderBindingError::ServerRequiresSelfHostedProvider { .. }
@@ -3825,11 +3828,22 @@ impl AgentFactory {
     pub fn decorate_agent_llm_client(
         client: Arc<dyn AgentLlmClient>,
         decorator: Option<&AgentLlmClientDecorator>,
-    ) -> Arc<dyn AgentLlmClient> {
-        match decorator {
+    ) -> Result<Arc<dyn AgentLlmClient>, FactoryError> {
+        let source_authority = client.request_attempt_authority();
+        let decorated = match decorator {
             Some(decorator) => decorator(client),
             None => client,
+        };
+        if source_authority == meerkat_core::RequestAttemptAuthority::Unified
+            && decorated.request_attempt_authority()
+                != meerkat_core::RequestAttemptAuthority::Unified
+        {
+            return Err(FactoryError::ClientCreationFailed(
+                "agent LLM client decorator did not preserve unified request-attempt authority"
+                    .to_string(),
+            ));
         }
+        Ok(decorated)
     }
 
     pub async fn build_llm_client_for_identity(
@@ -4170,12 +4184,6 @@ impl AgentFactory {
             .realm
             .get(auth_binding.realm.as_str())
             .and_then(|section| section.binding.get(auth_binding.binding.as_str()));
-        if binding.is_none() && !auth_binding.is_env_default() {
-            return Err(FactoryError::ClientCreationFailed(format!(
-                "auth binding '{}:{}' is absent while resolving live LLM request policy",
-                auth_binding.realm, auth_binding.binding
-            )));
-        }
         Ok(binding)
     }
 
@@ -4192,6 +4200,18 @@ impl AgentFactory {
                 |binding| binding.credential_identity(auth_binding),
             ),
         ))
+    }
+
+    fn credential_identity_for_client_override(
+        config: &Config,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Option<meerkat_core::AuthCredentialIdentity>, FactoryError> {
+        let Some(auth_binding) = identity.auth_binding.as_ref() else {
+            return Ok(None);
+        };
+        let target = meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding)
+            .map_err(FactoryError::ConnectionTarget)?;
+        Ok(Some(target.credential_identity))
     }
 
     fn llm_identity_uses_copilot(
@@ -5144,6 +5164,8 @@ impl AgentFactory {
         } else {
             None
         };
+        let agent_llm_client_was_overridden = build_config.agent_llm_client_override.is_some();
+        let raw_llm_client_was_overridden = build_config.llm_client_override.is_some();
 
         // 3. Create LLM client (split out for opt-level=0 stack-frame size;
         // see `resolve_llm_client_phase`).
@@ -5175,10 +5197,16 @@ impl AgentFactory {
             provider_params: build_config.provider_params.clone(),
             auth_binding: build_config.auth_binding.clone(),
         };
+        let configured_credential_identity =
+            if agent_llm_client_was_overridden || raw_llm_client_was_overridden {
+                Self::credential_identity_for_client_override(config, &resolved_llm_identity)
+                    .map_err(BuildAgentError::LlmClient)?
+            } else {
+                Self::credential_identity_for_llm_identity(config, &resolved_llm_identity)
+                    .map_err(BuildAgentError::LlmClient)?
+            };
         let auth_credential_identity =
-            Self::credential_identity_for_llm_identity(config, &resolved_llm_identity)
-                .map_err(BuildAgentError::LlmClient)?
-                .or(resolved_auth_credential_identity);
+            configured_credential_identity.or(resolved_auth_credential_identity);
         #[cfg(not(target_arch = "wasm32"))]
         let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
             let active_model_has_native_search = model_profile
@@ -5234,8 +5262,6 @@ impl AgentFactory {
                 })?;
         }
         let event_tap = meerkat_core::new_event_tap();
-        let agent_llm_client_was_overridden = build_config.agent_llm_client_override.is_some();
-        let raw_llm_client_was_overridden = build_config.llm_client_override.is_some();
         let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
             build_config.agent_llm_client_override.take()
         {
@@ -5275,7 +5301,8 @@ impl AgentFactory {
         let llm_adapter = Self::decorate_agent_llm_client(
             llm_adapter,
             build_config.agent_llm_client_decorator.as_ref(),
-        );
+        )
+        .map_err(BuildAgentError::LlmClient)?;
         let llm_adapter = if !agent_llm_client_was_overridden
             && !raw_llm_client_was_overridden
             && config.model_fallback.enabled
@@ -5364,7 +5391,8 @@ impl AgentFactory {
                 let decorated = Self::decorate_agent_llm_client(
                     Arc::new(adapter),
                     build_config.agent_llm_client_decorator.as_ref(),
-                );
+                )
+                .map_err(BuildAgentError::LlmClient)?;
                 let request_policy = self.request_policy_for_session_llm_identity(
                     config,
                     &identity,
@@ -15969,6 +15997,47 @@ mod host_prompt_sections_tests {
             assert_eq!(
                 fallback_policy.provider_native_tools,
                 meerkat_core::ProviderNativeToolPolicy::DisableAll
+            );
+        }
+
+        #[test]
+        fn client_override_resolves_inherited_account_identity() {
+            let mut config = copilot_config();
+            config.realm.insert(
+                "child".to_string(),
+                meerkat_core::RealmConfigSection {
+                    parent: Some(RealmId::global()),
+                    ..Default::default()
+                },
+            );
+            let identity = SessionLlmIdentity {
+                model: meerkat_models::default_model(Provider::OpenAI)
+                    .expect("OpenAI default")
+                    .to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: Some(AuthBindingRef {
+                    realm: RealmId::parse("child").expect("child realm"),
+                    binding: meerkat_core::BindingId::parse("copilot_openai")
+                        .expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                }),
+            };
+
+            let credential =
+                AgentFactory::credential_identity_for_client_override(&config, &identity)
+                    .expect("credential target resolves")
+                    .expect("inherited account credential");
+
+            assert_eq!(
+                credential,
+                meerkat_core::AuthCredentialIdentity::Account(meerkat_core::CredentialAccountRef {
+                    realm: RealmId::global(),
+                    account: meerkat_core::CredentialAccountId::parse("github_copilot")
+                        .expect("valid account"),
+                })
             );
         }
     }

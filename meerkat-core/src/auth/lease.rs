@@ -148,6 +148,13 @@ pub enum HttpAuthorizationResponseAction {
     RetryWithFreshAuthorization,
 }
 
+/// Typed content facts an authorizer may use to add protocol-owned request
+/// headers without inspecting a provider's serialized JSON body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HttpAuthorizationContent {
+    pub has_images: bool,
+}
+
 /// Dynamic authorizer trait. Used when auth artifacts need to be computed
 /// per request (ADC, refreshed OAuth bearer, etc.).
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -181,6 +188,14 @@ pub trait HttpAuthorizer: Send + Sync {
         self.observe_response(response).await
     }
     fn label(&self) -> &str;
+
+    fn append_content_headers(
+        &self,
+        _content: HttpAuthorizationContent,
+        _headers: &mut Vec<(String, String)>,
+    ) -> Result<(), AuthError> {
+        Ok(())
+    }
 
     /// Process-local persistence authority that scopes any derived credential
     /// cache owned by this authorizer.

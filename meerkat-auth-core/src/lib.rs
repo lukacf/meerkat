@@ -54,7 +54,7 @@ pub use auth_store::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use browser_login::{
     BrowserOAuthFlowCommit, save_oauth_tokens_and_consume_browser_flow,
-    save_oauth_tokens_and_consume_device_flow,
+    save_oauth_tokens_and_consume_device_flow, save_tokens_and_publish_lifecycle,
 };
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(feature = "oauth")]

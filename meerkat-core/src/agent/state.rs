@@ -36,6 +36,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+const MAX_REQUEST_ROUTE_STABILIZATION_RETRIES: u8 = 2;
+
 use super::{
     Agent, AgentLlmClient, AgentLlmFallbackSwitch, AgentSessionStore, AgentToolDispatcher,
     LlmStreamResult, TurnUsageIdentityVerdict, classify_provider_turn_usage_identity,
@@ -82,11 +84,12 @@ struct LlmRetryRequest<'a> {
     /// Already-composed, hydrated provider request. Ownership crosses into the
     /// retry loop so ordinary calls do not deep-clone the accumulated
     /// transcript merely to obtain a mutable fallback/retry buffer.
-    messages: Vec<Message>,
-    tools: &'a [Arc<ToolDef>],
+    messages: Arc<Vec<Message>>,
+    tools: Arc<[Arc<ToolDef>]>,
     max_tokens: u32,
     temperature: Option<f32>,
     provider_params: Option<&'a ProviderParamsOverride>,
+    prepared_attempt: Arc<dyn crate::AgentLlmRequestAttempt>,
     extraction_output_schema: Option<crate::types::OutputSchema>,
     allow_empty_success: bool,
     durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
@@ -419,14 +422,31 @@ fn fallback_activation_is_pre_stream_safe(
         return false;
     }
     match error {
-        AgentError::Llm { reason, .. } => !matches!(
-            reason,
+        AgentError::Llm { reason, .. } => match reason {
             LlmFailureReason::NetworkTimeout { .. }
-                | LlmFailureReason::CallTimeout { .. }
-                | LlmFailureReason::StreamStalled { .. }
-        ),
+            | LlmFailureReason::CallTimeout { .. }
+            | LlmFailureReason::StreamStalled { .. } => false,
+            LlmFailureReason::ProviderError(error) if is_authorization_route_changed(error) => {
+                false
+            }
+            _ => true,
+        },
         _ => false,
     }
+}
+
+fn is_authorization_route_changed(error: &crate::error::LlmProviderError) -> bool {
+    error.kind == crate::error::LlmProviderErrorKind::AuthorizationRouteChanged
+}
+
+fn agent_error_is_authorization_route_changed(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Llm {
+            reason: LlmFailureReason::ProviderError(provider_error),
+            ..
+        } if is_authorization_route_changed(provider_error)
+    )
 }
 
 /// Test-only predicate; production notice refresh goes through the atomic
@@ -1492,6 +1512,7 @@ where
             max_tokens,
             temperature,
             provider_params,
+            prepared_attempt,
             extraction_output_schema,
             allow_empty_success,
             durable_visibility_parent,
@@ -1500,11 +1521,12 @@ where
         let mut current_messages = messages;
         // `tools` is already the ToolScope authority's boundary projection;
         // the client cannot narrow or widen it with a private semantic view.
-        let mut current_tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
+        let mut current_tools = tools;
         let mut current_max_tokens = max_tokens;
         let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
-        let mut fallback_request_pressure_recheck = false;
+        let mut retry_request_pressure_recheck = false;
+        let mut next_request_attempt = Some(prepared_attempt);
 
         loop {
             // 1. Budget gate at loop entry
@@ -1523,15 +1545,39 @@ where
                 return Err(exceeded.to_agent_error());
             }
 
-            if fallback_request_pressure_recheck {
-                fallback_request_pressure_recheck = false;
-                let request_pressure = self.client.request_pressure(
-                    &current_messages,
-                    &current_tools,
+            let mut request_attempt = match next_request_attempt.take() {
+                Some(attempt) => attempt,
+                None => Arc::clone(&self.client).prepare_request_attempt(
+                    Arc::clone(&current_messages),
+                    Arc::clone(&current_tools),
                     current_max_tokens,
                     temperature,
-                    current_provider_params.as_ref(),
-                )?;
+                    current_provider_params.clone(),
+                )?,
+            };
+
+            if std::mem::take(&mut retry_request_pressure_recheck) {
+                let mut route_stabilization_attempt = 0_u8;
+                let request_pressure = loop {
+                    match request_attempt.request_pressure() {
+                        Ok(pressure) => break pressure,
+                        Err(error)
+                            if agent_error_is_authorization_route_changed(&error)
+                                && route_stabilization_attempt
+                                    < MAX_REQUEST_ROUTE_STABILIZATION_RETRIES =>
+                        {
+                            route_stabilization_attempt += 1;
+                            request_attempt = Arc::clone(&self.client).prepare_request_attempt(
+                                Arc::clone(&current_messages),
+                                Arc::clone(&current_tools),
+                                current_max_tokens,
+                                temperature,
+                                current_provider_params.clone(),
+                            )?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
                 let request_byte_error = request_pressure.and_then(|pressure| {
                     let effective_cap = self
                         .compactor
@@ -1560,11 +1606,11 @@ where
                 if preflight_error.is_some() {
                     // RetryRequested parked one ordinary machine-authorized
                     // CheckCompaction boundary. Give that exact boundary the
-                    // newly activated fallback pressure once. If a configured
-                    // compactor commits a rewrite, the outer CallingLlm
-                    // boundary rebuilds all request projections from canonical
-                    // session state. A non-triggering or ineffective compactor
-                    // cannot loop: this flag is consumed before the attempt.
+                    // current route's pressure once. If a configured compactor
+                    // commits a rewrite, the outer CallingLlm boundary rebuilds
+                    // all request projections from canonical session state. A
+                    // non-triggering or ineffective compactor cannot loop: this
+                    // flag is consumed before the attempt.
                     if self.compactor.is_some() && self.pending_compaction_boundary_index.is_some()
                     {
                         let prior_completed_boundary =
@@ -1618,13 +1664,7 @@ where
             // identically on wasm32 (tokio_with_wasm) and native.
             let wait_outcome = {
                 let probe_client = Arc::clone(&self.client);
-                let call_fut = self.client.stream_response(
-                    &current_messages,
-                    &current_tools,
-                    current_max_tokens,
-                    temperature,
-                    current_provider_params.as_ref(),
-                );
+                let call_fut = request_attempt.stream_response();
                 let mut call_fut = std::pin::pin!(call_fut);
                 let call_started = crate::time_compat::Instant::now();
                 let mut last_activity = call_started;
@@ -1804,10 +1844,9 @@ where
                                         current_tools = next_tools;
                                         current_provider_params = next_params;
                                         current_max_tokens = next_max_tokens;
-                                        current_messages.push(notice);
+                                        Arc::make_mut(&mut current_messages).push(notice);
                                         *durable_visibility_parent =
                                             Some(next_durable_visibility_parent);
-                                        fallback_request_pressure_recheck = true;
                                     }
                                     ModelFallbackSwitchOutcome::SkippedNonDurable { reason } => {
                                         tracing::warn!(
@@ -1841,6 +1880,7 @@ where
                                 })?;
                             self.execute_turn_effects(&retry, turn_count, event_tx)
                                 .await?;
+                            retry_request_pressure_recheck = true;
                             continue;
                         }
                         return Err(error);
@@ -1923,10 +1963,9 @@ where
                                     current_tools = next_tools;
                                     current_provider_params = next_params;
                                     current_max_tokens = next_max_tokens;
-                                    current_messages.push(notice);
+                                    Arc::make_mut(&mut current_messages).push(notice);
                                     *durable_visibility_parent =
                                         Some(next_durable_visibility_parent);
-                                    fallback_request_pressure_recheck = true;
                                 }
                                 ModelFallbackSwitchOutcome::SkippedNonDurable { reason } => {
                                     tracing::warn!(
@@ -1959,6 +1998,7 @@ where
                         })?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
                             .await?;
+                        retry_request_pressure_recheck = true;
                         continue;
                     }
                     return Err(e);
@@ -4674,18 +4714,46 @@ where
                     .await;
             }
         };
-        let request_pressure = match self.client.request_pressure(
-            &request_messages,
-            call_tool_defs,
-            prepared.effective_max_tokens,
-            prepared.effective_temperature,
-            prepared.typed_provider_params.as_ref(),
-        ) {
-            Ok(pressure) => pressure,
-            Err(error) => {
-                return self
-                    .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
-                    .await;
+        let request_messages = Arc::new(request_messages);
+        let call_tool_defs: Arc<[Arc<ToolDef>]> = call_tool_defs.to_vec().into();
+        let mut route_stabilization_attempt = 0_u8;
+        let (prepared_attempt, request_pressure) = loop {
+            let attempt = match Arc::clone(&self.client).prepare_request_attempt(
+                Arc::clone(&request_messages),
+                Arc::clone(&call_tool_defs),
+                prepared.effective_max_tokens,
+                prepared.effective_temperature,
+                prepared.typed_provider_params.clone(),
+            ) {
+                Ok(attempt) => attempt,
+                Err(error)
+                    if agent_error_is_authorization_route_changed(&error)
+                        && route_stabilization_attempt
+                            < MAX_REQUEST_ROUTE_STABILIZATION_RETRIES =>
+                {
+                    route_stabilization_attempt += 1;
+                    continue;
+                }
+                Err(error) => {
+                    return self
+                        .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
+                        .await;
+                }
+            };
+            match attempt.request_pressure() {
+                Ok(pressure) => break (attempt, pressure),
+                Err(error)
+                    if agent_error_is_authorization_route_changed(&error)
+                        && route_stabilization_attempt
+                            < MAX_REQUEST_ROUTE_STABILIZATION_RETRIES =>
+                {
+                    route_stabilization_attempt += 1;
+                }
+                Err(error) => {
+                    return self
+                        .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
+                        .await;
+                }
             }
         };
 
@@ -4737,7 +4805,7 @@ where
         // its other measures.
         let request_context_budget_result = self.context_budget_fact_for_request(
             &request_messages,
-            call_tool_defs,
+            &call_tool_defs,
             prepared.effective_max_tokens,
             request_pressure,
         );
@@ -4821,6 +4889,7 @@ where
                 max_tokens: prepared.effective_max_tokens,
                 temperature: prepared.effective_temperature,
                 provider_params: prepared.typed_provider_params.as_ref(),
+                prepared_attempt,
                 extraction_output_schema: if prepared.in_extraction {
                     self.config.output_schema.clone()
                 } else {
@@ -17260,23 +17329,43 @@ mod tests {
 
     struct UnknownThenSucceedClient {
         calls: std::sync::atomic::AtomicUsize,
+        pressure_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl UnknownThenSucceedClient {
         fn new() -> Self {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                pressure_calls: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        fn pressure_calls(&self) -> usize {
+            self.pressure_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for UnknownThenSucceedClient {
+        fn request_pressure(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            self.pressure_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+
         async fn stream_response(
             &self,
             _messages: &[Message],
@@ -17306,6 +17395,84 @@ mod tests {
                 }],
                 StopReason::EndTurn,
                 normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct RoutePressureThenSucceedClient {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct RoutePressureAttempt {
+        stale: bool,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::AgentLlmRequestAttempt for RoutePressureAttempt {
+        fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            if self.stale {
+                return Err(AgentError::llm(
+                    "mock",
+                    LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                        LlmProviderErrorKind::AuthorizationRouteChanged,
+                        serde_json::json!({"message": "route changed"}),
+                    )),
+                    "route changed",
+                ));
+            }
+            Ok(None)
+        }
+
+        async fn stream_response(&self) -> Result<super::LlmStreamResult, AgentError> {
+            self.dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(text_response("ok after route stabilization"))
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for RoutePressureThenSucceedClient {
+        fn prepare_request_attempt(
+            self: Arc<Self>,
+            _messages: Arc<Vec<Message>>,
+            _tools: Arc<[Arc<ToolDef>]>,
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Arc::new(RoutePressureAttempt {
+                stale: attempt == 0,
+                dispatches: Arc::clone(&self.dispatches),
+            }))
+        }
+
+        fn request_attempt_authority(&self) -> crate::RequestAttemptAuthority {
+            crate::RequestAttemptAuthority::Unified
+        }
+
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Err(AgentError::InternalError(
+                "unified attempt path was bypassed".to_string(),
             ))
         }
 
@@ -18669,6 +18836,33 @@ mod tests {
             2,
             "one unknown failure, one successful retry"
         );
+        assert_eq!(
+            client.pressure_calls(),
+            2,
+            "request pressure must be recomputed before the successful retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_route_change_rebuilds_pressure_before_dispatch() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = Arc::new(RoutePressureThenSucceedClient {
+            attempts: Arc::clone(&attempts),
+            dispatches: Arc::clone(&dispatches),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("stabilize route".to_string().into())
+            .await
+            .expect("route preparation should stabilize before dispatch");
+
+        assert_eq!(result.text, "ok after route stabilization");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// HomeCore defect B: a provider stream that goes silent mid-turn must be
@@ -19855,6 +20049,17 @@ mod tests {
                 "model removed after partial output",
             ),
             true,
+        ));
+        assert!(!super::fallback_activation_is_pre_stream_safe(
+            &AgentError::llm(
+                "mock",
+                LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                    LlmProviderErrorKind::AuthorizationRouteChanged,
+                    serde_json::json!({"message": "route refreshed"}),
+                )),
+                "route refreshed",
+            ),
+            false,
         ));
     }
 

@@ -14,11 +14,13 @@ use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
-    AssistantImageRef, MediaType, Message, OutputSchema, Provider, ServerToolKind, StopReason,
-    ToolDef, Usage,
+    AssistantBlock, AssistantImageRef, MediaType, Message, OutputSchema, Provider, ServerToolKind,
+    StopReason, ToolDef, ToolResult, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::any::Any;
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -35,6 +37,16 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    /// Prepare replay messages together with any opaque, request-scoped route
+    /// witness required to keep later lowering and dispatch coherent.
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<LlmReplayProjection, LlmError> {
+        self.project_replay_messages(messages)
+            .map(LlmReplayProjection::new)
+    }
+
     /// Project canonical Meerkat transcript history into the provider-safe
     /// replay history for this client.
     ///
@@ -60,6 +72,15 @@ pub trait LlmClient: Send + Sync {
         Ok(None)
     }
 
+    /// Measure a request through the exact route witness captured while its
+    /// replay projection was built.
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure(request.request())
+    }
+
     /// Return non-authoritative claims for cache breakpoints authored by the exact
     /// provider lowering used for this request.
     ///
@@ -74,11 +95,27 @@ pub trait LlmClient: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Author cache evidence through the exact route witness captured while
+    /// this request was projected.
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &PreparedLlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.authored_cache_breakpoints(request.request(), canonical_messages)
+    }
+
     /// Stream a completion request
     ///
     /// Returns a stream of normalized events. The stream completes
     /// when the model finishes (either with EndTurn or ToolUse).
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a>;
+
+    /// Dispatch through the exact route witness captured while this request
+    /// was projected.
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.stream(request.request())
+    }
 
     /// Typed provider identity for this client.
     ///
@@ -99,6 +136,79 @@ pub trait LlmClient: Send + Sync {
             schema: output_schema.schema.as_value().clone(),
             warnings: Vec::new(),
         })
+    }
+}
+
+/// Opaque in-process route evidence carried only between one client's replay
+/// projection, pressure/cache lowering, and dispatch.
+#[derive(Clone)]
+pub struct LlmRequestRouteWitness(Arc<dyn Any + Send + Sync>);
+
+impl LlmRequestRouteWitness {
+    pub fn new<T>(witness: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self(Arc::new(witness))
+    }
+
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl fmt::Debug for LlmRequestRouteWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LlmRequestRouteWitness(..)")
+    }
+}
+
+/// Provider-safe replay projection plus request-scoped route evidence.
+#[derive(Debug, Clone)]
+pub struct LlmReplayProjection {
+    messages: Vec<Message>,
+    route_witness: Option<LlmRequestRouteWitness>,
+}
+
+impl LlmReplayProjection {
+    pub fn new(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            route_witness: None,
+        }
+    }
+
+    pub fn with_route_witness(mut self, witness: LlmRequestRouteWitness) -> Self {
+        self.route_witness = Some(witness);
+        self
+    }
+}
+
+/// One provider request bound to the route evidence that authored its replay
+/// projection.
+#[derive(Debug, Clone)]
+pub struct PreparedLlmRequest {
+    request: LlmRequest,
+    route_witness: Option<LlmRequestRouteWitness>,
+}
+
+impl PreparedLlmRequest {
+    pub fn from_projection(mut request: LlmRequest, projection: LlmReplayProjection) -> Self {
+        request.messages = projection.messages;
+        Self {
+            request,
+            route_witness: projection.route_witness,
+        }
+    }
+
+    pub fn request(&self) -> &LlmRequest {
+        &self.request
+    }
+
+    pub fn route_witness<T: Any>(&self) -> Option<&T> {
+        self.route_witness
+            .as_ref()
+            .and_then(LlmRequestRouteWitness::downcast_ref)
     }
 }
 
@@ -257,6 +367,20 @@ impl LlmRequest {
     pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
         self.tools = tools;
         self
+    }
+
+    /// Whether the typed request contains any user, assistant, or tool-result
+    /// image content.
+    pub fn has_images(&self) -> bool {
+        self.messages.iter().any(|message| match message {
+            Message::User(user) => user.has_images(),
+            Message::BlockAssistant(assistant) => assistant
+                .blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Image { .. })),
+            Message::ToolResults { results, .. } => results.iter().any(ToolResult::has_images),
+            Message::System(_) | Message::SystemNotice(_) => false,
+        })
     }
 
     /// Set provider-specific parameters (replaces any existing params).

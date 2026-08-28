@@ -34,9 +34,9 @@ pub use realtime_session::{
 };
 pub use test_client::TestClient;
 pub use types::{
-    ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse,
-    LlmStream, ProviderGeneratedImage, ProviderImageGenerationOutput,
-    ProviderImageGenerationRequest, ToolCallBuffer, WebSearchExecutor,
-    dimensions_from_size_preference, media_type_from_format_preference,
+    ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmReplayProjection, LlmRequest,
+    LlmRequestRouteWitness, LlmResponse, LlmStream, PreparedLlmRequest, ProviderGeneratedImage,
+    ProviderImageGenerationOutput, ProviderImageGenerationRequest, ToolCallBuffer,
+    WebSearchExecutor, dimensions_from_size_preference, media_type_from_format_preference,
     normalize_base64_image_data,
 };

@@ -50,6 +50,10 @@ pub enum LlmFailureReason {
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderErrorKind {
     InvalidRequest,
+    /// A dynamic authorization refresh changed the concrete provider route
+    /// before dispatch. The caller must rebuild provider projections before
+    /// retrying.
+    AuthorizationRouteChanged,
     /// The provider rejected (or preflight proved) a serialized request body
     /// that exceeds its request-size cap.
     RequestTooLarge,

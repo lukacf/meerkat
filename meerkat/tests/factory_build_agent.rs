@@ -152,8 +152,52 @@ struct CountingAgentLlmClient {
     stream_calls: Arc<AtomicUsize>,
 }
 
+struct CountingAgentLlmRequestAttempt {
+    inner: Arc<dyn meerkat_core::AgentLlmRequestAttempt>,
+    stream_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl meerkat_core::AgentLlmRequestAttempt for CountingAgentLlmRequestAttempt {
+    fn request_pressure(
+        &self,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+        self.inner.request_pressure()
+    }
+
+    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+        self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.stream_response().await
+    }
+}
+
 #[async_trait]
 impl AgentLlmClient for CountingAgentLlmClient {
+    fn prepare_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<meerkat::Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
+        let attempt = Arc::clone(&self.inner).prepare_request_attempt(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+        )?;
+        Ok(Arc::new(CountingAgentLlmRequestAttempt {
+            inner: attempt,
+            stream_calls: Arc::clone(&self.stream_calls),
+        }))
+    }
+
+    fn request_attempt_authority(&self) -> meerkat_core::RequestAttemptAuthority {
+        self.inner.request_attempt_authority()
+    }
+
     async fn stream_response(
         &self,
         messages: &[meerkat::Message],

@@ -137,7 +137,7 @@ impl ProviderRuntimeCatalog {
         )
     }
 
-    pub(crate) fn validate_binding_with_credential_identity(
+    pub fn validate_binding_with_credential_identity(
         auth_binding: &AuthBindingRef,
         credential_identity: AuthCredentialIdentity,
         backend: &BackendProfile,

@@ -36,33 +36,6 @@ use crate::image_generation::{
     OpenAiResponsesImagePlan,
 };
 
-fn json_contains_type(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.get("type").and_then(Value::as_str) == Some(expected)
-                || object
-                    .values()
-                    .any(|value| json_contains_type(value, expected))
-        }
-
-        Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_type(value, expected)),
-        _ => false,
-    }
-}
-
-fn authorizer_is_github_copilot(authorizer: &dyn meerkat_core::HttpAuthorizer) -> bool {
-    #[cfg(feature = "copilot")]
-    {
-        authorizer.label() == meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
-    }
-    #[cfg(not(feature = "copilot"))]
-    {
-        let _ = authorizer;
-        false
-    }
-}
 use meerkat_core::image_generation::ImageGenerationProviderProfile;
 
 /// Extract the typed OpenAI provider tag from a request.
@@ -609,9 +582,7 @@ impl OpenAiClient {
             let receipt = authorizer
                 .authorize_with_receipt(&mut auth_req)
                 .await
-                .map_err(|e| LlmError::AuthenticationFailed {
-                    message: format!("openai authorizer failed: {e}"),
-                })?;
+                .map_err(LlmError::from_authorizer)?;
             for (name, value) in extra {
                 request_builder = request_builder.header(name, value);
             }
@@ -1034,18 +1005,25 @@ impl OpenAiClient {
         &self,
         endpoint: &str,
         body: &Value,
+        has_images: bool,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
         let mut request_builder = self
             .http
             .post(endpoint)
             .header("Content-Type", "application/json");
-        if self
-            .authorizer
-            .as_ref()
-            .is_some_and(|authorizer| authorizer_is_github_copilot(authorizer.as_ref()))
-            && json_contains_type(body, "input_image")
-        {
-            request_builder = request_builder.header("Copilot-Vision-Request", "true");
+        if let Some(authorizer) = &self.authorizer {
+            let mut content_headers = Vec::new();
+            authorizer
+                .append_content_headers(
+                    meerkat_core::HttpAuthorizationContent { has_images },
+                    &mut content_headers,
+                )
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: error.to_string(),
+                })?;
+            for (name, value) in content_headers {
+                request_builder = request_builder.header(name, value);
+            }
         }
         let (request_builder, receipt) = self
             .apply_request_headers_with_receipt(request_builder, endpoint, &[])
@@ -1072,8 +1050,11 @@ impl OpenAiClient {
         endpoint: &str,
         body: &Value,
         fallback_body: Option<Value>,
+        has_images: bool,
     ) -> Result<reqwest::Response, LlmError> {
-        let (mut response, receipt) = self.send_responses_request(endpoint, body).await?;
+        let (mut response, receipt) = self
+            .send_responses_request(endpoint, body, has_images)
+            .await?;
         let mut status_code = response.status().as_u16();
         if (200..=299).contains(&status_code) {
             return Ok(response);
@@ -1094,7 +1075,9 @@ impl OpenAiClient {
                 })?
                 == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
         {
-            let retried = self.send_responses_request(endpoint, body).await?;
+            let retried = self
+                .send_responses_request(endpoint, body, has_images)
+                .await?;
             response = retried.0;
             let retry_receipt = retried.1;
             status_code = response.status().as_u16();
@@ -1122,7 +1105,7 @@ impl OpenAiClient {
             && Self::previous_response_id_retriable_error(status_code, &text)
         {
             let (mut retry, fallback_receipt) = self
-                .send_responses_request(endpoint, &fallback_body)
+                .send_responses_request(endpoint, &fallback_body, has_images)
                 .await?;
             let mut retry_status = retry.status().as_u16();
             if (200..=299).contains(&retry_status) {
@@ -1145,7 +1128,7 @@ impl OpenAiClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_responses_request(endpoint, &fallback_body)
+                    .send_responses_request(endpoint, &fallback_body, has_images)
                     .await?;
                 retry = retried.0;
                 let retry_receipt = retried.1;
@@ -2342,7 +2325,12 @@ impl LlmClient for OpenAiClient {
 
             let endpoint = self.responses_endpoint();
             let response = self
-                .responses_response_with_fallback(&endpoint, &body, fallback_body)
+                .responses_response_with_fallback(
+                    &endpoint,
+                    &body,
+                    fallback_body,
+                    request.has_images(),
+                )
                 .await?;
             let mut stream = response.bytes_stream();
             let mut buffer = String::with_capacity(512);
@@ -3732,7 +3720,12 @@ mod tests {
             .with_authorizer(authorizer.clone());
         let endpoint = client.responses_endpoint();
         let response = client
-            .responses_response_with_fallback(&endpoint, &serde_json::json!({"stream": true}), None)
+            .responses_response_with_fallback(
+                &endpoint,
+                &serde_json::json!({"stream": true}),
+                None,
+                false,
+            )
             .await
             .expect("second authorization succeeds");
         assert_eq!(response.status(), StatusCode::OK);
@@ -3757,7 +3750,12 @@ mod tests {
             .with_authorizer(authorizer.clone());
         let endpoint = client.responses_endpoint();
         client
-            .responses_response_with_fallback(&endpoint, &serde_json::json!({"stream": true}), None)
+            .responses_response_with_fallback(
+                &endpoint,
+                &serde_json::json!({"stream": true}),
+                None,
+                false,
+            )
             .await
             .expect_err("second unauthorized response propagates");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);

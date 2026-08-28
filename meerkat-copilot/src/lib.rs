@@ -11,9 +11,11 @@ mod runtime;
 
 pub use protocol::{
     CopilotBackendConfig, CopilotEndpoint, CopilotModel, CopilotModelCapabilities,
-    CopilotModelLimits, CopilotModelPolicy, CopilotModelPolicyState, CopilotModelSnapshot,
-    CopilotModelSupports, CopilotModelsEnvelope, CopilotTokenEnvelope, DEFAULT_COPILOT_API_BASE,
-    GITHUB_COPILOT_AUTHORIZER_LABEL, GitHubCopilotEndpoints, PROVISIONAL_GITHUB_COPILOT_CLIENT_ID,
+    CopilotModelLimits, CopilotModelOffering, CopilotModelPolicy, CopilotModelPolicyState,
+    CopilotModelSnapshot, CopilotModelSupports, CopilotModelsEnvelope, CopilotProviderRoute,
+    CopilotTokenEnvelope, DEFAULT_COPILOT_API_BASE, GITHUB_COPILOT_AUTHORIZER_LABEL,
+    GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID, GitHubCopilotEndpoints,
+    PROVISIONAL_GITHUB_COPILOT_CLIENT_ID,
 };
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

@@ -28,33 +28,6 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default request timeout
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
-fn json_contains_type(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.get("type").and_then(Value::as_str) == Some(expected)
-                || object
-                    .values()
-                    .any(|value| json_contains_type(value, expected))
-        }
-
-        Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_type(value, expected)),
-        _ => false,
-    }
-}
-
-fn authorizer_is_github_copilot(authorizer: &dyn meerkat_core::HttpAuthorizer) -> bool {
-    #[cfg(feature = "copilot")]
-    {
-        authorizer.label() == meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
-    }
-    #[cfg(not(feature = "copilot"))]
-    {
-        let _ = authorizer;
-        false
-    }
-}
 /// Default pool idle timeout
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// SSE buffer capacity to reduce reallocations
@@ -1127,7 +1100,10 @@ impl AnthropicClient {
         url: &str,
         body: &Value,
         betas: &[String],
+        has_images: bool,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
+        #[cfg(target_arch = "wasm32")]
+        let _ = has_images;
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
@@ -1137,17 +1113,17 @@ impl AnthropicClient {
             .post(url)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
-        if self
-            .authorizer
-            .as_ref()
-            .is_some_and(|authorizer| authorizer_is_github_copilot(authorizer.as_ref()))
-            && json_contains_type(body, "image")
-        {
-            request = request.header("Copilot-Vision-Request", "true");
-        }
         #[cfg(not(target_arch = "wasm32"))]
         let receipt = if let Some(authorizer) = &self.authorizer {
             let mut extra = Vec::new();
+            authorizer
+                .append_content_headers(
+                    meerkat_core::HttpAuthorizationContent { has_images },
+                    &mut extra,
+                )
+                .map_err(|error| LlmError::AuthenticationFailed {
+                    message: error.to_string(),
+                })?;
             let receipt = authorizer
                 .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
                     method: "POST",
@@ -1155,9 +1131,7 @@ impl AnthropicClient {
                     headers: &mut extra,
                 })
                 .await
-                .map_err(|error| LlmError::AuthenticationFailed {
-                    message: format!("authorizer failed: {error}"),
-                })?;
+                .map_err(LlmError::from_authorizer)?;
             for (name, value) in extra {
                 if name.eq_ignore_ascii_case("anthropic-beta") {
                     for beta in value
@@ -1513,8 +1487,9 @@ impl LlmClient for AnthropicClient {
             }
 
             let url = format!("{}/v1/messages", self.base_url);
+            let has_images = request.has_images();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas).await?;
+                self.send_messages_request(&url, &body, &betas, has_images).await?;
             #[cfg(not(target_arch = "wasm32"))]
             let (mut response, receipt) = response_with_receipt;
             #[cfg(target_arch = "wasm32")]
@@ -1541,7 +1516,9 @@ impl LlmClient for AnthropicClient {
                     })?
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
-                let retried = self.send_messages_request(&url, &body, &betas).await?;
+                let retried = self
+                    .send_messages_request(&url, &body, &betas, has_images)
+                    .await?;
                 response = retried.0;
                 let retry_receipt = retried.1;
                 status_code = response.status().as_u16();

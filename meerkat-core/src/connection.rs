@@ -870,17 +870,38 @@ pub enum ConnectionTargetError {
         auth: Provider,
     },
     #[error(
-        "credential account '{realm}:{account}' has multiple bindings for provider {provider:?}: {}",
-        .bindings.join(", ")
+        "credential account '{realm}:{account}' has multiple bindings for provider {provider:?}: {bindings}"
     )]
     AmbiguousCredentialAccountBindings {
         realm: String,
         account: String,
         provider: Provider,
-        bindings: Vec<String>,
+        bindings: CredentialAccountBindingCandidates,
     },
     #[error(transparent)]
     RealmChain(#[from] RealmChainError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountBindingCandidates(Vec<String>);
+
+impl FromIterator<String> for CredentialAccountBindingCandidates {
+    fn from_iter<T: IntoIterator<Item = String>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl std::fmt::Display for CredentialAccountBindingCandidates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut bindings = self.0.iter();
+        if let Some(first) = bindings.next() {
+            f.write_str(first)?;
+        }
+        for binding in bindings {
+            write!(f, ", {binding}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Fail-closed errors from resolving a realm parent chain.
@@ -1602,6 +1623,68 @@ pub(crate) fn materialize_connection_target(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AccountCredentialIssuer {
+    GitHubCopilot,
+    ProviderMethod {
+        provider: Provider,
+        auth_method: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccountCredentialContract {
+    issuer: AccountCredentialIssuer,
+    persisted_mode: crate::auth::PersistedAuthMode,
+    source: CredentialSourceSpec,
+}
+
+fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialContract> {
+    let (auth_method, persisted_mode, github_copilot) = match auth.provider {
+        Provider::OpenAI => {
+            let method = OpenAiAuthMethod::parse(&auth.auth_method)?;
+            (
+                method.as_str(),
+                method.persisted_auth_mode()?,
+                method == OpenAiAuthMethod::GitHubCopilotOauth,
+            )
+        }
+        Provider::Anthropic => {
+            let method = AnthropicAuthMethod::parse(&auth.auth_method)?;
+            (
+                method.as_str(),
+                method.persisted_auth_mode()?,
+                method == AnthropicAuthMethod::GitHubCopilotOauth,
+            )
+        }
+        Provider::Gemini => {
+            let method = GoogleAuthMethod::parse(&auth.auth_method)?;
+            (
+                method.as_str(),
+                method.persisted_auth_mode()?,
+                method == GoogleAuthMethod::GitHubCopilotOauth,
+            )
+        }
+        Provider::SelfHosted => {
+            let method = SelfHostedAuthMethod::parse(&auth.auth_method)?;
+            (method.as_str(), method.persisted_auth_mode()?, false)
+        }
+        Provider::Other => return None,
+    };
+    Some(AccountCredentialContract {
+        issuer: if github_copilot {
+            AccountCredentialIssuer::GitHubCopilot
+        } else {
+            AccountCredentialIssuer::ProviderMethod {
+                provider: auth.provider,
+                auth_method,
+            }
+        },
+        persisted_mode,
+        source: auth.source.clone(),
+    })
+}
+
 impl RealmConnectionSet {
     /// Validate and materialize a realm connection set from its config
     /// section. Normalizes provider strings into the typed
@@ -1714,66 +1797,6 @@ impl RealmConnectionSet {
                 provider_default: cfg.provider_default,
             };
             bindings.insert(id.clone(), binding);
-        }
-
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        enum AccountCredentialIssuer {
-            GitHubCopilot,
-            ProviderMethod {
-                provider: Provider,
-                auth_method: &'static str,
-            },
-        }
-
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        struct AccountCredentialContract {
-            issuer: AccountCredentialIssuer,
-            persisted_mode: crate::auth::PersistedAuthMode,
-        }
-
-        fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialContract> {
-            let (auth_method, persisted_mode, github_copilot) = match auth.provider {
-                Provider::OpenAI => {
-                    let method = OpenAiAuthMethod::parse(&auth.auth_method)?;
-                    (
-                        method.as_str(),
-                        method.persisted_auth_mode()?,
-                        method == OpenAiAuthMethod::GitHubCopilotOauth,
-                    )
-                }
-                Provider::Anthropic => {
-                    let method = AnthropicAuthMethod::parse(&auth.auth_method)?;
-                    (
-                        method.as_str(),
-                        method.persisted_auth_mode()?,
-                        method == AnthropicAuthMethod::GitHubCopilotOauth,
-                    )
-                }
-                Provider::Gemini => {
-                    let method = GoogleAuthMethod::parse(&auth.auth_method)?;
-                    (
-                        method.as_str(),
-                        method.persisted_auth_mode()?,
-                        method == GoogleAuthMethod::GitHubCopilotOauth,
-                    )
-                }
-                Provider::SelfHosted => {
-                    let method = SelfHostedAuthMethod::parse(&auth.auth_method)?;
-                    (method.as_str(), method.persisted_auth_mode()?, false)
-                }
-                Provider::Other => return None,
-            };
-            Some(AccountCredentialContract {
-                issuer: if github_copilot {
-                    AccountCredentialIssuer::GitHubCopilot
-                } else {
-                    AccountCredentialIssuer::ProviderMethod {
-                        provider: auth.provider,
-                        auth_method,
-                    }
-                },
-                persisted_mode,
-            })
         }
 
         Ok(Self {
@@ -1920,6 +1943,21 @@ impl RealmConnectionSet {
             .auth_profiles
             .get(auth_profile_id)
             .ok_or_else(|| ProviderBindingError::UnknownAuth(auth_profile_id.to_string()))?;
+        if let Some(account) = binding.credential_account.as_ref() {
+            let configured_auth = self
+                .auth_profiles
+                .get(&binding.auth_profile)
+                .ok_or_else(|| ProviderBindingError::UnknownAuth(binding.auth_profile.clone()))?;
+            if account_credential_contract(configured_auth) != account_credential_contract(auth) {
+                return Err(
+                    ProviderBindingError::CredentialAccountProfileOverrideMismatch {
+                        account: account.as_str().into(),
+                        binding: binding.id.clone().into_boxed_str(),
+                        profile: auth_profile_id.into(),
+                    },
+                );
+            }
+        }
         Ok((binding, backend, auth))
     }
 }
@@ -1965,6 +2003,14 @@ pub enum ProviderBindingError {
         account: Box<str>,
         first_binding: Box<str>,
         conflicting_binding: Box<str>,
+    },
+    #[error(
+        "credential account '{account}' binding '{binding}' cannot override to incompatible auth profile '{profile}'"
+    )]
+    CredentialAccountProfileOverrideMismatch {
+        account: Box<str>,
+        binding: Box<str>,
+        profile: Box<str>,
     },
     #[error("unknown provider name: {0}")]
     UnknownProviderName(String),
@@ -3610,6 +3656,86 @@ credential_account = "shared"
         assert!(matches!(
             error,
             ProviderBindingError::CredentialAccountContractMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn credential_account_rejects_incompatible_sources() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.a]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.auth.a]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.a]
+backend_profile = "a"
+auth_profile = "a"
+credential_account = "github_copilot"
+
+[realm.global.backend.b]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.b]
+provider = "anthropic"
+auth_method = "github_copilot_oauth"
+source = { kind = "env", env = "COPILOT_TOKEN" }
+
+[realm.global.binding.b]
+backend_profile = "b"
+auth_profile = "b"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RealmConnectionSet::from_config("global", &config.realm["global"]),
+            Err(ProviderBindingError::CredentialAccountContractMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn credential_account_rejects_incompatible_profile_override() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.auth.managed]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.auth.environment]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "env", env = "COPILOT_TOKEN" }
+
+[realm.global.binding.copilot]
+backend_profile = "copilot"
+auth_profile = "managed"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+        let realm = RealmConnectionSet::from_config("global", &config.realm["global"]).unwrap();
+        let auth_binding = AuthBindingRef {
+            realm: RealmId::global(),
+            binding: BindingId::parse("copilot").unwrap(),
+            profile: Some(ProfileId::parse("environment").unwrap()),
+            origin: BindingOrigin::Configured,
+        };
+
+        assert!(matches!(
+            realm.lookup_auth_binding(&auth_binding),
+            Err(ProviderBindingError::CredentialAccountProfileOverrideMismatch { .. })
         ));
     }
 

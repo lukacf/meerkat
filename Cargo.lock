@@ -3172,6 +3172,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
+ "meerkat-copilot",
  "meerkat-core",
  "meerkat-live",
  "meerkat-machine-kernels",

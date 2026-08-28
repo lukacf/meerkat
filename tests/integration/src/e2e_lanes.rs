@@ -2746,7 +2746,7 @@ fn executable_from_cargo_messages(
     Ok(None)
 }
 
-fn strict_prereqs_enabled() -> bool {
+pub fn strict_prereqs_enabled() -> bool {
     matches!(
         std::env::var("MEERKAT_STRICT_E2E_PREREQS").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")

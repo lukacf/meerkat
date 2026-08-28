@@ -69,6 +69,11 @@ path = "tests/live_mob_tools.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
+name = "copilot_live_e2e"
+path = "tests/copilot_live_e2e.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
 name = "smoke_shared_realm"
 path = "tests/smoke_shared_realm.rs"
 
@@ -102,6 +107,7 @@ base64.workspace = true
 sha2.workspace = true
 axum.workspace = true
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
+meerkat-copilot.workspace = true
 # The e2e-fast multi-host beat #[path]-includes meerkat-mob/tests/support,
 # whose fixture installs an env-gated tracing subscriber.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

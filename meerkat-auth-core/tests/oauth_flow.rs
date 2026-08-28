@@ -318,7 +318,11 @@ async fn device_poll_handler(
     let n = state.poll_count.fetch_add(1, Ordering::SeqCst);
     if n < 2 {
         (
-            axum::http::StatusCode::BAD_REQUEST,
+            if n == 0 {
+                axum::http::StatusCode::OK
+            } else {
+                axum::http::StatusCode::BAD_REQUEST
+            },
             Json(serde_json::json!({"error": "authorization_pending"})),
         )
     } else {
@@ -373,7 +377,8 @@ async fn device_poll_transitions_pending_to_ready() {
     let mut ep = endpoints(token_url);
     ep.device_code_url = Some(device_url);
 
-    // Poll 1 + 2 → Pending; poll 3 → Ready.
+    // GitHub reports Pending with 200 while RFC-style providers may use 4xx.
+    // Both forms must preserve the flow until a later Ready response.
     for expected in &[false, false, true] {
         let outcome = poll_device_code(&Client::new(), &ep, "dc-xyz", None)
             .await

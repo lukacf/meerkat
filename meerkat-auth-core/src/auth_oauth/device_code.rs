@@ -116,12 +116,26 @@ pub async fn poll_device_code(
         .map_err(|e| OAuthError::Network(e.to_string()))?;
     let status = resp.status();
 
-    // Device-code token polling returns 4xx with typed error codes. We
-    // parse the JSON body and dispatch on `error`.
+    // Device token endpoints carry typed errors in the body. GitHub returns
+    // pending with 200 while RFC-style providers commonly use 4xx, so classify
+    // the body before interpreting the HTTP status.
     let body: TokenResponseWire = resp
         .json()
         .await
         .map_err(|e| OAuthError::Network(format!("decode: {e}")))?;
+
+    if let Some(error) = body.error.as_deref() {
+        return match error {
+            "authorization_pending" => Ok(DevicePollOutcome::Pending),
+            "slow_down" => Ok(DevicePollOutcome::SlowDown),
+            "access_denied" => Ok(DevicePollOutcome::AccessDenied),
+            "expired_token" => Ok(DevicePollOutcome::Expired),
+            other => Err(OAuthError::TokenEndpoint {
+                status: status.as_u16(),
+                body: format!("error={other}"),
+            }),
+        };
+    }
 
     if status.is_success() {
         let access = body.access_token.ok_or_else(|| OAuthError::TokenEndpoint {
@@ -137,18 +151,8 @@ pub async fn poll_device_code(
         }));
     }
 
-    match body.error.as_deref() {
-        Some("authorization_pending") => Ok(DevicePollOutcome::Pending),
-        Some("slow_down") => Ok(DevicePollOutcome::SlowDown),
-        Some("access_denied") => Ok(DevicePollOutcome::AccessDenied),
-        Some("expired_token") => Ok(DevicePollOutcome::Expired),
-        Some(other) => Err(OAuthError::TokenEndpoint {
-            status: status.as_u16(),
-            body: format!("error={other}"),
-        }),
-        None => Err(OAuthError::TokenEndpoint {
-            status: status.as_u16(),
-            body: "non-2xx without error field".into(),
-        }),
-    }
+    Err(OAuthError::TokenEndpoint {
+        status: status.as_u16(),
+        body: "non-2xx without error field".into(),
+    })
 }

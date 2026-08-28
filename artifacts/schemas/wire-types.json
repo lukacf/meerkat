@@ -2401,7 +2401,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -21916,7 +21922,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -32899,7 +32911,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -47332,7 +47350,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -63803,7 +63827,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -71574,7 +71604,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },
@@ -122993,7 +123029,13 @@
           "post_llm_response",
           "pre_tool_execution",
           "post_tool_execution",
-          "turn_boundary"
+          "turn_boundary",
+          "runtime_input_accepted",
+          "runtime_input_rejected",
+          "runtime_input_deduplicated",
+          "peer_ingress_committed",
+          "peer_egress_committed",
+          "interaction_completed"
         ],
         "type": "string"
       },

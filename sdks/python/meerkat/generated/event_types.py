@@ -46,7 +46,7 @@ HookId = str
 
 
 # Hook points available in V1.
-HookPoint = Literal['run_started', 'run_completed', 'run_failed', 'pre_llm_request', 'post_llm_response', 'pre_tool_execution', 'post_tool_execution', 'turn_boundary']
+HookPoint = Literal['run_started', 'run_completed', 'run_failed', 'pre_llm_request', 'post_llm_response', 'pre_tool_execution', 'post_tool_execution', 'turn_boundary', 'runtime_input_accepted', 'runtime_input_rejected', 'runtime_input_deduplicated', 'peer_ingress_committed', 'peer_egress_committed', 'interaction_completed']
 
 
 # Typed reason codes for guardrail denials.

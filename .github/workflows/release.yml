@@ -691,11 +691,17 @@ jobs:
           # the machine catalog: LLVM OOM on meerkat-mcp, 0xc0000409 stack
           # overruns on meerkat-runtime/meerkat-machine-schema across the
           # v0.7.14-v0.7.16 tag runs). The root cause is fixed at the
-          # generator (#835 chunks the emission), so the opt-level pins that
-          # papered over it are gone; the parallelism cap stays as cheap
-          # commit-capacity headroom on the 16GB runner.
+          # generator (#835 chunks the emission). The 0.8.31 tag and recovery
+          # runs nevertheless both spent more than three hours in this step
+          # after the council machine expansion, reproducing the prior LLVM
+          # failure shape. Restore the proven Windows-only opt-level pins;
+          # Linux/macOS binaries keep full release codegen.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             export CARGO_BUILD_JOBS=2
+            {
+              printf '\n[profile.release.package.meerkat-runtime]\nopt-level = 1\n'
+              printf '\n[profile.release.package.meerkat-mcp]\nopt-level = 1\n'
+            } >> .cargo/config.toml
           fi
           cargo_cmd=(./scripts/repo-cargo)
           if [[ "${{ runner.os }}" == "Linux" ]]; then

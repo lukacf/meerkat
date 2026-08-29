@@ -59,6 +59,7 @@ BuildBuddy is enabled, that switch calls `scripts/buildbuddy-dev`.
 | Lane | Scope |
 | --- | --- |
 | `make test-unit` | Fast unit coverage. |
+| `make test-mob-dense-topology` | Isolated 300-member/150-peer Mob scalability stress. |
 | `make test-int` | Integration-fast coverage without e2e scenarios. |
 | `make e2e-fast` | Deterministic end-to-end lane. |
 | `make e2e-system` | Local real-resource scenarios. |
@@ -68,6 +69,17 @@ BuildBuddy is enabled, that switch calls `scripts/buildbuddy-dev`.
 The canonical e2e lane taxonomy lives in
 `tests/integration/src/e2e_lanes.rs`. Scripts and BuildBuddy targets route to
 that taxonomy rather than inventing separate lane names.
+
+The dense Mob topology stress has a dedicated GitHub-hosted Linux workflow,
+`.github/workflows/mob-dense-topology.yml`. The active top-level CI calls it
+and requires its result alongside BuildBuddy, while the full Cargo workflow
+also runs it from the existing unit-test archive and includes it in the Cargo
+gate. The test owns a five-minute wire-materialization budget; its nextest
+profile reports the named test every minute and terminates a whole-test stall
+after eight minutes. The result is bounded to the hosted runner environment:
+local macOS
+and BuildBuddy runs are supplementary evidence, not latency predictions or
+substitutes for this lane.
 
 ## Architecture Gates
 

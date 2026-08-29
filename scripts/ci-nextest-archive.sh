@@ -11,7 +11,7 @@ usage:
   scripts/ci-nextest-archive.sh build <family> <archive-file>
   scripts/ci-nextest-archive.sh run <family> <archive-file> <partition>
 
-families: unit, int-heavy, int-mob, int-everything-else
+families: unit, unit-mob, int-heavy, int-mob, int-everything-else
 EOF
   exit 2
 }
@@ -26,6 +26,10 @@ final_status_level=fail
 case "$family" in
   unit)
     cargo_args=(--workspace --lib)
+    profile=ci-unit
+    ;;
+  unit-mob)
+    cargo_args=(-p meerkat-mob --lib)
     profile=ci-unit
     ;;
   int-heavy)
@@ -99,6 +103,12 @@ case "$family" in
     ;;
 esac
 
+if [[ -n "${NEXTEST_PROFILE_OVERRIDE:-}" ]]; then
+  profile="$NEXTEST_PROFILE_OVERRIDE"
+  status_level=slow
+  final_status_level=slow
+fi
+
 case "${1:-}" in
   build)
     mkdir -p "$(dirname "$archive_file")"
@@ -127,6 +137,9 @@ case "${1:-}" in
     )
     if [[ "$profile" != default ]]; then
       run_args+=(--profile "$profile")
+    fi
+    if [[ -n "${NEXTEST_RUN_IGNORED:-}" ]]; then
+      run_args+=(--run-ignored "$NEXTEST_RUN_IGNORED")
     fi
     RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}" \
       MEERKAT_WORKSPACE_ROOT="$ROOT" \

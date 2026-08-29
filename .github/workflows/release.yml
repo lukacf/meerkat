@@ -236,7 +236,12 @@ jobs:
              ((.schema_version == 1 and .cargo_result == "success") or
               (.schema_version == 2 and
                .validation_backend == "gcp-buildbuddy" and
-               .validation_result == "success"))' \
+               .validation_result == "success") or
+              (.schema_version == 3 and
+               .validation_backend == "gcp-buildbuddy+github-hosted-dense-mob" and
+               .validation_result == "success" and
+               .component_results.gcp_buildbuddy == "success" and
+               .component_results.github_hosted_dense_mob == "success"))' \
             "${attestation}"
           echo "Verified exact-tree CI attestation for ${RELEASE_SHA} (${RELEASE_TREE})"
 

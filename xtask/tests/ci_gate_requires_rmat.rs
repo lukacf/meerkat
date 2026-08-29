@@ -2,11 +2,12 @@
 
 //! Pinning tests for the CI workflow contract.
 //!
-//! CI runs one authoritative GCP BuildBuddy/RBE lane. The GitHub-hosted Cargo
-//! workflow remains a diagnostic fallback, while nightly owns low-churn heavy
-//! coverage. These tests ratchet the load-bearing invariants: the typed
-//! governance gates (rmat-audit set) bind every run, BuildBuddy stays on the
-//! hot path, and the aggregate gate enforces the 20-minute terminal budget.
+//! CI runs the broad GCP BuildBuddy/RBE lane plus one exact GitHub-hosted dense
+//! Mob topology stress. The full GitHub-hosted Cargo workflow remains a
+//! diagnostic fallback, while nightly owns low-churn heavy coverage. These
+//! tests ratchet the load-bearing invariants: the typed governance gates
+//! (rmat-audit set) bind every run, both selected lanes stay on the hot path,
+//! and the aggregate gate enforces the 20-minute terminal budget.
 
 use std::path::{Path, PathBuf};
 
@@ -47,7 +48,7 @@ fn job_names(doc: &serde_yaml::Value, path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn ci_runs_one_authoritative_buildbuddy_lane() {
+fn ci_runs_buildbuddy_and_hosted_dense_topology_lanes() {
     let ci_yml = workflow_yml_path("ci.yml");
     let ci = std::fs::read_to_string(&ci_yml)
         .unwrap_or_else(|e| panic!("read {}: {e}", ci_yml.display()));
@@ -55,8 +56,8 @@ fn ci_runs_one_authoritative_buildbuddy_lane() {
 
     assert_eq!(
         job_names(&doc, &ci_yml),
-        vec!["gate", "gcp-buildbuddy"],
-        "{} should expose only BuildBuddy and the aggregating gate",
+        vec!["gate", "gcp-buildbuddy", "github-hosted-dense-topology",],
+        "{} should expose only the selected validation lanes and aggregating gate",
         ci_yml.display(),
     );
     assert!(
@@ -66,6 +67,10 @@ fn ci_runs_one_authoritative_buildbuddy_lane() {
     assert!(
         !ci.contains("uses: ./.github/workflows/cargo.yml"),
         "the diagnostic Cargo workflow must not duplicate authoritative CI"
+    );
+    assert!(
+        ci.contains("uses: ./.github/workflows/mob-dense-topology.yml"),
+        "CI must include the exact GitHub-hosted dense Mob topology lane"
     );
     assert!(
         !ci.contains("github.actor"),
@@ -115,6 +120,7 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
             "audit",
             "changes",
             "clippy",
+            "dense-topology",
             "e2e-fast",
             "fmt-governance",
             "gate",

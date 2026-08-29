@@ -8,6 +8,14 @@ inputs:
   partition:
     description: Nextest partition expression.
     required: true
+  profile:
+    description: Optional nextest profile override for a specialized consumer.
+    required: false
+    default: ""
+  run_ignored:
+    description: Optional nextest ignored-test policy (default, only, or all).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -33,6 +41,8 @@ runs:
       env:
         ARCHIVE_FAMILY: ${{ inputs.family }}
         ARCHIVE_PARTITION: ${{ inputs.partition }}
+        NEXTEST_PROFILE_OVERRIDE: ${{ inputs.profile }}
+        NEXTEST_RUN_IGNORED: ${{ inputs.run_ignored }}
       run: |
         set -euo pipefail
         archive_path="${RUNNER_TEMP}/nextest-archives/nextest-${ARCHIVE_FAMILY}.tar.zst"

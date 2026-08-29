@@ -13,6 +13,18 @@
 inherits = "default"
 slow-timeout = { period = "60s", terminate-after = 4 }
 
+[profile.mob-dense-topology]
+# The dedicated GitHub-hosted scalability lane runs exactly one ignored-on-Linux
+# test. The test enforces its five-minute wire budget directly; this outer
+# deadline also bounds member spawn and result verification stalls.
+inherits = "default"
+default-filter = 'package(meerkat-mob) and test(=runtime::tests::test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+test-threads = 1
+status-level = "slow"
+final-status-level = "slow"
+success-output = "immediate-final"
+
 [[profile.ci-unit.overrides]]
 # This workflow-style xtask test performs nested machine-authority compilation.
 # Its measured healthy runtime is about 4.5 minutes on GitHub-hosted runners,

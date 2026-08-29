@@ -46,12 +46,18 @@ export ROOT
 export CARGO="$FAKE_CARGO"
 export NEXTEST_BIN="$FAKE_NEXTEST"
 
-families=(unit int-heavy int-mob int-everything-else)
+families=(unit unit-mob int-heavy int-mob int-everything-else)
 for family in "${families[@]}"; do
   archive="${TEST_ROOT}/${family}.tar.zst"
   "$ROOT/scripts/ci-nextest-archive.sh" build "$family" "$archive"
   "$ROOT/scripts/ci-nextest-archive.sh" run "$family" "$archive" hash:1/1
 done
+NEXTEST_PROFILE_OVERRIDE=mob-dense-topology \
+  NEXTEST_RUN_IGNORED=all \
+  "$ROOT/scripts/ci-nextest-archive.sh" run \
+  unit-mob \
+  "${TEST_ROOT}/unit-mob.tar.zst" \
+  hash:1/1
 
 assert_line_contains() {
   local pattern="$1"
@@ -68,8 +74,8 @@ assert_line_contains '<-p> <meerkat-mob> <-p> <meerkat-mob-adaptive>'
 assert_line_contains '<--workspace> <--exclude> <meerkat-integration-tests> <--exclude> <meerkat-mob>'
 
 run_count="$(grep -c '^nextest ' "$LOG")"
-[[ "$run_count" == 4 ]] || {
-  echo "expected four archived runs, got ${run_count}" >&2
+[[ "$run_count" == 6 ]] || {
+  echo "expected six archived runs, got ${run_count}" >&2
   exit 1
 }
 while IFS= read -r command; do
@@ -105,8 +111,25 @@ unit_run="$(grep '^nextest ' "$LOG" | head -n 1)"
   exit 1
 }
 ci_unit_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <ci-unit>')"
-[[ "$ci_unit_run_count" == 1 ]] || {
-  echo "expected one ci-unit archive run, got ${ci_unit_run_count}" >&2
+[[ "$ci_unit_run_count" == 2 ]] || {
+  echo "expected two ci-unit archive runs, got ${ci_unit_run_count}" >&2
+  exit 1
+}
+dense_run="$(grep '^nextest ' "$LOG" | tail -n 1)"
+[[ "$dense_run" == *' <--profile> <mob-dense-topology>'* ]] || {
+  echo "dense archive run omitted its isolated profile" >&2
+  exit 1
+}
+[[ "$dense_run" == *' <--run-ignored> <all>'* ]] || {
+  echo "dense archive run did not opt the Linux test back in" >&2
+  exit 1
+}
+[[ "$dense_run" == *' <--status-level> <slow>'* ]] || {
+  echo "dense archive run suppressed named slow-test reports" >&2
+  exit 1
+}
+[[ "$dense_run" == *' <--final-status-level> <slow>'* ]] || {
+  echo "dense archive run suppressed its slow-test summary" >&2
   exit 1
 }
 fast_build_count="$(grep '^cargo ' "$LOG" | grep -c -- '<--profile> <fast>')"
@@ -142,6 +165,9 @@ fi
 BUILD_ACTION="$ROOT/.github/actions/build-nextest-archive/action.yml"
 RUN_ACTION="$ROOT/.github/actions/run-nextest-archive/action.yml"
 WORKFLOW="$ROOT/.github/workflows/cargo.yml"
+TOP_LEVEL_WORKFLOW="$ROOT/.github/workflows/ci.yml"
+DENSE_WORKFLOW="$ROOT/.github/workflows/mob-dense-topology.yml"
+RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
 NEXTEST_CONFIG="$ROOT/.config/nextest.toml"
 
 assert_file_contains() {
@@ -162,10 +188,15 @@ assert_file_contains "$RUN_ACTION" "name: ${stable_artifact_name}"
 assert_file_contains "$RUN_ACTION" 'uses: ./.github/actions/setup-rust-ci'
 assert_file_contains "$RUN_ACTION" 'components: rustfmt'
 assert_file_contains "$RUN_ACTION" 'scripts/ci-nextest-archive.sh run'
+assert_file_contains "$RUN_ACTION" 'NEXTEST_PROFILE_OVERRIDE: ${{ inputs.profile }}'
+assert_file_contains "$RUN_ACTION" 'NEXTEST_RUN_IGNORED: ${{ inputs.run_ignored }}'
 assert_file_contains "$NEXTEST_CONFIG" '[profile.ci-unit]'
 assert_file_contains "$NEXTEST_CONFIG" 'inherits = "default"'
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 4 }'
 assert_file_contains "$NEXTEST_CONFIG" 'filter = '\''test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'\'''
+assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'
+assert_file_contains "$NEXTEST_CONFIG" '[profile.mob-dense-topology]'
+assert_file_contains "$NEXTEST_CONFIG" 'default-filter = '\''package(meerkat-mob) and test(=runtime::tests::test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'\'''
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'
 fast_profile="$(sed -n '/^\[profile.fast\]$/,/^\[/p' "$NEXTEST_CONFIG")"
 [[ "$fast_profile" == *'slow-timeout = { period = "60s" }'* ]] || {
@@ -185,6 +216,33 @@ for execution_job in unit int-mob int-else int-rest; do
   assert_file_contains "$WORKFLOW" "      - ${execution_job}"
   assert_file_contains "$WORKFLOW" "            \${{ needs.${execution_job}.result }}"
 done
+
+dense_job="$(sed -n '/^  dense-topology:$/,/^  int-archives:$/p' "$WORKFLOW")"
+for contract in \
+  '      - unit-archive' \
+  '          profile: mob-dense-topology' \
+  '          run_ignored: all'; do
+  [[ "$dense_job" == *"$contract"* ]] || {
+    echo "Cargo dense-topology job is missing contract: ${contract}" >&2
+    exit 1
+  }
+done
+assert_file_contains "$WORKFLOW" '      - dense-topology'
+assert_file_contains "$WORKFLOW" '${{ needs.dense-topology.result }}'
+assert_file_contains "$DENSE_WORKFLOW" '  workflow_call:'
+assert_file_contains "$DENSE_WORKFLOW" '          family: unit-mob'
+assert_file_contains "$DENSE_WORKFLOW" '    timeout-minutes: 10'
+assert_file_contains "$DENSE_WORKFLOW" '          profile: mob-dense-topology'
+assert_file_contains "$DENSE_WORKFLOW" '          run_ignored: all'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" '  github-hosted-dense-topology:'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" '    uses: ./.github/workflows/mob-dense-topology.yml'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" '      - github-hosted-dense-topology'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" '${{ needs.github-hosted-dense-topology.result }}'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" 'schema_version: 3'
+assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 3'
+assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "gcp-buildbuddy+github-hosted-dense-mob"'
+assert_file_contains "$RELEASE_WORKFLOW" '.component_results.gcp_buildbuddy == "success"'
+assert_file_contains "$RELEASE_WORKFLOW" '.component_results.github_hosted_dense_mob == "success"'
 
 unit_job="$(sed -n '/^  unit:$/,/^  int-archives:$/p' "$WORKFLOW")"
 [[ "$unit_job" == *'      - unit-archive'* ]] || {

@@ -1,0 +1,71 @@
+name: Dense Mob topology
+
+on:
+  workflow_call:
+  workflow_dispatch: {}
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.94.1
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+jobs:
+  unit-archive:
+    name: Build Mob unit-test archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-nextest-mob-archive
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Build Mob unit archive
+        uses: ./.github/actions/build-nextest-archive
+        with:
+          family: unit-mob
+
+  dense-topology:
+    name: 300 members x 150 peers
+    needs: unit-archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run isolated dense topology stress
+        uses: ./.github/actions/run-nextest-archive
+        with:
+          family: unit-mob
+          partition: hash:1/1
+          profile: mob-dense-topology
+          run_ignored: all

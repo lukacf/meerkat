@@ -1,8 +1,8 @@
 name: CI
 
-# BuildBuddy RBE is the authoritative full CI lane. The GitHub-hosted Cargo
-# workflow remains available for manual diagnostics and nightly coverage, but
-# fresh-runner compilation cannot satisfy the 20-minute push-to-terminal SLO.
+# BuildBuddy RBE is the broad CI lane. The exact dense Mob topology stress runs
+# from a prebuilt unit archive on GitHub-hosted Linux, so release evidence does
+# not mistake BuildBuddy/macOS timing for the hosted scalability signal.
 
 on:
   push:
@@ -43,21 +43,32 @@ jobs:
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
 
+  github-hosted-dense-topology:
+    name: GitHub-hosted dense Mob topology
+    uses: ./.github/workflows/mob-dense-topology.yml
+
   gate:
     name: CI gate
     if: ${{ always() }}
     needs:
       - gcp-buildbuddy
+      - github-hosted-dense-topology
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
         shell: bash
         env:
           BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
+          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
         run: |
           echo "GCP BuildBuddy result: ${BUILDBUDDY_RESULT}"
+          echo "GitHub-hosted dense Mob topology result: ${DENSE_TOPOLOGY_RESULT}"
           if [[ "${BUILDBUDDY_RESULT}" != "success" ]]; then
-            echo "::error::CI did not complete successfully."
+            echo "::error::BuildBuddy CI did not complete successfully."
+            exit 1
+          fi
+          if [[ "${DENSE_TOPOLOGY_RESULT}" != "success" ]]; then
+            echo "::error::GitHub-hosted dense Mob topology did not complete successfully."
             exit 1
           fi
 
@@ -93,6 +104,7 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
+          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
         run: |
           set -euo pipefail
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
@@ -108,8 +120,9 @@ jobs:
             --arg event "${GITHUB_EVENT_NAME}" \
             --arg ref "${GITHUB_REF}" \
             --arg validation_result "${BUILDBUDDY_RESULT}" \
+            --arg dense_topology_result "${DENSE_TOPOLOGY_RESULT}" \
             '{
-              schema_version: 2,
+              schema_version: 3,
               repository: $repository,
               commit_sha: $commit_sha,
               tree_sha: $tree_sha,
@@ -118,8 +131,17 @@ jobs:
               workflow_run_attempt: $workflow_run_attempt,
               event: $event,
               ref: $ref,
-              validation_backend: "gcp-buildbuddy",
-              validation_result: $validation_result
+              validation_backend: "gcp-buildbuddy+github-hosted-dense-mob",
+              validation_result: (
+                if $validation_result == "success" and $dense_topology_result == "success"
+                then "success"
+                else "failure"
+                end
+              ),
+              component_results: {
+                gcp_buildbuddy: $validation_result,
+                github_hosted_dense_mob: $dense_topology_result
+              }
             }' > "${destination}/attestation.json"
           echo "tree_sha=${tree_sha}"
           echo "path=${destination}" >> "${GITHUB_OUTPUT}"

@@ -17,6 +17,8 @@ name: Cargo CI
 #                     test-only lint yield; it runs nightly)
 #   unit-archive    - build lib unit tests once into a portable archive
 #   unit (x8)       - run hash partitions from the shared unit archive
+#   dense-topology  - run the isolated ignored 300-member/150-peer Mob stress
+#                     from that same archive on GitHub-hosted Linux
 #   int-archives    - build the three fast-profile integration families on one
 #                     runner so their shared dependency graph is compiled once;
 #                     run the sub-second integration-crate family in place
@@ -341,6 +343,26 @@ jobs:
         with:
           family: unit
           partition: hash:${{ matrix.partition }}/8
+
+  dense-topology:
+    name: Dense Mob topology (300 members x 150 peers)
+    needs:
+      - changes
+      - unit-archive
+    if: ${{ needs.changes.outputs.code_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run isolated dense topology stress
+        uses: ./.github/actions/run-nextest-archive
+        with:
+          family: unit
+          partition: hash:1/1
+          profile: mob-dense-topology
+          run_ignored: all
 
   # Integration tests split by build scope, not just run partition. One runner
   # builds the three fast-profile families so matching dependencies are
@@ -931,6 +953,7 @@ jobs:
       - clippy
       - unit-archive
       - unit
+      - dense-topology
       - int-archives
       - int-mob
       - int-else
@@ -955,6 +978,7 @@ jobs:
             ${{ needs.clippy.result }}
             ${{ needs.unit-archive.result }}
             ${{ needs.unit.result }}
+            ${{ needs.dense-topology.result }}
             ${{ needs.int-archives.result }}
             ${{ needs.int-mob.result }}
             ${{ needs.int-else.result }}

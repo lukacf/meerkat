@@ -9,7 +9,10 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::tempdir;
-use xtask::effect_authority::collect_effect_authority_findings;
+use xtask::effect_authority::{
+    AgentLlmClientDefaultMethod, collect_agent_llm_client_default_findings,
+    collect_effect_authority_findings,
+};
 
 const LIVE_WORKSPACE_RUNFILES: &str = "required";
 
@@ -72,6 +75,22 @@ impl MeerkatMachine {
     }
 }
 ";
+
+const AGENT_LLM_CLIENT_TRAIT_FIXTURE: &str = r"
+trait AgentLlmClient {
+    fn required(&self);
+    fn compatibility_default(&self) {}
+    fn fail_closed_default(&self) -> Result<(), ()> { Err(()) }
+}
+";
+
+const AGENT_LLM_CLIENT_DEFAULT_FIXTURE_INVENTORY: &[AgentLlmClientDefaultMethod] = &[
+    AgentLlmClientDefaultMethod::compatibility(
+        "compatibility_default",
+        "fixture compatibility behavior",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed("fail_closed_default", "fixture refusal behavior"),
+];
 
 fn write_file(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -277,6 +296,82 @@ fn core_executor_decorator_rejects_post_wrap_capability_capture() {
             finding.contains("post_stop_cleanup_handle") && finding.contains("captured")
         }),
         "post-wrap capability capture must fail ordering checks, got {findings:#?}"
+    );
+}
+
+#[test]
+fn agent_llm_client_default_inventory_distinguishes_required_methods() {
+    let findings = collect_agent_llm_client_default_findings(
+        AGENT_LLM_CLIENT_TRAIT_FIXTURE,
+        AGENT_LLM_CLIENT_DEFAULT_FIXTURE_INVENTORY,
+    )
+    .expect("collect AgentLlmClient default findings");
+    assert!(
+        findings.is_empty(),
+        "required methods must stay outside the classified default inventory, got {findings:#?}"
+    );
+}
+
+#[test]
+fn agent_llm_client_default_inventory_fails_when_live_trait_path_is_missing() {
+    let dir = tempdir().expect("tempdir");
+    write_file(dir.path(), "Cargo.toml", "[workspace]\n");
+    let findings =
+        collect_effect_authority_findings(dir.path()).expect("collect missing trait findings");
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains("meerkat-core/src/agent.rs")
+                && finding.contains("missing the trait source")
+        }),
+        "workspace root without the trait source must fail closed, got {findings:#?}"
+    );
+}
+
+#[test]
+fn agent_llm_client_default_inventory_requires_a_review_reason() {
+    let inventory = [
+        AgentLlmClientDefaultMethod::compatibility("compatibility_default", ""),
+        AgentLlmClientDefaultMethod::fail_closed("fail_closed_default", "fixture refusal behavior"),
+    ];
+    let findings =
+        collect_agent_llm_client_default_findings(AGENT_LLM_CLIENT_TRAIT_FIXTURE, &inventory)
+            .expect("collect missing review reason findings");
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains("compatibility_default") && finding.contains("no review reason")
+        }),
+        "empty review reason must fail with the method name, got {findings:#?}"
+    );
+}
+
+#[test]
+fn agent_llm_client_default_inventory_requires_explicit_classification() {
+    let mutated = AGENT_LLM_CLIENT_TRAIT_FIXTURE.replace(
+        "    fn required(&self);\n",
+        "    fn required(&self);\n    fn newly_defaulted_authority(&self) {}\n",
+    );
+    let findings = collect_agent_llm_client_default_findings(
+        &mutated,
+        AGENT_LLM_CLIENT_DEFAULT_FIXTURE_INVENTORY,
+    )
+    .expect("collect unclassified AgentLlmClient default findings");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("newly_defaulted_authority")),
+        "new defaulted method must fail with its name, got {findings:#?}"
+    );
+
+    let mut classified = AGENT_LLM_CLIENT_DEFAULT_FIXTURE_INVENTORY.to_vec();
+    classified.push(AgentLlmClientDefaultMethod::compatibility(
+        "newly_defaulted_authority",
+        "fixture reviewed compatibility behavior",
+    ));
+    let findings = collect_agent_llm_client_default_findings(&mutated, &classified)
+        .expect("collect classified AgentLlmClient default findings");
+    assert!(
+        findings.is_empty(),
+        "explicit classification must make the mutation pass, got {findings:#?}"
     );
 }
 

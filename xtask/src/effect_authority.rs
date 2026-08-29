@@ -17,9 +17,13 @@
 //!   checked as string-literal *content* via the AST (`visit_lit_str`),
 //!   because the emitted text itself is the banned artifact.
 //!
-//! The audit also owns the exhaustive `CoreExecutor` decorator ratchet. It
-//! cross-checks the core trait against the runtime decorator so a permissive
-//! default can never silently replace forwarding.
+//! The audit also owns two narrow trait-surface ratchets:
+//! - the exhaustive `CoreExecutor` decorator check cross-checks the core trait
+//!   against the runtime decorator so a permissive default can never silently
+//!   replace forwarding;
+//! - the `AgentLlmClient` default-method inventory requires every intentional
+//!   default body to carry an explicit compatibility or fail-closed
+//!   classification.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -84,6 +88,100 @@ const EXAMPLE_INTERRUPT_ALLOWLIST: [&str; 1] = ["examples/034-codemob-mcp/src/to
 const CORE_EXECUTOR_TRAIT_REL: &str = "meerkat-core/src/lifecycle/core_executor.rs";
 const MACHINE_MANAGED_EXECUTOR_REL: &str =
     "meerkat-runtime/src/meerkat_machine/session_management.rs";
+const AGENT_LLM_CLIENT_TRAIT_REL: &str = "meerkat-core/src/agent.rs";
+
+/// Reviewed disposition for one intentional `AgentLlmClient` default body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentLlmClientDefaultDisposition {
+    /// Preserves the supported behavior of stable custom clients.
+    Compatibility,
+    /// Refuses, disables, or withholds an optional capability by default.
+    FailClosed,
+}
+
+/// One explicitly reviewed default-bodied `AgentLlmClient` method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentLlmClientDefaultMethod {
+    name: &'static str,
+    disposition: AgentLlmClientDefaultDisposition,
+    reason: &'static str,
+}
+
+impl AgentLlmClientDefaultMethod {
+    pub const fn compatibility(name: &'static str, reason: &'static str) -> Self {
+        Self {
+            name,
+            disposition: AgentLlmClientDefaultDisposition::Compatibility,
+            reason,
+        }
+    }
+
+    pub const fn fail_closed(name: &'static str, reason: &'static str) -> Self {
+        Self {
+            name,
+            disposition: AgentLlmClientDefaultDisposition::FailClosed,
+            reason,
+        }
+    }
+}
+
+/// Singular inventory of intentional default bodies on `AgentLlmClient`.
+///
+/// Adding a default-bodied trait method requires an explicit review here.
+const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
+    AgentLlmClientDefaultMethod::compatibility(
+        "prepare_request_attempt",
+        "stable custom clients retain direct single-client request attempts",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "request_attempt_authority",
+        "stable custom clients retain legacy split authority; decorators must forward unified authority",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "request_pressure",
+        "absence withholds an exact request-pressure witness",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "target_cache_lowering_capabilities",
+        "an empty set grants no target cache-lowering capability",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "fork_noncommitting_live_bridge",
+        "unsupported clients refuse an event-isolated concurrent fork",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "prepare_model_fallback",
+        "absence proposes no fallback target",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "commit_model_fallback",
+        "unsupported clients refuse fallback activation",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "active_model_fallback_identity",
+        "absence prevents fallback identity verification",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "compile_model_fallback_schema",
+        "unsupported clients refuse target schema compilation",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "begin_stream_output_observation",
+        "clients without out-of-band visible deltas need no reset",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "stream_output_observed",
+        "clients without out-of-band visible deltas report none observed",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "stream_activity_count",
+        "clients without liveness counters keep the inactivity watchdog disabled",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
+        "compile_schema",
+        "custom clients retain normalized provider-neutral schema lowering",
+    ),
+];
 
 /// Methods for which `MachineManagedPostStopExecutor` is a transparent
 /// decorator. The structural gate below requires the body to remain a single
@@ -177,6 +275,7 @@ pub fn collect_effect_authority_findings(root: &Path) -> Result<Vec<String>> {
     }
 
     collect_core_executor_decorator_findings(root, &mut findings)?;
+    collect_agent_llm_client_default_inventory_findings(root, &mut findings)?;
 
     findings.sort();
     findings.dedup();
@@ -522,6 +621,98 @@ fn subtree_has_call_named(expr: &syn::Expr, name: &str) -> bool {
     let mut finder = CallFinder { name, found: false };
     finder.visit_expr(expr);
     finder.found
+}
+
+fn collect_agent_llm_client_default_inventory_findings(
+    root: &Path,
+    findings: &mut Vec<String>,
+) -> Result<()> {
+    let trait_path = root.join(AGENT_LLM_CLIENT_TRAIT_REL);
+    if !trait_path.is_file() {
+        if root.join("Cargo.toml").is_file() {
+            findings.push(format!(
+                "{AGENT_LLM_CLIENT_TRAIT_REL}:1: AgentLlmClient default-method inventory is missing the trait source"
+            ));
+        }
+        // Recognized tiny fixture roots have no workspace manifest and need
+        // not synthesize the core LLM client contract.
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(&trait_path)
+        .with_context(|| format!("read {}", trait_path.display()))?;
+    findings.extend(collect_agent_llm_client_default_findings(
+        &source,
+        AGENT_LLM_CLIENT_DEFAULT_METHODS,
+    )?);
+    Ok(())
+}
+
+/// Audit one `AgentLlmClient` source against an explicit default-body inventory.
+///
+/// This narrow entry point exists so mutation tests can prove both sides of
+/// the classification ratchet without constructing an external repository.
+pub fn collect_agent_llm_client_default_findings(
+    source: &str,
+    inventory: &[AgentLlmClientDefaultMethod],
+) -> Result<Vec<String>> {
+    let parsed =
+        syn::parse_file(source).with_context(|| format!("parse {AGENT_LLM_CLIENT_TRAIT_REL}"))?;
+    let mut trait_declarations = Vec::new();
+    collect_named_traits(&parsed.items, "AgentLlmClient", &mut trait_declarations);
+    if trait_declarations.len() != 1 {
+        return Ok(vec![format!(
+            "{AGENT_LLM_CLIENT_TRAIT_REL}:1: AgentLlmClient default-method inventory expected exactly one AgentLlmClient trait, found {}",
+            trait_declarations.len()
+        )]);
+    }
+
+    let mut findings = Vec::new();
+    let mut classified = BTreeMap::new();
+    for entry in inventory {
+        if entry.reason.trim().is_empty() {
+            findings.push(format!(
+                "{AGENT_LLM_CLIENT_TRAIT_REL}:1: AgentLlmClient default method `{}` has no review reason",
+                entry.name
+            ));
+        }
+        if let Some(previous) =
+            classified.insert(entry.name.to_string(), (entry.disposition, entry.reason))
+        {
+            findings.push(format!(
+                "{AGENT_LLM_CLIENT_TRAIT_REL}:1: AgentLlmClient default method `{}` is classified more than once ({:?}, {:?})",
+                entry.name, previous.0, entry.disposition
+            ));
+        }
+    }
+
+    let declaration = trait_declarations[0];
+    let defaulted = declaration
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(method) if method.default.is_some() => {
+                Some(method.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let classified = classified.into_keys().collect::<BTreeSet<_>>();
+    let stale = classified
+        .difference(&defaulted)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unclassified = defaulted
+        .difference(&classified)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !stale.is_empty() || !unclassified.is_empty() {
+        findings.push(format!(
+            "{AGENT_LLM_CLIENT_TRAIT_REL}:{}: AgentLlmClient default-method inventory drift: stale={stale:?}, unclassified={unclassified:?}",
+            declaration.ident.span().start().line
+        ));
+    }
+    Ok(findings)
 }
 
 /// Exhaustive delegation ratchet for the runtime-owned CoreExecutor decorator.

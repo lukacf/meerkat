@@ -103,7 +103,7 @@ pub async fn handle_send(
                 format!("Session not found or comms not enabled: {session_id}"),
             );
         }
-    };
+    }
 
     let peer_name = params.peer_label();
     let cmd = match params.into_command().into_command(&session_id) {

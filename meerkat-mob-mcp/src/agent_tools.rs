@@ -3026,9 +3026,8 @@ mod tests {
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
     /// T-B12 (DEC-P7B-18, ADJ-P7-6): the LLM-visible delegation roster is
-    /// snapshot-pinned — phase 7 adds NOTHING here. No live, no host, no
-    /// grant, no member-history tools; drift into the agent-facing surface
-    /// must be a reviewed roster change, never an accident.
+    /// snapshot-pinned. No live, host, grant, or member-history tools may drift
+    /// into the agent-facing surface without a reviewed roster change.
     #[test]
     fn agent_tool_roster_unchanged() {
         let names = |defs: Arc<[Arc<ToolDef>]>| -> Vec<String> {

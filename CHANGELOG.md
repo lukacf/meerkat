@@ -59,6 +59,74 @@ them.
   generated Web SDK `WireOAuthProvider`; provider-runtime embedders may use
   `ProviderRuntimeCatalog::validate_binding_with_credential_identity`, and
   native hosts gain `HostAuthDeviceStart` / `HostAuthDevicePoll`.
+- **Additional Rust provider, bridge, hook, and forked-participant contracts
+  changed.** Exact-pinned downstreams must update exhaustive matches, struct
+  literals, derives, and helper calls for:
+  - `HostAuthError::{BrowserFlowUnsupported, DeviceFlowUnsupported,
+    InvalidExpiry}`;
+  - `AnthropicProviderRuntime::{UnwindSafe, RefUnwindSafe}`,
+    `GoogleProviderRuntime::{UnwindSafe, RefUnwindSafe}`, and
+    `OpenAiProviderRuntime::{UnwindSafe, RefUnwindSafe}`;
+  - `OAuthTargetValidationError::{BackendProviderMismatch,
+    BackendKindMismatch, ProviderMismatch, AuthMethodMismatch, SourceMismatch,
+    SharedIssuerRequiresAccountTarget, BindingInvalid}`;
+  - `BridgeMaterializePayload::forked_participant_attachment`,
+    `BridgeHostBindPayload::delegated_bootstrap_proof`,
+    `WireProviderBinding::credential_account`, and
+    `BridgeCapabilities::forked_participants`;
+  - `BridgeRejectionCause::{InvalidSupervisorSpec, InvalidPeerSpec,
+    AddressMismatch, Unsupported, Internal, BindAdmissionOutcomeUnknown,
+    StaleFence, StaleCursor, OversizedEvent, HistoryRowTooLarge, Unavailable,
+    RuntimeRetirementInProgress, ScopeDenied, SpecDigestMismatch,
+    MaterializeBuildRejected, ModelUnresolvable, AuthBindingUnresolvable,
+    McpCommandMissing, RealmBackendUnavailable, EnvKeyMissing,
+    HostEngineVersionChanged, ModelNotRealtime, LiveAdapterUnavailable,
+    LiveTransportUnavailable, LiveChannelAlreadyBound, LiveChannelNotFound,
+    LiveTransportUnsupported, ResumeSessionNotFound, CapabilityMissing,
+    LaunchModeUnsupported, LaunchModePlacementMismatch,
+    SessionOwnershipConflict}`;
+  - `ResolvedConnectionTarget::credential_identity`,
+    `ProviderBinding::credential_account`,
+    `SessionLlmRequestPolicy::credential_identity`,
+    `ProviderBindingConfig::credential_account`, and
+    `LeaseKey::{identity, realm, binding, profile}`;
+  - `LlmProviderErrorKind::{RequestTooLarge, ContentFiltered, ServerError,
+    ServerOverloaded, ConnectionReset, Unknown, StreamParseError,
+    IncompleteResponse}`;
+  - `PersistedAuthMode::{Adc, ComputeAdc, Bedrock, Vertex, Foundry, McpOauth,
+    ExternalTokens, ExternalAuthorizer, Command, GithubCopilotOauth}`;
+  - `OpenAiBackendKind::Copilot`, `GoogleBackendKind::Copilot`,
+    `AnthropicBackendKind::Copilot`,
+    `OpenAiAuthMethod::GitHubCopilotOauth`,
+    `GoogleAuthMethod::GitHubCopilotOauth`,
+    `AnthropicAuthMethod::GitHubCopilotOauth`, and
+    `OAuthProviderIdentity::GitHubCopilot`;
+  - `HookPoint::{RuntimeInputAccepted, RuntimeInputRejected,
+    RuntimeInputDeduplicated, PeerIngressCommitted, PeerEgressCommitted,
+    InteractionCompleted}`;
+  - `ProviderBindingError::{CredentialAccountRequiresPersistedAuth,
+    CredentialAccountContractMismatch,
+    CredentialAccountProfileOverrideMismatch}` and
+    `ConnectionTargetError::AmbiguousCredentialAccountBindings`;
+  - `GOOGLE_CLIENT_SECRET`, `ResolvedConnection::credential_identity`, and
+    `LlmError::{ContentFiltered, ContextLengthExceeded, ModelNotFound,
+    InvalidApiKey, Unknown, StreamParseError, IncompleteResponse}`;
+  - `DurableMarkerProtocol::{credential_kind_field, account_field}`;
+  - `MobHostActorConfig::forked_participant_sweep_interval`,
+    `MobHostBindingRecord::forked_participant_obligations`,
+    `MaterializedMemberRow::forked_participant_attachment`,
+    `HostMemberSubstrate::{forked_participant_realm,
+    forked_participant_store, forked_participant_source_runtime}`, and
+    `HostBindRequest::{delegated_bootstrap_proof, delegated_supervisor}`;
+  - `SqliteRealmProfileStore::Clone`;
+  - `MobError::{ForkedParticipantSourceIneligible, ForkedParticipantRefused,
+    ForkedParticipantResumeRequiresAttachment,
+    ForkedParticipantRemoteLeaseUnsupported,
+    ForkedParticipantOwnerHostUnavailable,
+    ForkedParticipantAttachedSpawnSpecRejected,
+    ForkedParticipantAttachmentCustodyUnrecorded,
+    ForkedParticipantAttachmentReleaseUnproven}`; and
+  - `record_materialized_member`.
 
 ### Added
 

@@ -41,10 +41,24 @@ fi
 # `--release-type patch` declares our intent (we ship patches); any detected
 # break is then a REPORTED violation we convert into a changelog obligation
 # rather than a hard stop.
+#
+# `meerkat-copilot` first publishes in 0.8.31, so crates.io has no baseline for
+# cargo-semver-checks to retrieve. Keep this exception release-scoped: 0.8.32
+# automatically measures it against the now-published 0.8.31 baseline.
+workspace_version="$(
+    "$PYTHON" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])'
+)"
+semver_args=(--workspace --release-type patch)
+first_publish_crates=()
+if [[ "$workspace_version" == "0.8.31" ]]; then
+    semver_args+=(--exclude meerkat-copilot)
+    first_publish_crates+=(meerkat-copilot)
+    echo "semver-breaks: first publication has no registry baseline: meerkat-copilot"
+fi
 report_file="$(mktemp)"
 trap 'rm -f "$selftest_log" "$report_file"' EXIT
 tool_exit=0
-"$ROOT/scripts/repo-cargo" semver-checks check-release --workspace --release-type patch \
+"$ROOT/scripts/repo-cargo" semver-checks check-release "${semver_args[@]}" \
     >"$report_file" 2>&1 || tool_exit=$?
 
 # Every crate the release publishes and that cargo-semver-checks can look at
@@ -55,6 +69,14 @@ tool_exit=0
 release_args=()
 while IFS= read -r crate; do
     [[ -n "$crate" ]] || continue
+    skip=false
+    for first_publish in "${first_publish_crates[@]}"; do
+        if [[ "$crate" == "$first_publish" ]]; then
+            skip=true
+            break
+        fi
+    done
+    [[ "$skip" == false ]] || continue
     release_args+=(--release-crate "$crate")
 done < <("$ROOT/scripts/release-rust-crates.sh")
 

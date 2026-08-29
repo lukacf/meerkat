@@ -699,6 +699,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             export CARGO_BUILD_JOBS=2
             {
+              printf '\n[profile.release.package.meerkat-machine-schema]\nopt-level = 0\n'
               printf '\n[profile.release.package.meerkat-runtime]\nopt-level = 1\n'
               printf '\n[profile.release.package.meerkat-mcp]\nopt-level = 1\n'
             } >> .cargo/config.toml

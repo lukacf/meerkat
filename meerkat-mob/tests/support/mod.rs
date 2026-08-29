@@ -4028,9 +4028,12 @@ impl ControllingMob {
             // bridge shutdown. Retire the process-local supervisor transport
             // explicitly, exactly as process exit would, before the successor
             // claims the same participant name.
+            #[cfg(feature = "test-support")]
             handle
                 .retire_supervisor_transport_for_process_exit_test()
                 .await;
+            #[cfg(not(feature = "test-support"))]
+            unreachable!("actor fail-stop restart requires the test-support feature");
         }
         drop(handle);
 

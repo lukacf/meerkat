@@ -1599,7 +1599,7 @@ async fn recovered_started_rejection_cannot_abort_prior_uncertain_send_or_unbloc
     // rejection for THIS retry. It cannot retroactively prove the earlier T0
     // send had no effect, so the recovered Started anchor must stay open.
     let mut wrong_token = descriptor_to_bind_request(&scripted.descriptor);
-    wrong_token.bootstrap_token = BridgeBootstrapToken::from("different-retry-token");
+    wrong_token.bootstrap_token = Some(BridgeBootstrapToken::from("different-retry-token"));
     controlling
         .handle
         .bind_host(wrong_token)

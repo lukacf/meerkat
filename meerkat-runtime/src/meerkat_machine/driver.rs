@@ -205,6 +205,118 @@ enum InteractionTerminalBatchScope<'a> {
     RuntimeTermination,
 }
 
+/// Sealed identity of the single durable `InputTerminalCompletion` batch a
+/// directed terminal outbox batch is derived from.
+///
+/// Every field is read back from the persisted completion rows, including the
+/// exact [`crate::input_state::InputTerminalCompletionBatchKey`]. Directed
+/// outbox scope is therefore never an independent caller parameter: it is
+/// derived here, so an outbox row can never claim a run or a runless
+/// termination that its completion authority did not record.
+#[derive(Clone)]
+struct StagedInputTerminalCompletionBatch {
+    input_ids: Vec<InputId>,
+    owner_input_id: InputId,
+    batch_key: crate::input_state::InputTerminalCompletionBatchKey,
+    candidate_digest: String,
+    completion_input_ids_digest: String,
+}
+
+impl StagedInputTerminalCompletionBatch {
+    /// Fail closed unless the witness is internally consistent: the recorded
+    /// owner must be the canonical first recipient, and a runless
+    /// runtime-termination key must name that same owner.
+    fn validate_sealed_identity(&self) -> Result<(), String> {
+        if self.input_ids.first() != Some(&self.owner_input_id) {
+            return Err(
+                "terminal completion batch owner is not its canonical first recipient".into(),
+            );
+        }
+        if let crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination {
+            owner_input_id,
+        } = &self.batch_key
+            && owner_input_id != &self.owner_input_id
+        {
+            return Err("runtime-termination completion batch key names a different owner".into());
+        }
+        Ok(())
+    }
+
+    /// Derive the directed outbox batch key for a run whose commit authority
+    /// is independently known. The commit's run must be exactly the run the
+    /// completion batch was sealed for; a runless witness can never key a
+    /// run-scoped directed batch.
+    fn run_scoped_outbox_batch_key(
+        &self,
+        run_id: &RunId,
+    ) -> Result<crate::input_state::InteractionTerminalBatchKey, String> {
+        self.validate_sealed_identity()?;
+        match &self.batch_key {
+            crate::input_state::InputTerminalCompletionBatchKey::Run { run_id: sealed_run_id }
+                if sealed_run_id == run_id =>
+            {
+                Ok(crate::input_state::InteractionTerminalBatchKey::Run {
+                    run_id: run_id.clone(),
+                })
+            }
+            _ => Err(
+                "directed terminal outbox run authority disagrees with its terminal completion batch key"
+                    .into(),
+            ),
+        }
+    }
+
+    /// Derive the directed outbox batch key from the sealed witness alone.
+    ///
+    /// A run-scoped completion yields exactly its own run key. A
+    /// runtime-termination completion yields the directed-owner key only after
+    /// the witness proves it is runless and that its own owner is the owner
+    /// its completion key names.
+    fn directed_outbox_batch_key(
+        &self,
+        candidate_owner_input_id: &InputId,
+    ) -> Result<crate::input_state::InteractionTerminalBatchKey, String> {
+        self.validate_sealed_identity()?;
+        match &self.batch_key {
+            crate::input_state::InputTerminalCompletionBatchKey::Run { run_id } => {
+                Ok(crate::input_state::InteractionTerminalBatchKey::Run {
+                    run_id: run_id.clone(),
+                })
+            }
+            crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination { .. } => Ok(
+                crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
+                    candidate_owner_input_id: candidate_owner_input_id.clone(),
+                },
+            ),
+        }
+    }
+}
+
+/// Exact projection of the single durable `InputTerminalCompletion` batch that
+/// one directed terminal outbox batch links back to. The completion owner is
+/// the sole candidate and recipient-set authority; the outbox keeps only its
+/// digests.
+#[derive(Clone)]
+struct LinkedTerminalCompletionBatch {
+    input_ids: Vec<InputId>,
+    owner_input_id: InputId,
+    candidate: Option<crate::input_state::InteractionTerminalCandidate>,
+}
+
+/// One exact released-0.8.31 normalization unit: every row a single legacy
+/// directed outbox row must rewrite, paired with the exact successor image
+/// that row must reach.
+///
+/// The image is derived purely from the current rows, so the repair CAS and
+/// the durable reconciliation compute identical bytes. A repair whose durable
+/// CAS committed but whose shell hydration was cancelled is then recognizable
+/// as its own normalization successor across *every* row it touched,
+/// including a completion owner that carries no outbox of its own.
+struct Released0831NormalizationUnit {
+    current: Vec<crate::input_state::StoredInputState>,
+    normalized: Vec<crate::input_state::StoredInputState>,
+}
+
 impl RuntimeCompletionResultAuthority {
     // This is the mechanical typed projection of one generated effect. Keeping
     // every authority field explicit makes omissions visible at the seam.
@@ -764,7 +876,7 @@ impl DriverEntry {
         input_ids: &[InputId],
         candidate: crate::input_state::InteractionTerminalCandidate,
         requires_session_checkpoint: bool,
-    ) -> Result<(), RuntimeDriverError> {
+    ) -> Result<StagedInputTerminalCompletionBatch, RuntimeDriverError> {
         use crate::input_state::{
             InputTerminalCompletion, InputTerminalCompletionBatchKey, InputTerminalCompletionPhase,
             interaction_terminal_payload_digest,
@@ -880,7 +992,194 @@ impl DriverEntry {
             state.terminal_completion = Some(completion);
             ledger.refresh_pending_terminal_owner(&input_id);
         }
-        Ok(())
+        self.input_terminal_completion_batch_witness(&completion_input_ids)
+    }
+
+    fn input_terminal_completion_batch_witness(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<StagedInputTerminalCompletionBatch, RuntimeDriverError> {
+        let mut rows = input_ids
+            .iter()
+            .map(|input_id| {
+                self.as_driver()
+                    .stored_input_state(input_id)
+                    .and_then(|stored| stored.state.terminal_completion)
+                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                        reason: format!(
+                            "terminal completion batch witness lost recipient row {input_id}"
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.sort_by_key(|row| row.batch_ordinal);
+        let owner = crate::input_state::validate_input_terminal_completion_batch(&rows)
+            .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+        let persisted_input_ids = owner.completion_input_ids.clone().ok_or_else(|| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: "terminal completion batch witness owner lost recipients".to_string(),
+            }
+        })?;
+        if persisted_input_ids != canonical_completion_input_ids(input_ids) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason:
+                    "terminal completion batch witness recipients differ from the requested batch"
+                        .to_string(),
+            });
+        }
+        Ok(StagedInputTerminalCompletionBatch {
+            input_ids: persisted_input_ids,
+            owner_input_id: owner.owner_input_id.clone(),
+            batch_key: owner.batch_key.clone(),
+            candidate_digest: owner.candidate_digest.clone(),
+            completion_input_ids_digest: owner.completion_input_ids_digest.clone(),
+        })
+    }
+
+    fn terminal_completion_recipients_for_outbox_owner(
+        &self,
+        outbox_owner_input_id: &InputId,
+        candidate_digest: &str,
+        completion_input_ids_digest: &str,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        Ok(self
+            .linked_terminal_completion_for_outbox_owner(
+                outbox_owner_input_id,
+                candidate_digest,
+                completion_input_ids_digest,
+            )?
+            .input_ids)
+    }
+
+    /// Resolve the single [`crate::input_state::InputTerminalCompletion`]
+    /// batch that owns the candidate and recipient set for one directed
+    /// terminal outbox owner. This is the only read path for either payload;
+    /// the outbox itself carries digests and receipt state only.
+    fn linked_terminal_completion_for_outbox_owner(
+        &self,
+        outbox_owner_input_id: &InputId,
+        candidate_digest: &str,
+        completion_input_ids_digest: &str,
+    ) -> Result<LinkedTerminalCompletionBatch, RuntimeDriverError> {
+        let linked_completion = self
+            .as_driver()
+            .stored_input_state(outbox_owner_input_id)
+            .and_then(|stored| stored.state.terminal_completion)
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "interaction terminal owner {outbox_owner_input_id} lost its terminal-completion link"
+                ),
+            })?;
+        let completion_owner = self
+            .as_driver()
+            .stored_input_state(&linked_completion.owner_input_id)
+            .and_then(|stored| stored.state.terminal_completion)
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "interaction terminal owner {outbox_owner_input_id} points to missing terminal-completion owner {}",
+                    linked_completion.owner_input_id
+                ),
+            })?;
+        let input_ids = completion_owner
+            .completion_input_ids
+            .clone()
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "interaction terminal owner {outbox_owner_input_id} cannot recover its completion recipients"
+                ),
+            })?;
+        let witness = self.input_terminal_completion_batch_witness(&input_ids)?;
+        if witness.owner_input_id != completion_owner.owner_input_id
+            || witness.candidate_digest != candidate_digest
+            || witness.completion_input_ids_digest != completion_input_ids_digest
+        {
+            return Err(RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "interaction terminal owner {outbox_owner_input_id} disagrees with its terminal-completion batch"
+                ),
+            });
+        }
+        Ok(LinkedTerminalCompletionBatch {
+            input_ids: witness.input_ids,
+            owner_input_id: completion_owner.owner_input_id,
+            candidate: completion_owner.candidate,
+        })
+    }
+
+    /// Same as [`Self::linked_terminal_completion_for_outbox_owner`], plus the
+    /// fail-closed containment invariant for the whole directed batch: every
+    /// directed outbox row must name an input that the linked completion batch
+    /// actually addresses. Containment is a subset, not equality, because
+    /// nondirected recipients are completion-only and own no outbox row.
+    fn linked_terminal_completion_for_outbox_batch(
+        &self,
+        outboxes: &[crate::input_state::InteractionTerminalOutbox],
+    ) -> Result<LinkedTerminalCompletionBatch, RuntimeDriverError> {
+        let owner = outboxes.first().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "interaction terminal batch lookup received no rows".to_string(),
+            )
+        })?;
+        let linked = self.linked_terminal_completion_for_outbox_owner(
+            &owner.candidate_owner_input_id,
+            &owner.candidate_digest,
+            &owner.completion_input_ids_digest,
+        )?;
+        let recipients = linked
+            .input_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        for outbox in outboxes {
+            if !recipients.contains(&outbox.input_id) {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "directed terminal outbox {} is not a recipient of its linked terminal-completion batch",
+                        outbox.input_id
+                    ),
+                });
+            }
+        }
+        Ok(linked)
+    }
+
+    fn terminal_completion_recipients_for_outbox_batch(
+        &self,
+        outboxes: &[crate::input_state::InteractionTerminalOutbox],
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        Ok(self
+            .linked_terminal_completion_for_outbox_batch(outboxes)?
+            .input_ids)
+    }
+
+    /// Resolve the exact candidate for one directed batch, failing closed when
+    /// the single completion owner no longer carries it.
+    fn linked_terminal_candidate_for_outbox_batch(
+        &self,
+        outboxes: &[crate::input_state::InteractionTerminalOutbox],
+    ) -> Result<
+        (
+            Vec<InputId>,
+            crate::input_state::InteractionTerminalCandidate,
+        ),
+        RuntimeDriverError,
+    > {
+        let LinkedTerminalCompletionBatch {
+            input_ids,
+            owner_input_id,
+            candidate,
+        } = self.linked_terminal_completion_for_outbox_batch(outboxes)?;
+        let candidate = candidate.ok_or_else(|| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "terminal-completion owner {owner_input_id} lost the single durable candidate its directed batch publishes"
+                ),
+            }
+        })?;
+        crate::input_state::validate_interaction_terminal_outbox_batch_against_candidate(
+            outboxes, &candidate,
+        )
+        .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+        Ok((input_ids, candidate))
     }
 
     /// Stage one runless runtime-termination batch into the same in-memory
@@ -899,20 +1198,24 @@ impl DriverEntry {
             });
         }
         let checkpoint = self.begin_terminal_transition("runless_terminal_preparation")?;
-        if let Err(error) = self.stage_input_terminal_completion_batch(
+        let candidate = crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+            reason: reason.clone(),
+        };
+        let completion_batch = match self.stage_input_terminal_completion_batch(
             InteractionTerminalBatchScope::RuntimeTermination,
             input_ids,
-            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
-                reason: reason.clone(),
-            },
+            candidate,
             false,
         ) {
-            return Err(self.fail_terminal_transition(
-                checkpoint,
-                "runless_terminal_completion_batch_stage",
-                error,
-            ));
-        }
+            Ok(batch) => batch,
+            Err(error) => {
+                return Err(self.fail_terminal_transition(
+                    checkpoint,
+                    "runless_terminal_completion_batch_stage",
+                    error,
+                ));
+            }
+        };
         let existing =
             match self.existing_exact_runless_runtime_termination_batch(input_ids, &reason) {
                 Ok(existing) => existing,
@@ -932,9 +1235,8 @@ impl DriverEntry {
         }
         let outboxes = match authorized_staged_directed_terminal_outboxes(
             self,
-            InteractionTerminalBatchScope::RuntimeTermination,
             input_ids,
-            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated { reason },
+            &completion_batch,
         ) {
             Ok(outboxes) => outboxes,
             Err(error) => {
@@ -1053,12 +1355,13 @@ impl DriverEntry {
                         .to_string(),
                 });
             }
-            let persisted_completion_input_ids =
-                validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
-                    .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
             let owner = &outboxes[0];
+            let linked = self.linked_terminal_completion_for_outbox_batch(&outboxes)?;
+            let persisted_completion_input_ids = linked.input_ids;
             let exact_reason = matches!(
-                owner.candidate.as_ref(),
+                linked.candidate.as_ref(),
                 Some(InteractionTerminalCandidate::RuntimeTerminated {
                     reason: existing_reason,
                 }) if existing_reason == reason
@@ -1118,50 +1421,11 @@ impl DriverEntry {
                 ),
             });
         }
-        let completion_input_ids = match owner_outbox.completion_input_ids.as_ref() {
-            Some(input_ids) => input_ids.clone(),
-            None if matches!(
-                owner_outbox.phase,
-                crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
-            ) =>
-            {
-                let terminal_completion = owner
-                    .state
-                    .terminal_completion
-                    .as_ref()
-                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                        reason: format!(
-                            "published interaction terminal owner {candidate_owner_input_id} lost its terminal-completion proof"
-                        ),
-                    })?;
-                let completion_owner = self
-                    .as_driver()
-                    .stored_input_state(&terminal_completion.owner_input_id)
-                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                        reason: format!(
-                            "published interaction terminal owner {candidate_owner_input_id} points to missing terminal-completion owner {}",
-                            terminal_completion.owner_input_id
-                        ),
-                    })?;
-                completion_owner
-                    .state
-                    .terminal_completion
-                    .as_ref()
-                    .and_then(|completion| completion.completion_input_ids.clone())
-                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                        reason: format!(
-                            "published interaction terminal owner {candidate_owner_input_id} cannot recover its terminal-completion recipients"
-                        ),
-                    })?
-            }
-            None => {
-                return Err(RuntimeDriverError::RecoveryCorruption {
-                    reason: format!(
-                        "unpublished interaction terminal owner {candidate_owner_input_id} lost its recipient set"
-                    ),
-                });
-            }
-        };
+        let completion_input_ids = self.terminal_completion_recipients_for_outbox_owner(
+            candidate_owner_input_id,
+            &owner_outbox.candidate_digest,
+            &owner_outbox.completion_input_ids_digest,
+        )?;
         if completion_input_ids.is_empty() || completion_input_ids.len() > 256 {
             return Err(RuntimeDriverError::RecoveryCorruption {
                 reason: "interaction terminal owner carries an invalid recipient batch size"
@@ -1260,9 +1524,10 @@ impl DriverEntry {
             });
         }
         outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+        crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
+            .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
         let completion_input_ids =
-            crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
-                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            self.terminal_completion_recipients_for_outbox_batch(&outboxes)?;
         let mut interaction_ids = std::collections::BTreeSet::new();
         for outbox in &outboxes {
             self.validate_interaction_outbox_owner_binding(outbox)?;
@@ -1303,6 +1568,12 @@ impl DriverEntry {
         &mut self,
         candidate_owner_input_id: &InputId,
     ) -> Result<(), RuntimeDriverError> {
+        // Normalize any released-0.8.31 duplication first: the adoption CAS
+        // rewrites these rows, and a rewrite that dropped the legacy candidate
+        // before it reached the single completion owner would lose the only
+        // remaining copy.
+        self.repair_released_0831_terminal_carriers_for_owner(candidate_owner_input_id)
+            .await?;
         let mut outboxes = self
             .stored_interaction_terminal_batch_for_owner(candidate_owner_input_id)?
             .into_iter()
@@ -1312,9 +1583,231 @@ impl DriverEntry {
         outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
         crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
             .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+        self.linked_terminal_completion_for_outbox_batch(&outboxes)?;
         let adoption = self.authorize_interaction_terminal_outbox_adoption(&outboxes)?;
         self.realize_interaction_terminal_outbox_adoption(adoption)
             .await
+    }
+
+    /// One-way normalization of the exact released-0.8.31 durable shape for
+    /// one directed batch.
+    ///
+    /// 0.8.31 wrote both the shared candidate and the completion recipient
+    /// vector onto `InteractionTerminalOutbox` in addition to
+    /// `InputTerminalCompletion`, including the crash window where the
+    /// completion was already `Finalized` with `candidate: None` while the
+    /// outbox still held the legacy candidate. This binary keeps exactly one
+    /// live authority, so the legacy copies are moved into the completion
+    /// owner (when it lost its candidate) and then dropped, atomically, by the
+    /// same exact input-state CAS that every other terminal transition uses.
+    ///
+    /// This runs only from the existing adoption entry points, so it does not
+    /// change how often startup/teardown repair is triggered.
+    async fn repair_released_0831_terminal_carriers_for_owner(
+        &mut self,
+        candidate_owner_input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        let batch = self.stored_interaction_terminal_batch_for_owner(candidate_owner_input_id)?;
+        self.repair_released_0831_terminal_carriers(&batch).await
+    }
+
+    async fn repair_released_0831_terminal_carriers(
+        &mut self,
+        rows: &[crate::input_state::StoredInputState],
+    ) -> Result<(), RuntimeDriverError> {
+        // Only the ordinal-zero candidate owner could ever carry the released
+        // duplicates, so each repair unit is at most two rows (the outbox row
+        // plus its completion owner). Committing one unit per CAS keeps every
+        // batch far under the exact input-state CAS bound while preserving the
+        // atomicity that matters: the candidate reaches its new single owner
+        // in the same transaction that drops the old copy.
+        let legacy_input_ids: Vec<InputId> = rows
+            .iter()
+            .filter(|stored| {
+                stored
+                    .state
+                    .interaction_terminal_outbox
+                    .as_ref()
+                    .is_some_and(
+                        crate::input_state::InteractionTerminalOutbox::has_released_0831_carriers,
+                    )
+            })
+            .map(|stored| stored.state.input_id.clone())
+            .collect();
+        for input_id in legacy_input_ids {
+            // Re-derive from the live shell: an earlier unit in this loop may
+            // already have rewritten a shared completion owner.
+            let Some(unit) = self.released_0831_normalization_unit(&input_id)? else {
+                continue;
+            };
+            let replacements = unit
+                .normalized
+                .into_iter()
+                .map(|replacement| {
+                    crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(
+                        replacement,
+                    )
+                    .map_err(RuntimeDriverError::Internal)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            self.commit_interaction_terminal_outbox_replacements(
+                &unit.current,
+                replacements,
+                "released 0.8.31 terminal carrier normalization lost the exact durable CAS",
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Derive every normalization unit implied by the released-0.8.31 carriers
+    /// in `rows`, without mutating or persisting anything.
+    fn released_0831_normalization_units(
+        &self,
+        rows: &[crate::input_state::StoredInputState],
+    ) -> Result<Vec<Released0831NormalizationUnit>, RuntimeDriverError> {
+        let mut units = Vec::new();
+        for stored in rows {
+            if !stored
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .is_some_and(
+                    crate::input_state::InteractionTerminalOutbox::has_released_0831_carriers,
+                )
+            {
+                continue;
+            }
+            if let Some(unit) = self.released_0831_normalization_unit(&stored.state.input_id)? {
+                units.push(unit);
+            }
+        }
+        Ok(units)
+    }
+
+    /// The exact successor image one legacy directed outbox row and its linked
+    /// completion owner must reach.
+    ///
+    /// This derivation is pure: it reads the live shell and returns images, so
+    /// the repair CAS and [`Self::reconcile_durable_interaction_terminal_phase`]
+    /// agree byte for byte on what "already normalized" means. `None` means
+    /// the row carries no released duplicate and needs no successor.
+    fn released_0831_normalization_unit(
+        &self,
+        input_id: &InputId,
+    ) -> Result<Option<Released0831NormalizationUnit>, RuntimeDriverError> {
+        let current = self
+            .as_driver()
+            .stored_input_state(input_id)
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!("released 0.8.31 terminal repair lost input row {input_id}"),
+            })?;
+        let mut replacement = current.clone();
+        let Some(outbox) = replacement.state.interaction_terminal_outbox.as_mut() else {
+            return Ok(None);
+        };
+        if !outbox.has_released_0831_carriers() {
+            return Ok(None);
+        }
+        let legacy_candidate = outbox.released_0831_candidate.take();
+        outbox.released_0831_completion_input_ids = None;
+        outbox
+            .validate()
+            .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+
+        let Some(candidate) = legacy_candidate else {
+            return Ok(Some(Released0831NormalizationUnit {
+                current: vec![current],
+                normalized: vec![replacement],
+            }));
+        };
+        let completion_owner_input_id = current
+            .state
+            .terminal_completion
+            .as_ref()
+            .map(|completion| completion.owner_input_id.clone())
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "released 0.8.31 terminal repair found no completion link on candidate owner {input_id}"
+                ),
+            })?;
+        if completion_owner_input_id == *input_id {
+            let mut owner_replacement = replacement;
+            Self::adopt_released_0831_candidate(
+                &mut owner_replacement,
+                &completion_owner_input_id,
+                candidate,
+            )?;
+            return Ok(Some(Released0831NormalizationUnit {
+                current: vec![current],
+                normalized: vec![owner_replacement],
+            }));
+        }
+        let owner_current = self
+            .as_driver()
+            .stored_input_state(&completion_owner_input_id)
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "released 0.8.31 terminal repair lost completion owner {completion_owner_input_id}"
+                ),
+            })?;
+        let mut owner_replacement = owner_current.clone();
+        Self::adopt_released_0831_candidate(
+            &mut owner_replacement,
+            &completion_owner_input_id,
+            candidate,
+        )?;
+        Ok(Some(Released0831NormalizationUnit {
+            current: vec![current, owner_current],
+            normalized: vec![replacement, owner_replacement],
+        }))
+    }
+
+    /// Move one released-0.8.31 duplicate candidate into the single live
+    /// completion authority, refusing any row that is not that authority and
+    /// any duplicate that disagrees with a candidate already held there.
+    fn adopt_released_0831_candidate(
+        owner: &mut crate::input_state::StoredInputState,
+        completion_owner_input_id: &InputId,
+        candidate: crate::input_state::InteractionTerminalCandidate,
+    ) -> Result<(), RuntimeDriverError> {
+        let completion = owner
+            .state
+            .terminal_completion
+            .as_mut()
+            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "released 0.8.31 terminal repair found no completion row on owner {completion_owner_input_id}"
+                ),
+            })?;
+        if completion.owner_input_id != *completion_owner_input_id
+            || completion.input_id != *completion_owner_input_id
+        {
+            return Err(RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "released 0.8.31 terminal repair addressed a non-owner completion row {completion_owner_input_id}"
+                ),
+            });
+        }
+        match completion.candidate.as_ref() {
+            // The live authority already has it; the legacy duplicate must
+            // agree byte for byte before it is dropped.
+            Some(live)
+                if crate::input_state::interaction_terminal_payload_digest(live)
+                    != crate::input_state::interaction_terminal_payload_digest(&candidate) =>
+            {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "released 0.8.31 terminal repair found a divergent duplicate candidate for {completion_owner_input_id}"
+                    ),
+                });
+            }
+            Some(_) => {}
+            None => completion.candidate = Some(candidate),
+        }
+        completion
+            .validate_row()
+            .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })
     }
 
     fn interaction_outbox_owner_binding_matches_current(
@@ -1628,16 +2121,17 @@ impl DriverEntry {
 
         // Reconstruct the only image the corresponding store-first operation
         // is allowed to write. Candidate -> Finalized changes only the phase;
-        // Finalized -> Published additionally compacts the owner payload and
-        // completion recipients. Exact JSON equality then rejects every other
-        // field mutation, including a forged receipt/class or torn compaction.
+        // Finalized -> Published additionally compacts the released-0.8.31
+        // duplicates that a legacy row may still carry. Exact JSON equality
+        // then rejects every other field mutation, including a forged
+        // receipt/class or torn compaction.
         let mut expected = shell.clone();
         if matches!(
             &durable.phase,
             InteractionTerminalOutboxPhase::Published { .. }
         ) {
-            expected.candidate = None;
-            expected.completion_input_ids = None;
+            expected.released_0831_candidate = None;
+            expected.released_0831_completion_input_ids = None;
         }
         expected.phase = durable.phase.clone();
         Ok(serde_json::to_vec(&expected)
@@ -1677,40 +2171,32 @@ impl DriverEntry {
                 });
             }
             let mut recipient_ids = Vec::new();
-            if let Some(completion) = owner.state.terminal_completion.as_ref()
-                && completion.owner_input_id == *owner_input_id
-                && matches!(
-                    &completion.phase,
-                    crate::input_state::InputTerminalCompletionPhase::Pending
-                )
-            {
+            if let Some(completion) = owner.state.terminal_completion.as_ref() {
+                let completion_owner = self
+                    .as_driver()
+                    .stored_input_state(&completion.owner_input_id)
+                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                        reason: format!(
+                            "pending terminal owner {owner_input_id} points to missing live completion owner {}",
+                            completion.owner_input_id
+                        ),
+                    })?;
                 recipient_ids.extend(
-                    completion
+                    completion_owner
+                        .state
+                        .terminal_completion
+                        .as_ref()
+                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                            reason: format!(
+                                "pending live completion owner {} lost its completion row",
+                                completion.owner_input_id
+                            ),
+                        })?
                         .completion_input_ids
                         .as_ref()
                         .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
                             reason: format!(
                                 "pending terminal completion owner {owner_input_id} lost recipients"
-                            ),
-                        })?
-                        .iter()
-                        .cloned(),
-                );
-            }
-            if let Some(outbox) = owner.state.interaction_terminal_outbox.as_ref()
-                && outbox.candidate_owner_input_id == *owner_input_id
-                && !matches!(
-                    &outbox.phase,
-                    crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
-                )
-            {
-                recipient_ids.extend(
-                    outbox
-                        .completion_input_ids
-                        .as_ref()
-                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                            reason: format!(
-                                "pending interaction terminal owner {owner_input_id} lost recipients"
                             ),
                         })?
                         .iter()
@@ -1807,6 +2293,13 @@ impl DriverEntry {
     /// witness still match. A machine-owner replacement may then use the
     /// ordinary generated adoption CAS; owner-only adoption acknowledgement
     /// loss is likewise left to that idempotent retry below.
+    ///
+    /// The one other durable successor accepted here is the exact
+    /// released-0.8.31 normalization image derived by
+    /// [`Self::released_0831_normalization_unit`]. That repair is store-first
+    /// too, so its durable rows can commit while shell hydration is cancelled;
+    /// they are acknowledged only when *every* row of the unit is byte-equal
+    /// to the derived successor.
     async fn reconcile_durable_interaction_terminal_phase(
         &mut self,
     ) -> Result<(), RuntimeDriverError> {
@@ -1856,11 +2349,52 @@ impl DriverEntry {
             .map(|stored| (stored.state.input_id.clone(), stored))
             .collect::<std::collections::HashMap<_, _>>();
         let mut replacements = Vec::new();
+
+        // A released-0.8.31 normalization repair is store-first like every
+        // other terminal transition, so its durable image can commit while the
+        // shell hydration is lost to cancellation. Acknowledge that exact
+        // successor here, across *every* row the unit rewrites - including a
+        // completion owner that carries no outbox of its own, which the loop
+        // below never visits. Without this, the next reconciliation would
+        // reject the normalized durable rows as same-phase divergence and the
+        // batch could only converge through a cold reload.
+        let mut normalized_successors =
+            std::collections::HashMap::<InputId, StoredInputState>::new();
+        for unit in self.released_0831_normalization_units(&shell)? {
+            let mut acknowledged = Vec::new();
+            for (current, normalized) in unit.current.iter().zip(&unit.normalized) {
+                let input_id = &current.state.input_id;
+                let Some(durable_stored) = durable_by_id.get(input_id) else {
+                    acknowledged.clear();
+                    break;
+                };
+                if serde_json::to_vec(durable_stored)
+                    .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+                    != serde_json::to_vec(normalized)
+                        .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+                {
+                    acknowledged.clear();
+                    break;
+                }
+                acknowledged.push((input_id.clone(), durable_stored.clone()));
+            }
+            for (input_id, durable_stored) in acknowledged {
+                normalized_successors.insert(input_id, durable_stored);
+            }
+        }
+        for (input_id, durable_stored) in &normalized_successors {
+            prospective.insert(input_id.clone(), durable_stored.clone());
+            replacements.push(durable_stored.clone());
+        }
+
         for shell_stored in &shell {
             let Some(shell_outbox) = shell_stored.state.interaction_terminal_outbox.as_ref() else {
                 continue;
             };
             let input_id = &shell_stored.state.input_id;
+            if normalized_successors.contains_key(input_id) {
+                continue;
+            }
             let durable_stored = durable_by_id.get(input_id).ok_or_else(|| {
                 RuntimeDriverError::RecoveryCorruption {
                     reason: format!(
@@ -2023,6 +2557,13 @@ impl DriverEntry {
         }
 
         self.reconcile_durable_interaction_terminal_phase().await?;
+        // Same trigger point as the reconciliation above, so recovery keeps its
+        // exact existing frequency. This moves any released-0.8.31 duplicated
+        // candidate into the single completion owner before any adoption write
+        // can drop the legacy copy.
+        let pending = self.pending_terminal_input_states().await?;
+        self.repair_released_0831_terminal_carriers(&pending)
+            .await?;
 
         let mut grouped = std::collections::HashMap::<
             crate::input_state::InteractionTerminalBatchKey,
@@ -2072,10 +2613,7 @@ impl DriverEntry {
                         .to_string(),
                 });
             }
-            let completion_input_ids =
-                crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(
-                    &outboxes,
-                )
+            crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
                 .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
             let first = outboxes.first().ok_or_else(|| {
                 RuntimeDriverError::Internal(
@@ -2083,6 +2621,8 @@ impl DriverEntry {
                 )
             })?;
             let candidate_owner_input_id = first.candidate_owner_input_id.clone();
+            let (completion_input_ids, candidate) =
+                self.linked_terminal_candidate_for_outbox_batch(&outboxes)?;
             if outboxes.iter().any(|outbox| {
                 outbox.candidate_owner_input_id != candidate_owner_input_id
                     || outbox.candidate_digest != first.candidate_digest
@@ -2102,15 +2642,6 @@ impl DriverEntry {
                         .to_string(),
                 });
             }
-            let owner = owner_rows[0];
-            let candidate =
-                owner
-                    .candidate
-                    .as_ref()
-                    .ok_or_else(|| RuntimeDriverError::ValidationFailed {
-                        reason: "interaction terminal recovery candidate owner lost its payload"
-                            .to_string(),
-                    })?;
             let adoption = self.authorize_interaction_terminal_outbox_adoption(&outboxes)?;
             let terminal_recovery = candidate
                 .runtime_completion_terminal_recovery()
@@ -2201,7 +2732,7 @@ impl DriverEntry {
                     interaction_ids,
                     terminal: candidate.core_apply_terminal(),
                     terminal_observation: candidate.terminal_observation(),
-                    runtime_termination_reason: match candidate {
+                    runtime_termination_reason: match &candidate {
                         crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
                             reason,
                         } => Some(reason.clone()),
@@ -2836,12 +3367,28 @@ impl DriverEntry {
                 let replacements = expected
                     .iter()
                     .filter(|replacement| {
-                        replacement.state.persisted_input.is_some()
-                            && crate::store::input_state_payload_is_retirable(replacement)
+                        (replacement.state.persisted_input.is_some()
+                            && crate::store::input_state_payload_is_retirable(replacement))
+                            || (!has_interaction_terminal_outbox
+                                && replacement
+                                    .state
+                                    .terminal_completion
+                                    .as_ref()
+                                    .is_some_and(|completion| completion.candidate.is_some()))
                     })
                     .cloned()
                     .map(|mut replacement| {
-                        replacement.state.persisted_input = None;
+                        if crate::store::input_state_payload_is_retirable(&replacement) {
+                            replacement.state.persisted_input = None;
+                        }
+                        if !has_interaction_terminal_outbox
+                            && let Some(completion) = replacement.state.terminal_completion.as_mut()
+                        {
+                            completion.candidate = None;
+                            completion
+                                .validate_row()
+                                .map_err(RuntimeDriverError::Internal)?;
+                        }
                         crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(
                             replacement,
                         )
@@ -2890,7 +3437,9 @@ impl DriverEntry {
                             reason: "terminal completion disappeared during finalization"
                                 .to_string(),
                         })?;
-                completion.candidate = None;
+                if !has_interaction_terminal_outbox {
+                    completion.candidate = None;
+                }
                 completion.outcome = (completion.input_id == completion.owner_input_id)
                     .then(|| authorized.outcome().clone());
                 completion.phase = InputTerminalCompletionPhase::Finalized {
@@ -2947,14 +3496,15 @@ impl DriverEntry {
             .iter()
             .filter_map(|stored| stored.state.interaction_terminal_outbox.clone())
             .collect();
-        let completion_input_ids = outboxes
-            .first()
-            .and_then(|owner| owner.completion_input_ids.clone())
-            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+        if outboxes.is_empty() {
+            return Err(RuntimeDriverError::RecoveryCorruption {
                 reason: format!(
-                    "interaction terminal owner {candidate_owner_input_id} lost its completion recipients before publication"
+                    "interaction terminal owner {candidate_owner_input_id} lost its outbox before publication"
                 ),
-            })?;
+            });
+        }
+        let (completion_input_ids, candidate) =
+            self.linked_terminal_candidate_for_outbox_batch(&outboxes)?;
         let persisted_input_ids: std::collections::BTreeSet<_> = completion_input_ids
             .iter()
             .map(ToString::to_string)
@@ -3032,12 +3582,7 @@ impl DriverEntry {
                     "directed terminal outbox shared candidate owner disappeared".to_string(),
                 )
             })?;
-        let candidate = candidate_owner.candidate.as_ref().ok_or_else(|| {
-            RuntimeDriverError::ValidationFailed {
-                reason: "directed terminal outbox shared candidate owner carried no candidate"
-                    .to_string(),
-            }
-        })?;
+        let candidate = &candidate;
         let candidate_digest = candidate_owner.candidate_digest.as_str();
         let finalization_failed = finalization
             == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed;
@@ -3161,9 +3706,9 @@ impl DriverEntry {
                 });
             }
         }
-        let expected =
+        let directed_expected =
             self.stored_interaction_terminal_batch_for_owner(candidate_owner_input_id)?;
-        let outboxes: Vec<_> = expected
+        let outboxes: Vec<_> = directed_expected
             .iter()
             .filter_map(|stored| stored.state.interaction_terminal_outbox.clone())
             .collect();
@@ -3182,7 +3727,7 @@ impl DriverEntry {
         for outbox in &outboxes {
             self.validate_interaction_outbox_owner_binding(outbox)?;
         }
-        let completion_owner_input_id = expected
+        let completion_owner_input_id = directed_expected
             .first()
             .and_then(|stored| stored.state.terminal_completion.as_ref())
             .map(|completion| completion.owner_input_id.clone())
@@ -3191,7 +3736,7 @@ impl DriverEntry {
                     "interaction terminal owner {candidate_owner_input_id} lost its terminal-completion identity"
                 ),
             })?;
-        let completion_owner = self
+        let completion_owner_stored = self
             .as_driver()
             .stored_input_state(&completion_owner_input_id)
             .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
@@ -3199,7 +3744,7 @@ impl DriverEntry {
                     "interaction terminal batch points to missing terminal-completion owner {completion_owner_input_id}"
                 ),
             })?;
-        let completion_input_ids = completion_owner
+        let completion_input_ids = completion_owner_stored
             .state
             .terminal_completion
             .as_ref()
@@ -3223,16 +3768,16 @@ impl DriverEntry {
             })
             .collect::<Result<Vec<_>, _>>()?;
         terminal_completions.sort_by_key(|completion| completion.batch_ordinal);
-        let completion_owner =
+        let completion_batch_owner =
             crate::input_state::validate_input_terminal_completion_batch(&terminal_completions)
                 .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
         if !matches!(
-            completion_owner.phase,
+            completion_batch_owner.phase,
             crate::input_state::InputTerminalCompletionPhase::Finalized { .. }
         ) || outboxes.iter().any(|outbox| {
-            outbox.candidate_digest != completion_owner.candidate_digest
+            outbox.candidate_digest != completion_batch_owner.candidate_digest
                 || outbox.completion_input_ids_digest
-                    != completion_owner.completion_input_ids_digest
+                    != completion_batch_owner.completion_input_ids_digest
         }) {
             return Err(RuntimeDriverError::RecoveryCorruption {
                 reason:
@@ -3259,59 +3804,76 @@ impl DriverEntry {
             });
         }
 
+        let mut expected_by_input = directed_expected
+            .into_iter()
+            .map(|stored| (stored.state.input_id.clone(), stored))
+            .collect::<std::collections::HashMap<_, _>>();
+        expected_by_input
+            .entry(completion_owner_input_id.clone())
+            .or_insert(completion_owner_stored);
+        let mut expected = expected_by_input.into_values().collect::<Vec<_>>();
+        expected.sort_by_key(|stored| stored.state.input_id.0);
         let replacements = expected
             .iter()
             .cloned()
             .map(|mut replacement| {
                 let replacement_input_id = replacement.state.input_id.clone();
-                let live = replacement
-                    .state
-                    .interaction_terminal_outbox
-                    .as_mut()
-                    .ok_or_else(|| {
-                        RuntimeDriverError::Internal(format!(
-                            "interaction terminal outbox input {replacement_input_id} disappeared before publish receipt"
-                        ))
+                if let Some(live) = replacement.state.interaction_terminal_outbox.as_mut() {
+                    let receipt = by_id.get(&live.interaction_id.0).ok_or_else(|| {
+                        RuntimeDriverError::Internal(
+                            "exact publication receipt set changed during persistence".to_string(),
+                        )
                     })?;
-                let receipt = by_id.get(&live.interaction_id.0).ok_or_else(|| {
-                    RuntimeDriverError::Internal(
-                        "exact publication receipt set changed during persistence".to_string(),
-                    )
-                })?;
-                let publication = crate::input_state::InteractionTerminalPublication {
-                    terminal_seq: receipt.terminal_seq(),
-                    payload_digest: receipt.payload_digest().to_string(),
-                };
-                match &live.phase {
-                    crate::input_state::InteractionTerminalOutboxPhase::Finalized {
-                        finalization_failed,
-                        finalized_payload_digest,
-                        ..
-                    } if finalized_payload_digest == &publication.payload_digest => {
-                        let finalization_failed = *finalization_failed;
-                        live.candidate = None;
-                        live.completion_input_ids = None;
-                        live.phase =
-                            crate::input_state::InteractionTerminalOutboxPhase::Published {
-                                finalization_failed,
-                                publication,
-                            };
+                    let publication = crate::input_state::InteractionTerminalPublication {
+                        terminal_seq: receipt.terminal_seq(),
+                        payload_digest: receipt.payload_digest().to_string(),
+                    };
+                    match &live.phase {
+                        crate::input_state::InteractionTerminalOutboxPhase::Finalized {
+                            finalization_failed,
+                            finalized_payload_digest,
+                            ..
+                        } if finalized_payload_digest == &publication.payload_digest => {
+                            let finalization_failed = *finalization_failed;
+                            live.released_0831_candidate = None;
+                            live.released_0831_completion_input_ids = None;
+                            live.phase =
+                                crate::input_state::InteractionTerminalOutboxPhase::Published {
+                                    finalization_failed,
+                                    publication,
+                                };
+                        }
+                        crate::input_state::InteractionTerminalOutboxPhase::Published {
+                            publication: existing,
+                            ..
+                        } if existing.terminal_seq == publication.terminal_seq
+                            && existing.payload_digest == publication.payload_digest => {}
+                        _ => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: format!(
+                                    "interaction terminal publication receipt conflict for input {}",
+                                    live.input_id
+                                ),
+                            });
+                        }
                     }
-                    crate::input_state::InteractionTerminalOutboxPhase::Published {
-                        publication: existing,
-                        ..
-                    } if existing.terminal_seq == publication.terminal_seq
-                        && existing.payload_digest == publication.payload_digest => {}
-                    _ => {
-                        return Err(RuntimeDriverError::ValidationFailed {
-                            reason: format!(
-                                "interaction terminal publication receipt conflict for input {}",
-                                live.input_id
-                            ),
-                        });
-                    }
+                    live.validate().map_err(RuntimeDriverError::Internal)?;
                 }
-                live.validate().map_err(RuntimeDriverError::Internal)?;
+                if replacement_input_id == completion_owner_input_id {
+                    let completion = replacement
+                        .state
+                        .terminal_completion
+                        .as_mut()
+                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                            reason:
+                                "terminal-completion owner disappeared before publication compaction"
+                                    .to_string(),
+                        })?;
+                    completion.candidate = None;
+                    completion
+                        .validate_row()
+                        .map_err(RuntimeDriverError::Internal)?;
+                }
                 if crate::store::input_state_payload_is_retirable(&replacement) {
                     replacement.state.persisted_input = None;
                 }
@@ -4074,25 +4636,42 @@ impl DriverEntry {
                 error,
             ));
         }
-        if !terminal_input_ids.is_empty()
-            && existing_completion_rows == 0
-            && let Err(error) = self.stage_input_terminal_completion_batch(
+        let terminal_candidate =
+            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    terminal_error.clone(),
+                ),
+            };
+        let completion_batch = if terminal_input_ids.is_empty() {
+            None
+        } else if existing_completion_rows == 0 {
+            match self.stage_input_terminal_completion_batch(
                 InteractionTerminalBatchScope::Run(&run_id),
                 &terminal_input_ids,
-                crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                    error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                        terminal_error.clone(),
-                    ),
-                },
+                terminal_candidate.clone(),
                 applied_commit.is_some(),
-            )
-        {
-            return Err(self.fail_terminal_transition(
-                checkpoint,
-                "failed_run_completion_batch_stage",
-                error,
-            ));
-        }
+            ) {
+                Ok(batch) => Some(batch),
+                Err(error) => {
+                    return Err(self.fail_terminal_transition(
+                        checkpoint,
+                        "failed_run_completion_batch_stage",
+                        error,
+                    ));
+                }
+            }
+        } else {
+            match self.input_terminal_completion_batch_witness(&terminal_input_ids) {
+                Ok(batch) => Some(batch),
+                Err(error) => {
+                    return Err(self.fail_terminal_transition(
+                        checkpoint,
+                        "failed_run_completion_batch_witness",
+                        error,
+                    ));
+                }
+            }
+        };
 
         // A replayed failed run normally requeues its contributors, but the
         // generated rollback transition can terminalize the exact inputs whose
@@ -4102,15 +4681,19 @@ impl DriverEntry {
         // generated completion finalizes directed and non-directed inputs
         // together.
         if contributor_disposition.owes_terminal_outboxes() && !terminal_input_ids.is_empty() {
+            let Some(completion_batch) = completion_batch.as_ref() else {
+                return Err(self.fail_terminal_transition(
+                    checkpoint,
+                    "failed_run_completion_batch_missing",
+                    RuntimeDriverError::RecoveryCorruption {
+                        reason: "failed run lost its staged terminal completion batch".to_string(),
+                    },
+                ));
+            };
             let outboxes = match authorized_staged_directed_terminal_outboxes(
                 self,
-                InteractionTerminalBatchScope::Run(&run_id),
                 &terminal_input_ids,
-                crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                    error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                        terminal_error.clone(),
-                    ),
-                },
+                completion_batch,
             ) {
                 Ok(outboxes) => outboxes,
                 Err(error) => {
@@ -4385,12 +4968,9 @@ fn authorized_directed_terminal_outboxes(
     driver: &DriverEntry,
     authority: &AuthorizedRuntimeLoopRunCommit,
     directed_interaction_ids: &[meerkat_core::interaction::InteractionId],
-    terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
+    completion_batch: &StagedInputTerminalCompletionBatch,
 ) -> Result<Vec<crate::input_state::InteractionTerminalOutbox>, RuntimeDriverError> {
-    use crate::input_state::{
-        InteractionTerminalCandidate, InteractionTerminalOutbox,
-        interaction_terminal_payload_digest,
-    };
+    use crate::input_state::InteractionTerminalOutbox;
 
     let mut directed_interaction_ids = directed_interaction_ids.to_vec();
     directed_interaction_ids.sort_by_key(|interaction_id| interaction_id.0);
@@ -4447,58 +5027,22 @@ fn authorized_directed_terminal_outboxes(
         return Ok(Vec::new());
     }
 
-    let completion_input_ids = canonical_completion_input_ids(authority.consumed_input_ids());
-    if completion_input_ids.is_empty() || completion_input_ids.len() > 256 {
-        return Err(RuntimeDriverError::ValidationFailed {
-            reason: "runtime completion recipient batch has invalid size".to_string(),
-        });
-    }
-    if completion_input_ids
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        != completion_input_ids.len()
+    if completion_batch.input_ids != canonical_completion_input_ids(authority.consumed_input_ids())
     {
         return Err(RuntimeDriverError::ValidationFailed {
-            reason: "runtime completion recipient batch contains duplicate inputs".to_string(),
+            reason: "directed terminal outbox recipients differ from the staged completion batch"
+                .to_string(),
         });
     }
-    let completion_input_ids_digest = interaction_terminal_payload_digest(&completion_input_ids)
-        .map_err(RuntimeDriverError::Internal)?;
 
     let owner_session_id = authority.owner_session_id().clone();
-    let candidate = match terminal {
-        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(result)) => {
-            InteractionTerminalCandidate::RunResult {
-                result: result.clone(),
-            }
-        }
-        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackPending {
-            tool_use_id,
-            tool_name,
-            args,
-        }) => InteractionTerminalCandidate::CallbackPending {
-            tool_use_id: Some(tool_use_id.clone()),
-            tool_name: tool_name.clone(),
-            args: args.clone(),
-        },
-        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackBatchPending {
-            pending_tool_calls,
-        }) => InteractionTerminalCandidate::CallbackBatchPending {
-            pending_tool_calls: pending_tool_calls.clone(),
-        },
-        Some(
-            meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
-                error,
-            },
-        ) => InteractionTerminalCandidate::MachineTerminalFailure {
-            error: error.clone(),
-        },
-        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::NoPendingBoundary)
-        | None => InteractionTerminalCandidate::CompletedWithoutResult,
-    };
-    let candidate_digest =
-        interaction_terminal_payload_digest(&candidate).map_err(RuntimeDriverError::Internal)?;
+    // The directed batch key is derived from the sealed completion witness and
+    // must be exactly this commit's run. Scope is never an independent
+    // parameter, so an outbox row cannot claim a run its completion authority
+    // did not record.
+    let batch_key = completion_batch
+        .run_scoped_outbox_batch_key(authority.run_id())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
     let candidate_owner_input_id = InputId::from_uuid(
         directed_interaction_ids
@@ -4511,14 +5055,11 @@ fn authorized_directed_terminal_outboxes(
         .enumerate()
         .map(|(ordinal, interaction_id)| {
             let input_id = InputId::from_uuid(interaction_id.0);
-            let owns_candidate = input_id == candidate_owner_input_id;
             let outbox = InteractionTerminalOutbox {
                 interaction_id: *interaction_id,
                 input_id,
                 batch_ordinal: ordinal as u16,
-                batch_key: crate::input_state::InteractionTerminalBatchKey::Run {
-                    run_id: authority.run_id().clone(),
-                },
+                batch_key: batch_key.clone(),
                 owner_session_id: owner_session_id.clone(),
                 owner_agent_runtime_id: authority
                     .owner_agent_runtime_id()
@@ -4529,10 +5070,10 @@ fn authorized_directed_terminal_outboxes(
                     .owner_runtime_epoch_id()
                     .map(|value| value.0.clone()),
                 candidate_owner_input_id: candidate_owner_input_id.clone(),
-                candidate: owns_candidate.then(|| candidate.clone()),
-                candidate_digest: candidate_digest.clone(),
-                completion_input_ids: owns_candidate.then(|| completion_input_ids.clone()),
-                completion_input_ids_digest: completion_input_ids_digest.clone(),
+                released_0831_candidate: None,
+                candidate_digest: completion_batch.candidate_digest.clone(),
+                released_0831_completion_input_ids: None,
+                completion_input_ids_digest: completion_batch.completion_input_ids_digest.clone(),
                 phase: crate::input_state::InteractionTerminalOutboxPhase::Candidate,
             };
             outbox.validate().map_err(RuntimeDriverError::Internal)?;
@@ -4543,11 +5084,10 @@ fn authorized_directed_terminal_outboxes(
 
 fn authorized_staged_directed_terminal_outboxes(
     driver: &DriverEntry,
-    scope: InteractionTerminalBatchScope<'_>,
     input_ids: &[InputId],
-    candidate: crate::input_state::InteractionTerminalCandidate,
+    completion_batch: &StagedInputTerminalCompletionBatch,
 ) -> Result<Vec<crate::input_state::InteractionTerminalOutbox>, RuntimeDriverError> {
-    use crate::input_state::{InteractionTerminalOutbox, interaction_terminal_payload_digest};
+    use crate::input_state::InteractionTerminalOutbox;
     let mut directed = Vec::new();
     for input_id in input_ids {
         let stored = driver
@@ -4595,9 +5135,12 @@ fn authorized_staged_directed_terminal_outboxes(
             reason: "staged completion recipient batch contains duplicate inputs".to_string(),
         });
     }
-    let completion_input_ids = canonical_completion_input_ids(input_ids);
-    let completion_input_ids_digest = interaction_terminal_payload_digest(&completion_input_ids)
-        .map_err(RuntimeDriverError::Internal)?;
+    if completion_batch.input_ids != canonical_completion_input_ids(input_ids) {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "staged directed outbox recipients differ from the terminal completion batch"
+                .to_string(),
+        });
+    }
     directed.sort_by_key(|(input_id, _)| input_id.0);
     let binding = {
         let authority = driver.shared_dsl_authority();
@@ -4623,29 +5166,17 @@ fn authorized_staged_directed_terminal_outboxes(
             "directed terminal outbox owner session was not a UUID: {error}"
         ))
     })?;
-    let candidate_digest =
-        interaction_terminal_payload_digest(&candidate).map_err(RuntimeDriverError::Internal)?;
     let candidate_owner_input_id = directed
         .first()
         .map(|(input_id, _)| input_id.clone())
         .ok_or_else(|| RuntimeDriverError::Internal("directed batch lost owner".into()))?;
-    let batch_key = match scope {
-        InteractionTerminalBatchScope::Run(run_id) => {
-            crate::input_state::InteractionTerminalBatchKey::Run {
-                run_id: run_id.clone(),
-            }
-        }
-        InteractionTerminalBatchScope::RuntimeTermination => {
-            crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
-                candidate_owner_input_id: candidate_owner_input_id.clone(),
-            }
-        }
-    };
+    let batch_key = completion_batch
+        .directed_outbox_batch_key(&candidate_owner_input_id)
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
     directed
         .into_iter()
         .enumerate()
         .map(|(ordinal, (input_id, interaction_id))| {
-            let owns_candidate = input_id == candidate_owner_input_id;
             let outbox = InteractionTerminalOutbox {
                 interaction_id,
                 input_id,
@@ -4657,10 +5188,10 @@ fn authorized_staged_directed_terminal_outboxes(
                 owner_runtime_generation: binding.3.map(|value| value.0),
                 owner_runtime_epoch_id: binding.4.as_ref().map(|value| value.0.clone()),
                 candidate_owner_input_id: candidate_owner_input_id.clone(),
-                candidate: owns_candidate.then(|| candidate.clone()),
-                candidate_digest: candidate_digest.clone(),
-                completion_input_ids: owns_candidate.then(|| completion_input_ids.clone()),
-                completion_input_ids_digest: completion_input_ids_digest.clone(),
+                released_0831_candidate: None,
+                candidate_digest: completion_batch.candidate_digest.clone(),
+                released_0831_completion_input_ids: None,
+                completion_input_ids_digest: completion_batch.completion_input_ids_digest.clone(),
                 phase: crate::input_state::InteractionTerminalOutboxPhase::Candidate,
             };
             outbox.validate().map_err(RuntimeDriverError::Internal)?;
@@ -6942,6 +7473,133 @@ pub(crate) async fn machine_stop_runtime(
 mod tests {
     use super::*;
 
+    fn staged_completion_batch_fixture(
+        batch_key: crate::input_state::InputTerminalCompletionBatchKey,
+        input_ids: Vec<InputId>,
+        owner_input_id: InputId,
+    ) -> StagedInputTerminalCompletionBatch {
+        StagedInputTerminalCompletionBatch {
+            input_ids,
+            owner_input_id,
+            batch_key,
+            candidate_digest: "candidate-digest".to_string(),
+            completion_input_ids_digest: "recipient-digest".to_string(),
+        }
+    }
+
+    #[test]
+    fn staged_completion_witness_seals_the_directed_outbox_scope() {
+        let owner = InputId::new();
+        let run_id = RunId::new();
+        let run_witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::Run {
+                run_id: run_id.clone(),
+            },
+            vec![owner.clone()],
+            owner.clone(),
+        );
+        assert_eq!(
+            run_witness.run_scoped_outbox_batch_key(&run_id).unwrap(),
+            crate::input_state::InteractionTerminalBatchKey::Run {
+                run_id: run_id.clone()
+            }
+        );
+        assert_eq!(
+            run_witness.directed_outbox_batch_key(&owner).unwrap(),
+            crate::input_state::InteractionTerminalBatchKey::Run { run_id }
+        );
+
+        let directed_owner = InputId::new();
+        let runless_witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination {
+                owner_input_id: owner.clone(),
+            },
+            vec![owner.clone()],
+            owner,
+        );
+        assert_eq!(
+            runless_witness
+                .directed_outbox_batch_key(&directed_owner)
+                .unwrap(),
+            crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
+                candidate_owner_input_id: directed_owner
+            }
+        );
+    }
+
+    #[test]
+    fn staged_completion_witness_rejects_a_run_authority_it_did_not_seal() {
+        let owner = InputId::new();
+        let witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            vec![owner.clone()],
+            owner,
+        );
+        assert!(
+            witness
+                .run_scoped_outbox_batch_key(&RunId::new())
+                .unwrap_err()
+                .contains("run authority disagrees with its terminal completion batch key")
+        );
+    }
+
+    #[test]
+    fn staged_completion_witness_rejects_a_runless_run_scoped_outbox() {
+        let owner = InputId::new();
+        let witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination {
+                owner_input_id: owner.clone(),
+            },
+            vec![owner.clone()],
+            owner,
+        );
+        assert!(
+            witness
+                .run_scoped_outbox_batch_key(&RunId::new())
+                .unwrap_err()
+                .contains("run authority disagrees with its terminal completion batch key")
+        );
+    }
+
+    #[test]
+    fn staged_completion_witness_rejects_a_runtime_termination_key_naming_another_owner() {
+        let owner = InputId::new();
+        let witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination {
+                owner_input_id: InputId::new(),
+            },
+            vec![owner.clone()],
+            owner.clone(),
+        );
+        assert!(
+            witness
+                .directed_outbox_batch_key(&owner)
+                .unwrap_err()
+                .contains("runtime-termination completion batch key names a different owner")
+        );
+    }
+
+    #[test]
+    fn staged_completion_witness_rejects_an_owner_outside_its_canonical_head() {
+        let mut input_ids = vec![InputId::new(), InputId::new()];
+        input_ids.sort_by_key(|input_id| input_id.0);
+        let witness = staged_completion_batch_fixture(
+            crate::input_state::InputTerminalCompletionBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            input_ids.clone(),
+            input_ids[1].clone(),
+        );
+        assert!(
+            witness
+                .directed_outbox_batch_key(&input_ids[0])
+                .unwrap_err()
+                .contains("owner is not its canonical first recipient")
+        );
+    }
+
     fn queued_seed() -> InputStateSeed {
         let mut seed = InputStateSeed::new_accepted();
         seed.phase = InputLifecycleState::Queued;
@@ -7760,30 +8418,42 @@ pub(crate) async fn commit_runtime_loop_run(
     .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let completion_candidate =
         crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(terminal);
-    let interaction_outboxes = authorized_directed_terminal_outboxes(
-        &driver,
-        &commit_authority,
-        &directed_interaction_ids,
-        terminal,
-    )
-    .map_err(RuntimeLoopRunCommitError::Rejected)?;
 
     let terminal_checkpoint = driver
         .begin_terminal_transition("completed_run_terminal_commit")
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
-    if let Err(err) = driver.stage_input_terminal_completion_batch(
+    let completion_batch = match driver.stage_input_terminal_completion_batch(
         InteractionTerminalBatchScope::Run(&completed_run_id),
         &consumed_input_ids,
-        completion_candidate,
+        completion_candidate.clone(),
         committed.is_some(),
     ) {
-        let error = driver.fail_terminal_transition(
-            terminal_checkpoint,
-            "completed_run_completion_batch_stage",
-            err,
-        );
-        return Err(RuntimeLoopRunCommitError::Rejected(error));
-    }
+        Ok(batch) => batch,
+        Err(err) => {
+            let error = driver.fail_terminal_transition(
+                terminal_checkpoint,
+                "completed_run_completion_batch_stage",
+                err,
+            );
+            return Err(RuntimeLoopRunCommitError::Rejected(error));
+        }
+    };
+    let interaction_outboxes = match authorized_directed_terminal_outboxes(
+        &driver,
+        &commit_authority,
+        &directed_interaction_ids,
+        &completion_batch,
+    ) {
+        Ok(outboxes) => outboxes,
+        Err(err) => {
+            let error = driver.fail_terminal_transition(
+                terminal_checkpoint,
+                "completed_run_terminal_outbox_authorization",
+                err,
+            );
+            return Err(RuntimeLoopRunCommitError::Rejected(error));
+        }
+    };
     if let Err(err) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
         let error = driver.fail_terminal_transition(
             terminal_checkpoint,
@@ -8328,29 +8998,41 @@ pub(crate) async fn cancel_runtime_loop_run(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_cancelled(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    let interaction_outboxes = authorized_staged_directed_terminal_outboxes(
-        &driver,
-        InteractionTerminalBatchScope::Run(&cancelled_run_id),
-        &staged_input_ids,
-        crate::input_state::InteractionTerminalCandidate::Cancelled,
-    )
-    .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver
         .begin_terminal_transition("cancelled_run_terminal_commit")
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    if let Err(error) = driver.stage_input_terminal_completion_batch(
+    let candidate = crate::input_state::InteractionTerminalCandidate::Cancelled;
+    let completion_batch = match driver.stage_input_terminal_completion_batch(
         InteractionTerminalBatchScope::Run(&cancelled_run_id),
         &staged_input_ids,
-        crate::input_state::InteractionTerminalCandidate::Cancelled,
+        candidate.clone(),
         false,
     ) {
-        let error = driver.fail_terminal_transition(
-            terminal_checkpoint,
-            "cancelled_run_completion_batch_stage",
-            error,
-        );
-        return Err(RuntimeLoopRunFailError::Rejected(error));
-    }
+        Ok(batch) => batch,
+        Err(error) => {
+            let error = driver.fail_terminal_transition(
+                terminal_checkpoint,
+                "cancelled_run_completion_batch_stage",
+                error,
+            );
+            return Err(RuntimeLoopRunFailError::Rejected(error));
+        }
+    };
+    let interaction_outboxes = match authorized_staged_directed_terminal_outboxes(
+        &driver,
+        &staged_input_ids,
+        &completion_batch,
+    ) {
+        Ok(outboxes) => outboxes,
+        Err(error) => {
+            let error = driver.fail_terminal_transition(
+                terminal_checkpoint,
+                "cancelled_run_terminal_outbox_authorization",
+                error,
+            );
+            return Err(RuntimeLoopRunFailError::Rejected(error));
+        }
+    };
     if let Err(error) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
         let error = driver.fail_terminal_transition(
             terminal_checkpoint,
@@ -8639,13 +9321,29 @@ async fn fail_runtime_loop_run_inner(
         .map_err(RuntimeLoopRunFailError::Rejected)?;
     let mut applied_commit = None;
     if let Some(error) = machine_terminal_error.as_ref() {
-        let interaction_outboxes = match authorized_staged_directed_terminal_outboxes(
-            &driver,
+        let candidate = crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
+            error: error.clone(),
+        };
+        let completion_batch = match driver.stage_input_terminal_completion_batch(
             InteractionTerminalBatchScope::Run(&failed_run_id),
             &staged_input_ids,
-            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                error: error.clone(),
-            },
+            candidate,
+            true,
+        ) {
+            Ok(batch) => batch,
+            Err(stage_error) => {
+                let error = driver.fail_terminal_transition(
+                    terminal_checkpoint,
+                    "failed_run_completion_batch_stage",
+                    stage_error,
+                );
+                return Err(RuntimeLoopRunFailError::Rejected(error));
+            }
+        };
+        let interaction_outboxes = match authorized_staged_directed_terminal_outboxes(
+            &driver,
+            &staged_input_ids,
+            &completion_batch,
         ) {
             Ok(outboxes) => outboxes,
             Err(error) => {
@@ -8657,21 +9355,6 @@ async fn fail_runtime_loop_run_inner(
                 return Err(RuntimeLoopRunFailError::Rejected(error));
             }
         };
-        if let Err(stage_error) = driver.stage_input_terminal_completion_batch(
-            InteractionTerminalBatchScope::Run(&failed_run_id),
-            &staged_input_ids,
-            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                error: error.clone(),
-            },
-            true,
-        ) {
-            let error = driver.fail_terminal_transition(
-                terminal_checkpoint,
-                "failed_run_completion_batch_stage",
-                stage_error,
-            );
-            return Err(RuntimeLoopRunFailError::Rejected(error));
-        }
         if let Err(error) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
             let error = driver.fail_terminal_transition(
                 terminal_checkpoint,
@@ -9419,14 +10102,108 @@ mod recovery_tests {
             .collect()
     }
 
+    /// How the seeded row mimics a durable shape.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SeededTerminalShape {
+        /// This binary's shape: the completion owner is the only candidate
+        /// carrier and the outbox holds digests only.
+        Current,
+        /// Exact released 0.8.31 shape: both carriers exist, the outbox
+        /// duplicates `candidate` and `completion_input_ids`, and the
+        /// completion is already `Finalized` with `candidate: None` - the
+        /// crash window where the legacy outbox holds the only candidate.
+        Released0831FinalizedCompletion,
+    }
+
+    /// The exact finalized receipt the released binary would have recorded for
+    /// one candidate.
+    ///
+    /// The fixture must not contradict its own candidate: the repaired batch
+    /// is driven through finalization and publication, and both re-derive the
+    /// terminal event from the candidate that repair restored.
+    fn released_0831_finalized_receipt(
+        candidate: &crate::input_state::InteractionTerminalCandidate,
+    ) -> (
+        crate::completion::CompletionOutcome,
+        crate::input_state::InputTerminalCompletionFinalizationVerdict,
+    ) {
+        use crate::completion::CompletionOutcome;
+        use crate::input_state::{
+            InputTerminalCompletionFinalizationVerdict, InteractionTerminalCandidate,
+        };
+
+        let outcome = match candidate {
+            InteractionTerminalCandidate::RunResult { result } => {
+                CompletionOutcome::Completed(result.clone())
+            }
+            InteractionTerminalCandidate::CompletedWithoutResult => {
+                CompletionOutcome::CompletedWithoutResult
+            }
+            InteractionTerminalCandidate::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => CompletionOutcome::CallbackPending {
+                tool_use_id: tool_use_id.clone().unwrap_or_default(),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            },
+            InteractionTerminalCandidate::CallbackBatchPending { pending_tool_calls } => {
+                CompletionOutcome::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
+                }
+            }
+            InteractionTerminalCandidate::MachineTerminalFailure { error } => {
+                CompletionOutcome::AbandonedWithError {
+                    reason: error.detail.clone().unwrap_or_default(),
+                    error: error.clone(),
+                }
+            }
+            InteractionTerminalCandidate::Cancelled => CompletionOutcome::Cancelled,
+            InteractionTerminalCandidate::RuntimeTerminated { reason } => {
+                CompletionOutcome::RuntimeTerminated {
+                    reason: reason.clone(),
+                    error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(reason.clone()),
+                }
+            }
+        };
+        (
+            outcome,
+            InputTerminalCompletionFinalizationVerdict::Succeeded,
+        )
+    }
+
     async fn seed_terminal_recovery_outbox(
         persistent: &mut PersistentRuntimeDriver,
         session_id: &SessionId,
         runtime_id: &LogicalRuntimeId,
         batch_key: crate::input_state::InteractionTerminalBatchKey,
         candidate: crate::input_state::InteractionTerminalCandidate,
-    ) {
-        use crate::input_state::{InteractionTerminalOutbox, InteractionTerminalOutboxPhase};
+    ) -> InputId {
+        seed_terminal_recovery_outbox_with_shape(
+            persistent,
+            session_id,
+            runtime_id,
+            batch_key,
+            candidate,
+            SeededTerminalShape::Current,
+        )
+        .await
+    }
+
+    async fn seed_terminal_recovery_outbox_with_shape(
+        persistent: &mut PersistentRuntimeDriver,
+        session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        batch_key: crate::input_state::InteractionTerminalBatchKey,
+        candidate: crate::input_state::InteractionTerminalCandidate,
+        shape: SeededTerminalShape,
+    ) -> InputId {
+        use crate::input_state::{
+            InputTerminalCompletion, InputTerminalCompletionBatchKey,
+            InputTerminalCompletionFinalizationVerdict, InputTerminalCompletionPhase,
+            InteractionTerminalOutbox, InteractionTerminalOutboxPhase,
+        };
 
         let input_id = InputId::new();
         let input = crate::mob_adapter::create_tracked_flow_step_input(
@@ -9453,11 +10230,57 @@ mod recovery_tests {
         let completion_input_ids_digest =
             crate::input_state::interaction_terminal_payload_digest(&completion_input_ids)
                 .expect("digest completion recipients");
+        let completion_batch_key = match &batch_key {
+            crate::input_state::InteractionTerminalBatchKey::Run { run_id } => {
+                InputTerminalCompletionBatchKey::Run {
+                    run_id: run_id.clone(),
+                }
+            }
+            crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
+                candidate_owner_input_id,
+            } => InputTerminalCompletionBatchKey::RuntimeTermination {
+                owner_input_id: candidate_owner_input_id.clone(),
+            },
+        };
+        let legacy = shape == SeededTerminalShape::Released0831FinalizedCompletion;
+        let (completion_candidate, completion_outcome, completion_phase) = if legacy {
+            let (outcome, finalization) = released_0831_finalized_receipt(&candidate);
+            let receipt_digest =
+                crate::input_state::interaction_terminal_payload_digest(&(&outcome, finalization))
+                    .expect("digest released receipt");
+            (
+                None,
+                Some(outcome),
+                InputTerminalCompletionPhase::Finalized {
+                    receipt_digest,
+                    finalization,
+                },
+            )
+        } else {
+            (
+                Some(candidate.clone()),
+                None,
+                InputTerminalCompletionPhase::Pending,
+            )
+        };
         let ledger = persistent.inner_mut().ledger_mut();
-        ledger
+        let state = ledger
             .get_mut(&input_id)
-            .expect("accepted terminal recovery input")
-            .interaction_terminal_outbox = Some(InteractionTerminalOutbox {
+            .expect("accepted terminal recovery input");
+        state.terminal_completion = Some(InputTerminalCompletion {
+            input_id: input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: completion_batch_key,
+            owner_input_id: input_id.clone(),
+            candidate_digest: candidate_digest.clone(),
+            completion_input_ids_digest: completion_input_ids_digest.clone(),
+            requires_session_checkpoint: false,
+            candidate: completion_candidate,
+            completion_input_ids: Some(completion_input_ids.clone()),
+            outcome: completion_outcome,
+            phase: completion_phase,
+        });
+        state.interaction_terminal_outbox = Some(InteractionTerminalOutbox {
             interaction_id: meerkat_core::interaction::InteractionId(input_id.0),
             input_id: input_id.clone(),
             batch_ordinal: 0,
@@ -9468,13 +10291,14 @@ mod recovery_tests {
             owner_runtime_generation: Some(1),
             owner_runtime_epoch_id: Some("previous-epoch".to_string()),
             candidate_owner_input_id: input_id.clone(),
-            candidate: Some(candidate),
+            released_0831_candidate: legacy.then_some(candidate),
             candidate_digest,
-            completion_input_ids: Some(completion_input_ids),
+            released_0831_completion_input_ids: legacy.then_some(completion_input_ids),
             completion_input_ids_digest,
             phase: InteractionTerminalOutboxPhase::Candidate,
         });
         ledger.refresh_pending_terminal_owner(&input_id);
+        input_id
     }
 
     async fn candidate_terminal_recovery_driver(
@@ -9536,6 +10360,605 @@ mod recovery_tests {
             driver,
             serialized_input_states(shell_before),
         )
+    }
+
+    async fn registered_persistent_driver_for_test(
+        runtime_name: &str,
+    ) -> (
+        LogicalRuntimeId,
+        SessionId,
+        Arc<crate::store::InMemoryRuntimeStore>,
+        PersistentRuntimeDriver,
+    ) {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new(runtime_name);
+        let session_id = SessionId::new();
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut persistent =
+            PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
+        persistent
+            .inner_mut()
+            .install_registered_authority_for_test(
+                crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                Some(&runtime_id),
+                Some(2),
+                Some(crate::meerkat_machine::dsl::Generation::from(2)),
+                Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                    "current-epoch".to_string(),
+                )),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("seed current runtime attachment authority");
+        (runtime_id, session_id, store, persistent)
+    }
+
+    async fn persist_shell_snapshot(
+        driver: &DriverEntry,
+        store: &crate::store::InMemoryRuntimeStore,
+        runtime_id: &LogicalRuntimeId,
+    ) {
+        use crate::store::RuntimeStore;
+
+        for stored in driver
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot seeded terminal rows")
+        {
+            store
+                .persist_input_state(runtime_id, &persistable(stored))
+                .await
+                .expect("persist seeded terminal row");
+        }
+    }
+
+    /// Exact released-0.8.31 crash window: `InputTerminalCompletion` already
+    /// `Finalized` with `candidate: None` while the directed outbox still
+    /// holds the duplicated candidate. Recovery must move that candidate onto
+    /// the single completion owner and drop both legacy outbox fields, without
+    /// ever running two live candidate authorities.
+    #[tokio::test]
+    async fn released_0831_terminal_batch_normalizes_into_the_single_completion_owner() {
+        use crate::input_state::{InteractionTerminalBatchKey, InteractionTerminalCandidate};
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, session_id, store, mut persistent) =
+            registered_persistent_driver_for_test("released-0831-terminal-repair").await;
+        let input_id = seed_terminal_recovery_outbox_with_shape(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            InteractionTerminalBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            InteractionTerminalCandidate::CompletedWithoutResult,
+            SeededTerminalShape::Released0831FinalizedCompletion,
+        )
+        .await;
+
+        let mut driver = DriverEntry::Persistent(persistent);
+        persist_shell_snapshot(&driver, &store, &runtime_id).await;
+        let durable_before = store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("load released 0.8.31 durable image");
+        let legacy_json = serde_json::to_value(
+            durable_before
+                .iter()
+                .find(|stored| stored.state.input_id == input_id)
+                .expect("durable released row")
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("durable released outbox"),
+        )
+        .expect("serialize durable released outbox");
+        assert!(
+            legacy_json.get("candidate").is_some()
+                && legacy_json.get("completion_input_ids").is_some(),
+            "the fixture must reproduce the exact released duplication"
+        );
+
+        let batches = driver
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("released 0.8.31 batch must recover after normalization");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].input_ids, vec![input_id.clone()]);
+
+        for (label, stored) in [
+            (
+                "shell",
+                driver
+                    .as_driver()
+                    .stored_input_state(&input_id)
+                    .expect("shell row after repair"),
+            ),
+            (
+                "durable",
+                store
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("load durable image after repair")
+                    .into_iter()
+                    .find(|stored| stored.state.input_id == input_id)
+                    .expect("durable row after repair"),
+            ),
+        ] {
+            let completion = stored
+                .state
+                .terminal_completion
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label} completion row"));
+            assert!(
+                matches!(
+                    completion.candidate,
+                    Some(InteractionTerminalCandidate::CompletedWithoutResult)
+                ),
+                "{label} completion owner must hold the single repaired candidate"
+            );
+            let outbox = stored
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label} outbox row"));
+            assert!(
+                !outbox.has_released_0831_carriers(),
+                "{label} outbox must lose both released duplicates"
+            );
+            let outbox_json = serde_json::to_value(outbox).expect("serialize repaired outbox");
+            assert!(
+                outbox_json.get("candidate").is_none()
+                    && outbox_json.get("completion_input_ids").is_none(),
+                "{label} outbox must not serialize the legacy fields after repair"
+            );
+        }
+
+        // Discovery is not the point: the repaired batch must still be usable
+        // terminal delivery. Drive it through finalization and publication,
+        // both of which re-derive the terminal event from the single candidate
+        // that repair restored onto the completion owner.
+        let events = completed_terminal_events(&batches[0]);
+        driver
+            .finalize_interaction_terminal_outboxes(
+                &input_id,
+                &events,
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            )
+            .await
+            .expect("repaired candidate must finalize its directed batch");
+        let finalized = driver
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("repaired batch must reload as finalized");
+        let InteractionTerminalRecoveryPhase::Finalized {
+            events: finalized_events,
+            ..
+        } = &finalized[0].phase
+        else {
+            panic!("repaired terminal batch must be finalized before publication");
+        };
+        let receipts = finalized_events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                    event,
+                    u64::try_from(index).expect("receipt index") + 1,
+                )
+                .expect("build exact terminal publication receipt")
+            })
+            .collect::<Vec<_>>();
+        driver
+            .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
+            .await
+            .map_or_else(
+                |error| match error {
+                    // The seeded row never received a machine-owned terminal
+                    // seed, so post-publication archiving classifies it as
+                    // non-quiescent. The publication CAS itself has already
+                    // committed, which is the delivery step under test.
+                    RuntimeDriverError::Internal(ref reason)
+                        if reason.contains("terminal-obligation inputs were durably quiescent") => {
+                    }
+                    other => panic!("repaired batch must publish: {other}"),
+                },
+                |()| (),
+            );
+        let durable_published = store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("load durable image after publication")
+            .into_iter()
+            .find(|stored| stored.state.input_id == input_id)
+            .expect("durable row after publication");
+        assert!(matches!(
+            durable_published
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("published outbox")
+                .phase,
+            crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+        ));
+        assert!(
+            durable_published
+                .state
+                .terminal_completion
+                .as_ref()
+                .expect("published completion")
+                .candidate
+                .is_none(),
+            "publication must compact the single durable candidate"
+        );
+    }
+
+    /// Seed the exact released-0.8.31 crash window for a batch whose single
+    /// completion owner is a *different* row from the directed outbox owner.
+    ///
+    /// Only a nondirected recipient can be the canonical completion owner
+    /// while another input owns the directed batch, so the completion owner is
+    /// an operator prompt that sorts before the tracked directed input.
+    /// Normalization therefore has to rewrite two rows atomically.
+    async fn seed_released_0831_split_owner_batch(
+        persistent: &mut PersistentRuntimeDriver,
+        session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        run_id: RunId,
+        candidate: crate::input_state::InteractionTerminalCandidate,
+    ) -> (InputId, InputId) {
+        use crate::input_state::{
+            InputTerminalCompletion, InputTerminalCompletionBatchKey, InputTerminalCompletionPhase,
+            InteractionTerminalBatchKey, InteractionTerminalOutbox, InteractionTerminalOutboxPhase,
+        };
+
+        let completion_owner_input = Input::Prompt(crate::input::PromptInput::new(
+            "released 0.8.31 nondirected completion recipient",
+            None,
+        ));
+        let completion_owner_input_id = completion_owner_input.id().clone();
+        assert!(
+            persistent
+                .accept_input(completion_owner_input)
+                .await
+                .expect("accept nondirected completion recipient")
+                .is_accepted()
+        );
+        let mut directed_input_id = InputId::new();
+        while directed_input_id.0 <= completion_owner_input_id.0 {
+            directed_input_id = InputId::new();
+        }
+        let directed_input = crate::mob_adapter::create_tracked_flow_step_input(
+            "released-0831-split-owner-step",
+            meerkat_core::types::ContentInput::Text(
+                "released 0.8.31 split-owner directed input".to_string(),
+            ),
+            "released-0831-split-owner-flow",
+            None,
+            &directed_input_id.to_string(),
+        )
+        .expect("build tracked directed terminal recovery input");
+        assert!(
+            persistent
+                .accept_input(directed_input)
+                .await
+                .expect("accept directed terminal recovery input")
+                .is_accepted()
+        );
+
+        let completion_input_ids =
+            vec![completion_owner_input_id.clone(), directed_input_id.clone()];
+        let candidate_digest = crate::input_state::interaction_terminal_payload_digest(&candidate)
+            .expect("digest terminal candidate");
+        let completion_input_ids_digest =
+            crate::input_state::interaction_terminal_payload_digest(&completion_input_ids)
+                .expect("digest completion recipients");
+        let batch_key = InputTerminalCompletionBatchKey::Run {
+            run_id: run_id.clone(),
+        };
+        let (outcome, finalization) = released_0831_finalized_receipt(&candidate);
+        let receipt_digest =
+            crate::input_state::interaction_terminal_payload_digest(&(&outcome, finalization))
+                .expect("digest released receipt");
+        let phase = InputTerminalCompletionPhase::Finalized {
+            receipt_digest,
+            finalization,
+        };
+
+        let ledger = persistent.inner_mut().ledger_mut();
+        ledger
+            .get_mut(&completion_owner_input_id)
+            .expect("accepted completion owner input")
+            .terminal_completion = Some(InputTerminalCompletion {
+            input_id: completion_owner_input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: batch_key.clone(),
+            owner_input_id: completion_owner_input_id.clone(),
+            candidate_digest: candidate_digest.clone(),
+            completion_input_ids_digest: completion_input_ids_digest.clone(),
+            requires_session_checkpoint: false,
+            // The released crash window: the completion owner already
+            // compacted its candidate at finalization while the outbox still
+            // holds the only remaining copy.
+            candidate: None,
+            completion_input_ids: Some(completion_input_ids.clone()),
+            outcome: Some(outcome),
+            phase: phase.clone(),
+        });
+        let directed = ledger
+            .get_mut(&directed_input_id)
+            .expect("accepted directed terminal input");
+        directed.terminal_completion = Some(InputTerminalCompletion {
+            input_id: directed_input_id.clone(),
+            batch_ordinal: 1,
+            batch_key,
+            owner_input_id: completion_owner_input_id.clone(),
+            candidate_digest: candidate_digest.clone(),
+            completion_input_ids_digest: completion_input_ids_digest.clone(),
+            requires_session_checkpoint: false,
+            candidate: None,
+            completion_input_ids: None,
+            outcome: None,
+            phase,
+        });
+        directed.interaction_terminal_outbox = Some(InteractionTerminalOutbox {
+            interaction_id: meerkat_core::interaction::InteractionId(directed_input_id.0),
+            input_id: directed_input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: InteractionTerminalBatchKey::Run { run_id },
+            owner_session_id: session_id.clone(),
+            owner_agent_runtime_id: Some(runtime_id.0.clone()),
+            owner_fence_token: Some(1),
+            owner_runtime_generation: Some(1),
+            owner_runtime_epoch_id: Some("previous-epoch".to_string()),
+            candidate_owner_input_id: directed_input_id.clone(),
+            released_0831_candidate: Some(candidate),
+            candidate_digest,
+            released_0831_completion_input_ids: Some(completion_input_ids),
+            completion_input_ids_digest,
+            phase: InteractionTerminalOutboxPhase::Candidate,
+        });
+        ledger.refresh_pending_terminal_owner(&completion_owner_input_id);
+        ledger.refresh_pending_terminal_owner(&directed_input_id);
+        (completion_owner_input_id, directed_input_id)
+    }
+
+    fn released_0831_row_shape(stored: &crate::input_state::StoredInputState) -> (bool, bool) {
+        (
+            stored
+                .state
+                .terminal_completion
+                .as_ref()
+                .is_some_and(|completion| completion.candidate.is_some()),
+            stored
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .is_some_and(
+                    crate::input_state::InteractionTerminalOutbox::has_released_0831_carriers,
+                ),
+        )
+    }
+
+    /// The released-0.8.31 normalization repair is store-first, so its durable
+    /// CAS can commit while the shell hydration is lost to cancellation. The
+    /// next reconciliation must recognize the committed rows as the exact
+    /// normalization successor of the stale legacy shell - across *both* rows,
+    /// including the completion owner that carries no outbox of its own - and
+    /// converge without a cold reload.
+    #[tokio::test]
+    async fn released_0831_repair_cancelled_after_commit_reconciles_both_rows() {
+        use crate::input_state::InteractionTerminalCandidate;
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, session_id, store, mut persistent) =
+            registered_persistent_driver_for_test("released-0831-repair-cancel-after-commit").await;
+        let (completion_owner_input_id, directed_input_id) = seed_released_0831_split_owner_batch(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            RunId::new(),
+            InteractionTerminalCandidate::CompletedWithoutResult,
+        )
+        .await;
+        let driver = DriverEntry::Persistent(persistent);
+        persist_shell_snapshot(&driver, &store, &runtime_id).await;
+        let legacy_image = serialized_input_states(
+            driver
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot seeded released rows"),
+        );
+
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        store.block_next_input_state_batch_cas_after_commit(
+            Arc::clone(&entered),
+            Arc::clone(&release),
+        );
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(driver));
+        let task = crate::tokio::spawn({
+            let driver = Arc::clone(&driver);
+            async move {
+                driver
+                    .lock()
+                    .await
+                    .interaction_terminal_recovery_batches()
+                    .await
+            }
+        });
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("released 0.8.31 repair CAS test block must be reached");
+        task.abort();
+        let join_error = match task.await {
+            Ok(_) => panic!("blocked released 0.8.31 repair completed instead of being cancelled"),
+            Err(error) => error,
+        };
+        assert!(
+            join_error.is_cancelled(),
+            "test cancellation must drop the repair acknowledgement"
+        );
+        release.notify_waiters();
+
+        assert_eq!(
+            serialized_input_states(
+                driver
+                    .lock()
+                    .await
+                    .as_driver()
+                    .stored_input_states_snapshot()
+                    .expect("snapshot shell after lost repair acknowledgement"),
+            ),
+            legacy_image,
+            "a lost acknowledgement must leave the shell on the stale legacy image"
+        );
+        let durable_after_cancel = store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("load durable image after lost repair acknowledgement");
+        for stored in &durable_after_cancel {
+            let (owns_candidate, has_carriers) = released_0831_row_shape(stored);
+            if stored.state.input_id == completion_owner_input_id {
+                assert!(owns_candidate, "durable completion owner must be repaired");
+            }
+            assert!(
+                !has_carriers,
+                "the committed durable image must have dropped both legacy carriers"
+            );
+        }
+        assert_ne!(
+            serialized_input_states(durable_after_cancel.clone()),
+            legacy_image,
+            "the injected boundary must observe a committed durable normalization"
+        );
+
+        let batches = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("normalized durable rows must be acknowledged without a cold reload");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].input_ids,
+            vec![completion_owner_input_id.clone(), directed_input_id.clone()],
+            "the recovered batch must address the whole completion recipient set"
+        );
+        assert_eq!(
+            batches[0].interaction_ids,
+            vec![meerkat_core::interaction::InteractionId(
+                directed_input_id.0
+            )],
+            "only the directed row owns a public interaction terminal"
+        );
+
+        let shell_after_retry = driver
+            .lock()
+            .await
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot shell after acknowledged normalization");
+        for stored in &shell_after_retry {
+            let (owns_candidate, has_carriers) = released_0831_row_shape(stored);
+            if stored.state.input_id == completion_owner_input_id {
+                assert!(
+                    owns_candidate,
+                    "the hydrated shell completion owner must hold the single candidate"
+                );
+            }
+            assert!(
+                !has_carriers,
+                "the hydrated shell must carry no released duplicate"
+            );
+        }
+        assert_eq!(
+            serialized_input_states(shell_after_retry),
+            serialized_input_states(
+                store
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("load durable image after acknowledged normalization"),
+            ),
+            "shell and durable images must converge on the exact normalized successor"
+        );
+    }
+
+    /// Fail-closed containment: every directed outbox row must name an input
+    /// the linked completion batch actually addresses. The relation is a
+    /// subset, not equality, because nondirected recipients own no outbox.
+    #[tokio::test]
+    async fn directed_outbox_outside_its_completion_recipient_set_fails_closed() {
+        use crate::input_state::{InteractionTerminalBatchKey, InteractionTerminalCandidate};
+
+        let (runtime_id, session_id, store, mut persistent) =
+            registered_persistent_driver_for_test("terminal-recipient-containment").await;
+        let batch_key = InteractionTerminalBatchKey::Run {
+            run_id: RunId::new(),
+        };
+        let owner_input_id = seed_terminal_recovery_outbox(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            batch_key.clone(),
+            InteractionTerminalCandidate::CompletedWithoutResult,
+        )
+        .await;
+        let extraneous_input_id = seed_terminal_recovery_outbox(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            InteractionTerminalBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            InteractionTerminalCandidate::CompletedWithoutResult,
+        )
+        .await;
+
+        let mut driver = DriverEntry::Persistent(persistent);
+        let owner_outbox = driver
+            .as_driver()
+            .stored_input_state(&owner_input_id)
+            .expect("owner row")
+            .state
+            .interaction_terminal_outbox
+            .expect("owner outbox");
+        {
+            let ledger = driver.shell_driver_mut().ledger_mut();
+            let extraneous = ledger
+                .get_mut(&extraneous_input_id)
+                .expect("extraneous input row");
+            let outbox = extraneous
+                .interaction_terminal_outbox
+                .as_mut()
+                .expect("extraneous outbox");
+            outbox.batch_ordinal = 1;
+            outbox.batch_key = owner_outbox.batch_key.clone();
+            outbox.candidate_owner_input_id = owner_outbox.candidate_owner_input_id.clone();
+            outbox.candidate_digest = owner_outbox.candidate_digest.clone();
+            outbox.completion_input_ids_digest = owner_outbox.completion_input_ids_digest.clone();
+            outbox
+                .validate()
+                .expect("the extraneous row is structurally valid on its own");
+            ledger.refresh_pending_terminal_owner(&extraneous_input_id);
+        }
+        persist_shell_snapshot(&driver, &store, &runtime_id).await;
+
+        let error = match driver.interaction_terminal_recovery_batches().await {
+            Ok(_) => panic!("a directed row outside the completion recipient set must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                RuntimeDriverError::RecoveryCorruption { ref reason }
+                    if reason.contains("is not a recipient of its linked terminal-completion batch")
+            ),
+            "unexpected containment error: {error}"
+        );
     }
 
     fn completed_terminal_events(
@@ -9914,11 +11337,16 @@ mod recovery_tests {
             .mark_interaction_terminal_outboxes_published(&candidate_owner_input_id, &receipts)
             .await
             .expect_err("publication must require the exact finalized completion receipt");
-        assert!(matches!(
-            error,
-            RuntimeDriverError::RecoveryCorruption { ref reason }
-                if reason.contains("lost its terminal-completion identity")
-        ));
+        assert!(
+            matches!(
+                error,
+                RuntimeDriverError::RecoveryCorruption { ref reason }
+                    if reason.contains(
+                        "not bound to one exact finalized terminal-completion batch"
+                    )
+            ),
+            "publication must require a finalized completion receipt: {error}"
+        );
         assert_eq!(
             serialized_input_states(
                 driver

@@ -410,6 +410,12 @@ pub(crate) enum InputTerminalCompletionPhase {
 /// The potentially large candidate/outcome payload is stored on exactly one
 /// canonical owner row. Other rows carry only immutable batch identity and
 /// digests, keeping multi-input turns O(one result + batch cardinality).
+///
+/// This row is the *sole* durable candidate authority and the sole full
+/// completion recipient-set carrier. [`InteractionTerminalOutbox`] keeps only
+/// directed publication identity, placement, batch linkage, digests, and
+/// receipt state, and binds back here by `candidate_digest` plus
+/// `completion_input_ids_digest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InputTerminalCompletion {
     pub(crate) input_id: InputId,
@@ -419,6 +425,10 @@ pub(crate) struct InputTerminalCompletion {
     pub(crate) candidate_digest: String,
     pub(crate) completion_input_ids_digest: String,
     pub(crate) requires_session_checkpoint: bool,
+    /// The single durable candidate for the whole batch, held only by the
+    /// canonical owner row. It is retained across finalization because
+    /// directed publication reads it from here; non-directed finalization and
+    /// directed publication compact it once no later delivery needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) candidate: Option<InteractionTerminalCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,6 +439,33 @@ pub(crate) struct InputTerminalCompletion {
 }
 
 impl InputTerminalCompletion {
+    /// Prove that the single owner-held candidate matches this row's immutable
+    /// digest and batch scope. This is the only durable candidate authority,
+    /// so the check is identical in every phase that still carries it.
+    fn validate_owner_candidate(
+        &self,
+        candidate: &InteractionTerminalCandidate,
+    ) -> Result<(), String> {
+        if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
+            return Err("terminal completion candidate digest mismatch".into());
+        }
+        match (&self.batch_key, candidate) {
+            (
+                InputTerminalCompletionBatchKey::RuntimeTermination { .. },
+                InteractionTerminalCandidate::RuntimeTerminated { .. },
+            ) => {}
+            (
+                InputTerminalCompletionBatchKey::Run { .. },
+                InteractionTerminalCandidate::RuntimeTerminated { .. },
+            )
+            | (InputTerminalCompletionBatchKey::RuntimeTermination { .. }, _) => {
+                return Err("terminal completion scope does not match its candidate".into());
+            }
+            (InputTerminalCompletionBatchKey::Run { .. }, _) => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_row(&self) -> Result<(), String> {
         if self.candidate_digest.is_empty() || self.completion_input_ids_digest.is_empty() {
             return Err("terminal completion row carried an empty immutable digest".into());
@@ -485,23 +522,7 @@ impl InputTerminalCompletion {
         }
         match (&self.phase, &self.candidate, &self.outcome, owns_payload) {
             (InputTerminalCompletionPhase::Pending, Some(candidate), None, true) => {
-                if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
-                    return Err("terminal completion candidate digest mismatch".into());
-                }
-                match (&self.batch_key, candidate) {
-                    (
-                        InputTerminalCompletionBatchKey::RuntimeTermination { .. },
-                        InteractionTerminalCandidate::RuntimeTerminated { .. },
-                    ) => {}
-                    (
-                        InputTerminalCompletionBatchKey::Run { .. },
-                        InteractionTerminalCandidate::RuntimeTerminated { .. },
-                    )
-                    | (InputTerminalCompletionBatchKey::RuntimeTermination { .. }, _) => {
-                        return Err("terminal completion scope does not match its candidate".into());
-                    }
-                    (InputTerminalCompletionBatchKey::Run { .. }, _) => {}
-                }
+                self.validate_owner_candidate(candidate)?;
             }
             (InputTerminalCompletionPhase::Pending, None, None, false) => {}
             (
@@ -509,10 +530,17 @@ impl InputTerminalCompletion {
                     receipt_digest,
                     finalization,
                 },
-                None,
+                candidate,
                 Some(outcome),
                 true,
             ) => {
+                // The owner normally keeps its candidate through directed
+                // publication. `None` is accepted only because exact released
+                // 0.8.31 rows compacted it here at finalization; those rows
+                // are repaired from their outbox copy before adoption.
+                if let Some(candidate) = candidate {
+                    self.validate_owner_candidate(candidate)?;
+                }
                 if interaction_terminal_payload_digest(&(outcome, finalization))? != *receipt_digest
                 {
                     return Err("terminal completion receipt digest mismatch".into());
@@ -646,6 +674,12 @@ impl InteractionTerminalBatchKey {
 /// creation is bound to the machine-owned run commit/failure path, final event
 /// creation consumes generated runtime-completion authority, and publication
 /// is accepted only with an exact event-store receipt.
+///
+/// The row deliberately carries no candidate and no recipient vector of its
+/// own. [`InputTerminalCompletion`] is the sole durable candidate and
+/// recipient-set authority; this row keeps only directed publication identity,
+/// runtime placement, batch linkage, the two immutable digests that bind it
+/// back to that authority, and finalized-event/publication receipt state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InteractionTerminalOutbox {
     pub(crate) interaction_id: InteractionId,
@@ -663,18 +697,29 @@ pub(crate) struct InteractionTerminalOutbox {
     pub(crate) owner_runtime_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner_runtime_epoch_id: Option<String>,
-    /// Input row that owns the batch's single shared candidate payload.
+    /// Input row that owns the batch's single shared candidate payload, which
+    /// lives on that row's [`InputTerminalCompletion`].
     pub(crate) candidate_owner_input_id: InputId,
-    /// Shared candidate payload, present only on the owner row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) candidate: Option<InteractionTerminalCandidate>,
+    /// Read-back-only carrier for the duplicated candidate that released
+    /// 0.8.31 wrote here. It is never populated by this binary; it exists so
+    /// exact byte-CAS can still address a legacy row, and so the one-way
+    /// repair can copy the payload into the single completion owner and then
+    /// drop it. Declared in the released field position and under the released
+    /// name so a legacy row round-trips byte-identically until repaired.
+    #[serde(default, rename = "candidate", skip_serializing_if = "Option::is_none")]
+    pub(crate) released_0831_candidate: Option<InteractionTerminalCandidate>,
     pub(crate) candidate_digest: String,
-    /// Exact completion-waiter recipients for the whole runtime batch. The
-    /// vector is stored only on the candidate owner and compacted after the
-    /// terminal publication receipt is durable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) completion_input_ids: Option<Vec<InputId>>,
-    /// Shared immutable proof for the owner-only recipient vector.
+    /// Read-back-only carrier for the duplicated recipient vector that
+    /// released 0.8.31 wrote here. See `released_0831_candidate`; the exact
+    /// recipient set is owned by [`InputTerminalCompletion`].
+    #[serde(
+        default,
+        rename = "completion_input_ids",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) released_0831_completion_input_ids: Option<Vec<InputId>>,
+    /// Shared immutable proof that links this directed-publication projection
+    /// to the exact recipient set owned by [`InputTerminalCompletion`].
     pub(crate) completion_input_ids_digest: String,
     pub(crate) phase: InteractionTerminalOutboxPhase,
 }
@@ -730,6 +775,12 @@ pub(crate) fn interaction_terminal_event_for_id(
 }
 
 impl InteractionTerminalOutbox {
+    /// Whether this row still carries the duplicated released-0.8.31 payloads
+    /// that must be normalized into the single completion owner.
+    pub(crate) fn has_released_0831_carriers(&self) -> bool {
+        self.released_0831_candidate.is_some() || self.released_0831_completion_input_ids.is_some()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.input_id.0 != self.interaction_id.0 {
             return Err("interaction terminal outbox input/interaction identity mismatch".into());
@@ -748,103 +799,88 @@ impl InteractionTerminalOutbox {
                 "interaction terminal outbox is missing required runtime placement binding".into(),
             );
         }
-        match (&self.batch_key, self.candidate.as_ref()) {
-            (
-                InteractionTerminalBatchKey::RuntimeTermination {
-                    candidate_owner_input_id,
-                },
-                candidate,
-            ) => {
-                if candidate_owner_input_id != &self.candidate_owner_input_id {
-                    return Err("runtime-termination batch key/candidate-owner mismatch".into());
-                }
-                if candidate.is_some_and(|candidate| {
-                    !matches!(
-                        candidate,
-                        InteractionTerminalCandidate::RuntimeTerminated { .. }
-                    )
-                }) {
-                    return Err("runtime-termination batch carried a run-scoped candidate".into());
-                }
-            }
-            (
-                InteractionTerminalBatchKey::Run { .. },
-                Some(InteractionTerminalCandidate::RuntimeTerminated { .. }),
-            ) => {
-                return Err("run-scoped terminal batch carried runtime termination".into());
-            }
-            (InteractionTerminalBatchKey::Run { .. }, _) => {}
+        if let InteractionTerminalBatchKey::RuntimeTermination {
+            candidate_owner_input_id,
+        } = &self.batch_key
+            && candidate_owner_input_id != &self.candidate_owner_input_id
+        {
+            return Err("runtime-termination batch key/candidate-owner mismatch".into());
         }
         let published = matches!(self.phase, InteractionTerminalOutboxPhase::Published { .. });
         let owns_candidate = self.input_id == self.candidate_owner_input_id;
         if owns_candidate != (self.batch_ordinal == 0) {
             return Err("interaction terminal outbox candidate owner/ordinal mismatch".into());
         }
-        match (&self.completion_input_ids, owns_candidate, published) {
-            (Some(input_ids), true, false) => {
-                if input_ids.is_empty() || input_ids.len() > 256 {
-                    return Err(
-                        "interaction terminal completion recipient set has invalid size".into(),
-                    );
-                }
-                let unique = input_ids.iter().collect::<std::collections::HashSet<_>>();
-                if unique.len() != input_ids.len() {
-                    return Err(
-                        "interaction terminal completion recipient set contains duplicates".into(),
-                    );
-                }
-                if !input_ids.contains(&self.input_id) {
-                    return Err(
-                        "interaction terminal candidate owner is not a completion recipient".into(),
-                    );
-                }
-                if interaction_terminal_payload_digest(input_ids)?
-                    != self.completion_input_ids_digest
-                {
-                    return Err("interaction terminal completion recipient digest mismatch".into());
-                }
-            }
-            (None, false, false) | (None, _, true) => {}
-            (Some(_), false, _) => {
-                return Err("non-owner interaction outbox duplicated completion recipients".into());
-            }
-            (Some(_), true, true) => {
-                return Err("published interaction outbox retained completion recipients".into());
-            }
-            (None, true, false) => {
-                return Err("interaction outbox candidate owner lost completion recipients".into());
-            }
-        }
-        match (&self.candidate, owns_candidate, published) {
+        // The released-0.8.31 duplicates are tolerated exactly where that
+        // release could have written them, and only while they still prove the
+        // immutable digests they duplicated. Anything else is corruption, not
+        // a legacy row.
+        match (&self.released_0831_candidate, owns_candidate, published) {
             (Some(candidate), true, false) => {
                 if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
-                    return Err("interaction terminal outbox candidate digest mismatch".into());
+                    return Err(
+                        "released 0.8.31 interaction terminal candidate digest mismatch".into(),
+                    );
                 }
                 if let InteractionTerminalCandidate::RunResult { result } = candidate
                     && result.session_id != self.owner_session_id
                 {
                     return Err("interaction terminal candidate session/owner mismatch".into());
                 }
+                match (&self.batch_key, candidate) {
+                    (
+                        InteractionTerminalBatchKey::RuntimeTermination { .. },
+                        InteractionTerminalCandidate::RuntimeTerminated { .. },
+                    ) => {}
+                    (
+                        InteractionTerminalBatchKey::Run { .. },
+                        InteractionTerminalCandidate::RuntimeTerminated { .. },
+                    )
+                    | (InteractionTerminalBatchKey::RuntimeTermination { .. }, _) => {
+                        return Err(
+                            "released 0.8.31 interaction terminal scope/candidate mismatch".into(),
+                        );
+                    }
+                    (InteractionTerminalBatchKey::Run { .. }, _) => {}
+                }
             }
-            (None, false, false) => {}
-            (None, _, true) => {}
+            (None, _, _) => {}
             (Some(_), false, _) => {
                 return Err("non-owner interaction outbox duplicated shared candidate".into());
             }
             (Some(_), true, true) => {
                 return Err("published interaction outbox retained its shared candidate".into());
             }
-            (None, true, false) => {
-                return Err("interaction outbox candidate owner has no candidate".into());
+        }
+        match (
+            &self.released_0831_completion_input_ids,
+            owns_candidate,
+            published,
+        ) {
+            (Some(input_ids), true, false) => {
+                if interaction_terminal_payload_digest(input_ids)?
+                    != self.completion_input_ids_digest
+                {
+                    return Err(
+                        "released 0.8.31 interaction terminal recipient digest mismatch".into(),
+                    );
+                }
+            }
+            (None, _, _) => {}
+            (Some(_), false, _) => {
+                return Err("non-owner interaction outbox duplicated completion recipients".into());
+            }
+            (Some(_), true, true) => {
+                return Err("published interaction outbox retained completion recipients".into());
             }
         }
         match &self.phase {
             InteractionTerminalOutboxPhase::Candidate => {}
             InteractionTerminalOutboxPhase::Finalized {
-                finalization_failed,
                 finalized_event: Some(event),
                 finalized_payload_digest: digest,
-            } if self.input_id == self.candidate_owner_input_id => {
+                ..
+            } if owns_candidate => {
                 if interaction_terminal_event_id(event) != Some(self.interaction_id) {
                     return Err(
                         "interaction terminal outbox finalized event identity mismatch".into(),
@@ -853,24 +889,12 @@ impl InteractionTerminalOutbox {
                 if interaction_terminal_payload_digest(event)? != *digest {
                     return Err("interaction terminal outbox finalized digest mismatch".into());
                 }
-                let Some(candidate) = self.candidate.as_ref() else {
-                    return Err("finalized candidate owner lost shared candidate".into());
-                };
-                if !interaction_terminal_candidate_matches_event(
-                    candidate,
-                    self.interaction_id,
-                    event,
-                    *finalization_failed,
-                ) {
-                    return Err("interaction terminal finalized event/candidate mismatch".into());
-                }
             }
             InteractionTerminalOutboxPhase::Finalized {
                 finalized_event: None,
                 finalized_payload_digest,
                 ..
-            } if self.input_id != self.candidate_owner_input_id
-                && !finalized_payload_digest.is_empty() => {}
+            } if !owns_candidate && !finalized_payload_digest.is_empty() => {}
             InteractionTerminalOutboxPhase::Finalized { .. } => {
                 return Err(
                     "interaction terminal outbox finalized payload ownership is invalid".into(),
@@ -925,12 +949,8 @@ pub(crate) fn validate_interaction_terminal_outbox_batch_shape(
 /// Callers must order rows by `batch_ordinal` before invoking this helper.
 pub(crate) fn validate_unpublished_interaction_terminal_outbox_batch(
     outboxes: &[InteractionTerminalOutbox],
-) -> Result<Vec<InputId>, String> {
+) -> Result<(), String> {
     validate_interaction_terminal_outbox_batch_shape(outboxes)?;
-    let owner = &outboxes[0];
-    let completion_input_ids = owner.completion_input_ids.clone().ok_or_else(|| {
-        "unpublished interaction terminal batch owner lost completion recipients".to_string()
-    })?;
     for outbox in outboxes {
         if matches!(
             outbox.phase,
@@ -938,11 +958,63 @@ pub(crate) fn validate_unpublished_interaction_terminal_outbox_batch(
         ) {
             return Err("published row appeared in an unpublished terminal batch".into());
         }
-        if !completion_input_ids.contains(&outbox.input_id) {
-            return Err("directed terminal input is not a completion recipient".into());
+    }
+    Ok(())
+}
+
+/// Cross-check one directed terminal batch against the single candidate owned
+/// by its linked [`InputTerminalCompletion`].
+///
+/// The outbox no longer keeps a second candidate copy, so this is the only
+/// place where scope, session, digest, and finalized-event agreement with the
+/// candidate can be proven. Callers must order rows by `batch_ordinal`.
+pub(crate) fn validate_interaction_terminal_outbox_batch_against_candidate(
+    outboxes: &[InteractionTerminalOutbox],
+    candidate: &InteractionTerminalCandidate,
+) -> Result<(), String> {
+    validate_interaction_terminal_outbox_batch_shape(outboxes)?;
+    let owner = &outboxes[0];
+    if interaction_terminal_payload_digest(candidate)? != owner.candidate_digest {
+        return Err("interaction terminal batch candidate digest mismatch".into());
+    }
+    match (&owner.batch_key, candidate) {
+        (
+            InteractionTerminalBatchKey::RuntimeTermination { .. },
+            InteractionTerminalCandidate::RuntimeTerminated { .. },
+        ) => {}
+        (
+            InteractionTerminalBatchKey::Run { .. },
+            InteractionTerminalCandidate::RuntimeTerminated { .. },
+        ) => {
+            return Err("run-scoped terminal batch carried runtime termination".into());
+        }
+        (InteractionTerminalBatchKey::RuntimeTermination { .. }, _) => {
+            return Err("runtime-termination batch carried a run-scoped candidate".into());
+        }
+        (InteractionTerminalBatchKey::Run { .. }, _) => {}
+    }
+    if let InteractionTerminalCandidate::RunResult { result } = candidate
+        && result.session_id != owner.owner_session_id
+    {
+        return Err("interaction terminal candidate session/owner mismatch".into());
+    }
+    for outbox in outboxes {
+        if let InteractionTerminalOutboxPhase::Finalized {
+            finalization_failed,
+            finalized_event: Some(event),
+            ..
+        } = &outbox.phase
+            && !interaction_terminal_candidate_matches_event(
+                candidate,
+                outbox.interaction_id,
+                event,
+                *finalization_failed,
+            )
+        {
+            return Err("interaction terminal finalized event/candidate mismatch".into());
         }
     }
-    Ok(completion_input_ids)
+    Ok(())
 }
 
 pub(crate) fn interaction_terminal_candidate_matches_event(
@@ -1718,25 +1790,22 @@ mod tests {
         directed_input_ids
             .into_iter()
             .enumerate()
-            .map(|(ordinal, input_id)| {
-                let owns_candidate = input_id == candidate_owner_input_id;
-                InteractionTerminalOutbox {
-                    interaction_id: InteractionId(input_id.0),
-                    input_id,
-                    batch_ordinal: ordinal as u16,
-                    batch_key: batch_key.clone(),
-                    owner_session_id: SessionId::new(),
-                    owner_agent_runtime_id: Some("fixture-runtime".to_string()),
-                    owner_fence_token: Some(7),
-                    owner_runtime_generation: Some(3),
-                    owner_runtime_epoch_id: Some("fixture-epoch".to_string()),
-                    candidate_owner_input_id: candidate_owner_input_id.clone(),
-                    candidate: owns_candidate.then(|| candidate.clone()),
-                    candidate_digest: candidate_digest.clone(),
-                    completion_input_ids: owns_candidate.then(|| completion_input_ids.clone()),
-                    completion_input_ids_digest: completion_input_ids_digest.clone(),
-                    phase: InteractionTerminalOutboxPhase::Candidate,
-                }
+            .map(|(ordinal, input_id)| InteractionTerminalOutbox {
+                interaction_id: InteractionId(input_id.0),
+                input_id,
+                batch_ordinal: ordinal as u16,
+                batch_key: batch_key.clone(),
+                owner_session_id: SessionId::new(),
+                owner_agent_runtime_id: Some("fixture-runtime".to_string()),
+                owner_fence_token: Some(7),
+                owner_runtime_generation: Some(3),
+                owner_runtime_epoch_id: Some("fixture-epoch".to_string()),
+                candidate_owner_input_id: candidate_owner_input_id.clone(),
+                released_0831_candidate: None,
+                candidate_digest: candidate_digest.clone(),
+                released_0831_completion_input_ids: None,
+                completion_input_ids_digest: completion_input_ids_digest.clone(),
+                phase: InteractionTerminalOutboxPhase::Candidate,
             })
             .collect()
     }
@@ -1881,14 +1950,15 @@ mod tests {
     }
 
     #[test]
-    fn terminal_outbox_batch_preserves_full_mixed_completion_recipients() {
+    fn terminal_outbox_batch_references_one_mixed_completion_recipient_owner() {
         let outboxes = terminal_outbox_batch_fixture();
-        let recipients = validate_unpublished_interaction_terminal_outbox_batch(&outboxes).unwrap();
+        validate_unpublished_interaction_terminal_outbox_batch(&outboxes).unwrap();
 
-        assert_eq!(recipients.len(), 3);
         assert_eq!(outboxes.len(), 2);
-        assert!(recipients.contains(&outboxes[0].input_id));
-        assert!(recipients.contains(&outboxes[1].input_id));
+        assert_eq!(
+            outboxes[0].completion_input_ids_digest,
+            outboxes[1].completion_input_ids_digest
+        );
     }
 
     #[test]
@@ -1902,43 +1972,159 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_outbox_owner_rejects_duplicate_completion_recipients() {
-        let mut outboxes = terminal_outbox_batch_fixture();
-        let owner = &mut outboxes[0];
-        let recipients = owner.completion_input_ids.as_mut().unwrap();
-        recipients.push(recipients[0].clone());
-        owner.completion_input_ids_digest =
-            interaction_terminal_payload_digest(recipients).unwrap();
+    /// Exact released-0.8.31 `runtime_input_states.state_json` outbox shape:
+    /// both `candidate` and `completion_input_ids` are duplicated onto the
+    /// directed outbox alongside the digests. This binary must read that row,
+    /// validate it, and re-serialize it byte-identically - the input-state CAS
+    /// compares serialized bytes, so a lossy round-trip would make every
+    /// legacy row permanently un-CAS-able.
+    fn released_0831_outbox_json() -> (String, InteractionTerminalOutbox) {
+        let input_id = InputId::new();
+        let run_id = RunId::new();
+        let session_id = SessionId::new();
+        let candidate = InteractionTerminalCandidate::CompletedWithoutResult;
+        let recipients = vec![input_id.clone()];
+        let candidate_json = serde_json::to_string(&candidate).unwrap();
+        let recipients_json = serde_json::to_string(&recipients).unwrap();
+        let candidate_digest = interaction_terminal_payload_digest(&candidate).unwrap();
+        let recipients_digest = interaction_terminal_payload_digest(&recipients).unwrap();
+        let json = format!(
+            concat!(
+                r#"{{"interaction_id":"{id}","input_id":"{id}","batch_ordinal":0,"#,
+                r#""batch_key":{{"scope":"run","run_id":"{run_id}"}},"#,
+                r#""owner_session_id":"{session_id}","owner_agent_runtime_id":"released-runtime","#,
+                r#""owner_fence_token":7,"owner_runtime_generation":3,"#,
+                r#""owner_runtime_epoch_id":"released-epoch","candidate_owner_input_id":"{id}","#,
+                r#""candidate":{candidate},"candidate_digest":"{candidate_digest}","#,
+                r#""completion_input_ids":{recipients},"#,
+                r#""completion_input_ids_digest":"{recipients_digest}","#,
+                r#""phase":{{"phase":"candidate"}}}}"#
+            ),
+            id = input_id,
+            run_id = run_id,
+            session_id = session_id,
+            candidate = candidate_json,
+            candidate_digest = candidate_digest,
+            recipients = recipients_json,
+            recipients_digest = recipients_digest,
+        );
+        let decoded: InteractionTerminalOutbox = serde_json::from_str(&json).unwrap();
+        (json, decoded)
+    }
 
-        assert!(
-            owner
-                .validate()
-                .unwrap_err()
-                .contains("contains duplicates")
+    #[test]
+    fn released_0831_outbox_row_round_trips_byte_identically_until_repaired() {
+        let (json, decoded) = released_0831_outbox_json();
+        decoded.validate().unwrap();
+        assert!(decoded.has_released_0831_carriers());
+        assert_eq!(
+            serde_json::to_string(&decoded).unwrap(),
+            json,
+            "a legacy row must re-serialize byte-identically or the exact input-state CAS can never address it"
         );
     }
 
     #[test]
-    fn terminal_outbox_resource_bounds_reject_257_rows_or_recipients() {
+    fn repaired_released_0831_outbox_row_drops_both_duplicate_fields() {
+        let (_, mut outbox) = released_0831_outbox_json();
+        outbox.released_0831_candidate = None;
+        outbox.released_0831_completion_input_ids = None;
+        outbox.validate().unwrap();
+        assert!(!outbox.has_released_0831_carriers());
+
+        let repaired = serde_json::to_value(&outbox).unwrap();
+        assert!(
+            repaired.get("candidate").is_none() && repaired.get("completion_input_ids").is_none(),
+            "after repair no outbox row may serialize a second candidate or recipient vector"
+        );
+    }
+
+    #[test]
+    fn released_0831_outbox_row_rejects_a_forged_duplicate_candidate() {
+        let (json, _) = released_0831_outbox_json();
+        let mut forged: serde_json::Value = serde_json::from_str(&json).unwrap();
+        forged["candidate"] = serde_json::json!({"candidate_type":"cancelled"});
+        let outbox: InteractionTerminalOutbox = serde_json::from_value(forged).unwrap();
+        assert!(
+            outbox
+                .validate()
+                .unwrap_err()
+                .contains("released 0.8.31 interaction terminal candidate digest mismatch")
+        );
+    }
+
+    #[test]
+    fn released_0831_outbox_row_rejects_a_forged_duplicate_recipient_set() {
+        let (json, _) = released_0831_outbox_json();
+        let mut forged: serde_json::Value = serde_json::from_str(&json).unwrap();
+        forged["completion_input_ids"] = serde_json::json!([InputId::new().to_string()]);
+        let outbox: InteractionTerminalOutbox = serde_json::from_value(forged).unwrap();
+        assert!(
+            outbox
+                .validate()
+                .unwrap_err()
+                .contains("released 0.8.31 interaction terminal recipient digest mismatch")
+        );
+    }
+
+    /// The completion owner is the single candidate authority, so it keeps its
+    /// candidate across finalization. The released-0.8.31 shape (finalized,
+    /// candidate compacted away) must still decode so its outbox copy can be
+    /// repaired back into this row.
+    #[test]
+    fn finalized_terminal_completion_owner_keeps_its_single_candidate() {
+        let mut rows = pending_terminal_completion_batch_fixture();
+        let outcome = crate::completion::CompletionOutcome::CompletedWithoutResult;
+        let finalization = InputTerminalCompletionFinalizationVerdict::Succeeded;
+        let receipt_digest =
+            interaction_terminal_payload_digest(&(&outcome, finalization)).unwrap();
+        for row in &mut rows {
+            let completion = row.state.terminal_completion.as_mut().unwrap();
+            let owns_payload = completion.input_id == completion.owner_input_id;
+            completion.outcome = owns_payload.then(|| outcome.clone());
+            completion.phase = InputTerminalCompletionPhase::Finalized {
+                receipt_digest: receipt_digest.clone(),
+                finalization,
+            };
+        }
+        let carriers = rows
+            .iter()
+            .map(|row| row.state.terminal_completion.clone().unwrap())
+            .collect::<Vec<_>>();
+        validate_input_terminal_completion_batch(&carriers).unwrap();
+        assert!(
+            carriers[0].candidate.is_some(),
+            "finalization must not compact the only durable candidate"
+        );
+        assert!(carriers[1].candidate.is_none(), "peers never carry payload");
+
+        // The released 0.8.31 crash-window shape decodes too.
+        let mut released = carriers;
+        released[0].candidate = None;
+        validate_input_terminal_completion_batch(&released).unwrap();
+    }
+
+    #[test]
+    fn finalized_terminal_completion_owner_rejects_a_forged_candidate() {
+        let mut rows = pending_terminal_completion_batch_fixture();
+        let completion = rows[0].state.terminal_completion.as_mut().unwrap();
+        completion.candidate = Some(InteractionTerminalCandidate::Cancelled);
+        assert!(
+            completion
+                .validate_row()
+                .unwrap_err()
+                .contains("terminal completion candidate digest mismatch")
+        );
+    }
+
+    #[test]
+    fn terminal_outbox_resource_bounds_reject_257_rows() {
         let fixture = terminal_outbox_batch_fixture();
         let oversized_rows = vec![fixture[0].clone(); 257];
         assert!(
             validate_interaction_terminal_outbox_batch_shape(&oversized_rows)
                 .unwrap_err()
                 .contains("invalid directed-row count")
-        );
-
-        let mut owner = fixture[0].clone();
-        let recipients = (0..257).map(|_| InputId::new()).collect::<Vec<_>>();
-        owner.completion_input_ids_digest =
-            interaction_terminal_payload_digest(&recipients).unwrap();
-        owner.completion_input_ids = Some(recipients);
-        assert!(
-            owner
-                .validate()
-                .unwrap_err()
-                .contains("recipient set has invalid size")
         );
     }
 
@@ -1947,8 +2133,6 @@ mod tests {
         let mut outbox = terminal_outbox_batch_fixture().remove(0);
         let recipient_digest = outbox.completion_input_ids_digest.clone();
         let candidate_digest = outbox.candidate_digest.clone();
-        outbox.candidate = None;
-        outbox.completion_input_ids = None;
         outbox.phase = InteractionTerminalOutboxPhase::Published {
             finalization_failed: false,
             publication: InteractionTerminalPublication {
@@ -1966,8 +2150,6 @@ mod tests {
     fn published_terminal_batch_rejects_split_immutable_recipient_proof() {
         let mut outboxes = terminal_outbox_batch_fixture();
         for outbox in &mut outboxes {
-            outbox.candidate = None;
-            outbox.completion_input_ids = None;
             outbox.phase = InteractionTerminalOutboxPhase::Published {
                 finalization_failed: false,
                 publication: InteractionTerminalPublication {
@@ -2199,7 +2381,10 @@ mod tests {
             .interaction_terminal_outbox
             .as_ref()
             .expect("outbox survives decode");
-        let candidate = outbox.candidate.as_ref().expect("owner keeps candidate");
+        let candidate = outbox
+            .released_0831_candidate
+            .as_ref()
+            .expect("released duplicate candidate is read back for repair");
         assert!(matches!(
             candidate,
             InteractionTerminalCandidate::CallbackPending {

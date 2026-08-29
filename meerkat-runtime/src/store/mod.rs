@@ -2200,7 +2200,6 @@ pub struct PreparedRuntimeSessionCommitResult {
     profile: RuntimeSessionPersistenceProfile,
     outcome: PreparedRuntimeSessionCommitOutcome,
     recovery_status: Option<RecoveryCommitStatus>,
-    downstream_projection_required: bool,
     authority: Option<RuntimeSessionAuthority>,
 }
 
@@ -2213,10 +2212,6 @@ impl PreparedRuntimeSessionCommitResult {
             profile,
             outcome: PreparedRuntimeSessionCommitOutcome::Applied,
             recovery_status: None,
-            // RuntimeStore is the sole full-body authority for WholeBlob and
-            // owns the small catalog projection for both profiles. No boundary
-            // requires a downstream SessionStore body mirror.
-            downstream_projection_required: false,
             authority: Some(authority),
         }
     }
@@ -2228,7 +2223,6 @@ impl PreparedRuntimeSessionCommitResult {
             profile,
             outcome: PreparedRuntimeSessionCommitOutcome::Applied,
             recovery_status: None,
-            downstream_projection_required: false,
             authority: None,
         }
     }
@@ -2276,13 +2270,6 @@ impl PreparedRuntimeSessionCommitResult {
     #[must_use]
     pub const fn recovery_status(&self) -> Option<RecoveryCommitStatus> {
         self.recovery_status
-    }
-
-    /// Whether the caller must publish a separate compatibility projection
-    /// after this commit.
-    #[must_use]
-    pub const fn downstream_projection_required(&self) -> bool {
-        self.downstream_projection_required
     }
 
     /// Exact session authority committed in this boundary, or `None` when the
@@ -7181,9 +7168,9 @@ pub(crate) fn pending_terminal_owner_fixture(
         owner_runtime_generation: Some(1),
         owner_runtime_epoch_id: Some("indexed-epoch".to_string()),
         candidate_owner_input_id: input_id.clone(),
-        candidate: (!published).then_some(candidate),
+        released_0831_candidate: None,
         candidate_digest,
-        completion_input_ids: (!published).then_some(recipients),
+        released_0831_completion_input_ids: None,
         completion_input_ids_digest,
         phase,
     };

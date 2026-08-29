@@ -1362,8 +1362,23 @@ mod tests {
                 outbox.phase,
                 crate::input_state::InteractionTerminalOutboxPhase::Finalized { .. }
             ));
-            assert!(outbox.candidate.is_some());
-            assert!(outbox.completion_input_ids.is_some());
+            assert!(
+                !outbox.has_released_0831_carriers(),
+                "a directed outbox this binary wrote never duplicates the candidate"
+            );
+            let completion = driver
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot terminal completion carrier")
+                .into_iter()
+                .filter_map(|stored| stored.state.terminal_completion)
+                .find(|completion| completion.input_id == completion.owner_input_id)
+                .expect("terminal completion owner keeps exact recipients");
+            assert!(completion.completion_input_ids.is_some());
+            assert!(
+                completion.candidate.is_some(),
+                "the single completion owner keeps the candidate through directed publication"
+            );
         }
         assert_eq!(
             completions.lock().await.debug_waiter_count(),
@@ -1402,8 +1417,22 @@ mod tests {
                 outbox.phase,
                 crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
             ));
-            assert!(outbox.candidate.is_none());
-            assert!(outbox.completion_input_ids.is_none());
+            assert!(!outbox.has_released_0831_carriers());
+            let outbox_json = serde_json::to_value(&outbox).expect("serialize published outbox");
+            assert!(
+                outbox_json.get("candidate").is_none()
+                    && outbox_json.get("completion_input_ids").is_none(),
+                "new writes must never serialize a second candidate or recipient vector"
+            );
+            let completion = driver
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot published terminal completion carrier")
+                .into_iter()
+                .filter_map(|stored| stored.state.terminal_completion)
+                .find(|completion| completion.input_id == completion.owner_input_id)
+                .expect("published terminal completion owner keeps exact recipients");
+            assert!(completion.completion_input_ids.is_some());
         }
 
         for outcome in [

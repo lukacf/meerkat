@@ -885,40 +885,41 @@ impl PersistentRuntimeDriver {
             }
 
             let mut recipient_ids = Vec::new();
-            if let Some(completion) = owner.state.terminal_completion.as_ref()
-                && completion.owner_input_id == owner_input_id
-                && matches!(
-                    &completion.phase,
-                    crate::input_state::InputTerminalCompletionPhase::Pending
-                )
-            {
+            if let Some(completion) = owner.state.terminal_completion.as_ref() {
+                let completion_owner = if completion.owner_input_id == owner_input_id {
+                    owner.clone()
+                } else {
+                    self.store
+                        .load_input_state(&self.runtime_id, &completion.owner_input_id)
+                        .await
+                        .map_err(|error| {
+                            RuntimeDriverError::Internal(format!(
+                                "pending terminal completion owner read failed: {error}"
+                            ))
+                        })?
+                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                            reason: format!(
+                                "pending terminal owner {owner_input_id} points to missing completion owner {}",
+                                completion.owner_input_id
+                            ),
+                        })?
+                };
                 recipient_ids.extend(
-                    completion
+                    completion_owner
+                        .state
+                        .terminal_completion
+                        .as_ref()
+                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                            reason: format!(
+                                "pending terminal completion owner {} lost its completion row",
+                                completion.owner_input_id
+                            ),
+                        })?
                         .completion_input_ids
                         .as_ref()
                         .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
                             reason: format!(
                                 "pending terminal completion owner {owner_input_id} lost recipients"
-                            ),
-                        })?
-                        .iter()
-                        .cloned(),
-                );
-            }
-            if let Some(outbox) = owner.state.interaction_terminal_outbox.as_ref()
-                && outbox.candidate_owner_input_id == owner_input_id
-                && !matches!(
-                    &outbox.phase,
-                    crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
-                )
-            {
-                recipient_ids.extend(
-                    outbox
-                        .completion_input_ids
-                        .as_ref()
-                        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                            reason: format!(
-                                "pending interaction terminal owner {owner_input_id} lost recipients"
                             ),
                         })?
                         .iter()

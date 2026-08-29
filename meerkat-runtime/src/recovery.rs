@@ -1975,11 +1975,6 @@ pub async fn recover_durable_tail(
             "prepared recovery commit returned a different successor authority".to_string(),
         ));
     }
-    if committed.downstream_projection_required() {
-        return Err(DurableTailRecoveryError::Authority(
-            "store-owned recovery unexpectedly requested a SessionStore projection".to_string(),
-        ));
-    }
     tracing::info!(
         session_id = %candidate.session_id,
         candidate_run_id = %candidate.candidate_run_id,

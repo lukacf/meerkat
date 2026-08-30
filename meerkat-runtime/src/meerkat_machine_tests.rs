@@ -10020,6 +10020,25 @@ fn recovered_idle_exact_binding_survives_authoritative_prepare_then_executor_att
 }
 
 #[tokio::test]
+async fn model_routing_status_rejects_unknown_session() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    let error = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect_err("unknown session must not project a default routing status");
+
+    assert!(matches!(
+        error,
+        RuntimeDriverError::NotFound { runtime_id }
+            if runtime_id == MeerkatMachine::logical_runtime_id(&session_id)
+    ));
+}
+
+#[tokio::test]
 async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

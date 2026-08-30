@@ -240,6 +240,7 @@ impl meerkat_copilot::CopilotChatCompletionsClientFactory
         &self,
         spec: meerkat_copilot::CopilotChatCompletionsClientSpec,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+        let supports_image_input = spec.supports_image_input();
         let (
             provider,
             model,
@@ -263,6 +264,7 @@ impl meerkat_copilot::CopilotChatCompletionsClientFactory
                     supports_image_tool_results,
                 },
             )
+            .with_image_input_support(supports_image_input)
             .with_authorizer(authorizer)
             .with_provider(provider),
         ))
@@ -625,6 +627,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             let (identity, profile, connection) = target.into_parts();
             let model = identity.model.clone();
             let supports_temperature = profile.profile().supports_temperature;
+            let supports_image_input = profile.profile().image_input;
             let supports_image_tool_results = profile.profile().image_tool_results;
             let factory: meerkat_copilot::CopilotRouteClientFactory =
                 Arc::new(move |route, connection| {
@@ -660,6 +663,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 None,
                                 route.api_base.clone(),
                             )
+                            .with_image_input_support(supports_image_input)
                             .with_authorizer(authorizer)
                             .with_responses_path("responses"),
                         )
@@ -677,6 +681,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     supports_image_tool_results,
                                 },
                             )
+                            .with_image_input_support(supports_image_input)
                             .with_authorizer(authorizer)
                             .with_provider(Provider::OpenAI),
                         )

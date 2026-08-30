@@ -92,6 +92,7 @@ pub struct OpenAiCompatibleClient {
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
+    supports_image_input: bool,
     supports_image_tool_results: bool,
     post_finish_trailer_window: Duration,
 }
@@ -147,6 +148,7 @@ impl OpenAiCompatibleClient {
             supports_temperature: options.supports_temperature,
             supports_thinking: options.supports_thinking,
             supports_reasoning: options.supports_reasoning,
+            supports_image_input: true,
             supports_image_tool_results: options.supports_image_tool_results,
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
         }
@@ -163,6 +165,12 @@ impl OpenAiCompatibleClient {
 
     pub fn with_provider(mut self, provider: Provider) -> Self {
         self.provider = provider;
+        self
+    }
+
+    #[must_use]
+    pub fn with_image_input_support(mut self, supports_image_input: bool) -> Self {
+        self.supports_image_input = supports_image_input;
         self
     }
 
@@ -676,6 +684,7 @@ impl LlmClient for OpenAiCompatibleClient {
         project_openai_replay_messages_for_capabilities(
             messages,
             mode,
+            self.supports_image_input,
             self.supports_image_tool_results,
         )
     }
@@ -3153,5 +3162,36 @@ mod tests {
             block,
             AssistantBlock::Reasoning { text, .. } if text == "anthropic" || text == "gemini"
         )));
+    }
+
+    #[test]
+    fn non_vision_self_hosted_replay_lowers_inline_images_to_text() {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "remote-model".to_string(),
+            "https://example.test".to_string(),
+            None,
+            options(true, true, true, true),
+        )
+        .with_image_input_support(false);
+        let messages = vec![Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "AAAA".to_string(),
+                },
+            },
+        ]))];
+
+        let projected = client
+            .project_replay_messages(&messages)
+            .expect("non-vision SelfHosted replay should lower image history");
+        let Message::User(user) = &projected[0] else {
+            panic!("expected projected user message");
+        };
+        assert!(matches!(
+            user.content.as_slice(),
+            [ContentBlock::Text { .. }]
+        ));
     }
 }

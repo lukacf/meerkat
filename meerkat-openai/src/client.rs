@@ -63,6 +63,7 @@ pub struct OpenAiClient {
     /// invocation. Used for ExternalAuthorizer flows that produce a
     /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+    supports_image_input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,19 +432,21 @@ fn project_openai_assistant_blocks(
     Ok(projected)
 }
 
+#[cfg(test)]
 fn project_openai_replay_messages(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
 ) -> Result<Vec<Message>, LlmError> {
-    project_openai_replay_messages_for_capabilities(messages, mode, true)
+    project_openai_replay_messages_for_capabilities(messages, mode, true, true)
 }
 
 pub(crate) fn project_openai_replay_messages_for_capabilities(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
+    image_input: bool,
     image_tool_results: bool,
 ) -> Result<Vec<Message>, LlmError> {
-    project_openai_replay_messages_for_target(messages, mode, true, image_tool_results)
+    project_openai_replay_messages_for_target(messages, mode, image_input, image_tool_results)
 }
 
 pub(crate) fn project_openai_replay_messages_for_target(
@@ -604,6 +607,7 @@ impl OpenAiClient {
             http,
             extra_headers: Vec::new(),
             authorizer: None,
+            supports_image_input: true,
         }
     }
 
@@ -645,6 +649,12 @@ impl OpenAiClient {
         authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
     ) -> Self {
         self.authorizer = Some(authorizer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_image_input_support(mut self, supports_image_input: bool) -> Self {
+        self.supports_image_input = supports_image_input;
         self
     }
 
@@ -2267,7 +2277,12 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiClient {
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_openai_replay_messages(messages, OpenAiReplayProjectionMode::Responses)
+        project_openai_replay_messages_for_capabilities(
+            messages,
+            OpenAiReplayProjectionMode::Responses,
+            self.supports_image_input,
+            true,
+        )
     }
 
     fn request_pressure(
@@ -3540,6 +3555,30 @@ mod tests {
         assert_eq!(output[1]["type"], "input_image");
         assert_eq!(output[1]["image_url"], "data:image/png;base64,CCCC");
         assert!(matches!(projected[3], Message::SystemNotice(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn non_vision_openai_replay_lowers_inline_images_to_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = OpenAiClient::new("test-key".to_string()).with_image_input_support(false);
+        let messages = vec![Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "AAAA".to_string(),
+                },
+            },
+        ]))];
+
+        let projected = client.project_replay_messages(&messages)?;
+        let Message::User(user) = &projected[0] else {
+            return Err("expected projected user message".into());
+        };
+        assert!(matches!(
+            user.content.as_slice(),
+            [ContentBlock::Text { .. }]
+        ));
         Ok(())
     }
 

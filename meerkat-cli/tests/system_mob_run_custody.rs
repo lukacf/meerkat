@@ -26,6 +26,14 @@ use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+#[path = "support/deterministic_mob_provider.rs"]
+mod deterministic_mob_provider;
+
+use deterministic_mob_provider::{
+    MODEL as DETERMINISTIC_MODEL, PROVIDER as DETERMINISTIC_PROVIDER,
+    remove_ambient_provider_credentials,
+};
+
 /// Budget for one CLI verb against a cold debug-build realm.
 const VERB_TIMEOUT: Duration = Duration::from_secs(150);
 /// Budget between run start and the stalled member turn's HTTP request.
@@ -88,6 +96,7 @@ impl ConsoleHome {
 
     fn command(&self, rkat: &Path, args: &[&str]) -> Command {
         let mut cmd = Command::new(rkat);
+        remove_ambient_provider_credentials(&mut cmd);
         cmd.current_dir(self.temp.path())
             .env("HOME", self.temp.path())
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
@@ -215,37 +224,6 @@ async fn pack_fixture(
     pack_path
 }
 
-/// Local OpenAI-compatible endpoint that accepts connections, observes the
-/// request bytes, and never answers: the member turn stays deterministically
-/// in flight until the run is canceled.
-async fn spawn_stall_server() -> (u16, tokio::sync::mpsc::UnboundedReceiver<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stall server");
-    let stall_port = listener.local_addr().expect("stall server addr").port();
-    let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    tokio::spawn(async move {
-        let mut held_sockets = Vec::new();
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let request_tx = request_tx.clone();
-            let (held_tx, held_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let mut request_bytes = [0u8; 1024];
-                if matches!(socket.read(&mut request_bytes).await, Ok(read) if read > 0) {
-                    let _ = request_tx.send(());
-                }
-                // Park the socket without responding until the test ends.
-                let _ = held_tx.send(socket);
-            });
-            held_sockets.push(held_rx);
-        }
-    });
-    (stall_port, request_rx)
-}
-
 fn send_signal(pid: u32, signal: &str) {
     let status = std::process::Command::new("kill")
         .args([signal, pid.to_string().as_str()])
@@ -263,49 +241,16 @@ async fn integration_real_mob_run_pack_sigterm_converges_to_durable_canceled() {
     let rkat = rkat_binary_path().expect("rkat binary not found");
     let console = ConsoleHome::new("mob-run-sigterm-e2e");
 
-    let (stall_port, mut request_rx) = spawn_stall_server().await;
-    // The self-hosted registry is realm-config-owned: write it into the
-    // realm's config doc under the state root.
-    let realm_doc_dir = console.path().join("realms").join(console.realm);
-    tokio::fs::create_dir_all(&realm_doc_dir)
-        .await
-        .expect("realm config dir");
-    // Mob member sessions build under the mob-scoped realm `mob.<mob_id>`,
-    // so the self-hosted credential binding is declared for that realm.
-    let member_realm = format!("mob.{MOB_ID}");
-    tokio::fs::write(
-        realm_doc_dir.join("config.toml"),
-        format!(
-            r#"[self_hosted.servers.stall]
-base_url = "http://127.0.0.1:{stall_port}/v1"
-
-[self_hosted.models."stall-model"]
-server = "stall"
-remote_model = "stall"
-
-[realm."{member_realm}"]
-default_binding = "stall"
-
-[realm."{member_realm}".backend.stall]
-provider = "self_hosted"
-backend_kind = "self_hosted"
-
-[realm."{member_realm}".auth.stall_auth]
-provider = "self_hosted"
-auth_method = "none"
-source = {{ kind = "platform_default" }}
-
-[realm."{member_realm}".binding.stall]
-backend_profile = "stall"
-auth_profile = "stall_auth"
-"#
-        ),
+    let (_provider, mut requests) =
+        deterministic_mob_provider::install(&console.path().join("realms"), console.realm, MOB_ID)
+            .await;
+    let fixture = write_mobpack_fixture(
+        console.path(),
+        MOB_ID,
+        DETERMINISTIC_MODEL,
+        Some(DETERMINISTIC_PROVIDER),
     )
-    .await
-    .expect("write realm config");
-
-    let fixture =
-        write_mobpack_fixture(console.path(), MOB_ID, "stall-model", Some("self_hosted")).await;
+    .await;
     let pack_path = pack_fixture(&console, &rkat, &fixture, "mob-run-sigterm.mobpack").await;
 
     let mut run_child = console
@@ -341,7 +286,7 @@ auth_profile = "stall_auth"
     // premature CLI exit is surfaced with its output instead of a bare
     // dispatch-budget timeout.
     tokio::select! {
-        request = tokio::time::timeout(DISPATCH_TIMEOUT, request_rx.recv()) => {
+        request = tokio::time::timeout(DISPATCH_TIMEOUT, requests.recv()) => {
             request
                 .expect("flow step never dispatched a member turn before the budget")
                 .expect("stall server closed before observing a member turn");
@@ -452,10 +397,16 @@ async fn integration_real_mob_run_detach_converges_execution_custody_lost() {
     let rkat = rkat_binary_path().expect("rkat binary not found");
     let console = ConsoleHome::new("mob-run-detach-custody-e2e");
 
-    // The worker model is never invoked before the CLI exits, so a catalog
-    // model without credentials is sufficient (same posture as the
-    // `cli-mob-verbs` suite's detach install).
-    let fixture = write_mobpack_fixture(console.path(), MOB_ID, "claude-sonnet-4-5", None).await;
+    let (_provider, _requests) =
+        deterministic_mob_provider::install(&console.path().join("realms"), console.realm, MOB_ID)
+            .await;
+    let fixture = write_mobpack_fixture(
+        console.path(),
+        MOB_ID,
+        DETERMINISTIC_MODEL,
+        Some(DETERMINISTIC_PROVIDER),
+    )
+    .await;
     let pack_path = pack_fixture(&console, &rkat, &fixture, "mob-run-detach.mobpack").await;
 
     let ran = console

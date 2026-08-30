@@ -2529,6 +2529,7 @@ rust_test(
         "src/main.rs",
     ],
     srcs = [
+        "tests/support/deterministic_mob_provider.rs",
         "tests/system_mob_cli_verbs.rs",
     ],
     visibility = ["//visibility:public"],
@@ -2631,6 +2632,7 @@ rust_test(
         "src/main.rs",
     ],
     srcs = [
+        "tests/support/deterministic_mob_provider.rs",
         "tests/system_mob_cli_verbs.rs",
     ],
     visibility = ["//visibility:public"],
@@ -2961,6 +2963,7 @@ rust_test(
         "src/main.rs",
     ],
     srcs = [
+        "tests/support/deterministic_mob_provider.rs",
         "tests/system_mob_run_custody.rs",
     ],
     visibility = ["//visibility:public"],
@@ -3063,6 +3066,7 @@ rust_test(
         "src/main.rs",
     ],
     srcs = [
+        "tests/support/deterministic_mob_provider.rs",
         "tests/system_mob_run_custody.rs",
     ],
     visibility = ["//visibility:public"],
@@ -3173,6 +3177,7 @@ rust_test(
         "src/main.rs",
     ],
     srcs = [
+        "tests/support/deterministic_mob_provider.rs",
         "tests/system_mob_run_custody.rs",
     ],
     visibility = ["//visibility:public"],

@@ -26,6 +26,14 @@ use meerkat_mob::runtime::bridge_protocol::WireHostBindingDescriptor;
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 
+#[path = "support/deterministic_mob_provider.rs"]
+mod deterministic_mob_provider;
+
+use deterministic_mob_provider::{
+    MODEL as DETERMINISTIC_MODEL, PROVIDER as DETERMINISTIC_PROVIDER,
+    remove_ambient_provider_credentials,
+};
+
 const DESCRIPTOR_TIMEOUT: Duration = Duration::from_secs(60);
 /// The bind bridge reply deadline is 60s (actor bind_host send); the verb
 /// budget must comfortably contain it.
@@ -83,7 +91,9 @@ impl DaemonHome {
     }
 
     fn spawn_daemon(&self, rkat: &Path) -> Child {
-        Command::new(rkat)
+        let mut command = Command::new(rkat);
+        remove_ambient_provider_credentials(&mut command);
+        command
             .current_dir(self.temp.path())
             .env("HOME", self.temp.path())
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
@@ -168,6 +178,7 @@ impl ConsoleHome {
 
     async fn run_rkat(&self, rkat: &Path, args: &[&str]) -> std::process::Output {
         let mut cmd = Command::new(rkat);
+        remove_ambient_provider_credentials(&mut cmd);
         cmd.current_dir(self.temp.path())
             .env("HOME", self.temp.path())
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
@@ -223,8 +234,9 @@ async fn write_mobpack_fixture(project_dir: &Path) -> PathBuf {
   "id":"{MOB_ID}",
   "profiles":{{
     "worker":{{
-      "model":"claude-sonnet-4-5",
-      "tools":{{"comms":true}},
+    "model":"{DETERMINISTIC_MODEL}",
+    "provider":"{DETERMINISTIC_PROVIDER}",
+    "tools":{{"comms":true}},
       "peer_description":"Worker"
     }}
   }},
@@ -259,6 +271,8 @@ async fn shutdown(mut daemon: Child) {
 async fn integration_real_mob_cli_verbs_over_tcp() {
     let rkat = rkat_binary_path().expect("rkat binary not found");
     let console = ConsoleHome::new();
+    let (_provider, _requests) =
+        deterministic_mob_provider::install(&console.path().join("realms"), REALM, MOB_ID).await;
 
     // ---- Install the mob into the console realm (mobpack --detach) ----
     let fixture = write_mobpack_fixture(console.path()).await;

@@ -28,6 +28,16 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Provider replay now fails closed before dispatch when canonical tool
+  adjacency, media capability, or cross-provider continuity metadata cannot be
+  represented safely.** New Rust contracts include `ReplayPlan`,
+  `ReplayApplication`, `ReplayTarget`, `ReplayWireFamily`,
+  `ReplayToolResultProjection`, `ReplayReasoningProjection`,
+  `ReplayDisposition`, `ReplaySubject`, `ReplayCapability`, `ReplayPlanError`,
+  `ReplayPlanEntry`, and typed replay index newtypes.
+
 ## [0.8.31] - 2026-08-28
 
 ### Breaking

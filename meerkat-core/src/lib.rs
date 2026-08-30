@@ -502,9 +502,10 @@ pub use tool_scope::{
 };
 pub use transcript_replay::{
     ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition,
-    ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError, ReplaySubject, ReplayTarget,
-    ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayUserContentIndex, ReplayWireFamily,
-    replay_provider_metadata,
+    ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError, ReplayReasoningProjection,
+    ReplaySubject, ReplaySystemNoticeBlockIndex, ReplaySystemNoticeContentIndex, ReplayTarget,
+    ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayToolResultProjection,
+    ReplayUserContentIndex, ReplayWireFamily, replay_provider_metadata,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{

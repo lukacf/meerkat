@@ -5560,6 +5560,146 @@ async fn cold_registration_cannot_publish_an_epoch_retired_by_overlapping_unregi
         .expect("fresh registration cleanup");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finalized_unregister_removal_queues_behind_unrelated_session_reads() {
+    const READER_COUNT: usize = 64;
+
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register removal target");
+    for _ in 0..160 {
+        machine
+            .register_session(SessionId::new())
+            .await
+            .expect("register unrelated fleet session");
+    }
+
+    let (removal_entered, release_removal) =
+        machine.pause_before_finalized_unregister_removal(session_id.clone());
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered target must expose exact identity");
+    let observer = match machine
+        .observe_unregister_session_registration_if_current(&registration)
+        .await
+        .expect("exact unregister admission")
+    {
+        crate::RuntimeSessionUnregisterAdmission::Pending(observer) => observer,
+        outcome => panic!("fresh unregister must remain observable, got {outcome:?}"),
+    };
+    tokio::time::timeout(Duration::from_secs(2), removal_entered)
+        .await
+        .expect("unregister must reach post-finalization removal")
+        .expect("removal test hook must remain armed");
+    let durable = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+        .await
+        .expect("load post-finalization lifecycle")
+        .expect("post-finalization lifecycle must remain durable");
+    assert!(
+        durable.unregister_progress().is_none(),
+        "the removing-entry milestone follows the terminal durable commit"
+    );
+    assert!(
+        durable.binding().agent_runtime_id().is_none(),
+        "the removing-entry milestone follows durable runtime detachment"
+    );
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("mechanical removal has not run while the hook is paused");
+        let state = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        assert_eq!(
+            state.registration_phase,
+            mm_dsl::RegistrationPhase::Draining
+        );
+        assert!(
+            state.session_id.is_none(),
+            "the generated terminal projection has already removed session identity"
+        );
+        assert!(
+            entry.pending_unregister_finalization.is_some(),
+            "the exact retry witness remains installed until mechanical removal"
+        );
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicUsize::new(0));
+    let mut readers = Vec::with_capacity(READER_COUNT);
+    for reader_index in 0..READER_COUNT {
+        let machine = Arc::clone(&machine);
+        let stop = Arc::clone(&stop);
+        let started = Arc::clone(&started);
+        readers.push(tokio::spawn(async move {
+            let hold = Duration::from_millis(2 + (reader_index % 8) as u64);
+            while !stop.load(Ordering::Acquire) {
+                let sessions = machine.sessions.read().await;
+                started.fetch_add(1, Ordering::AcqRel);
+                tokio::time::sleep(hold).await;
+                drop(sessions);
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while started.load(Ordering::Acquire) < READER_COUNT {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every unrelated reader must join the pressure wave");
+    let reads_before_removal = started.load(Ordering::Acquire);
+
+    release_removal
+        .send(())
+        .expect("release post-finalization removal");
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match observer.try_result() {
+                Ok(Some(result)) => break result,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(1)).await,
+                Err(error) => break Err(error),
+            }
+        }
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while started.load(Ordering::Acquire) <= reads_before_removal {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unrelated session readers must resume after exact removal");
+    stop.store(true, Ordering::Release);
+    for reader in readers {
+        reader.await.expect("reader pressure task joins");
+    }
+    let result = result.expect(
+        "post-finalization removal must queue for the shared sessions write lock instead of \
+         polling behind continuing unrelated reads",
+    );
+    result.expect("unregister coordinator must succeed");
+    assert!(
+        !machine.contains_session(&session_id).await,
+        "exact finalized registration must be removed"
+    );
+}
+
 #[tokio::test]
 async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());

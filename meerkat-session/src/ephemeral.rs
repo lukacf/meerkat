@@ -9527,6 +9527,9 @@ mod archive_shutdown_drain_tests {
     struct DrainProbeHooks {
         entered_run: Arc<tokio::sync::Notify>,
         release_run: Arc<tokio::sync::Semaphore>,
+        entered_control: Arc<tokio::sync::Notify>,
+        release_control: Arc<tokio::sync::Semaphore>,
+        actor_dropped: Arc<tokio::sync::Notify>,
         /// When set, the next pending-tool-results effect handler fires
         /// `request_shutdown` on the installed turn-admission slot. That
         /// handler is the last synchronous agent seam before `begin`, so this
@@ -9541,6 +9544,9 @@ mod archive_shutdown_drain_tests {
             Self {
                 entered_run: Arc::new(tokio::sync::Notify::new()),
                 release_run: Arc::new(tokio::sync::Semaphore::new(0)),
+                entered_control: Arc::new(tokio::sync::Notify::new()),
+                release_control: Arc::new(tokio::sync::Semaphore::new(0)),
+                actor_dropped: Arc::new(tokio::sync::Notify::new()),
                 yank_shutdown_before_begin: Arc::new(AtomicBool::new(false)),
                 turn_admission: Arc::new(std::sync::Mutex::new(None)),
             }
@@ -9571,6 +9577,12 @@ mod archive_shutdown_drain_tests {
         identity: SessionLlmIdentity,
         hooks: DrainProbeHooks,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
+    }
+
+    impl Drop for DrainProbeAgent {
+        fn drop(&mut self) {
+            self.hooks.actor_dropped.notify_one();
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -9663,6 +9675,17 @@ mod archive_shutdown_drain_tests {
                         ))
                     })?;
             }
+            Ok(())
+        }
+
+        async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), AgentError> {
+            self.hooks.entered_control.notify_one();
+            self.hooks
+                .release_control
+                .acquire()
+                .await
+                .expect("drain probe control release semaphore should stay open")
+                .forget();
             Ok(())
         }
 
@@ -9934,11 +9957,8 @@ mod archive_shutdown_drain_tests {
         );
     }
 
-    /// Pin (GREEN): once archive completed, a fresh context application is a
-    /// typed `NotFound` — the archived-session public contract — and never a
-    /// hung waiter.
     #[tokio::test]
-    async fn cancelled_archive_waiting_for_shutdown_capacity_preserves_live_session() {
+    async fn archive_does_not_wait_for_saturated_command_queue() {
         let hooks = DrainProbeHooks::new();
         let service = Arc::new(EphemeralSessionService::new(
             DrainProbeBuilder {
@@ -9970,8 +9990,8 @@ mod archive_shutdown_drain_tests {
             .await
             .expect("turn should enter the probe run");
 
-        // Fill every command slot. Archive may snapshot A's actor sender, but
-        // it must remain lock-free and pre-verdict while reserving capacity.
+        // Fill every command slot. Archive must use the out-of-band shutdown
+        // wake rather than competing for ordinary command capacity.
         let mut queued_probe_replies = Vec::with_capacity(COMMAND_CHANNEL_CAPACITY);
         for _ in 0..COMMAND_CHANNEL_CAPACITY {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -9982,17 +10002,29 @@ mod archive_shutdown_drain_tests {
             queued_probe_replies.push(reply_rx);
         }
 
-        let mut archive = Box::pin(service.archive(&session_id));
+        tokio::time::timeout(Duration::from_secs(1), service.archive(&session_id))
+            .await
+            .expect("archive must not wait for shutdown command capacity")
+            .expect("archive must succeed");
+
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), archive.as_mut())
+            !service
+                .has_live_session(&session_id)
                 .await
-                .is_err(),
-            "archive must wait for reserved shutdown capacity"
+                .expect("archived session live query"),
+            "archive must remove the exact live actor"
+        );
+        assert!(
+            service
+                .archived_views
+                .read()
+                .await
+                .contains_key(&session_id),
+            "archive must publish the archived view"
         );
 
-        // Waiting on A's saturated queue must not retain the global sessions
-        // writer. Unrelated session B stays promptly readable through both the
-        // public live-query and the read path used by interrupt dispatch.
+        // Unrelated session B stays promptly readable through both the public
+        // live-query and the read path used by interrupt dispatch.
         let other_is_live = tokio::time::timeout(
             Duration::from_secs(1),
             service.has_live_session(&other_session_id),
@@ -10009,45 +10041,91 @@ mod archive_shutdown_drain_tests {
             matches!(other_interrupt, Err(SessionError::NotRunning { .. })),
             "idle B should remain promptly readable and report NotRunning, got {other_interrupt:?}"
         );
-        drop(archive);
-
-        // Dropping the pending future releases its locks and reservation wait;
-        // no machine verdict or registry/authority mutation may have happened.
-        {
-            let sessions = service.sessions.read().await;
-            let handle = sessions
-                .get(&session_id)
-                .expect("cancelled pre-verdict archive preserves live handle");
-            assert!(handle.actor_witness.is_live());
-            assert!(!handle.command_tx.is_closed());
-        }
-        assert!(
-            !service
-                .archived_views
-                .read()
-                .await
-                .contains_key(&session_id),
-            "cancelled pre-verdict archive must not publish an archived view"
-        );
-
-        // The preserved session remains fully operable and can subsequently be
-        // archived once the actor is allowed to drain the queued commands.
+        // The in-flight turn finishes, observes ShuttingDown, and drains every
+        // command that was buffered before archive closed the actor channel.
         hooks.release_run.add_permits(1);
         let run_result = tokio::time::timeout(WAITER_TIMEOUT, turn)
             .await
             .expect("turn task should finish")
             .expect("turn task should not panic")
-            .expect("preserved turn must succeed");
+            .expect("in-flight turn must complete");
         assert_eq!(run_result.text, "ran");
-        service
-            .archive(&session_id)
-            .await
-            .expect("archive succeeds after capacity becomes available");
-        drop(queued_probe_replies);
+        for reply in queued_probe_replies {
+            tokio::time::timeout(WAITER_TIMEOUT, reply)
+                .await
+                .expect("queued command must drain")
+                .expect("queued command reply sender must remain live");
+        }
         service
             .archive(&other_session_id)
             .await
             .expect("cleanup unrelated session");
+    }
+
+    #[tokio::test]
+    async fn discard_live_session_actor_does_not_wait_for_saturated_command_queue() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create session");
+        let session_id = created.session_id;
+        let command_tx = command_tx_for(service.as_ref(), &session_id).await;
+        let witness = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .expect("live actor witness");
+
+        let (control_reply_tx, control_reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::AbortUncommittedCompactionProjections {
+                reply_tx: control_reply_tx,
+            })
+            .await
+            .expect("send actor-blocking control command");
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_control.notified())
+            .await
+            .expect("actor should enter the blocking control command");
+
+        let mut queued_probe_replies = Vec::with_capacity(COMMAND_CHANNEL_CAPACITY);
+        for _ in 0..COMMAND_CHANNEL_CAPACITY {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::VisibleToolDefs { reply_tx })
+                .await
+                .expect("blocked actor keeps its command receiver alive");
+            queued_probe_replies.push(reply_rx);
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            service.discard_live_session_actor(&witness),
+        )
+        .await
+        .expect("discard must not wait for shutdown command capacity")
+        .expect("discard should succeed");
+
+        hooks.release_control.add_permits(1);
+        tokio::time::timeout(WAITER_TIMEOUT, control_reply_rx)
+            .await
+            .expect("in-flight control command must resolve")
+            .expect("in-flight control reply sender must remain live")
+            .expect("in-flight control command must complete");
+        for reply in queued_probe_replies {
+            tokio::time::timeout(WAITER_TIMEOUT, reply)
+                .await
+                .expect("queued command must drain")
+                .expect("queued command reply sender must remain live");
+        }
+        tokio::time::timeout(WAITER_TIMEOUT, command_tx.closed())
+            .await
+            .expect("Notify-driven shutdown must close the actor command channel");
     }
 
     /// Regression (0.7.2): `discard_live_session` must be idempotent.
@@ -10108,8 +10186,8 @@ mod archive_shutdown_drain_tests {
 
         service.archive(&session_id).await.expect("archive");
 
-        // The session task exits once it has processed the Shutdown command;
-        // the command channel closes with it.
+        // The session task exits once it has observed the out-of-band shutdown
+        // wake; the command channel closes with it.
         tokio::time::timeout(WAITER_TIMEOUT, command_tx.closed())
             .await
             .expect("session task should exit after archive");
@@ -10120,6 +10198,34 @@ mod archive_shutdown_drain_tests {
             !slot.admission_drain_pending(),
             "the session task must close the machine-owned drain obligation \
              (ResolvePendingAdmissionDrained) before it exits"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_command_channel_authorizes_teardown_before_task_exit() {
+        let hooks = DrainProbeHooks::new();
+        let service = EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        );
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let turn_admission = turn_admission_for(&service, &created.session_id).await;
+
+        drop(service);
+
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.actor_dropped.notified())
+            .await
+            .expect("closed command channel must let the actor exit");
+        let slot = lock_turn_admission(&turn_admission);
+        assert_eq!(slot.phase(), TurnAdmissionPhase::ShuttingDown);
+        assert!(
+            !slot.admission_drain_pending(),
+            "channel-close teardown must close the generated drain obligation before actor exit"
         );
     }
 }

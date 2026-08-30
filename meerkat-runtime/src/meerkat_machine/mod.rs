@@ -7649,6 +7649,16 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// One-shot deterministic pause after durable unregister finalization and
+    /// before the exact entry-removal mechanics begin.
+    #[cfg(test)]
+    test_before_finalized_unregister_removal: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 
 #[cfg(test)]
@@ -8958,6 +8968,8 @@ impl MeerkatMachine {
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
+                #[cfg(test)]
+                test_before_finalized_unregister_removal: StdMutex::new(None),
             }),
         }
     }
@@ -9035,6 +9047,8 @@ impl MeerkatMachine {
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
+                #[cfg(test)]
+                test_before_finalized_unregister_removal: StdMutex::new(None),
             }),
         }
     }
@@ -9112,6 +9126,8 @@ impl MeerkatMachine {
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
+                #[cfg(test)]
+                test_before_finalized_unregister_removal: StdMutex::new(None),
             }),
         }
     }
@@ -9292,6 +9308,46 @@ impl MeerkatMachine {
         let session_authority = Arc::clone(&entry.dsl_authority);
         let driver = entry.driver.lock().await;
         Some((session_authority, driver.shared_dsl_authority()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_before_finalized_unregister_removal(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        *self
+            .test_before_finalized_unregister_removal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    async fn run_before_finalized_unregister_removal_test_hook(&self, session_id: &SessionId) {
+        let gate = {
+            let mut slot = self
+                .test_before_finalized_unregister_removal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = gate {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
     }
 
     /// Create a driver entry for a session.

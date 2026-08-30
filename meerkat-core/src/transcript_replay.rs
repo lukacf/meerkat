@@ -9,6 +9,8 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayMessageIndex(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReplayProjectedMessageIndex(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayAssistantBlockIndex(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayUserContentIndex(pub usize);
@@ -185,6 +187,10 @@ pub enum ReplayPlanError {
     },
     #[error("replay projection changed or omitted an ordered system message")]
     PreservedSystemMessageMismatch,
+    #[error("replay projection has an unexpected message at {projected:?}")]
+    UnexpectedProjectedMessage {
+        projected: ReplayProjectedMessageIndex,
+    },
     #[error(
         "replay application ended before its complete plan was consumed; next subject is {next:?}"
     )]
@@ -342,54 +348,33 @@ impl ReplayApplication<'_> {
     ) -> Result<SystemNoticeMessage, ReplayPlanError> {
         self.consume(ReplaySubject::Message(message))?;
         let mut projected = notice.clone();
-        for (notice_block_index, (source_block, projected_block)) in notice
-            .blocks
-            .iter()
-            .zip(projected.blocks.iter_mut())
-            .enumerate()
-        {
-            let (source_content, projected_content) = match (source_block, projected_block) {
-                (
-                    SystemNoticeBlock::Comms {
-                        content: source, ..
-                    },
-                    SystemNoticeBlock::Comms {
-                        content: projected, ..
-                    },
-                )
-                | (
-                    SystemNoticeBlock::ExternalEvent {
-                        content: source, ..
-                    },
-                    SystemNoticeBlock::ExternalEvent {
-                        content: projected, ..
-                    },
-                ) => (source, projected),
+        for (notice_block_index, projected_block) in projected.blocks.iter_mut().enumerate() {
+            let projected_content = match projected_block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => content,
                 _ => continue,
             };
-            let mut next_content = Vec::with_capacity(source_content.len());
-            for (content_index, source) in source_content.iter().enumerate() {
+            for (content_index, projected) in projected_content.iter_mut().enumerate() {
                 let subject = ReplaySubject::SystemNoticeContent {
                     message,
                     notice_block: ReplaySystemNoticeBlockIndex(notice_block_index),
                     content_block: ReplaySystemNoticeContentIndex(content_index),
                 };
-                let next = match self.next(subject)? {
-                    ReplayDisposition::Preserve => source.clone(),
-                    ReplayDisposition::LowerToText => ContentBlock::Text {
-                        text: source.text_projection().into_owned(),
-                    },
+                match self.consume(subject)? {
+                    ReplayDisposition::Preserve => {}
+                    ReplayDisposition::LowerToText => {
+                        *projected = ContentBlock::Text {
+                            text: projected.text_projection().into_owned(),
+                        };
+                    }
                     disposition => {
                         return Err(ReplayPlanError::ProjectionMismatch {
                             subject,
                             disposition,
                         });
                     }
-                };
-                self.record_content(subject, source, &next)?;
-                next_content.push(next);
+                }
             }
-            *projected_content = next_content;
         }
         Ok(projected)
     }
@@ -604,16 +589,335 @@ impl ReplayPlan {
         application: ReplayApplication<'_>,
     ) -> Result<(), ReplayPlanError> {
         application.finish()?;
-        let source_system = source
-            .iter()
-            .filter(|message| matches!(message, Message::System(_)));
-        let projected_system = projected
-            .iter()
-            .filter(|message| matches!(message, Message::System(_)));
-        if !source_system.eq(projected_system) {
-            return Err(ReplayPlanError::PreservedSystemMessageMismatch);
-        }
+        validate_final_projection(source, projected, self.target)?;
         validate_tool_adjacency(projected)
+    }
+}
+
+fn validate_final_projection(
+    source: &[Message],
+    projected: &[Message],
+    target: ReplayTarget,
+) -> Result<(), ReplayPlanError> {
+    let mut projected_index = 0;
+    for (message_index, source_message) in source.iter().enumerate() {
+        let message_index = ReplayMessageIndex(message_index);
+        if let Message::BlockAssistant(source_assistant) = source_message {
+            let projected_assistant =
+                projected
+                    .get(projected_index)
+                    .and_then(|message| match message {
+                        Message::BlockAssistant(assistant) => Some(assistant),
+                        _ => None,
+                    });
+            let consumed = validate_final_assistant_projection(
+                message_index,
+                source_assistant,
+                projected_assistant,
+                target,
+            )?;
+            projected_index += usize::from(consumed);
+            continue;
+        }
+
+        let Some(projected_message) = projected.get(projected_index) else {
+            return Err(message_projection_mismatch(message_index));
+        };
+        let valid = match (source_message, projected_message) {
+            (Message::System(source), Message::System(actual)) => source == actual,
+            (Message::User(source), Message::User(actual)) => {
+                let expected_content = source
+                    .content
+                    .iter()
+                    .enumerate()
+                    .map(|(block_index, block)| {
+                        project_content_block(
+                            block,
+                            target,
+                            false,
+                            ReplaySubject::UserContent {
+                                message: message_index,
+                                block: ReplayUserContentIndex(block_index),
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                source.render_metadata == actual.render_metadata
+                    && source.identity == actual.identity
+                    && source.transcript_role == actual.transcript_role
+                    && source.created_at == actual.created_at
+                    && expected_content == actual.content
+            }
+            (
+                Message::ToolResults {
+                    results: source,
+                    created_at: source_created_at,
+                },
+                Message::ToolResults {
+                    results: actual,
+                    created_at: actual_created_at,
+                },
+            ) => {
+                let expected = source
+                    .iter()
+                    .enumerate()
+                    .map(|(result_index, result)| {
+                        project_tool_result_for_target(
+                            message_index,
+                            ReplayToolResultIndex(result_index),
+                            result,
+                            target,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                source_created_at == actual_created_at && expected == *actual
+            }
+            (Message::SystemNotice(source), Message::SystemNotice(actual)) => {
+                project_system_notice_for_target(message_index, source, target)? == *actual
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(match source_message {
+                Message::System(_) => ReplayPlanError::PreservedSystemMessageMismatch,
+                _ => message_projection_mismatch(message_index),
+            });
+        }
+        projected_index += 1;
+    }
+    if projected_index != projected.len() {
+        return Err(ReplayPlanError::UnexpectedProjectedMessage {
+            projected: ReplayProjectedMessageIndex(projected_index),
+        });
+    }
+    Ok(())
+}
+
+fn validate_final_assistant_projection(
+    message: ReplayMessageIndex,
+    source: &crate::BlockAssistantMessage,
+    projected: Option<&crate::BlockAssistantMessage>,
+    target: ReplayTarget,
+) -> Result<bool, ReplayPlanError> {
+    let requires_message = source.blocks.iter().any(|block| {
+        matches!(
+            assistant_disposition(block, target),
+            ReplayDisposition::Preserve | ReplayDisposition::LowerToText
+        )
+    });
+    let Some(projected) = projected else {
+        return if requires_message {
+            Err(message_projection_mismatch(message))
+        } else {
+            Ok(false)
+        };
+    };
+    if !requires_message
+        && projected.blocks.first().is_some_and(|first| {
+            !source
+                .blocks
+                .iter()
+                .any(|block| assistant_block_matches_target(block, first, target))
+        })
+    {
+        return Ok(false);
+    }
+    if source.stop_reason != projected.stop_reason
+        || source.identity != projected.identity
+        || source.created_at != projected.created_at
+    {
+        return Err(message_projection_mismatch(message));
+    }
+
+    let mut projected_block = 0;
+    for (block_index, source_block) in source.blocks.iter().enumerate() {
+        let subject = ReplaySubject::AssistantBlock {
+            message,
+            block: ReplayAssistantBlockIndex(block_index),
+        };
+        let disposition = assistant_disposition(source_block, target);
+        let actual = projected.blocks.get(projected_block);
+        let consumes = match disposition {
+            ReplayDisposition::Preserve => {
+                validate_final_assistant_block(subject, source_block, actual, target)?;
+                true
+            }
+            ReplayDisposition::LowerToText => {
+                let valid = actual.is_some_and(|block| {
+                    matches!(block, AssistantBlock::Text { text, meta: None } if *text == source_text_projection(source_block))
+                });
+                if !valid {
+                    return Err(projection_mismatch(subject, disposition));
+                }
+                true
+            }
+            ReplayDisposition::Omit => false,
+            ReplayDisposition::ProviderNative => {
+                if actual.is_some_and(|block| {
+                    assistant_block_matches_target(source_block, block, target)
+                }) {
+                    validate_final_assistant_block(subject, source_block, actual, target)?;
+                    true
+                } else {
+                    false
+                }
+            }
+            ReplayDisposition::CollapseToText => {
+                return Err(projection_mismatch(subject, disposition));
+            }
+        };
+        projected_block += usize::from(consumes);
+    }
+    if projected_block != projected.blocks.len() {
+        return Err(message_projection_mismatch(message));
+    }
+    Ok(true)
+}
+
+fn validate_final_assistant_block(
+    subject: ReplaySubject,
+    source: &AssistantBlock,
+    projected: Option<&AssistantBlock>,
+    target: ReplayTarget,
+) -> Result<(), ReplayPlanError> {
+    if !assistant_payload_eq(source, projected) {
+        return Err(projection_mismatch(subject, ReplayDisposition::Preserve));
+    }
+    let source_meta = assistant_meta(source);
+    let projected_meta = projected.and_then(assistant_meta);
+    let expected_meta = source_meta.filter(|metadata| {
+        ReplayWireFamily::from_provider_metadata(metadata) == target.wire_family
+    });
+    if projected_meta != expected_meta {
+        return Err(projection_mismatch(
+            subject,
+            ReplayDisposition::ProviderNative,
+        ));
+    }
+    Ok(())
+}
+
+fn assistant_block_matches_target(
+    source: &AssistantBlock,
+    projected: &AssistantBlock,
+    target: ReplayTarget,
+) -> bool {
+    if !assistant_payload_eq(source, Some(projected)) {
+        return false;
+    }
+    let expected_meta = assistant_meta(source).filter(|metadata| {
+        ReplayWireFamily::from_provider_metadata(metadata) == target.wire_family
+    });
+    assistant_meta(projected) == expected_meta
+}
+
+fn project_content_block(
+    block: &ContentBlock,
+    target: ReplayTarget,
+    tool_result: bool,
+    subject: ReplaySubject,
+) -> Result<ContentBlock, ReplayPlanError> {
+    match content_disposition(block, target, tool_result) {
+        ReplayDisposition::Preserve => Ok(block.clone()),
+        ReplayDisposition::LowerToText => Ok(ContentBlock::Text {
+            text: block.text_projection().into_owned(),
+        }),
+        disposition => Err(projection_mismatch(subject, disposition)),
+    }
+}
+
+fn project_tool_result_for_target(
+    message: ReplayMessageIndex,
+    result: ReplayToolResultIndex,
+    source: &ToolResult,
+    target: ReplayTarget,
+) -> Result<ToolResult, ReplayPlanError> {
+    for (block_index, block) in source.content.iter().enumerate() {
+        if matches!(block, ContentBlock::Video { .. }) {
+            return Err(ReplayPlanError::UnsupportedCapability {
+                subject: ReplaySubject::ToolResultContent {
+                    message,
+                    result,
+                    block: ReplayToolResultContentIndex(block_index),
+                },
+                capability: ReplayCapability::ToolResultVideo,
+            });
+        }
+    }
+    let projected = source
+        .content
+        .iter()
+        .enumerate()
+        .map(|(block_index, block)| {
+            project_content_block(
+                block,
+                target,
+                true,
+                ReplaySubject::ToolResultContent {
+                    message,
+                    result,
+                    block: ReplayToolResultContentIndex(block_index),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let content = match target.tool_result_projection {
+        ReplayToolResultProjection::PreserveBlocks => projected,
+        ReplayToolResultProjection::CollapseToText => {
+            ContentBlock::text_vec(crate::types::text_content(&projected))
+        }
+    };
+    Ok(ToolResult::with_blocks(
+        source.tool_use_id.clone(),
+        content,
+        source.is_error,
+    ))
+}
+
+fn project_system_notice_for_target(
+    message: ReplayMessageIndex,
+    source: &SystemNoticeMessage,
+    target: ReplayTarget,
+) -> Result<SystemNoticeMessage, ReplayPlanError> {
+    let mut projected = source.clone();
+    for (notice_block_index, block) in projected.blocks.iter_mut().enumerate() {
+        match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                *content = content
+                    .iter()
+                    .enumerate()
+                    .map(|(content_block_index, block)| {
+                        project_content_block(
+                            block,
+                            target,
+                            false,
+                            ReplaySubject::SystemNoticeContent {
+                                message,
+                                notice_block: ReplaySystemNoticeBlockIndex(notice_block_index),
+                                content_block: ReplaySystemNoticeContentIndex(content_block_index),
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            _ => {}
+        }
+    }
+    Ok(projected)
+}
+
+fn message_projection_mismatch(message: ReplayMessageIndex) -> ReplayPlanError {
+    projection_mismatch(
+        ReplaySubject::Message(message),
+        ReplayDisposition::ProviderNative,
+    )
+}
+
+fn projection_mismatch(subject: ReplaySubject, disposition: ReplayDisposition) -> ReplayPlanError {
+    ReplayPlanError::ProjectionMismatch {
+        subject,
+        disposition,
     }
 }
 
@@ -939,5 +1243,144 @@ mod tests {
                 .map(|entry| entry.disposition),
             Some(ReplayDisposition::Omit)
         );
+    }
+
+    #[test]
+    fn final_projection_validation_rejects_output_changed_after_recording() {
+        let source_block = ContentBlock::Structured {
+            data: serde_json::value::RawValue::from_string(r#"{"key":"value"}"#.to_string())
+                .unwrap_or_else(|error| panic!("test structured content: {error}")),
+        };
+        let source = [Message::User(UserMessage::with_blocks(vec![
+            source_block.clone(),
+        ]))];
+        let plan = ReplayPlan::build(
+            &source,
+            ReplayTarget::new(
+                ReplayWireFamily::OpenAi,
+                false,
+                false,
+                false,
+                ReplayToolResultProjection::CollapseToText,
+                ReplayReasoningProjection::Omit,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("test replay plan: {error}"));
+        let mut application = plan.application();
+        application
+            .record_message(
+                ReplaySubject::Message(ReplayMessageIndex(0)),
+                &source[0],
+                None,
+            )
+            .unwrap_or_else(|error| panic!("test message: {error}"));
+        let projected_block = ContentBlock::Text {
+            text: source_block.text_projection().into_owned(),
+        };
+        application
+            .record_content(
+                ReplaySubject::UserContent {
+                    message: ReplayMessageIndex(0),
+                    block: ReplayUserContentIndex(0),
+                },
+                &source_block,
+                &projected_block,
+            )
+            .unwrap_or_else(|error| panic!("test content: {error}"));
+
+        assert!(matches!(
+            plan.validate_projected(&source, &source, application),
+            Err(ReplayPlanError::ProjectionMismatch {
+                subject: ReplaySubject::Message(ReplayMessageIndex(0)),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn final_projection_aligns_identical_provider_native_payloads_by_metadata() {
+        let foreign = AssistantBlock::Reasoning {
+            text: "same reasoning".to_string(),
+            meta: Some(Box::new(ProviderMeta::Gemini {
+                thought_signature: "foreign".to_string(),
+            })),
+        };
+        let native = AssistantBlock::Reasoning {
+            text: "same reasoning".to_string(),
+            meta: Some(Box::new(ProviderMeta::Anthropic {
+                signature: "native".to_string(),
+            })),
+        };
+        let source_assistant =
+            BlockAssistantMessage::new(vec![foreign.clone(), native.clone()], StopReason::EndTurn);
+        let mut projected_assistant = source_assistant.clone();
+        projected_assistant.blocks = vec![native.clone()];
+        let source = [Message::BlockAssistant(source_assistant)];
+        let projected = [Message::BlockAssistant(projected_assistant)];
+        let plan = ReplayPlan::build(
+            &source,
+            ReplayTarget::new(
+                ReplayWireFamily::Anthropic,
+                true,
+                false,
+                true,
+                ReplayToolResultProjection::PreserveBlocks,
+                ReplayReasoningProjection::ProviderNative,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("test replay plan: {error}"));
+        let mut application = plan.application();
+        application
+            .record_message(
+                ReplaySubject::Message(ReplayMessageIndex(0)),
+                &source[0],
+                None,
+            )
+            .unwrap_or_else(|error| panic!("test message: {error}"));
+        application
+            .record_assistant(
+                ReplaySubject::AssistantBlock {
+                    message: ReplayMessageIndex(0),
+                    block: ReplayAssistantBlockIndex(0),
+                },
+                &foreign,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("foreign assistant block: {error}"));
+        application
+            .record_provider_metadata(
+                ReplaySubject::ProviderMetadata {
+                    message: ReplayMessageIndex(0),
+                    block: ReplayAssistantBlockIndex(0),
+                },
+                assistant_meta(&foreign).unwrap_or_else(|| panic!("foreign metadata")),
+                &foreign,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("foreign metadata: {error}"));
+        application
+            .record_assistant(
+                ReplaySubject::AssistantBlock {
+                    message: ReplayMessageIndex(0),
+                    block: ReplayAssistantBlockIndex(1),
+                },
+                &native,
+                Some(&native),
+            )
+            .unwrap_or_else(|error| panic!("native assistant block: {error}"));
+        application
+            .record_provider_metadata(
+                ReplaySubject::ProviderMetadata {
+                    message: ReplayMessageIndex(0),
+                    block: ReplayAssistantBlockIndex(1),
+                },
+                assistant_meta(&native).unwrap_or_else(|| panic!("native metadata")),
+                &native,
+                Some(&native),
+            )
+            .unwrap_or_else(|error| panic!("native metadata: {error}"));
+
+        plan.validate_projected(&source, &projected, application)
+            .unwrap_or_else(|error| panic!("valid projection: {error}"));
     }
 }

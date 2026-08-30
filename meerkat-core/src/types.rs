@@ -2523,6 +2523,16 @@ impl SystemNoticeMessage {
         Self::with_blocks(kind, body, vec![block])
     }
 
+    /// Whether nested model-facing notice content contains an image.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        self.blocks.iter().any(|block| match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => has_images(content),
+            _ => false,
+        })
+    }
+
     /// Whether this exact notice is an ephemeral refresh projection.
     ///
     /// `McpPending` blocks with `persisted: true` are durable facts despite

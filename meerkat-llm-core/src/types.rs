@@ -369,8 +369,8 @@ impl LlmRequest {
         self
     }
 
-    /// Whether the typed request contains any user, assistant, or tool-result
-    /// image content.
+    /// Whether the typed request contains any user, assistant, tool-result, or
+    /// nested system-notice image content.
     pub fn has_images(&self) -> bool {
         self.messages.iter().any(|message| match message {
             Message::User(user) => user.has_images(),
@@ -379,7 +379,8 @@ impl LlmRequest {
                 .iter()
                 .any(|block| matches!(block, AssistantBlock::Image { .. })),
             Message::ToolResults { results, .. } => results.iter().any(ToolResult::has_images),
-            Message::System(_) | Message::SystemNotice(_) => false,
+            Message::SystemNotice(notice) => notice.has_images(),
+            Message::System(_) => false,
         })
     }
 
@@ -622,6 +623,34 @@ impl ToolCallBuffer {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_image_detection_includes_nested_system_notice_content() {
+        let request = LlmRequest::new(
+            "model",
+            vec![Message::SystemNotice(
+                meerkat_core::SystemNoticeMessage::with_block(
+                    meerkat_core::SystemNoticeKind::ExternalEvent,
+                    None,
+                    meerkat_core::SystemNoticeBlock::ExternalEvent {
+                        source: "test".to_string(),
+                        event_type: "image".to_string(),
+                        summary: None,
+                        body: None,
+                        payload: None,
+                        content: vec![meerkat_core::ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: meerkat_core::ImageData::Inline {
+                                data: "IMAGE_BYTES".to_string(),
+                            },
+                        }],
+                    },
+                ),
+            )],
+        );
+
+        assert!(request.has_images());
+    }
 
     #[test]
     fn test_llm_event_serialization() -> Result<(), Box<dyn std::error::Error>> {

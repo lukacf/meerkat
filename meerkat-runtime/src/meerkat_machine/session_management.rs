@@ -8713,61 +8713,50 @@ impl MeerkatMachine {
         )
         .await?;
 
-        let persistence_worker = loop {
-            #[cfg(feature = "live")]
-            let Some(persistence_gate_guard) = self
-                .lock_exact_unregister_mutation_gate(
-                    session_id,
-                    &entry_incarnation,
-                    &live_lifecycle_lease,
-                )
-                .await
-            else {
-                return Ok(());
-            };
-            #[cfg(not(feature = "live"))]
-            let Some(persistence_gate_guard) = self
-                .lock_exact_unregister_mutation_gate(session_id, &entry_incarnation)
-                .await
-            else {
-                return Ok(());
-            };
-            let mut sessions = match self.sessions.try_write() {
-                Ok(sessions) => sessions,
-                Err(_) => {
-                    drop(persistence_gate_guard);
-                    crate::tokio::task::yield_now().await;
-                    continue;
-                }
-            };
-            let Some(entry) = sessions.get_mut(session_id) else {
-                return Ok(());
-            };
-            if &entry.epoch_id != epoch_id
-                || !Arc::ptr_eq(&entry.driver, &driver_handle)
-                || !Arc::ptr_eq(&entry.ops_lifecycle, &ops_lifecycle)
-                || !entry
-                    .unregister_coordinator
-                    .as_ref()
-                    .is_some_and(|coordinator| {
-                        coordinator.epoch_id == *epoch_id
-                            && coordinator.coordinator_id == coordinator_id
-                    })
-                || entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .state()
-                    .registration_phase
-                    != crate::meerkat_machine::dsl::RegistrationPhase::Draining
-            {
-                return Ok(());
-            }
-            let worker = entry.ops_lifecycle_persistence_worker.take();
-            drop(sessions);
-            drop(persistence_gate_guard);
-            break worker;
+        #[cfg(feature = "live")]
+        let Some((mut sessions, persistence_gate_guard)) = self
+            .lock_exact_unregister_sessions_for_write(
+                session_id,
+                &entry_incarnation,
+                &live_lifecycle_lease,
+            )
+            .await
+        else {
+            return Ok(());
         };
+        #[cfg(not(feature = "live"))]
+        let Some((mut sessions, persistence_gate_guard)) = self
+            .lock_exact_unregister_sessions_for_write(session_id, &entry_incarnation)
+            .await
+        else {
+            return Ok(());
+        };
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return Ok(());
+        };
+        if &entry.epoch_id != epoch_id
+            || !Arc::ptr_eq(&entry.driver, &driver_handle)
+            || !Arc::ptr_eq(&entry.ops_lifecycle, &ops_lifecycle)
+            || !entry
+                .unregister_coordinator
+                .as_ref()
+                .is_some_and(|coordinator| {
+                    coordinator.epoch_id == *epoch_id
+                        && coordinator.coordinator_id == coordinator_id
+                })
+            || entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                .registration_phase
+                != crate::meerkat_machine::dsl::RegistrationPhase::Draining
+        {
+            return Ok(());
+        }
+        let persistence_worker = entry.ops_lifecycle_persistence_worker.take();
+        drop(sessions);
+        drop(persistence_gate_guard);
         // The retired registry has closed its persistence producer. Release M
         // before joining the backend worker. L remains held as the physical-
         // absence witness until durable finalization finishes.
@@ -8914,65 +8903,59 @@ impl MeerkatMachine {
                 &error,
                 RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             ) {
-                let rollback_restored = loop {
+                let rollback_restored = {
                     #[cfg(feature = "live")]
-                    let clear_gate = self
-                        .lock_exact_unregister_mutation_gate(
+                    let locked = self
+                        .lock_exact_unregister_sessions_for_write(
                             session_id,
                             &entry_incarnation,
                             &live_lifecycle_lease,
                         )
                         .await;
                     #[cfg(not(feature = "live"))]
-                    let clear_gate = self
-                        .lock_exact_unregister_mutation_gate(session_id, &entry_incarnation)
+                    let locked = self
+                        .lock_exact_unregister_sessions_for_write(session_id, &entry_incarnation)
                         .await;
-                    let Some(clear_gate) = clear_gate else {
-                        break false;
-                    };
-                    let mut sessions = match self.sessions.try_write() {
-                        Ok(sessions) => sessions,
-                        Err(_) => {
+                    if let Some((mut sessions, clear_gate)) = locked {
+                        if let Some(entry) = sessions.get_mut(session_id)
+                            && &entry.epoch_id == epoch_id
+                            && Arc::ptr_eq(&entry.driver, &driver_handle)
+                            && entry
+                                .unregister_coordinator
+                                .as_ref()
+                                .is_some_and(|coordinator| {
+                                    coordinator.epoch_id == *epoch_id
+                                        && coordinator.coordinator_id == coordinator_id
+                                })
+                            && pending_unregister_finalization_matches(
+                                entry.pending_unregister_finalization.as_ref(),
+                                expected_pending_finalization.as_ref(),
+                            )
+                            && entry
+                                .dsl_authority
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .snapshot()
+                                .state()
+                                == expected_terminal_snapshot.state()
+                        {
+                            Self::restore_dsl_authority_snapshot(
+                                &entry.dsl_authority,
+                                unregister_rollback_snapshot.clone(),
+                            );
+                            entry.pending_unregister_finalization = None;
+                            entry.sync_control_projection_from_dsl_authority();
+                            drop(sessions);
                             drop(clear_gate);
-                            crate::tokio::task::yield_now().await;
-                            continue;
+                            true
+                        } else {
+                            drop(sessions);
+                            drop(clear_gate);
+                            false
                         }
-                    };
-                    if let Some(entry) = sessions.get_mut(session_id)
-                        && &entry.epoch_id == epoch_id
-                        && Arc::ptr_eq(&entry.driver, &driver_handle)
-                        && entry
-                            .unregister_coordinator
-                            .as_ref()
-                            .is_some_and(|coordinator| {
-                                coordinator.epoch_id == *epoch_id
-                                    && coordinator.coordinator_id == coordinator_id
-                            })
-                        && pending_unregister_finalization_matches(
-                            entry.pending_unregister_finalization.as_ref(),
-                            expected_pending_finalization.as_ref(),
-                        )
-                        && entry
-                            .dsl_authority
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .snapshot()
-                            .state()
-                            == expected_terminal_snapshot.state()
-                    {
-                        Self::restore_dsl_authority_snapshot(
-                            &entry.dsl_authority,
-                            unregister_rollback_snapshot.clone(),
-                        );
-                        entry.pending_unregister_finalization = None;
-                        entry.sync_control_projection_from_dsl_authority();
-                        drop(sessions);
-                        drop(clear_gate);
-                        break true;
+                    } else {
+                        false
                     }
-                    drop(sessions);
-                    drop(clear_gate);
-                    break false;
                 };
                 if !rollback_restored {
                     return Err(RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
@@ -8997,6 +8980,9 @@ impl MeerkatMachine {
             return Err(error);
         }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized removing entry");
+        #[cfg(test)]
+        self.run_before_finalized_unregister_removal_test_hook(session_id)
+            .await;
         self.compare_remove_finalized_unregister_entry(
             session_id,
             epoch_id,
@@ -9069,14 +9055,148 @@ impl MeerkatMachine {
         }
     }
 
+    #[cfg(feature = "live")]
+    async fn lock_exact_unregister_sessions_for_write(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+        live_lifecycle_lease: &crate::member_live::MemberLiveLifecycleLease,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        if !live_lifecycle_lease.matches_gate(&entry_incarnation.live_lifecycle_gate) {
+            return None;
+        }
+        self.lock_exact_unregister_sessions_for_write_inner(session_id, entry_incarnation)
+            .await
+    }
+
+    #[cfg(not(feature = "live"))]
+    async fn lock_exact_unregister_sessions_for_write(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        self.lock_exact_unregister_sessions_for_write_inner(session_id, entry_incarnation)
+            .await
+    }
+
+    async fn lock_exact_unregister_sessions_for_write_inner(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        loop {
+            // Join the fair writer queue without retaining M. Once the map is
+            // exclusively held, M is acquired only if immediately available.
+            let sessions = self.sessions.write().await;
+            let entry = sessions.get(session_id)?;
+            if !entry_incarnation.matches(entry) {
+                return None;
+            }
+            match Arc::clone(&entry_incarnation.mutation_gate).try_lock_owned() {
+                Ok(mutation_guard) => return Some((sessions, mutation_guard)),
+                Err(_) => {
+                    drop(sessions);
+                    let mutation_guard = Arc::clone(&entry_incarnation.mutation_gate)
+                        .lock_owned()
+                        .await;
+                    drop(mutation_guard);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "live")]
+    async fn lock_finalized_unregister_removal_fences(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+        live_lifecycle_lease: &crate::member_live::MemberLiveLifecycleLease,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        if !live_lifecycle_lease.matches_gate(&entry_incarnation.live_lifecycle_gate) {
+            return None;
+        }
+        self.lock_finalized_unregister_removal_fences_inner(session_id, entry_incarnation)
+            .await
+    }
+
+    #[cfg(not(feature = "live"))]
+    async fn lock_finalized_unregister_removal_fences(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        self.lock_finalized_unregister_removal_fences_inner(session_id, entry_incarnation)
+            .await
+    }
+
+    async fn lock_finalized_unregister_removal_fences_inner(
+        &self,
+        session_id: &SessionId,
+        entry_incarnation: &UnregisterEntryIncarnationWitness,
+    ) -> Option<(
+        crate::tokio::sync::RwLockWriteGuard<'_, HashMap<SessionId, RuntimeSessionEntry>>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+        crate::tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        let registration_slot = self.session_registration_transaction_slot(session_id);
+        loop {
+            let sessions = self.sessions.write().await;
+            let entry = sessions.get(session_id)?;
+            if !entry_incarnation.matches(entry) {
+                return None;
+            }
+            let registration_guard = match Arc::clone(&registration_slot).try_lock_owned() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    drop(sessions);
+                    let guard = Arc::clone(&registration_slot).lock_owned().await;
+                    drop(guard);
+                    continue;
+                }
+            };
+            match Arc::clone(&entry_incarnation.mutation_gate).try_lock_owned() {
+                Ok(mutation_guard) => {
+                    return Some((sessions, registration_guard, mutation_guard));
+                }
+                Err(_) => {
+                    drop(registration_guard);
+                    drop(sessions);
+                    let mutation_guard = Arc::clone(&entry_incarnation.mutation_gate)
+                        .lock_owned()
+                        .await;
+                    drop(mutation_guard);
+                }
+            }
+        }
+    }
+
     /// Commit the process-local half of a successful durable unregister.
     ///
     /// Slow mechanical joins run after an exact L + M capture with M released.
     /// The unregister worker's original exact L stays held through those joins
     /// and the final compare-remove. The commit point then takes T while that
-    /// L is still held, acquires exact M, revalidates the complete witness, and
-    /// removes from the map without awaiting while all three fences are held.
-    /// This bounded L -> T section is safe only after the exact unregister
+    /// L is still held, queues for the sessions writer without another fence,
+    /// then non-blockingly acquires T and exact M, revalidates the complete
+    /// witness, and removes from the map without awaiting while multiple fences
+    /// are held. This bounded L -> sessions -> try(T) -> try(M) section is safe
+    /// only after the exact unregister
     /// coordinator is installed: every archive/retire T -> L path rejects that
     /// coordinator under T before attempting L.
     // These fields are the exact unregister witness and remain explicit so no
@@ -9106,63 +9226,50 @@ impl MeerkatMachine {
         )
         .await?;
 
-        loop {
-            let registration_transaction_guard =
-                self.lock_session_registration_transaction(session_id).await;
-            #[cfg(feature = "live")]
-            let Some(mutation_guard) = self
-                .lock_exact_unregister_mutation_gate(
-                    session_id,
-                    entry_incarnation,
-                    &live_lifecycle_lease,
-                )
-                .await
-            else {
-                return Ok(());
-            };
-            #[cfg(not(feature = "live"))]
-            let Some(mutation_guard) = self
-                .lock_exact_unregister_mutation_gate(session_id, entry_incarnation)
-                .await
-            else {
-                return Ok(());
-            };
-            let mut sessions = match self.sessions.try_write() {
-                Ok(sessions) => sessions,
-                Err(_) => {
-                    drop(mutation_guard);
-                    drop(registration_transaction_guard);
-                    crate::tokio::task::yield_now().await;
-                    continue;
-                }
-            };
-            let Some(entry) = sessions.get(session_id) else {
-                return Ok(());
-            };
-            if !Self::finalized_unregister_entry_is_exact(
-                entry,
+        #[cfg(feature = "live")]
+        let Some((mut sessions, registration_transaction_guard, mutation_guard)) = self
+            .lock_finalized_unregister_removal_fences(
                 session_id,
-                epoch_id,
                 entry_incarnation,
-                driver,
-                coordinator_id,
-                expected_terminal_snapshot,
-                expected_pending,
-            )? {
-                return Ok(());
-            }
-            let removed_entry = sessions.remove(session_id);
-            if let Some(entry) = removed_entry.as_ref() {
-                entry.post_commit_hooks.shutdown();
-            }
-            drop(sessions);
-            drop(mutation_guard);
-            #[cfg(feature = "live")]
-            drop(live_lifecycle_lease);
-            drop(registration_transaction_guard);
-            drop(removed_entry);
+                &live_lifecycle_lease,
+            )
+            .await
+        else {
+            return Ok(());
+        };
+        #[cfg(not(feature = "live"))]
+        let Some((mut sessions, registration_transaction_guard, mutation_guard)) = self
+            .lock_finalized_unregister_removal_fences(session_id, entry_incarnation)
+            .await
+        else {
+            return Ok(());
+        };
+        let Some(entry) = sessions.get(session_id) else {
+            return Ok(());
+        };
+        if !Self::finalized_unregister_entry_is_exact(
+            entry,
+            session_id,
+            epoch_id,
+            entry_incarnation,
+            driver,
+            coordinator_id,
+            expected_terminal_snapshot,
+            expected_pending,
+        )? {
             return Ok(());
         }
+        let removed_entry = sessions.remove(session_id);
+        if let Some(entry) = removed_entry.as_ref() {
+            entry.post_commit_hooks.shutdown();
+        }
+        drop(sessions);
+        drop(mutation_guard);
+        #[cfg(feature = "live")]
+        drop(live_lifecycle_lease);
+        drop(registration_transaction_guard);
+        drop(removed_entry);
+        Ok(())
     }
 
     // Keep the same exact unregister witness explicit across the mechanical
@@ -9180,10 +9287,10 @@ impl MeerkatMachine {
         #[cfg(feature = "live")]
         live_lifecycle_lease: &crate::member_live::MemberLiveLifecycleLease,
     ) -> Result<(), RuntimeDriverError> {
-        let (drain_task, rotation_task) = loop {
+        let (drain_task, rotation_task) = {
             #[cfg(feature = "live")]
-            let Some(mutation_guard) = self
-                .lock_exact_unregister_mutation_gate(
+            let Some((mut sessions, mutation_guard)) = self
+                .lock_exact_unregister_sessions_for_write(
                     session_id,
                     entry_incarnation,
                     live_lifecycle_lease,
@@ -9193,19 +9300,11 @@ impl MeerkatMachine {
                 return Ok(());
             };
             #[cfg(not(feature = "live"))]
-            let Some(mutation_guard) = self
-                .lock_exact_unregister_mutation_gate(session_id, entry_incarnation)
+            let Some((mut sessions, mutation_guard)) = self
+                .lock_exact_unregister_sessions_for_write(session_id, entry_incarnation)
                 .await
             else {
                 return Ok(());
-            };
-            let mut sessions = match self.sessions.try_write() {
-                Ok(sessions) => sessions,
-                Err(_) => {
-                    drop(mutation_guard);
-                    crate::tokio::task::yield_now().await;
-                    continue;
-                }
             };
             let Some(entry) = sessions.get_mut(session_id) else {
                 return Ok(());
@@ -9228,7 +9327,7 @@ impl MeerkatMachine {
             );
             drop(sessions);
             drop(mutation_guard);
-            break mechanics;
+            mechanics
         };
         if let Some(drain_task) = drain_task {
             drain_task.abort();

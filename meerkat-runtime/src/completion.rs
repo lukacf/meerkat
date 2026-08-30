@@ -126,6 +126,37 @@ pub enum CompletionOutcome {
     },
 }
 
+/// Public completion plus the exact committed input terminal observed by the
+/// completion witness.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CompletionObservation {
+    outcome: CompletionOutcome,
+    input_terminal_outcome: Option<crate::input_state::InputTerminalOutcome>,
+}
+
+impl CompletionObservation {
+    #[must_use]
+    pub fn outcome(&self) -> &CompletionOutcome {
+        &self.outcome
+    }
+
+    #[must_use]
+    pub fn input_terminal_outcome(&self) -> Option<&crate::input_state::InputTerminalOutcome> {
+        self.input_terminal_outcome.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        CompletionOutcome,
+        Option<crate::input_state::InputTerminalOutcome>,
+    ) {
+        (self.outcome, self.input_terminal_outcome)
+    }
+}
+
 /// Project one generated-authority completion onto the canonical
 /// interaction-scoped terminal event. Both the comms live stream and durable
 /// placed-turn observation use this single mapping so result/failure semantics
@@ -291,6 +322,7 @@ impl CompletionCleanupObservation {
 struct CompletionDelivery {
     outcome: CompletionOutcome,
     cleanup_observation: CompletionCleanupObservation,
+    terminal_outcome: Option<crate::input_state::InputTerminalOutcome>,
 }
 
 /// Snapshot of one input's registered completion waiters.
@@ -362,6 +394,18 @@ impl CompletionHandle {
     ) -> Result<(CompletionOutcome, CompletionCleanupObservation), CompletionWaitError> {
         let delivery = self.try_wait_delivery().await?;
         Ok((delivery.outcome, delivery.cleanup_observation))
+    }
+
+    /// Wait for completion together with the exact committed input terminal
+    /// observed by the terminal-completion witness.
+    pub async fn try_wait_with_terminal_outcome(
+        self,
+    ) -> Result<CompletionObservation, CompletionWaitError> {
+        let delivery = self.try_wait_delivery().await?;
+        Ok(CompletionObservation {
+            outcome: delivery.outcome,
+            input_terminal_outcome: delivery.terminal_outcome,
+        })
     }
 
     /// Wait for the generated execution result or report mechanical waiter failure.
@@ -492,6 +536,7 @@ impl CompletionHandle {
         let _ = tx.send(Ok(CompletionDelivery {
             outcome,
             cleanup_observation: CompletionCleanupObservation::from_realized_result(realized),
+            terminal_outcome: None,
         }));
         Self {
             rx: Some(rx),
@@ -984,11 +1029,21 @@ impl CompletionRegistry {
         outcome: CompletionOutcome,
         cleanup_observation: CompletionCleanupObservation,
     ) {
+        Self::send_outcome_with_terminal(senders, outcome, cleanup_observation, None);
+    }
+
+    fn send_outcome_with_terminal(
+        senders: Vec<oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>,
+        outcome: CompletionOutcome,
+        cleanup_observation: CompletionCleanupObservation,
+        terminal_outcome: Option<crate::input_state::InputTerminalOutcome>,
+    ) {
         for tx in senders {
             let outcome = outcome.clone();
             let _ = tx.send(Ok(CompletionDelivery {
                 outcome,
                 cleanup_observation: cleanup_observation.clone(),
+                terminal_outcome: terminal_outcome.clone(),
             }));
         }
     }
@@ -1161,10 +1216,15 @@ impl CompletionRegistry {
     {
         for input_id in input_ids {
             if let Some(senders) = self.take_waiters(&input_id) {
-                Self::send_outcome(
+                let terminal_outcome = bundle
+                    .terminal_completion_witness
+                    .terminal_outcome(&input_id)
+                    .cloned();
+                Self::send_outcome_with_terminal(
                     senders,
                     bundle.outcome.clone(),
                     bundle.cleanup_observation.clone(),
+                    terminal_outcome,
                 );
             }
         }
@@ -1763,6 +1823,65 @@ mod tests {
             CompletionWaitError::AuthorityUnavailable(reason)
                 if reason.contains("exact pending batch candidate")
         ));
+    }
+
+    #[test]
+    fn released_0831_abandoned_completion_json_remains_byte_identical() {
+        let outcome = CompletionOutcome::AbandonedWithError {
+            reason: "runtime apply failed".to_string(),
+            error: TurnErrorMetadata::runtime_apply_failure("runtime apply failed"),
+        };
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"completion_type":"abandoned_with_error","reason":"runtime apply failed","error":{"kind":"runtime_apply_failure","terminal":true,"outcome":"failed","detail":"runtime apply failed"}}"#
+        );
+        let decoded: CompletionOutcome = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            CompletionOutcome::AbandonedWithError { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn additive_wait_api_returns_the_witness_derived_terminal() {
+        let mut pending = CompletionHandle::pending_for_test();
+        let handle = pending.take_handle();
+        let authority = authority(
+            RuntimeCompletionResultClass::AbandonedWithError,
+            RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
+        );
+        let attempt = authority.begin_surface_resolution();
+        pending
+            .tx
+            .send(Ok(CompletionDelivery {
+                outcome: CompletionOutcome::AbandonedWithError {
+                    reason: "never executed".to_string(),
+                    error: TurnErrorMetadata::runtime_apply_failure("never executed"),
+                },
+                cleanup_observation: CompletionCleanupObservation::from_realized_result(
+                    attempt.realize(),
+                ),
+                terminal_outcome: Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::NeverExecuted,
+                }),
+            }))
+            .expect("test completion receiver remains live");
+
+        let observation = handle
+            .try_wait_with_terminal_outcome()
+            .await
+            .expect("typed waiter delivery");
+        assert!(matches!(
+            observation.outcome(),
+            CompletionOutcome::AbandonedWithError { .. }
+        ));
+        assert_eq!(
+            observation.input_terminal_outcome(),
+            Some(&crate::input_state::InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::NeverExecuted,
+            })
+        );
     }
 
     #[tokio::test]

@@ -378,6 +378,31 @@ async fn persist_authorized_terminal_completion_owned(
     })?
 }
 
+async fn persist_and_deliver_authorized_terminal_completion_owned(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: &crate::meerkat_machine::SharedCompletionRegistry,
+    input_ids: Vec<InputId>,
+    bundle: crate::completion::AuthorizedRuntimeTerminalBundle,
+) -> Result<(), crate::RuntimeDriverError> {
+    let driver = std::sync::Arc::clone(driver);
+    let completions = std::sync::Arc::clone(completions);
+    let handoff = tokio::spawn(async move {
+        let mut driver = driver.lock_owned().await;
+        driver
+            .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+            .await?;
+        drop(driver);
+        let mut completions = completions.lock_owned().await;
+        completions.resolve_authorized_runtime_terminal_bundle(input_ids, bundle);
+        Ok::<(), crate::RuntimeDriverError>(())
+    });
+    handoff.await.map_err(|error| {
+        crate::RuntimeDriverError::Internal(format!(
+            "owned terminal completion delivery task ended before publishing its outcome: {error}"
+        ))
+    })?
+}
+
 /// What an EMPTY compaction outbox obliges the checkpoint refresh to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmptyOutboxCheckpoint {
@@ -1487,7 +1512,7 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     _authority_guard: &crate::tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<(), InteractionTerminalPublicationError> {
-    drain_recovered_input_terminal_completions(driver, executor).await?;
+    drain_recovered_input_terminal_completions(driver, completions, executor).await?;
     let batches = driver
         .lock()
         .await
@@ -1684,6 +1709,7 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
 /// event publication and waiter delivery.
 async fn drain_recovered_input_terminal_completions(
     driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
 ) -> Result<(), InteractionTerminalPublicationError> {
     let batches = driver
@@ -1800,14 +1826,27 @@ async fn drain_recovered_input_terminal_completions(
                 "terminal completion recovery projection failed: {error}"
             ))
         })?;
-        persist_authorized_terminal_completion_owned(driver, bundle.terminal_completion())
-            .await
-            .map_err(|error| {
-                InteractionTerminalPublicationError::from_driver(
-                    "terminal completion recovery receipt persistence failed",
-                    error,
+        match completions {
+            Some(completions) => {
+                persist_and_deliver_authorized_terminal_completion_owned(
+                    driver,
+                    completions,
+                    batch.input_ids,
+                    bundle,
                 )
-            })?;
+                .await
+            }
+            None => {
+                persist_authorized_terminal_completion_owned(driver, bundle.terminal_completion())
+                    .await
+            }
+        }
+        .map_err(|error| {
+            InteractionTerminalPublicationError::from_driver(
+                "terminal completion recovery receipt persistence failed",
+                error,
+            )
+        })?;
     }
     Ok(())
 }
@@ -5999,17 +6038,20 @@ async fn process_queue(
                             abandoned = abandoned_input_ids.len(),
                             "generated staging authority refused an accepted input batch; resolved through machine authority"
                         );
-                        if !abandoned_input_ids.is_empty()
-                            && let Some(completions) = completions.as_ref()
-                        {
-                            let mut completions = completions.lock().await;
-                            fail_completion_waiters(
-                                &mut completions,
-                                &abandoned_input_ids,
-                                format!("runtime batch staging refused: {reason}"),
-                            );
-                        }
                         drop(queue_authority_guard);
+                        if !abandoned_input_ids.is_empty()
+                            && drain_recovered_interaction_terminal_outboxes_until_clear(
+                                driver,
+                                completions,
+                                executor,
+                                authority_binding,
+                                true,
+                                RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+                            )
+                            .await
+                        {
+                            return true;
+                        }
                         continue;
                     }
                     Err(err) => {
@@ -9305,6 +9347,69 @@ mod tests {
         })
     }
 
+    struct CountingTurnFinalizationBoundary {
+        gate: Arc<crate::tokio::sync::Mutex<()>>,
+        acquisitions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle
+        for CountingTurnFinalizationBoundary
+    {
+        async fn acquire(
+            &self,
+        ) -> Result<
+            Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+            CoreExecutorError,
+        > {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Arc::clone(&self.gate).lock_owned().await))
+        }
+    }
+
+    struct BoundaryApplyFailingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        stop_calls: Arc<AtomicUsize>,
+        boundary: Arc<CountingTurnFinalizationBoundary>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for BoundaryApplyFailingExecutor {
+        fn turn_finalization_boundary_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle>>
+        {
+            Some(self.boundary.clone())
+        }
+
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, CoreExecutorError>
+        {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "synthetic deterministic apply failure",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     /// Field class (0.7.23 crew gateway): a poison input reaching the
     /// machine's max-attempts abandonment mid-wake must not wedge the queue.
     /// Pre-fix, the whole-batch defer sweep hit `GuardRejected` on the
@@ -9346,30 +9451,43 @@ mod tests {
 
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
-        let mut executor = crate::control_plane::test_support::ApplyFailingExecutor::new(
-            Arc::clone(&apply_calls),
-            Arc::clone(&stop_calls),
-        );
+        let boundary_acquisitions = Arc::new(AtomicUsize::new(0));
+        let mut executor = BoundaryApplyFailingExecutor {
+            apply_calls: Arc::clone(&apply_calls),
+            stop_calls: Arc::clone(&stop_calls),
+            boundary: Arc::new(CountingTurnFinalizationBoundary {
+                gate: Arc::new(crate::tokio::sync::Mutex::new(())),
+                acquisitions: Arc::clone(&boundary_acquisitions),
+            }),
+        };
         let (_effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
         let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
         let teardown_slot = RuntimeLoopTeardownSlot::pending();
         let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
 
-        let should_stop = process_queue(
-            &driver,
-            &mut executor,
-            &mut effect_rx,
-            None,
-            &authority_binding,
-            &teardown_slot,
-            &mut terminal_handoff,
+        let should_stop = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            process_queue(
+                &driver,
+                &mut executor,
+                &mut effect_rx,
+                None,
+                &authority_binding,
+                &teardown_slot,
+                &mut terminal_handoff,
+            ),
         )
-        .await;
+        .await
+        .expect("stage-refusal terminal drain must not reacquire the held boundary");
         assert!(
             !should_stop,
             "a machine-policy abandonment must not stop the runtime loop"
         );
         assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            boundary_acquisitions.load(Ordering::SeqCst) > 0,
+            "the regression must exercise a real turn-finalization boundary"
+        );
 
         let guard = driver.lock().await;
         match &*guard {
@@ -9681,8 +9799,13 @@ mod tests {
         );
 
         // Attempt 1: refused, counted, and deferred behind the backlog.
+        let first_refusal_run = RunId::new();
         let abandoned = guard
-            .resolve_unstageable_queued_inputs(std::slice::from_ref(&head_id))
+            .resolve_unstageable_queued_inputs(
+                &first_refusal_run,
+                std::slice::from_ref(&head_id),
+                "test staging refusal",
+            )
             .await
             .expect("machine resolves a refused queued input");
         assert!(
@@ -9710,15 +9833,25 @@ mod tests {
 
         // Burn the remaining generated attempts.
         for _ in 0..2 {
+            let refusal_run = RunId::new();
             let abandoned = guard
-                .resolve_unstageable_queued_inputs(std::slice::from_ref(&head_id))
+                .resolve_unstageable_queued_inputs(
+                    &refusal_run,
+                    std::slice::from_ref(&head_id),
+                    "test staging refusal",
+                )
                 .await
                 .expect("machine resolves a refused queued input");
             assert!(abandoned.is_empty(), "the retry cap is not reached yet");
         }
 
+        let terminal_refusal_run = RunId::new();
         let abandoned = guard
-            .resolve_unstageable_queued_inputs(std::slice::from_ref(&head_id))
+            .resolve_unstageable_queued_inputs(
+                &terminal_refusal_run,
+                std::slice::from_ref(&head_id),
+                "test staging refusal",
+            )
             .await
             .expect("machine resolves a refused queued input");
         assert_eq!(
@@ -9961,13 +10094,14 @@ mod tests {
         // The field evidence was a caller waiting forever. A terminalized input
         // with the caller still hanging would fail this lane's criterion the
         // same way the original defect did.
-        let outcome = tokio::time::timeout(
+        let completion = tokio::time::timeout(
             crate::run_progress::RUN_EXECUTION_START_BOUND,
-            waiter.wait_authorized(),
+            waiter.try_wait_with_terminal_outcome(),
         )
         .await
-        .expect("the caller must stop waiting when its run is terminalized");
-        let reason = match &outcome {
+        .expect("the caller must stop waiting when its run is terminalized")
+        .expect("the caller must receive an authorized terminal");
+        let reason = match completion.outcome() {
             crate::completion::CompletionOutcome::Abandoned { reason, .. }
             | crate::completion::CompletionOutcome::AbandonedWithError { reason, .. } => {
                 reason.clone()
@@ -9977,6 +10111,13 @@ mod tests {
         assert!(
             reason.contains("ExecutorNotProgressing"),
             "the caller's outcome must name why its run could not progress, got: {reason}"
+        );
+        assert_eq!(
+            completion.input_terminal_outcome(),
+            Some(&crate::input_state::InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::NeverExecuted,
+            }),
+            "the additive waiter observation must preserve the exact machine-owned cause"
         );
         let failure = last_apply_failure_message(&authority)
             .expect("the machine must record why the run could not progress");

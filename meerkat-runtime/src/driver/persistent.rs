@@ -65,6 +65,27 @@ enum PreparedProvisionalPromotion {
     HeadCanonical(PreparedHeadCanonicalProvisionalPromotion),
 }
 
+#[must_use = "prepared unstageable-input resolution must be committed or explicitly aborted"]
+pub(crate) struct PreparedUnstageableQueuedResolution {
+    checkpoint: Option<EphemeralDriverRollbackSnapshot>,
+    changed_input_ids: Vec<InputId>,
+    abandoned_input_ids: Vec<InputId>,
+    cancellation_guard:
+        Option<crate::meerkat_machine::driver::PersistentTerminalTransitionCancellationGuard>,
+}
+
+impl PreparedUnstageableQueuedResolution {
+    pub(crate) fn abandoned_input_ids(&self) -> &[InputId] {
+        &self.abandoned_input_ids
+    }
+
+    fn disarm(&mut self) {
+        if let Some(mut guard) = self.cancellation_guard.take() {
+            guard.disarm();
+        }
+    }
+}
+
 impl PersistentRuntimeDriver {
     fn prepare_provisional_promotion(
         &self,
@@ -1949,10 +1970,20 @@ impl PersistentRuntimeDriver {
     ///
     /// Fail-closed: every fallible step between the staged DSL transition and
     /// the durable commit restores the pre-transition checkpoint (K11).
+    #[cfg(test)]
     pub(crate) async fn resolve_unstageable_queued_inputs(
         &mut self,
         input_ids: &[InputId],
     ) -> Result<Vec<InputId>, crate::traits::RuntimeDriverError> {
+        let prepared = self.prepare_unstageable_queued_inputs(input_ids)?;
+        self.commit_prepared_unstageable_queued_inputs(prepared)
+            .await
+    }
+
+    pub(crate) fn prepare_unstageable_queued_inputs(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<PreparedUnstageableQueuedResolution, crate::traits::RuntimeDriverError> {
         self.require_durability_ready()?;
         let checkpoint = self.persistence_rollback_checkpoint();
         // The change set mirrors the inner skip: the persistence helpers fail
@@ -1975,8 +2006,39 @@ impl PersistentRuntimeDriver {
                 ));
             }
         };
+        Ok(PreparedUnstageableQueuedResolution {
+            checkpoint,
+            changed_input_ids,
+            abandoned_input_ids: abandoned,
+            cancellation_guard: Some(
+                crate::meerkat_machine::driver::PersistentTerminalTransitionCancellationGuard::new(
+                    self.durability_health.clone(),
+                    "unstageable_queued_resolution",
+                ),
+            ),
+        })
+    }
+
+    pub(crate) fn abort_prepared_unstageable_queued_inputs(
+        &mut self,
+        mut prepared: PreparedUnstageableQueuedResolution,
+        operation: &'static str,
+        error: crate::traits::RuntimeDriverError,
+    ) -> crate::traits::RuntimeDriverError {
+        let checkpoint = prepared.checkpoint.take();
+        prepared.disarm();
+        self.post_transition_failure(checkpoint, operation, error.to_string())
+    }
+
+    pub(crate) async fn commit_prepared_unstageable_queued_inputs(
+        &mut self,
+        mut prepared: PreparedUnstageableQueuedResolution,
+    ) -> Result<Vec<InputId>, crate::traits::RuntimeDriverError> {
+        let checkpoint = prepared.checkpoint.take();
+        let changed_input_ids = std::mem::take(&mut prepared.changed_input_ids);
         if changed_input_ids.is_empty() {
-            return Ok(abandoned);
+            prepared.disarm();
+            return Ok(std::mem::take(&mut prepared.abandoned_input_ids));
         }
         let (checkpoint, input_states, commit) = self.lifecycle_persistence_payload_with_rollback(
             checkpoint,
@@ -1988,23 +2050,28 @@ impl PersistentRuntimeDriver {
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
             .await
         {
-            return Err(self.post_transition_failure(
+            let error = self.post_transition_failure(
                 checkpoint,
                 "resolve_unstageable_queued_inputs_commit",
                 format!("unstageable queued input resolution persist failed: {error}"),
-            ));
+            );
+            prepared.disarm();
+            return Err(error);
         }
         if let Err(error) = self
             .inner
             .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
         {
-            return Err(self.post_transition_failure(
+            let error = self.post_transition_failure(
                 None,
                 "resolve_unstageable_queued_inputs_archive",
                 error.to_string(),
-            ));
+            );
+            prepared.disarm();
+            return Err(error);
         }
-        Ok(abandoned)
+        prepared.disarm();
+        Ok(std::mem::take(&mut prepared.abandoned_input_ids))
     }
 
     /// Persist the just-staged run bindings BEFORE the run executes.

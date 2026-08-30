@@ -181,7 +181,7 @@ pub(crate) struct InputTerminalCompletionAuthorizationWitness {
     batch_key: crate::input_state::InputTerminalCompletionBatchKey,
     candidate_digest: String,
     completion_input_ids_digest: String,
-    input_ids: Vec<InputId>,
+    recipients: indexmap::IndexMap<InputId, InputTerminalOutcome>,
     cas_profile: crate::store::InputStateBatchCasImplementationProfile,
     write_fence: Option<InputTerminalCompletionWriteFence>,
 }
@@ -195,8 +195,12 @@ impl InputTerminalCompletionAuthorizationWitness {
         &self.candidate_digest
     }
 
-    pub(crate) fn input_ids(&self) -> &[InputId] {
-        &self.input_ids
+    pub(crate) fn input_ids(&self) -> impl Iterator<Item = &InputId> {
+        self.recipients.keys()
+    }
+
+    pub(crate) fn terminal_outcome(&self, input_id: &InputId) -> Option<&InputTerminalOutcome> {
+        self.recipients.get(input_id)
     }
 }
 
@@ -424,6 +428,24 @@ impl RuntimeCompletionResultAuthority {
         let mut input_ids = input_ids;
         input_ids.sort_by_key(|input_id| input_id.0);
         let owner_input_id = input_ids[0].clone();
+        let terminal_outcome = match &candidate {
+            crate::input_state::InteractionTerminalCandidate::Cancelled => {
+                InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::Cancelled,
+                }
+            }
+            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated { .. } => {
+                InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::Destroyed,
+                }
+            }
+            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure { .. } => {
+                InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::NeverExecuted,
+                }
+            }
+            _ => InputTerminalOutcome::Consumed,
+        };
         InputTerminalCompletionAuthorizationWitness {
             runtime_id: LogicalRuntimeId::new("test-runtime"),
             session_id: self.session_id.clone(),
@@ -441,7 +463,10 @@ impl RuntimeCompletionResultAuthority {
                 .expect("test terminal candidate should serialize"),
             completion_input_ids_digest: interaction_terminal_payload_digest(&input_ids)
                 .expect("test terminal recipients should serialize"),
-            input_ids,
+            recipients: input_ids
+                .into_iter()
+                .map(|input_id| (input_id, terminal_outcome.clone()))
+                .collect(),
             cas_profile: crate::store::InputStateBatchCasImplementationProfile::MultiWriter,
             write_fence: None,
         }
@@ -797,14 +822,17 @@ enum TerminalTransitionCheckpoint {
 /// commit. Async cancellation drops the future without running ordinary error
 /// handling, so the guard owns a clone of the shared durability gate and
 /// degrades it synchronously unless the exact durable operation completed.
-struct PersistentTerminalTransitionCancellationGuard {
+pub(crate) struct PersistentTerminalTransitionCancellationGuard {
     durability_health: Option<DurabilityHealthHandle>,
     operation: &'static str,
     armed: bool,
 }
 
 impl PersistentTerminalTransitionCancellationGuard {
-    fn new(durability_health: Option<DurabilityHealthHandle>, operation: &'static str) -> Self {
+    pub(crate) fn new(
+        durability_health: Option<DurabilityHealthHandle>,
+        operation: &'static str,
+    ) -> Self {
         Self {
             durability_health,
             operation,
@@ -812,7 +840,7 @@ impl PersistentTerminalTransitionCancellationGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -3059,6 +3087,21 @@ impl DriverEntry {
                         .to_string(),
             });
         }
+        let recipients = persisted_input_ids
+            .iter()
+            .map(|input_id| {
+                let terminal_outcome = self
+                    .as_driver()
+                    .stored_input_state(input_id)
+                    .and_then(|stored| stored.seed.terminal_outcome)
+                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                        reason: format!(
+                            "terminal completion witness lost terminal outcome for recipient {input_id}"
+                        ),
+                    })?;
+                Ok((input_id.clone(), terminal_outcome))
+            })
+            .collect::<Result<indexmap::IndexMap<_, _>, _>>()?;
         let authority = self.shared_dsl_authority();
         let authority = authority
             .lock()
@@ -3128,7 +3171,7 @@ impl DriverEntry {
             batch_key: owner.batch_key.clone(),
             candidate_digest: owner.candidate_digest.clone(),
             completion_input_ids_digest: owner.completion_input_ids_digest.clone(),
-            input_ids: persisted_input_ids.clone(),
+            recipients,
             cas_profile,
             write_fence,
         })
@@ -3293,15 +3336,14 @@ impl DriverEntry {
                     .to_string(),
             });
         }
-        let current_witness =
-            self.input_terminal_completion_authorization_witness(authorized_witness.input_ids())?;
+        let input_ids = authorized_witness.input_ids().cloned().collect::<Vec<_>>();
+        let current_witness = self.input_terminal_completion_authorization_witness(&input_ids)?;
         if current_witness != authorized_witness {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: "terminal completion authority no longer matches the exact owner, run, candidate, or recipient batch"
                     .to_string(),
             });
         }
-        let input_ids = authorized_witness.input_ids();
         let requested = input_ids.iter().collect::<std::collections::HashSet<_>>();
         let expected = input_ids
             .iter()
@@ -3430,7 +3472,7 @@ impl DriverEntry {
                     .await?;
                 }
                 if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
-                    driver.archive_terminal_inputs_after_durable_obligations(input_ids)?;
+                    driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
                 }
                 return Ok(());
             }
@@ -3480,7 +3522,7 @@ impl DriverEntry {
         )
         .await?;
         if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
-            driver.archive_terminal_inputs_after_durable_obligations(input_ids)?;
+            driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
         }
         Ok(())
     }
@@ -4885,12 +4927,137 @@ impl DriverEntry {
     /// machine's disposition durably before returning it.
     pub(crate) async fn resolve_unstageable_queued_inputs(
         &mut self,
+        run_id: &RunId,
         input_ids: &[InputId],
+        refusal_reason: &str,
     ) -> Result<Vec<InputId>, crate::traits::RuntimeDriverError> {
         match self {
-            DriverEntry::Ephemeral(d) => d.resolve_unstageable_queued_inputs(input_ids),
-            DriverEntry::Persistent(d) => d.resolve_unstageable_queued_inputs(input_ids).await,
+            DriverEntry::Ephemeral(d) => {
+                let checkpoint = d.rollback_snapshot();
+                let abandoned = match d.resolve_unstageable_queued_inputs(input_ids) {
+                    Ok(abandoned) => abandoned,
+                    Err(error) => {
+                        d.restore_rollback_snapshot(checkpoint);
+                        return Err(self.rollback_refused_run_after_error(run_id, error));
+                    }
+                };
+                if !abandoned.is_empty()
+                    && let Err(error) = self.stage_stage_refusal_terminal_carriers(
+                        run_id,
+                        &abandoned,
+                        refusal_reason,
+                    )
+                {
+                    let DriverEntry::Ephemeral(d) = self else {
+                        unreachable!("driver kind cannot change while staging a terminal")
+                    };
+                    d.restore_rollback_snapshot(checkpoint);
+                    return Err(self.rollback_refused_run_after_error(run_id, error));
+                }
+                if let Err(error) = machine_apply_run_return_projection(
+                    self,
+                    run_id,
+                    RunReturnDisposition::Rollback,
+                ) {
+                    let DriverEntry::Ephemeral(d) = self else {
+                        unreachable!("driver kind cannot change while returning a refused run")
+                    };
+                    d.restore_rollback_snapshot(checkpoint);
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to return refused runtime run: {error}"
+                    )));
+                }
+                Ok(abandoned)
+            }
+            DriverEntry::Persistent(d) => {
+                let prepared = match d.prepare_unstageable_queued_inputs(input_ids) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return Err(self.rollback_refused_run_after_error(run_id, error)),
+                };
+                if !prepared.abandoned_input_ids().is_empty()
+                    && let Err(error) = self.stage_stage_refusal_terminal_carriers(
+                        run_id,
+                        prepared.abandoned_input_ids(),
+                        refusal_reason,
+                    )
+                {
+                    let DriverEntry::Persistent(d) = self else {
+                        unreachable!("driver kind cannot change while staging a terminal")
+                    };
+                    let error = d.abort_prepared_unstageable_queued_inputs(
+                        prepared,
+                        "stage_refusal_terminal_carriers",
+                        error,
+                    );
+                    return Err(self.rollback_refused_run_after_error(run_id, error));
+                }
+                if let Err(error) = machine_apply_run_return_projection(
+                    self,
+                    run_id,
+                    RunReturnDisposition::Rollback,
+                ) {
+                    let DriverEntry::Persistent(d) = self else {
+                        unreachable!("driver kind cannot change while returning a refused run")
+                    };
+                    return Err(d.abort_prepared_unstageable_queued_inputs(
+                        prepared,
+                        "stage_refusal_run_return",
+                        RuntimeDriverError::Internal(format!(
+                            "failed to return refused runtime run: {error}"
+                        )),
+                    ));
+                }
+                let DriverEntry::Persistent(d) = self else {
+                    unreachable!("driver kind cannot change while staging a terminal")
+                };
+                match d.commit_prepared_unstageable_queued_inputs(prepared).await {
+                    Ok(abandoned) => Ok(abandoned),
+                    Err(error) => Err(self.rollback_refused_run_after_error(run_id, error)),
+                }
+            }
         }
+    }
+
+    fn rollback_refused_run_after_error(
+        &mut self,
+        run_id: &RunId,
+        error: RuntimeDriverError,
+    ) -> RuntimeDriverError {
+        if self.current_run_id().as_ref() != Some(run_id) {
+            return error;
+        }
+        match machine_apply_run_return_projection(self, run_id, RunReturnDisposition::Rollback) {
+            Ok(_) => error,
+            Err(rollback_error) => RuntimeDriverError::Internal(format!(
+                "failed to return refused run after terminal handling error: {rollback_error}; \
+                 terminal handling failure: {error}"
+            )),
+        }
+    }
+
+    fn stage_stage_refusal_terminal_carriers(
+        &mut self,
+        run_id: &RunId,
+        abandoned_input_ids: &[InputId],
+        refusal_reason: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        let error = meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
+            "input abandoned before execution: {refusal_reason}"
+        ));
+        let candidate =
+            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure { error };
+        let completion_batch = self.stage_input_terminal_completion_batch(
+            InteractionTerminalBatchScope::Run(run_id),
+            abandoned_input_ids,
+            candidate,
+            false,
+        )?;
+        let outboxes = authorized_staged_directed_terminal_outboxes(
+            self,
+            abandoned_input_ids,
+            &completion_batch,
+        )?;
+        self.stage_interaction_terminal_outboxes(outboxes)
     }
 
     pub(crate) async fn abandon_pending_inputs(
@@ -8246,7 +8413,7 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     run_id: RunId,
     batch: AuthorizedRuntimeLoopBatch,
 ) -> Result<RuntimeLoopBatchStart, RuntimeDriverError> {
-    let mut driver = driver.lock().await;
+    let mut driver = Arc::clone(driver).lock_owned().await;
     let staged_ids = batch.input_ids().to_vec();
     let stage_source = batch.source();
     machine_begin_run(&mut driver, run_id.clone()).map_err(|err| {
@@ -8279,27 +8446,25 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
             // refusal probe cannot attribute a batch-level refusal to any
             // single member, so it would need a whole-batch fallback anyway -
             // a second, untested path through the never-starve floor.
-            let abandoned_input_ids = driver
-                    .resolve_unstageable_queued_inputs(&staged_ids)
+            let handoff = crate::tokio::spawn(async move {
+                let abandoned_input_ids = driver
+                    .resolve_unstageable_queued_inputs(&run_id, &staged_ids, &reason)
                     .await
                     .map_err(|resolve_err| {
                         RuntimeDriverError::Internal(format!(
                             "failed to resolve unstageable queued inputs: {resolve_err}; staging refusal: {reason}"
                         ))
                     })?;
-            if let Err(rollback_err) = machine_apply_run_return_projection(
-                &mut driver,
-                &run_id,
-                RunReturnDisposition::Rollback,
-            ) {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "failed to roll back runtime run after batch staging refusal: {rollback_err}; staging refusal: {reason}"
-                )));
-            }
-            return Ok(RuntimeLoopBatchStart::StageRefused {
-                reason,
-                abandoned_input_ids,
+                Ok(RuntimeLoopBatchStart::StageRefused {
+                    reason,
+                    abandoned_input_ids,
+                })
             });
+            return handoff.await.map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "owned stage-refusal terminal commit task ended before completion: {error}"
+                ))
+            })?;
         }
     };
 

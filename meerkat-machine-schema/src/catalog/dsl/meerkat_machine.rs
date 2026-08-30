@@ -12416,6 +12416,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Keep both correlation and terminal truth single-valued: divergent
         // recovery facts are corruption, not an invitation for the shell to
         // overwrite machine truth.
+        //
+        // Retained facts are comparable only when `turn_terminal_run_id`
+        // attributes them to the recovered run. A run abandoned before turn
+        // start has no such attribution and must not be rejected because an
+        // earlier run left a different terminal outcome.
         transition RecoverRuntimeCompletionResultCorrelation {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input RecoverRuntimeCompletionResultCorrelation { run_id, terminal_outcome, terminal_cause_kind }
@@ -12454,16 +12459,28 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "terminal_outcome_absent_or_same" {
                 terminal_outcome == None
                 || self.terminal_outcome == None
+                || (
+                    self.runtime_completion_result_run_id == None
+                    && self.turn_terminal_run_id != Some(run_id)
+                )
                 || self.terminal_outcome == terminal_outcome
             }
             guard "terminal_cause_absent_or_same" {
                 terminal_cause_kind == None
                 || self.terminal_cause_kind == None
+                || (
+                    self.runtime_completion_result_run_id == None
+                    && self.turn_terminal_run_id != Some(run_id)
+                )
                 || self.terminal_cause_kind == terminal_cause_kind
             }
             guard "cancelled_has_no_existing_failure_cause" {
                 terminal_outcome != Some(TurnTerminalOutcome::Cancelled)
                 || self.terminal_cause_kind == None
+                || (
+                    self.runtime_completion_result_run_id == None
+                    && self.turn_terminal_run_id != Some(run_id)
+                )
             }
             update {
                 self.runtime_completion_result_run_id = Some(run_id);

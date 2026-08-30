@@ -41171,6 +41171,477 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
     );
 }
 
+fn stage_refusal_terminal_driver(name: &'static str) -> SharedDriver {
+    let runtime_id = LogicalRuntimeId::new(name);
+    let session_id = SessionId::new();
+    let mut ephemeral = EphemeralRuntimeDriver::new(runtime_id.clone());
+    ephemeral
+        .install_registered_authority_for_test(
+            crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+            Some(&runtime_id),
+            Some(1),
+            Some(crate::meerkat_machine::dsl::Generation::from(1)),
+            Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                "stage-refusal-terminal-epoch".to_string(),
+            )),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )
+        .expect("stage-refusal fixture installs registered runtime authority");
+    Arc::new(tokio::sync::Mutex::new(DriverEntry::Ephemeral(ephemeral)))
+}
+
+fn persistent_stage_refusal_terminal_driver(
+    name: &'static str,
+) -> (
+    SharedDriver,
+    Arc<crate::store::InMemoryRuntimeStore>,
+    LogicalRuntimeId,
+) {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let runtime_store: Arc<dyn crate::store::RuntimeStore> = store.clone();
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let runtime_id = LogicalRuntimeId::new(name);
+    let session_id = SessionId::new();
+    let mut persistent = crate::driver::persistent::PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        runtime_store,
+        blob_store,
+    );
+    persistent
+        .inner_mut()
+        .install_registered_authority_for_test(
+            crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+            Some(&runtime_id),
+            Some(1),
+            Some(crate::meerkat_machine::dsl::Generation::from(1)),
+            Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                "persistent-stage-refusal-epoch".to_string(),
+            )),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )
+        .expect("persistent fixture installs registered runtime authority");
+    (
+        Arc::new(tokio::sync::Mutex::new(DriverEntry::Persistent(persistent))),
+        store,
+        runtime_id,
+    )
+}
+
+async fn drive_stage_refusal_to_terminal(driver: &SharedDriver, input_id: &InputId) -> RunId {
+    for _ in 0..8 {
+        let run_id = RunId::new();
+        let outcome = prepare_runtime_loop_batch_start(
+            driver,
+            run_id.clone(),
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![
+                input_id.clone(),
+                InputId::new(),
+            ]),
+        )
+        .await
+        .expect("staging refusal remains a typed non-fatal outcome");
+        let crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
+            abandoned_input_ids,
+            ..
+        } = outcome
+        else {
+            panic!("an unstageable test batch must be refused");
+        };
+        if abandoned_input_ids == [input_id.clone()] {
+            return run_id;
+        }
+    }
+    panic!("generated staging-attempt cap did not terminalize the input");
+}
+
+#[tokio::test]
+async fn stage_refusal_stages_one_linked_nondirected_terminal_completion() {
+    let driver = stage_refusal_terminal_driver("stage-refusal-nondirected-carrier");
+    let (input, input_id) =
+        interrupt_yielding_peer_input("nondirected input that never starts", None);
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("input admission")
+            .is_accepted()
+    );
+
+    let run_id = drive_stage_refusal_to_terminal(&driver, &input_id).await;
+    let entry = driver.lock().await;
+    let batches = entry
+        .input_terminal_completion_recovery_batches()
+        .await
+        .expect("terminal completion carrier must remain recoverable");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].input_ids, vec![input_id.clone()]);
+    assert_eq!(
+        batches[0].batch_key,
+        crate::input_state::InputTerminalCompletionBatchKey::Run { run_id }
+    );
+    assert!(
+        !batches[0].has_interaction_terminal_outbox,
+        "nondirected input must not fabricate an interaction outbox"
+    );
+}
+
+#[tokio::test]
+async fn stage_refusal_stages_directed_outbox_from_the_completion_witness() {
+    let driver = stage_refusal_terminal_driver("stage-refusal-directed-carrier");
+    let (input, input_id) =
+        directed_interrupt_yielding_peer_input("directed input that never starts");
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("directed input admission")
+            .is_accepted()
+    );
+
+    let run_id = drive_stage_refusal_to_terminal(&driver, &input_id).await;
+    let mut entry = driver.lock().await;
+    let completion_batches = entry
+        .input_terminal_completion_recovery_batches()
+        .await
+        .expect("completion carrier");
+    let interaction_batches = entry
+        .interaction_terminal_recovery_batches()
+        .await
+        .expect("directed publication carrier");
+    assert_eq!(completion_batches.len(), 1);
+    assert_eq!(interaction_batches.len(), 1);
+    assert_eq!(
+        completion_batches[0].batch_key,
+        crate::input_state::InputTerminalCompletionBatchKey::Run {
+            run_id: run_id.clone()
+        }
+    );
+    assert_eq!(
+        interaction_batches[0].batch_key,
+        crate::input_state::InteractionTerminalBatchKey::Run { run_id }
+    );
+    assert_eq!(
+        interaction_batches[0].input_ids,
+        completion_batches[0].input_ids
+    );
+}
+
+#[tokio::test]
+async fn persistent_stage_refusal_commits_terminal_and_delivery_obligations_atomically() {
+    let (driver, store, runtime_id) =
+        persistent_stage_refusal_terminal_driver("persistent-stage-refusal-atomic");
+    let (input, input_id) =
+        directed_interrupt_yielding_peer_input("persistent directed input that never starts");
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("directed input admission")
+            .is_accepted()
+    );
+
+    drive_stage_refusal_to_terminal(&driver, &input_id).await;
+    let durable = crate::store::RuntimeStore::load_input_states_strict(store.as_ref(), &runtime_id)
+        .await
+        .expect("load exact durable input rows");
+    let row = durable
+        .into_iter()
+        .find(|row| row.state.input_id == input_id)
+        .expect("terminal input remains durably inspectable");
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+        })
+    );
+    assert!(
+        row.state.terminal_completion.is_some(),
+        "the exact completion recipient carrier must commit with terminality"
+    );
+    assert!(
+        row.state.interaction_terminal_outbox.is_some(),
+        "the directed publication obligation must commit with terminality"
+    );
+    let durable_runtime_state = crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+        .await
+        .expect("load durable runtime lifecycle")
+        .expect("stage-refusal commit writes runtime lifecycle");
+    assert_ne!(
+        durable_runtime_state,
+        RuntimeState::Running,
+        "run rollback must commit atomically with terminal input carriers"
+    );
+}
+
+#[tokio::test]
+async fn failed_stage_refusal_commit_publishes_none_of_the_terminal_bundle() {
+    let (driver, store, runtime_id) =
+        persistent_stage_refusal_terminal_driver("persistent-stage-refusal-failure");
+    let (input, input_id) =
+        directed_interrupt_yielding_peer_input("failed atomic stage-refusal commit");
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("directed input admission")
+            .is_accepted()
+    );
+
+    for _ in 0..3 {
+        let run_id = RunId::new();
+        let outcome = prepare_runtime_loop_batch_start(
+            &driver,
+            run_id,
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![
+                input_id.clone(),
+                InputId::new(),
+            ]),
+        )
+        .await
+        .expect("pre-terminal refusal remains retryable");
+        assert!(matches!(
+            outcome,
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
+                ref abandoned_input_ids,
+                ..
+            } if abandoned_input_ids.is_empty()
+        ));
+    }
+
+    store.fail_next_machine_lifecycle_commit();
+    let error = prepare_runtime_loop_batch_start(
+        &driver,
+        RunId::new(),
+        crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![
+            input_id.clone(),
+            InputId::new(),
+        ]),
+    )
+    .await
+    .expect_err("failed atomic commit must not report a terminal delivery");
+    assert!(
+        error
+            .to_string()
+            .contains("unstageable queued input resolution")
+    );
+
+    let durable = crate::store::RuntimeStore::load_input_states_strict(store.as_ref(), &runtime_id)
+        .await
+        .expect("load durable input after rejected commit");
+    let row = durable
+        .into_iter()
+        .find(|row| row.state.input_id == input_id)
+        .expect("input remains durable after rejected commit");
+    assert_eq!(
+        row.seed.phase,
+        crate::input_state::InputLifecycleState::Queued
+    );
+    assert!(row.seed.terminal_outcome.is_none());
+    assert!(row.state.terminal_completion.is_none());
+    assert!(row.state.interaction_terminal_outbox.is_none());
+}
+
+async fn complete_prior_run_for_stage_refusal_test(driver: &SharedDriver) {
+    let run_id = RunId::new();
+    let mut entry = driver.lock().await;
+    crate::meerkat_machine::driver::machine_begin_run(&mut entry, run_id.clone())
+        .expect("registered session admits a prior run");
+    {
+        let authority = entry.shared_dsl_authority();
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RunCompleted {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
+            },
+        )
+        .expect("prior run reaches generated completion");
+    }
+    {
+        let authority = entry.shared_dsl_authority();
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveRuntimeCompletionResult {
+                run_id: Some(crate::meerkat_machine::dsl::RunId::from_domain(&run_id)),
+                terminal:
+                    crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RunResult,
+                finalization:
+                    crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            },
+        )
+        .expect("prior run resolves its generated completion");
+    }
+    crate::meerkat_machine::driver::machine_apply_run_return_projection(
+        &mut entry,
+        &run_id,
+        crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
+    )
+    .expect("prior run returns its runtime binding");
+}
+
+#[tokio::test]
+async fn stage_refusal_terminal_remains_recoverable_after_a_prior_completed_turn() {
+    let driver = stage_refusal_terminal_driver("stage-refusal-after-prior-turn");
+    complete_prior_run_for_stage_refusal_test(&driver).await;
+    let (input, input_id) =
+        directed_interrupt_yielding_peer_input("directed input after a prior turn");
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("directed input admission")
+            .is_accepted()
+    );
+
+    let run_id = drive_stage_refusal_to_terminal(&driver, &input_id).await;
+    let mut entry = driver.lock().await;
+    let mut batches = entry
+        .interaction_terminal_recovery_batches()
+        .await
+        .unwrap_or_else(|error| {
+            let authority = entry.shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!(
+                "prior-run terminal facts must not block exact carrier recovery: {error}; \
+                 requested_run={run_id} result_run={:?} result_resolved={} turn_terminal_run={:?} outcome={:?} cause={:?}",
+                authority.state().runtime_completion_result_run_id,
+                authority.state().runtime_completion_result_resolved,
+                authority.state().turn_terminal_run_id,
+                authority.state().terminal_outcome,
+                authority.state().terminal_cause_kind,
+            )
+        });
+    assert_eq!(batches.len(), 1);
+    let batch = batches.remove(0);
+    assert_eq!(batch.input_ids, vec![input_id.clone()]);
+    crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
+        &entry,
+        &run_id,
+        batch.terminal_recovery,
+    )
+    .expect("recover exact stage-refusal terminal correlation");
+    assert!(
+        crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
+            &entry,
+            &run_id,
+            crate::input_state::RuntimeCompletionTerminalRecovery::Cancelled,
+        )
+        .is_err(),
+        "an open recovery correlation must reject a contradictory terminal overwrite"
+    );
+    let authority = crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+        &entry,
+        Some(&run_id),
+        batch.terminal_observation,
+        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .expect("resolve the generated stage-refusal terminal");
+    let witness = entry
+        .input_terminal_completion_authorization_witness(&batch.input_ids)
+        .expect("exact terminal completion witness");
+    let bundle = crate::completion::authorize_runtime_terminal_bundle(
+        &batch.interaction_ids,
+        batch.terminal.as_ref(),
+        authority,
+        witness,
+        batch.completion_error_metadata.clone(),
+        None,
+    )
+    .expect("authorize one terminal bundle");
+    let events = bundle.interaction_events().to_vec();
+    assert!(matches!(
+        events.as_slice(),
+        [meerkat_core::event::AgentEvent::InteractionFailed { interaction_id, .. }]
+            if interaction_id.0 == input_id.0
+    ));
+    entry
+        .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+        .await
+        .expect("finalize exact completion receipt");
+    entry
+        .finalize_interaction_terminal_outboxes(
+            &input_id,
+            &events,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
+        .await
+        .expect("finalize exact directed terminal");
+    let receipts = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                event,
+                u64::try_from(index).expect("receipt index") + 1,
+            )
+            .expect("exact terminal publication receipt")
+        })
+        .collect::<Vec<_>>();
+    entry
+        .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
+        .await
+        .expect("commit publication receipt");
+    assert!(
+        entry
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("post-publication recovery scan")
+            .is_empty(),
+        "a published terminal must not be offered for duplicate delivery"
+    );
+    drop(entry);
+
+    let mut completions = crate::completion::CompletionRegistry::new();
+    let handle = completions.register(input_id.clone());
+    completions.resolve_authorized_runtime_terminal_bundle([input_id], bundle);
+    let completion = handle
+        .try_wait_with_terminal_outcome()
+        .await
+        .expect("directed waiter receives the published terminal");
+    assert_eq!(
+        completion.input_terminal_outcome(),
+        Some(&crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+        })
+    );
+}
+
+#[tokio::test]
+async fn legacy_waiter_api_remains_source_and_behavior_compatible() {
+    let handle = crate::completion::CompletionHandle::already_runtime_apply_failed(
+        "runtime apply failed".to_string(),
+        meerkat_core::TurnErrorMetadata::runtime_apply_failure("runtime apply failed"),
+    )
+    .expect("pre-resolved legacy completion");
+    assert!(matches!(
+        handle.try_wait().await,
+        Ok(crate::completion::CompletionOutcome::AbandonedWithError { .. })
+    ));
+}
+
 #[tokio::test]
 async fn modeled_meerkat_accept_with_completion_running_peer_interrupt_signal_matches_runtime() {
     let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;

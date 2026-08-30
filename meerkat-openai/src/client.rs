@@ -172,80 +172,10 @@ fn project_openai_tool_result(
     message: meerkat_core::ReplayMessageIndex,
     result_index: meerkat_core::ReplayToolResultIndex,
     result: &ToolResult,
-    image_tool_results: bool,
 ) -> Result<ToolResult, LlmError> {
-    if result.has_video() {
-        return Err(invalid_replay(
-            "video blocks are not supported in OpenAI tool results",
-        ));
-    }
-    if !image_tool_results {
-        let mut projected_blocks = Vec::with_capacity(result.content.len());
-        for (block_index, block) in result.content.iter().enumerate() {
-            let subject = meerkat_core::ReplaySubject::ToolResultContent {
-                message,
-                result: result_index,
-                block: meerkat_core::ReplayToolResultContentIndex(block_index),
-            };
-            let projected = match replay_application
-                .next(subject)
-                .map_err(|error| invalid_replay(error.to_string()))?
-            {
-                meerkat_core::ReplayDisposition::Preserve => block.clone(),
-                meerkat_core::ReplayDisposition::LowerToText => ContentBlock::Text {
-                    text: block.text_projection().into_owned(),
-                },
-                disposition => {
-                    return Err(invalid_replay(format!(
-                        "OpenAI replay cannot apply tool-result disposition {disposition:?}"
-                    )));
-                }
-            };
-            replay_application
-                .record_content(subject, block, &projected)
-                .map_err(|error| invalid_replay(error.to_string()))?;
-            projected_blocks.push(projected);
-        }
-        return Ok(ToolResult::new(
-            result.tool_use_id.clone(),
-            meerkat_core::types::text_content(&projected_blocks),
-            result.is_error,
-        ));
-    }
-    Ok(ToolResult::with_blocks(
-        result.tool_use_id.clone(),
-        result
-            .content
-            .iter()
-            .enumerate()
-            .map(|(block_index, block)| {
-                let subject = meerkat_core::ReplaySubject::ToolResultContent {
-                    message,
-                    result: result_index,
-                    block: meerkat_core::ReplayToolResultContentIndex(block_index),
-                };
-                let projected = match replay_application
-                    .next(subject)
-                    .map_err(|error| invalid_replay(error.to_string()))?
-                {
-                    meerkat_core::ReplayDisposition::Preserve => block.clone(),
-                    meerkat_core::ReplayDisposition::LowerToText => ContentBlock::Text {
-                        text: block.text_projection().into_owned(),
-                    },
-                    disposition => {
-                        return Err(invalid_replay(format!(
-                            "OpenAI replay cannot apply tool-result disposition {disposition:?}"
-                        )));
-                    }
-                };
-                replay_application
-                    .record_content(subject, block, &projected)
-                    .map_err(|error| invalid_replay(error.to_string()))?;
-                Ok(projected)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        result.is_error,
-    ))
+    replay_application
+        .project_tool_result(message, result_index, result)
+        .map_err(|error| invalid_replay(error.to_string()))
 }
 
 fn openai_reasoning_replayable(
@@ -470,6 +400,19 @@ pub(crate) fn project_openai_replay_messages_for_target(
             image_input,
             false,
             image_tool_results,
+            if image_tool_results {
+                meerkat_core::ReplayToolResultProjection::PreserveBlocks
+            } else {
+                meerkat_core::ReplayToolResultProjection::CollapseToText
+            },
+            match mode {
+                OpenAiReplayProjectionMode::Responses => {
+                    meerkat_core::ReplayReasoningProjection::ProviderNative
+                }
+                OpenAiReplayProjectionMode::ChatCompletions => {
+                    meerkat_core::ReplayReasoningProjection::Omit
+                }
+            },
         ),
     )
     .map_err(|error| invalid_replay(error.to_string()))?;
@@ -477,12 +420,19 @@ pub(crate) fn project_openai_replay_messages_for_target(
 
     for (message_index, message) in messages.iter().enumerate() {
         let message_index = meerkat_core::ReplayMessageIndex(message_index);
+        if let Message::SystemNotice(notice) = message {
+            let projected_notice = replay_application
+                .project_system_notice(message_index, notice)
+                .map_err(|error| invalid_replay(error.to_string()))?;
+            projected.push(Message::SystemNotice(projected_notice));
+            continue;
+        }
         replay_application
             .record_message(
                 meerkat_core::ReplaySubject::Message(message_index),
                 message,
                 match message {
-                    Message::System(_) | Message::SystemNotice(_) => Some(message),
+                    Message::System(_) => Some(message),
                     _ => None,
                 },
             )
@@ -501,7 +451,6 @@ pub(crate) fn project_openai_replay_messages_for_target(
                         message_index,
                         meerkat_core::ReplayToolResultIndex(result_index),
                         result,
-                        image_tool_results,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -513,7 +462,8 @@ pub(crate) fn project_openai_replay_messages_for_target(
         }
 
         let next_message = match message {
-            Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
+            Message::System(_) => Some(message.clone()),
+            Message::SystemNotice(_) => unreachable!("handled above"),
             Message::User(user) => Some(Message::User(UserMessage {
                 content: project_openai_content_blocks(
                     &mut replay_application,
@@ -749,7 +699,7 @@ impl OpenAiClient {
     }
 
     /// Build request body for OpenAI Responses API
-    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let author_explicit_breakpoints = openai_tag(request).is_some_and(|tag| {
             tag.prompt_cache_enabled != Some(false)
                 && tag.prompt_cache_options.is_some_and(|options| {
@@ -8044,7 +7994,7 @@ mod tests {
         };
 
         let client = OpenAiClient::new("test-key".to_string());
-        let request = LlmRequest::new(
+        let mut request = LlmRequest::new(
             "gpt-5.4",
             vec![Message::SystemNotice(SystemNoticeMessage::with_block(
                 SystemNoticeKind::Comms,
@@ -8076,6 +8026,9 @@ mod tests {
                 },
             ))],
         );
+        request.messages = client
+            .project_replay_messages(&request.messages)
+            .expect("project system notice");
 
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input array");

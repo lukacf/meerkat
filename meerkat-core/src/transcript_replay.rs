@@ -1,6 +1,9 @@
 //! Provider-neutral replay planning and verified adapter lowering.
 
-use crate::{AssistantBlock, ContentBlock, Message, ProviderMeta};
+use crate::{
+    AssistantBlock, ContentBlock, Message, ProviderMeta, SystemNoticeBlock, SystemNoticeMessage,
+    ToolResult,
+};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,6 +16,10 @@ pub struct ReplayUserContentIndex(pub usize);
 pub struct ReplayToolResultIndex(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayToolResultContentIndex(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReplaySystemNoticeBlockIndex(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReplaySystemNoticeContentIndex(pub usize);
 
 /// The provider wire grammar that receives replay, independently of account
 /// provider identity. Self-hosted and Copilot OpenAI-compatible endpoints use
@@ -84,6 +91,15 @@ pub enum ReplaySubject {
         result: ReplayToolResultIndex,
         block: ReplayToolResultContentIndex,
     },
+    ToolResult {
+        message: ReplayMessageIndex,
+        result: ReplayToolResultIndex,
+    },
+    SystemNoticeContent {
+        message: ReplayMessageIndex,
+        notice_block: ReplaySystemNoticeBlockIndex,
+        content_block: ReplaySystemNoticeContentIndex,
+    },
     ProviderMetadata {
         message: ReplayMessageIndex,
         block: ReplayAssistantBlockIndex,
@@ -99,6 +115,7 @@ pub enum ReplayCapability {
 pub enum ReplayDisposition {
     Preserve,
     LowerToText,
+    CollapseToText,
     Omit,
     /// The provider adapter owns wire-specific replay legality.
     ProviderNative,
@@ -116,6 +133,21 @@ pub struct ReplayTarget {
     pub image_input: bool,
     pub inline_video: bool,
     pub image_tool_results: bool,
+    pub tool_result_projection: ReplayToolResultProjection,
+    pub reasoning_projection: ReplayReasoningProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayToolResultProjection {
+    PreserveBlocks,
+    CollapseToText,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayReasoningProjection {
+    ProviderNative,
+    LowerToText,
+    Omit,
 }
 
 impl ReplayTarget {
@@ -125,12 +157,16 @@ impl ReplayTarget {
         image_input: bool,
         inline_video: bool,
         image_tool_results: bool,
+        tool_result_projection: ReplayToolResultProjection,
+        reasoning_projection: ReplayReasoningProjection,
     ) -> Self {
         Self {
             wire_family,
             image_input,
             inline_video,
             image_tool_results,
+            tool_result_projection,
+            reasoning_projection,
         }
     }
 }
@@ -230,7 +266,9 @@ impl ReplayApplication<'_> {
         let valid = match disposition {
             ReplayDisposition::Preserve => projected == source,
             ReplayDisposition::LowerToText => is_text_projection(source, projected),
-            ReplayDisposition::ProviderNative | ReplayDisposition::Omit => false,
+            ReplayDisposition::CollapseToText
+            | ReplayDisposition::ProviderNative
+            | ReplayDisposition::Omit => false,
         };
         if valid {
             Ok(())
@@ -240,6 +278,120 @@ impl ReplayApplication<'_> {
                 disposition,
             })
         }
+    }
+
+    /// Build and validate one complete tool result, including provider-required
+    /// collapse of multiple canonical blocks into one text payload.
+    pub fn project_tool_result(
+        &mut self,
+        message: ReplayMessageIndex,
+        result_index: ReplayToolResultIndex,
+        source: &ToolResult,
+    ) -> Result<ToolResult, ReplayPlanError> {
+        let mut projected_blocks = Vec::with_capacity(source.content.len());
+        for (block_index, block) in source.content.iter().enumerate() {
+            let subject = ReplaySubject::ToolResultContent {
+                message,
+                result: result_index,
+                block: ReplayToolResultContentIndex(block_index),
+            };
+            let projected = match self.next(subject)? {
+                ReplayDisposition::Preserve => block.clone(),
+                ReplayDisposition::LowerToText => ContentBlock::Text {
+                    text: block.text_projection().into_owned(),
+                },
+                disposition => {
+                    return Err(ReplayPlanError::ProjectionMismatch {
+                        subject,
+                        disposition,
+                    });
+                }
+            };
+            self.record_content(subject, block, &projected)?;
+            projected_blocks.push(projected);
+        }
+
+        let subject = ReplaySubject::ToolResult {
+            message,
+            result: result_index,
+        };
+        let disposition = self.consume(subject)?;
+        let content = match disposition {
+            ReplayDisposition::ProviderNative => projected_blocks,
+            ReplayDisposition::CollapseToText => {
+                ContentBlock::text_vec(crate::types::text_content(&projected_blocks))
+            }
+            _ => {
+                return Err(ReplayPlanError::ProjectionMismatch {
+                    subject,
+                    disposition,
+                });
+            }
+        };
+        Ok(ToolResult::with_blocks(
+            source.tool_use_id.clone(),
+            content,
+            source.is_error,
+        ))
+    }
+
+    pub fn project_system_notice(
+        &mut self,
+        message: ReplayMessageIndex,
+        notice: &SystemNoticeMessage,
+    ) -> Result<SystemNoticeMessage, ReplayPlanError> {
+        self.consume(ReplaySubject::Message(message))?;
+        let mut projected = notice.clone();
+        for (notice_block_index, (source_block, projected_block)) in notice
+            .blocks
+            .iter()
+            .zip(projected.blocks.iter_mut())
+            .enumerate()
+        {
+            let (source_content, projected_content) = match (source_block, projected_block) {
+                (
+                    SystemNoticeBlock::Comms {
+                        content: source, ..
+                    },
+                    SystemNoticeBlock::Comms {
+                        content: projected, ..
+                    },
+                )
+                | (
+                    SystemNoticeBlock::ExternalEvent {
+                        content: source, ..
+                    },
+                    SystemNoticeBlock::ExternalEvent {
+                        content: projected, ..
+                    },
+                ) => (source, projected),
+                _ => continue,
+            };
+            let mut next_content = Vec::with_capacity(source_content.len());
+            for (content_index, source) in source_content.iter().enumerate() {
+                let subject = ReplaySubject::SystemNoticeContent {
+                    message,
+                    notice_block: ReplaySystemNoticeBlockIndex(notice_block_index),
+                    content_block: ReplaySystemNoticeContentIndex(content_index),
+                };
+                let next = match self.next(subject)? {
+                    ReplayDisposition::Preserve => source.clone(),
+                    ReplayDisposition::LowerToText => ContentBlock::Text {
+                        text: source.text_projection().into_owned(),
+                    },
+                    disposition => {
+                        return Err(ReplayPlanError::ProjectionMismatch {
+                            subject,
+                            disposition,
+                        });
+                    }
+                };
+                self.record_content(subject, source, &next)?;
+                next_content.push(next);
+            }
+            *projected_content = next_content;
+        }
+        Ok(projected)
     }
 
     pub fn record_assistant(
@@ -260,6 +412,7 @@ impl ReplayApplication<'_> {
             ReplayDisposition::LowerToText => projected.is_some_and(|block| {
                 matches!(block, AssistantBlock::Text { text, meta: None } if *text == source_text_projection(source))
             }),
+            ReplayDisposition::CollapseToText => false,
             ReplayDisposition::Omit => projected.is_none(),
             ReplayDisposition::ProviderNative => native_assistant_outcome(source, projected),
         };
@@ -290,7 +443,9 @@ impl ReplayApplication<'_> {
                     projected.and_then(assistant_meta).is_none()
                 }
             }
-            ReplayDisposition::Preserve | ReplayDisposition::LowerToText => false,
+            ReplayDisposition::Preserve
+            | ReplayDisposition::LowerToText
+            | ReplayDisposition::CollapseToText => false,
         };
         if valid {
             Ok(())
@@ -315,14 +470,14 @@ impl ReplayApplication<'_> {
 
 impl ReplayPlan {
     pub fn build(messages: &[Message], target: ReplayTarget) -> Result<Self, ReplayPlanError> {
-        validate_source_tool_adjacency(messages)?;
         let mut entries = Vec::new();
         for (message_index, message) in messages.iter().enumerate() {
             let index = ReplayMessageIndex(message_index);
             entries.push(ReplayPlanEntry {
                 subject: ReplaySubject::Message(index),
                 disposition: match message {
-                    Message::System(_) | Message::SystemNotice(_) => ReplayDisposition::Preserve,
+                    Message::System(_) => ReplayDisposition::Preserve,
+                    Message::SystemNotice(_) => ReplayDisposition::ProviderNative,
                     _ => ReplayDisposition::ProviderNative,
                 },
             });
@@ -346,7 +501,7 @@ impl ReplayPlan {
                                 message: index,
                                 block: block_index,
                             },
-                            disposition: assistant_disposition(assistant),
+                            disposition: assistant_disposition(assistant, target),
                         });
                         if let Some(meta) = assistant_meta(assistant) {
                             entries.push(ReplayPlanEntry {
@@ -384,9 +539,42 @@ impl ReplayPlan {
                                 disposition: content_disposition(content, target, true),
                             });
                         }
+                        entries.push(ReplayPlanEntry {
+                            subject: ReplaySubject::ToolResult {
+                                message: index,
+                                result: ReplayToolResultIndex(result),
+                            },
+                            disposition: match target.tool_result_projection {
+                                ReplayToolResultProjection::PreserveBlocks => {
+                                    ReplayDisposition::ProviderNative
+                                }
+                                ReplayToolResultProjection::CollapseToText => {
+                                    ReplayDisposition::CollapseToText
+                                }
+                            },
+                        });
                     }
                 }
-                Message::System(_) | Message::SystemNotice(_) => {}
+                Message::SystemNotice(notice) => {
+                    for (notice_block, block) in notice.blocks.iter().enumerate() {
+                        let content = match block {
+                            SystemNoticeBlock::Comms { content, .. }
+                            | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+                            _ => continue,
+                        };
+                        for (content_block, content) in content.iter().enumerate() {
+                            entries.push(ReplayPlanEntry {
+                                subject: ReplaySubject::SystemNoticeContent {
+                                    message: index,
+                                    notice_block: ReplaySystemNoticeBlockIndex(notice_block),
+                                    content_block: ReplaySystemNoticeContentIndex(content_block),
+                                },
+                                disposition: content_disposition(content, target, false),
+                            });
+                        }
+                    }
+                }
+                Message::System(_) => {}
             }
         }
         Ok(Self { target, entries })
@@ -418,10 +606,10 @@ impl ReplayPlan {
         application.finish()?;
         let source_system = source
             .iter()
-            .filter(|message| matches!(message, Message::System(_) | Message::SystemNotice(_)));
+            .filter(|message| matches!(message, Message::System(_)));
         let projected_system = projected
             .iter()
-            .filter(|message| matches!(message, Message::System(_) | Message::SystemNotice(_)));
+            .filter(|message| matches!(message, Message::System(_)));
         if !source_system.eq(projected_system) {
             return Err(ReplayPlanError::PreservedSystemMessageMismatch);
         }
@@ -429,15 +617,27 @@ impl ReplayPlan {
     }
 }
 
-fn assistant_disposition(block: &AssistantBlock) -> ReplayDisposition {
+fn assistant_disposition(block: &AssistantBlock, target: ReplayTarget) -> ReplayDisposition {
     match block {
         AssistantBlock::Text { text, .. } if text.is_empty() => ReplayDisposition::Omit,
         AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => ReplayDisposition::Preserve,
         AssistantBlock::Transcript { text, .. } if text.is_empty() => ReplayDisposition::Omit,
         AssistantBlock::Transcript { .. } => ReplayDisposition::LowerToText,
-        AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => {
-            ReplayDisposition::ProviderNative
+        AssistantBlock::Reasoning { text, .. }
+            if text.is_empty()
+                && matches!(
+                    target.reasoning_projection,
+                    ReplayReasoningProjection::LowerToText
+                ) =>
+        {
+            ReplayDisposition::Omit
         }
+        AssistantBlock::Reasoning { .. } => match target.reasoning_projection {
+            ReplayReasoningProjection::ProviderNative => ReplayDisposition::ProviderNative,
+            ReplayReasoningProjection::LowerToText => ReplayDisposition::LowerToText,
+            ReplayReasoningProjection::Omit => ReplayDisposition::Omit,
+        },
+        AssistantBlock::ServerToolContent { .. } => ReplayDisposition::ProviderNative,
         AssistantBlock::Image { .. } => ReplayDisposition::Omit,
     }
 }
@@ -478,6 +678,7 @@ fn is_text_projection(source: &ContentBlock, projected: &ContentBlock) -> bool {
 fn source_text_projection(source: &AssistantBlock) -> String {
     match source {
         AssistantBlock::Transcript { text, .. } => text.clone(),
+        AssistantBlock::Reasoning { text, .. } => format!("[Reasoning: {text}]"),
         _ => String::new(),
     }
 }
@@ -530,15 +731,7 @@ fn assistant_payload_eq(source: &AssistantBlock, projected: Option<&AssistantBlo
 }
 
 fn native_assistant_outcome(source: &AssistantBlock, projected: Option<&AssistantBlock>) -> bool {
-    projected.is_none()
-        || assistant_payload_eq(source, projected)
-        || matches!(
-            (source, projected),
-            (
-                AssistantBlock::Reasoning { .. },
-                Some(AssistantBlock::Text { meta: None, .. })
-            )
-        )
+    projected.is_none() || assistant_payload_eq(source, projected)
 }
 
 fn tool_use_ids(message: &Message) -> Vec<&str> {
@@ -561,20 +754,9 @@ fn has_duplicate_ids(ids: &[&str]) -> bool {
 }
 
 fn validate_tool_adjacency(messages: &[Message]) -> Result<(), ReplayPlanError> {
-    validate_adjacency(messages, false)
-}
-
-fn validate_source_tool_adjacency(messages: &[Message]) -> Result<(), ReplayPlanError> {
-    validate_adjacency(messages, true)
-}
-
-fn validate_adjacency(messages: &[Message], allow_omitted: bool) -> Result<(), ReplayPlanError> {
     let mut pending: Option<(ReplayMessageIndex, Vec<&str>)> = None;
     for (index, message) in messages.iter().enumerate() {
         let message_index = ReplayMessageIndex(index);
-        if allow_omitted && pending.is_some() && source_message_is_replay_omitted(message) {
-            continue;
-        }
         if let Message::ToolResults { results, .. } = message {
             let Some((_, expected)) = pending.take() else {
                 return Err(ReplayPlanError::ToolResultsWithoutToolUse {
@@ -617,17 +799,6 @@ fn validate_adjacency(messages: &[Message], allow_omitted: bool) -> Result<(), R
         .unwrap_or(Ok(()))
 }
 
-fn source_message_is_replay_omitted(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::BlockAssistant(assistant)
-            if assistant.blocks.iter().all(|block| matches!(
-                assistant_disposition(block),
-                ReplayDisposition::Omit | ReplayDisposition::ProviderNative
-            ))
-    )
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -645,7 +816,14 @@ mod tests {
         ]))];
         let plan = ReplayPlan::build(
             &messages,
-            ReplayTarget::new(ReplayWireFamily::OpenAi, false, false, false),
+            ReplayTarget::new(
+                ReplayWireFamily::OpenAi,
+                false,
+                false,
+                false,
+                ReplayToolResultProjection::CollapseToText,
+                ReplayReasoningProjection::Omit,
+            ),
         )
         .unwrap_or_else(|error| panic!("test replay plan: {error}"));
         let mut application = plan.application();
@@ -687,7 +865,14 @@ mod tests {
         ))];
         let plan = ReplayPlan::build(
             &messages,
-            ReplayTarget::new(ReplayWireFamily::Anthropic, true, false, true),
+            ReplayTarget::new(
+                ReplayWireFamily::Anthropic,
+                true,
+                false,
+                true,
+                ReplayToolResultProjection::PreserveBlocks,
+                ReplayReasoningProjection::ProviderNative,
+            ),
         )
         .unwrap_or_else(|error| panic!("test replay plan: {error}"));
         let mut application = plan.application();
@@ -723,5 +908,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn empty_reasoning_is_omitted_when_target_lowers_reasoning_to_text() {
+        let messages = [Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Reasoning {
+                text: String::new(),
+                meta: Some(Box::new(ProviderMeta::AnthropicRedacted {
+                    data: "encrypted".to_string(),
+                })),
+            }],
+            StopReason::EndTurn,
+        ))];
+        let plan = ReplayPlan::build(
+            &messages,
+            ReplayTarget::new(
+                ReplayWireFamily::Gemini,
+                true,
+                true,
+                true,
+                ReplayToolResultProjection::PreserveBlocks,
+                ReplayReasoningProjection::LowerToText,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("test replay plan: {error}"));
+        assert_eq!(
+            plan.entries()
+                .find(|entry| matches!(entry.subject, ReplaySubject::AssistantBlock { .. }))
+                .map(|entry| entry.disposition),
+            Some(ReplayDisposition::Omit)
+        );
     }
 }

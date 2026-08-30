@@ -1774,8 +1774,16 @@ mod tests {
     fn chat_completions_system_notice_with_image_emits_typed_image_part() {
         use meerkat_core::{ContentBlock, ImageData, SystemNoticeKind, SystemNoticeMessage};
 
-        let messages = OpenAiCompatibleClient::convert_to_chat_messages(&[Message::SystemNotice(
-            SystemNoticeMessage::with_block(
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "https://example.test".to_string(),
+            None,
+            options(true, true, true, true),
+        )
+        .with_image_input_support(true);
+        let projected = client
+            .project_replay_messages(&[Message::SystemNotice(SystemNoticeMessage::with_block(
                 SystemNoticeKind::ExternalEvent,
                 None,
                 SystemNoticeBlock::ExternalEvent {
@@ -1791,9 +1799,10 @@ mod tests {
                         },
                     }],
                 },
-            ),
-        )])
-        .expect("convert chat messages");
+            ))])
+            .expect("project chat messages");
+        let messages =
+            OpenAiCompatibleClient::convert_to_chat_messages(&projected).expect("convert chat");
 
         assert_eq!(messages[0]["role"], "user");
         let content = messages[0]["content"].as_array().expect("content array");
@@ -3193,5 +3202,123 @@ mod tests {
             user.content.as_slice(),
             [ContentBlock::Text { .. }]
         ));
+    }
+
+    #[test]
+    fn non_vision_compatible_modes_strip_nested_notice_images_from_serialized_requests() {
+        use meerkat_core::{SystemNoticeKind, SystemNoticeMessage};
+
+        for mode in [
+            OpenAiCompatibleMode::Responses,
+            OpenAiCompatibleMode::ChatCompletions,
+        ] {
+            let client = OpenAiCompatibleClient::new_with_options(
+                mode,
+                "remote-model".to_string(),
+                "https://example.test".to_string(),
+                None,
+                options(true, true, true, true),
+            )
+            .with_image_input_support(false);
+            let mut request = LlmRequest::new(
+                "remote-model",
+                vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+                    SystemNoticeKind::ExternalEvent,
+                    None,
+                    SystemNoticeBlock::ExternalEvent {
+                        source: "console".to_string(),
+                        event_type: "operator_message".to_string(),
+                        summary: None,
+                        body: Some("inspect this".to_string()),
+                        payload: None,
+                        content: vec![ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "NESTED_IMAGE_BYTES".to_string(),
+                            },
+                        }],
+                    },
+                ))],
+            );
+            request.messages = client
+                .project_replay_messages(&request.messages)
+                .expect("project non-vision notice");
+
+            let body = match mode {
+                OpenAiCompatibleMode::Responses => client
+                    .responses_delegate
+                    .as_ref()
+                    .expect("responses delegate")
+                    .build_request_body(&client.request_with_remote_model(&request))
+                    .expect("build responses body"),
+                OpenAiCompatibleMode::ChatCompletions => client
+                    .build_chat_completions_body(&request)
+                    .expect("build chat body"),
+            };
+            let encoded = serde_json::to_string(&body).expect("encode request body");
+            assert!(!encoded.contains("NESTED_IMAGE_BYTES"));
+            assert!(!encoded.contains("input_image"));
+            assert!(!encoded.contains("image_url"));
+            assert!(encoded.contains("[image: image/png]"));
+        }
+    }
+
+    #[test]
+    fn compatible_modes_serialize_the_verified_collapsed_tool_result() {
+        for mode in [
+            OpenAiCompatibleMode::Responses,
+            OpenAiCompatibleMode::ChatCompletions,
+        ] {
+            let client = OpenAiCompatibleClient::new_with_options(
+                mode,
+                "remote-model".to_string(),
+                "https://example.test".to_string(),
+                None,
+                options(true, true, true, false),
+            );
+            let mut request = LlmRequest::new(
+                "remote-model",
+                vec![
+                    Message::BlockAssistant(BlockAssistantMessage::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "call-1".to_string(),
+                            name: "lookup".to_string(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("valid tool arguments"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                    )),
+                    Message::tool_results(vec![ToolResult::with_blocks(
+                        "call-1".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "first".to_string(),
+                            },
+                            ContentBlock::Text {
+                                text: "second".to_string(),
+                            },
+                        ],
+                        false,
+                    )]),
+                ],
+            );
+            request.messages = client
+                .project_replay_messages(&request.messages)
+                .expect("project compatible tool result");
+            let body = match mode {
+                OpenAiCompatibleMode::Responses => client
+                    .responses_delegate
+                    .as_ref()
+                    .expect("responses delegate")
+                    .build_request_body(&client.request_with_remote_model(&request))
+                    .expect("build responses body"),
+                OpenAiCompatibleMode::ChatCompletions => client
+                    .build_chat_completions_body(&request)
+                    .expect("build chat body"),
+            };
+            let encoded = serde_json::to_string(&body).expect("encode request body");
+            assert!(encoded.contains("first\\nsecond"));
+        }
     }
 }

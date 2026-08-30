@@ -24,7 +24,7 @@ use meerkat_llm_core::{
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time as async_time;
@@ -86,27 +86,47 @@ fn invalid_replay(message: impl Into<String>) -> LlmError {
     }
 }
 
-fn project_gemini_content_blocks(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+fn project_gemini_content_blocks(
+    replay_application: &mut meerkat_core::ReplayApplication<'_>,
+    message: meerkat_core::ReplayMessageIndex,
+    blocks: &[ContentBlock],
+) -> Result<Vec<ContentBlock>, LlmError> {
     blocks
         .iter()
-        .map(|block| match block {
-            ContentBlock::Text { .. } => block.clone(),
-            ContentBlock::Image {
-                data: ImageData::Inline { .. },
-                ..
-            } => block.clone(),
-            ContentBlock::Video { .. } => block.clone(),
-            ContentBlock::Image { .. } => ContentBlock::Text {
-                text: block.text_projection().into_owned(),
-            },
-            _ => ContentBlock::Text {
-                text: block.text_projection().into_owned(),
-            },
+        .enumerate()
+        .map(|(block_index, block)| {
+            let subject = meerkat_core::ReplaySubject::UserContent {
+                message,
+                block: meerkat_core::ReplayUserContentIndex(block_index),
+            };
+            let projected = match replay_application
+                .next(subject)
+                .map_err(|error| invalid_replay(error.to_string()))?
+            {
+                meerkat_core::ReplayDisposition::Preserve => block.clone(),
+                meerkat_core::ReplayDisposition::LowerToText => ContentBlock::Text {
+                    text: block.text_projection().into_owned(),
+                },
+                disposition => {
+                    return Err(invalid_replay(format!(
+                        "Gemini replay cannot apply user-content disposition {disposition:?}"
+                    )));
+                }
+            };
+            replay_application
+                .record_content(subject, block, &projected)
+                .map_err(|error| invalid_replay(error.to_string()))?;
+            Ok(projected)
         })
         .collect()
 }
 
-fn project_gemini_tool_result(result: &ToolResult) -> Result<ToolResult, LlmError> {
+fn project_gemini_tool_result(
+    replay_application: &mut meerkat_core::ReplayApplication<'_>,
+    message: meerkat_core::ReplayMessageIndex,
+    result_index: meerkat_core::ReplayToolResultIndex,
+    result: &ToolResult,
+) -> Result<ToolResult, LlmError> {
     if result.has_video() {
         return Err(invalid_replay(
             "video blocks are not supported in Gemini tool results",
@@ -114,90 +134,137 @@ fn project_gemini_tool_result(result: &ToolResult) -> Result<ToolResult, LlmErro
     }
     Ok(ToolResult::with_blocks(
         result.tool_use_id.clone(),
-        project_gemini_content_blocks(&result.content),
+        result
+            .content
+            .iter()
+            .enumerate()
+            .map(|(block_index, block)| {
+                let subject = meerkat_core::ReplaySubject::ToolResultContent {
+                    message,
+                    result: result_index,
+                    block: meerkat_core::ReplayToolResultContentIndex(block_index),
+                };
+                let projected = match replay_application
+                    .next(subject)
+                    .map_err(|error| invalid_replay(error.to_string()))?
+                {
+                    meerkat_core::ReplayDisposition::Preserve => block.clone(),
+                    meerkat_core::ReplayDisposition::LowerToText => ContentBlock::Text {
+                        text: block.text_projection().into_owned(),
+                    },
+                    disposition => {
+                        return Err(invalid_replay(format!(
+                            "Gemini replay cannot apply tool-result disposition {disposition:?}"
+                        )));
+                    }
+                };
+                replay_application
+                    .record_content(subject, block, &projected)
+                    .map_err(|error| invalid_replay(error.to_string()))?;
+                Ok(projected)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         result.is_error,
     ))
 }
 
-fn project_gemini_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBlock> {
+fn project_gemini_assistant_blocks(
+    replay_application: &mut meerkat_core::ReplayApplication<'_>,
+    message: meerkat_core::ReplayMessageIndex,
+    blocks: &[AssistantBlock],
+) -> Result<Vec<AssistantBlock>, LlmError> {
     blocks
         .iter()
-        .filter_map(|block| match block {
-            AssistantBlock::Text { text, .. } if text.is_empty() => None,
-            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
-            // Spoken transcripts replay to the provider as plain text
-            // (lane provenance is a Meerkat-side fact; Gemini sees the
-            // assistant's visible output).
-            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
-            AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
-                text: text.clone(),
-                meta: None,
-            }),
-            AssistantBlock::Reasoning { text, .. } if !text.is_empty() => {
-                Some(AssistantBlock::Text {
-                    text: format!("[Reasoning: {text}]"),
+        .enumerate()
+        .map(|(block_index, block)| {
+            let subject = meerkat_core::ReplaySubject::AssistantBlock {
+                message,
+                block: meerkat_core::ReplayAssistantBlockIndex(block_index),
+            };
+            let projected = match block {
+                AssistantBlock::Text { text, .. } if text.is_empty() => None,
+                AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(
+                    meerkat_core::ReplayWireFamily::Gemini.strip_foreign_metadata(block.clone()),
+                ),
+                AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
+                AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
+                    text: text.clone(),
                     meta: None,
-                })
+                }),
+                AssistantBlock::Reasoning { text, .. } if !text.is_empty() => {
+                    Some(AssistantBlock::Text {
+                        text: format!("[Reasoning: {text}]"),
+                        meta: None,
+                    })
+                }
+                AssistantBlock::Reasoning { .. }
+                | AssistantBlock::ServerToolContent { .. }
+                | AssistantBlock::Image { .. } => None,
+                _ => {
+                    return Err(invalid_replay(
+                        "Gemini replay cannot project unknown assistant block",
+                    ));
+                }
+            };
+            replay_application
+                .record_assistant(subject, block, projected.as_ref())
+                .map_err(|error| invalid_replay(error.to_string()))?;
+            if let Some(meta) = meerkat_core::replay_provider_metadata(block) {
+                replay_application
+                    .record_provider_metadata(
+                        meerkat_core::ReplaySubject::ProviderMetadata {
+                            message,
+                            block: meerkat_core::ReplayAssistantBlockIndex(block_index),
+                        },
+                        meta,
+                        block,
+                        projected.as_ref(),
+                    )
+                    .map_err(|error| invalid_replay(error.to_string()))?;
             }
-            AssistantBlock::Reasoning { .. }
-            | AssistantBlock::ServerToolContent { .. }
-            | AssistantBlock::Image { .. } => None,
-            _ => None,
+            Ok(projected)
         })
+        .filter_map(|result| result.transpose())
         .collect()
 }
 
-fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
-    match message {
-        Message::BlockAssistant(assistant) => assistant
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                AssistantBlock::ToolUse { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => HashSet::new(),
-    }
-}
-
-fn validate_tool_results(
-    provider: &str,
-    pending: HashSet<String>,
-    results: &[ToolResult],
-) -> Result<(), LlmError> {
-    let actual: HashSet<String> = results
-        .iter()
-        .map(|result| result.tool_use_id.clone())
-        .collect();
-    if actual == pending {
-        Ok(())
-    } else {
-        Err(invalid_replay(format!(
-            "{provider} replay projection found tool results that are not adjacent to matching tool uses"
-        )))
-    }
-}
-
 fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+    let replay_plan = meerkat_core::ReplayPlan::build(
+        messages,
+        meerkat_core::ReplayTarget::new(meerkat_core::ReplayWireFamily::Gemini, true, true, true),
+    )
+    .map_err(|error| invalid_replay(error.to_string()))?;
+    let mut replay_application = replay_plan.application();
     let mut projected = Vec::with_capacity(messages.len());
-    let mut pending_tool_ids: Option<HashSet<String>> = None;
 
-    for message in messages {
+    for (message_index, message) in messages.iter().enumerate() {
+        let message_index = meerkat_core::ReplayMessageIndex(message_index);
+        replay_application
+            .record_message(
+                meerkat_core::ReplaySubject::Message(message_index),
+                message,
+                match message {
+                    Message::System(_) | Message::SystemNotice(_) => Some(message),
+                    _ => None,
+                },
+            )
+            .map_err(|error| invalid_replay(error.to_string()))?;
         if let Message::ToolResults {
             results,
             created_at,
         } = message
         {
-            let Some(pending) = pending_tool_ids.take() else {
-                return Err(invalid_replay(
-                    "Gemini replay projection found tool results without preceding tool use",
-                ));
-            };
-            validate_tool_results("Gemini", pending, results)?;
             let results = results
                 .iter()
-                .map(project_gemini_tool_result)
+                .enumerate()
+                .map(|(result_index, result)| {
+                    project_gemini_tool_result(
+                        &mut replay_application,
+                        message_index,
+                        meerkat_core::ReplayToolResultIndex(result_index),
+                        result,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             projected.push(Message::ToolResults {
                 results,
@@ -206,23 +273,25 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
             continue;
         }
 
-        if pending_tool_ids.is_some() {
-            return Err(invalid_replay(
-                "Gemini replay projection found a tool use without adjacent tool results",
-            ));
-        }
-
         let next_message = match message {
             Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
             Message::User(user) => Some(Message::User(UserMessage {
-                content: project_gemini_content_blocks(&user.content),
+                content: project_gemini_content_blocks(
+                    &mut replay_application,
+                    message_index,
+                    &user.content,
+                )?,
                 render_metadata: user.render_metadata.clone(),
                 identity: user.identity.clone(),
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
             Message::BlockAssistant(assistant) => {
-                let blocks = project_gemini_assistant_blocks(&assistant.blocks);
+                let blocks = project_gemini_assistant_blocks(
+                    &mut replay_application,
+                    message_index,
+                    &assistant.blocks,
+                )?;
                 if blocks.is_empty() {
                     None
                 } else {
@@ -238,20 +307,13 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
         };
 
         if let Some(message) = next_message {
-            let tool_ids = tool_ids_from_assistant(&message);
-            if !tool_ids.is_empty() {
-                pending_tool_ids = Some(tool_ids);
-            }
             projected.push(message);
         }
     }
 
-    if pending_tool_ids.is_some() {
-        return Err(invalid_replay(
-            "Gemini replay projection found a trailing tool use without tool results",
-        ));
-    }
-
+    replay_plan
+        .validate_projected(messages, &projected, replay_application)
+        .map_err(|error| invalid_replay(error.to_string()))?;
     Ok(projected)
 }
 
@@ -2389,6 +2451,12 @@ mod tests {
                         text: "model thought".to_string(),
                         meta: None,
                     },
+                    AssistantBlock::Reasoning {
+                        text: "foreign thought".to_string(),
+                        meta: Some(Box::new(ProviderMeta::Anthropic {
+                            signature: "signature".to_string(),
+                        })),
+                    },
                     AssistantBlock::ServerToolContent {
                         id: None,
                         kind: ServerToolKind::GoogleSearch,
@@ -2428,6 +2496,10 @@ mod tests {
                 ],
                 false,
             )]),
+            Message::SystemNotice(SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "control intent",
+            )),
         ];
 
         let projected = client.project_replay_messages(&messages)?;
@@ -2458,6 +2530,10 @@ mod tests {
             )),
             "Gemini should project reasoning into text context"
         );
+        assert!(assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::Text { text, meta: None } if text == "[Reasoning: foreign thought]"
+        )));
         assert!(
             !assistant
                 .blocks
@@ -2480,6 +2556,7 @@ mod tests {
             results[0].has_images(),
             "Gemini should retain inline image tool results"
         );
+        assert!(matches!(projected[3], Message::SystemNotice(_)));
         Ok(())
     }
 
@@ -5267,5 +5344,93 @@ mod tests {
             "functionDeclarations alone should not force toolConfig"
         );
         Ok(())
+    }
+
+    #[test]
+    fn replay_projection_rejects_duplicate_tool_use_ids() {
+        let client = GeminiClient::new("test-key".to_string());
+        let args = serde_json::value::RawValue::from_string("{}".to_string())
+            .unwrap_or_else(|error| panic!("test args: {error}"));
+        let messages = [
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::ToolUse {
+                        id: "duplicate".to_string(),
+                        name: "a".to_string(),
+                        args: args.clone(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "duplicate".to_string(),
+                        name: "b".to_string(),
+                        args,
+                        meta: None,
+                    },
+                ],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "duplicate".to_string(),
+                "result".to_string(),
+                false,
+            )]),
+        ];
+        assert!(matches!(
+            client.project_replay_messages(&messages),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_projection_rejects_duplicate_tool_result_ids() {
+        let client = GeminiClient::new("test-key".to_string());
+        let args = serde_json::value::RawValue::from_string("{}".to_string())
+            .unwrap_or_else(|error| panic!("test args: {error}"));
+        let messages = [
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "tool".to_string(),
+                    name: "a".to_string(),
+                    args,
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![
+                ToolResult::new("tool".to_string(), "first".to_string(), false),
+                ToolResult::new("tool".to_string(), "second".to_string(), false),
+            ]),
+        ];
+        assert!(matches!(
+            client.project_replay_messages(&messages),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_projection_rejects_mismatched_tool_result_id() {
+        let client = GeminiClient::new("test-key".to_string());
+        let args = serde_json::value::RawValue::from_string("{}".to_string())
+            .unwrap_or_else(|error| panic!("test args: {error}"));
+        let messages = [
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "tool".to_string(),
+                    name: "a".to_string(),
+                    args,
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "other".to_string(),
+                "result".to_string(),
+                false,
+            )]),
+        ];
+        assert!(matches!(
+            client.project_replay_messages(&messages),
+            Err(LlmError::InvalidRequest { .. })
+        ));
     }
 }

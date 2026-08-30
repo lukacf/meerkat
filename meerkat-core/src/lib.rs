@@ -97,6 +97,7 @@ pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
 pub mod tool_scope;
+pub mod transcript_replay;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod turn_terminal;
@@ -498,6 +499,12 @@ pub use tool_scope::{
     ExternalToolSurfaceStagedOp, GeneratedToolVisibilityOwner, LocalToolVisibilityOwner,
     ToolFilter, ToolScope, ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision,
     ToolScopeSnapshot, ToolScopeStageError, ToolVisibilityOwner,
+};
+pub use transcript_replay::{
+    ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition,
+    ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError, ReplaySubject, ReplayTarget,
+    ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayUserContentIndex, ReplayWireFamily,
+    replay_provider_metadata,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{

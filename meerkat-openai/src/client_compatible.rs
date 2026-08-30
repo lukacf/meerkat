@@ -1350,7 +1350,7 @@ struct ChatPromptTokensDetails {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
@@ -3094,5 +3094,64 @@ mod tests {
             value["properties"]["outer"]["properties"]["inner"]["additionalProperties"],
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn self_hosted_replay_uses_openai_wire_family_for_metadata() {
+        use meerkat_core::ProviderMeta;
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "remote-model".to_string(),
+            "https://example.test".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        assert_eq!(client.provider(), Provider::SelfHosted);
+        let messages = vec![Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Text {
+                    text: "visible".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Reasoning {
+                    text: "openai".to_string(),
+                    meta: Some(Box::new(ProviderMeta::OpenAi {
+                        id: "rs_1".to_string(),
+                        encrypted_content: Some("ciphertext".to_string()),
+                        phase: Some("reasoning".to_string()),
+                        response_id: None,
+                    })),
+                },
+                AssistantBlock::Reasoning {
+                    text: "anthropic".to_string(),
+                    meta: Some(Box::new(ProviderMeta::Anthropic {
+                        signature: "foreign".to_string(),
+                    })),
+                },
+                AssistantBlock::Reasoning {
+                    text: "gemini".to_string(),
+                    meta: Some(Box::new(ProviderMeta::Gemini {
+                        thought_signature: "foreign".to_string(),
+                    })),
+                },
+            ],
+            StopReason::EndTurn,
+        ))];
+
+        let projected = client
+            .project_replay_messages(&messages)
+            .expect("SelfHosted OpenAI-family projection");
+        let Message::BlockAssistant(assistant) = &projected[0] else {
+            panic!("expected projected assistant message");
+        };
+        assert_eq!(assistant.blocks.len(), 2);
+        assert!(
+            matches!(assistant.blocks[1], AssistantBlock::Reasoning { meta: Some(ref meta), .. } if matches!(meta.as_ref(), ProviderMeta::OpenAi { .. }))
+        );
+        assert!(assistant.blocks.iter().all(|block| !matches!(
+            block,
+            AssistantBlock::Reasoning { text, .. } if text == "anthropic" || text == "gemini"
+        )));
     }
 }

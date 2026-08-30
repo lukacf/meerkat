@@ -300,7 +300,40 @@ impl StagedInputTerminalCompletionBatch {
 struct LinkedTerminalCompletionBatch {
     input_ids: Vec<InputId>,
     owner_input_id: InputId,
+    batch_key: crate::input_state::InputTerminalCompletionBatchKey,
     candidate: Option<crate::input_state::InteractionTerminalCandidate>,
+}
+
+impl LinkedTerminalCompletionBatch {
+    fn validate_outbox_link(
+        &self,
+        outbox: &crate::input_state::InteractionTerminalOutbox,
+    ) -> Result<(), String> {
+        if !self.input_ids.contains(&outbox.input_id) {
+            return Err(format!(
+                "directed terminal outbox {} is not a recipient of its linked terminal-completion batch",
+                outbox.input_id
+            ));
+        }
+        match (&outbox.batch_key, &self.batch_key) {
+            (
+                crate::input_state::InteractionTerminalBatchKey::Run {
+                    run_id: outbox_run_id,
+                },
+                crate::input_state::InputTerminalCompletionBatchKey::Run {
+                    run_id: completion_run_id,
+                },
+            ) if outbox_run_id == completion_run_id => Ok(()),
+            (
+                crate::input_state::InteractionTerminalBatchKey::RuntimeTermination { .. },
+                crate::input_state::InputTerminalCompletionBatchKey::RuntimeTermination { .. },
+            ) => Ok(()),
+            _ => Err(
+                "directed terminal outbox scope disagrees with its linked terminal-completion batch key"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// One exact released-0.8.31 normalization unit: every row a single legacy
@@ -1102,6 +1135,7 @@ impl DriverEntry {
         Ok(LinkedTerminalCompletionBatch {
             input_ids: witness.input_ids,
             owner_input_id: completion_owner.owner_input_id,
+            batch_key: completion_owner.batch_key,
             candidate: completion_owner.candidate,
         })
     }
@@ -1125,19 +1159,10 @@ impl DriverEntry {
             &owner.candidate_digest,
             &owner.completion_input_ids_digest,
         )?;
-        let recipients = linked
-            .input_ids
-            .iter()
-            .collect::<std::collections::HashSet<_>>();
         for outbox in outboxes {
-            if !recipients.contains(&outbox.input_id) {
-                return Err(RuntimeDriverError::RecoveryCorruption {
-                    reason: format!(
-                        "directed terminal outbox {} is not a recipient of its linked terminal-completion batch",
-                        outbox.input_id
-                    ),
-                });
-            }
+            linked
+                .validate_outbox_link(outbox)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
         }
         Ok(linked)
     }
@@ -1167,6 +1192,7 @@ impl DriverEntry {
             input_ids,
             owner_input_id,
             candidate,
+            ..
         } = self.linked_terminal_completion_for_outbox_batch(outboxes)?;
         let candidate = candidate.ok_or_else(|| {
             RuntimeDriverError::RecoveryCorruption {
@@ -2770,38 +2796,29 @@ impl DriverEntry {
             validate_input_terminal_completion_batch,
         };
         let snapshot = self.pending_terminal_input_states().await?;
-        let interaction_terminal_batch_identities = snapshot
-            .iter()
-            .filter_map(|stored| {
-                stored
-                    .state
-                    .interaction_terminal_outbox
-                    .as_ref()
-                    .map(|outbox| {
-                        let batch_key = match &outbox.batch_key {
-                            crate::input_state::InteractionTerminalBatchKey::Run { run_id } => {
-                                InputTerminalCompletionBatchKey::Run {
-                                    run_id: run_id.clone(),
-                                }
-                            }
-                            crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
-                                candidate_owner_input_id,
-                            } => InputTerminalCompletionBatchKey::RuntimeTermination {
-                                owner_input_id: candidate_owner_input_id.clone(),
-                            },
-                        };
-                        (
-                            batch_key,
-                            outbox.candidate_digest.clone(),
-                            outbox.completion_input_ids_digest.clone(),
-                            matches!(
-                                &outbox.phase,
-                                crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
-                            ),
-                        )
-                    })
-            })
-            .collect::<std::collections::HashSet<_>>();
+        let mut interaction_terminal_batch_identities = std::collections::HashSet::new();
+        for stored in &snapshot {
+            let Some(outbox) = stored.state.interaction_terminal_outbox.as_ref() else {
+                continue;
+            };
+            let linked = self.linked_terminal_completion_for_outbox_owner(
+                &outbox.candidate_owner_input_id,
+                &outbox.candidate_digest,
+                &outbox.completion_input_ids_digest,
+            )?;
+            linked
+                .validate_outbox_link(outbox)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            interaction_terminal_batch_identities.insert((
+                linked.batch_key,
+                outbox.candidate_digest.clone(),
+                outbox.completion_input_ids_digest.clone(),
+                matches!(
+                    &outbox.phase,
+                    crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+                ),
+            ));
+        }
         // Whether the batch has a directed outbox at all drives the existing
         // recovery plumbing. Whether that outbox is still UNPUBLISHED is a
         // different question, and it is the one that decides whether dropping
@@ -7600,6 +7617,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn linked_completion_batch_rejects_an_outbox_for_another_run() {
+        let input_id = InputId::new();
+        let linked = LinkedTerminalCompletionBatch {
+            input_ids: vec![input_id.clone()],
+            owner_input_id: input_id.clone(),
+            batch_key: crate::input_state::InputTerminalCompletionBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            candidate: None,
+        };
+        let outbox = crate::input_state::InteractionTerminalOutbox {
+            interaction_id: meerkat_core::interaction::InteractionId(input_id.0),
+            input_id: input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: crate::input_state::InteractionTerminalBatchKey::Run {
+                run_id: RunId::new(),
+            },
+            owner_session_id: SessionId::new(),
+            owner_agent_runtime_id: Some("runtime".to_string()),
+            owner_fence_token: Some(1),
+            owner_runtime_generation: Some(1),
+            owner_runtime_epoch_id: Some("epoch".to_string()),
+            candidate_owner_input_id: input_id,
+            released_0831_candidate: None,
+            candidate_digest: "candidate-digest".to_string(),
+            released_0831_completion_input_ids: None,
+            completion_input_ids_digest: "recipient-digest".to_string(),
+            phase: crate::input_state::InteractionTerminalOutboxPhase::Candidate,
+        };
+
+        assert!(
+            linked
+                .validate_outbox_link(&outbox)
+                .expect_err("another run must not claim the linked completion batch")
+                .contains("scope disagrees")
+        );
+    }
+
     fn queued_seed() -> InputStateSeed {
         let mut seed = InputStateSeed::new_accepted();
         seed.phase = InputLifecycleState::Queued;
@@ -10959,6 +11015,111 @@ mod recovery_tests {
             ),
             "unexpected containment error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn runless_recovery_links_directed_outbox_to_nondirected_first_completion_owner() {
+        let (runtime_id, _session_id, _store, mut persistent) =
+            registered_persistent_driver_for_test("runless-mixed-recipient-correlation").await;
+
+        let nondirected = Input::Prompt(crate::input::PromptInput::new(
+            "canonical first nondirected recipient",
+            None,
+        ));
+        let nondirected_id = nondirected.id().clone();
+        assert!(
+            persistent
+                .accept_input(nondirected)
+                .await
+                .expect("accept nondirected recipient")
+                .is_accepted()
+        );
+        let mut directed_id = InputId::new();
+        while directed_id.0 <= nondirected_id.0 {
+            directed_id = InputId::new();
+        }
+        let directed = crate::mob_adapter::create_tracked_flow_step_input(
+            "runless-mixed-recipient-step",
+            meerkat_core::types::ContentInput::Text(
+                "directed recipient sorts after nondirected owner".to_string(),
+            ),
+            "runless-mixed-recipient-flow",
+            None,
+            &directed_id.to_string(),
+        )
+        .expect("build directed recipient");
+        assert!(
+            persistent
+                .accept_input(directed)
+                .await
+                .expect("accept directed recipient")
+                .is_accepted()
+        );
+        let mut driver = DriverEntry::Persistent(persistent);
+
+        let recipients = vec![nondirected_id.clone(), directed_id.clone()];
+        let prepared = driver
+            .prepare_runless_runtime_terminated_interaction_outboxes(
+                &recipients,
+                "runtime stopped".to_string(),
+            )
+            .expect("stage one mixed runless terminal batch");
+        assert_eq!(
+            DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            Some(directed_id.clone()),
+            "the directed subset has its own outbox owner"
+        );
+        assert_eq!(
+            driver
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Stopped)
+                .await
+                .expect("terminalize the exact runless recipients"),
+            2
+        );
+
+        let batches = driver
+            .input_terminal_completion_recovery_batches()
+            .await
+            .expect("recover the committed mixed runless batch");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].input_ids, recipients);
+        assert!(
+            batches[0].has_interaction_terminal_outbox,
+            "the directed outbox must correlate through the actual nondirected completion owner"
+        );
+        assert!(
+            driver
+                .as_driver()
+                .stored_input_state(&nondirected_id)
+                .and_then(|stored| stored.state.terminal_completion)
+                .is_some_and(|completion| completion.candidate.is_some()),
+            "recovery must retain the sole candidate until directed publication"
+        );
+
+        driver
+            .shell_driver_mut()
+            .ledger_mut()
+            .get_mut(&directed_id)
+            .expect("directed recipient")
+            .interaction_terminal_outbox
+            .as_mut()
+            .expect("directed outbox")
+            .batch_key = crate::input_state::InteractionTerminalBatchKey::Run {
+            run_id: RunId::new(),
+        };
+        let error = match driver.input_terminal_completion_recovery_batches().await {
+            Ok(_) => panic!("cross-scope outbox claimed a runless completion batch"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                RuntimeDriverError::RecoveryCorruption { ref reason }
+                    if reason.contains("scope disagrees")
+            ),
+            "unexpected cross-scope error: {error}"
+        );
+        assert_eq!(driver.runtime_id(), &runtime_id);
     }
 
     fn completed_terminal_events(

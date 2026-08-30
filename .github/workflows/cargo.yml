@@ -640,6 +640,9 @@ jobs:
       - name: Verify release crate enumeration gate still fails closed
         run: scripts/test-crate-enumeration-gate.sh
 
+      - name: Verify parallel release packaging stays isolated and fails closed
+        run: make check-rust-release-packaging-contract
+
       - name: Verify generated machine kernels are not stale
         id: machine_drift
         shell: bash

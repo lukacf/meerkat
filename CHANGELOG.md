@@ -28,6 +28,12 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated concurrent Rust release-package verification into per-crate Cargo
+  target and toolchain-wrapper lanes, preventing `Text file busy` executable
+  races while preserving parallel failure reporting.
+
 ## [0.8.31] - 2026-08-28
 
 ### Breaking

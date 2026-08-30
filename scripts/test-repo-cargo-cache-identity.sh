@@ -25,8 +25,9 @@ value_from_env() {
 
 mkdir -p "${TEST_REPO}/scripts"
 cp "${ROOT}/scripts/repo-cargo" "${TEST_REPO}/scripts/repo-cargo"
+cp "${ROOT}/rust-toolchain.toml" "${TEST_REPO}/rust-toolchain.toml"
 git -C "${TEST_REPO}" init -q
-git -C "${TEST_REPO}" add scripts/repo-cargo
+git -C "${TEST_REPO}" add scripts/repo-cargo rust-toolchain.toml
 git -C "${TEST_REPO}" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   commit -qm "cache identity fixture"
 git -C "${TEST_REPO}" worktree add --detach --quiet "${WORKTREE_A}" HEAD
@@ -44,6 +45,9 @@ cargo_home_source="$(value_from_env CARGO_HOME "${shared_source}")"
 target_a="$(value_from_env CARGO_TARGET_DIR "${shared_a}")"
 target_b="$(value_from_env CARGO_TARGET_DIR "${shared_b}")"
 target_source="$(value_from_env CARGO_TARGET_DIR "${shared_source}")"
+toolchain_bin_a="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${shared_a}")"
+toolchain_bin_b="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${shared_b}")"
+toolchain_bin_source="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${shared_source}")"
 
 if ! [[ "${repo_key_a}" == "${repo_key_b}" && "${repo_key_a}" == "${repo_key_source}" ]]; then
   echo "repo-cargo split one repository by detached worktree basename" >&2
@@ -53,7 +57,9 @@ if ! [[ "${repo_key_a}" == "${repo_key_b}" && "${repo_key_a}" == "${repo_key_sou
 fi
 if ! [[ "${cargo_home_a}" == "${cargo_home_b}" &&
   "${cargo_home_a}" == "${cargo_home_source}" &&
-  "${target_a}" == "${target_b}" && "${target_a}" == "${target_source}" ]]; then
+  "${target_a}" == "${target_b}" && "${target_a}" == "${target_source}" &&
+  "${toolchain_bin_a}" == "${toolchain_bin_b}" &&
+  "${toolchain_bin_a}" == "${toolchain_bin_source}" ]]; then
   echo "repo-cargo did not reuse one explicitly named lane across linked worktrees" >&2
   exit 1
 fi
@@ -62,9 +68,18 @@ default_a="$(cd "${WORKTREE_A}" && env -u RUST_LANE_ID ./scripts/repo-cargo --pr
 default_b="$(cd "${WORKTREE_B}" && env -u RUST_LANE_ID ./scripts/repo-cargo --print-env)"
 default_target_a="$(value_from_env CARGO_TARGET_DIR "${default_a}")"
 default_target_b="$(value_from_env CARGO_TARGET_DIR "${default_b}")"
+default_toolchain_bin_a="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${default_a}")"
+default_toolchain_bin_b="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${default_b}")"
 if [[ "${default_target_a}" == "${default_target_b}" ]]; then
-  echo "repo-cargo collapsed distinct default worktree lanes" >&2
+  echo "repo-cargo collapsed distinct default worktree target lanes" >&2
   exit 1
+fi
+if [[ -n "${default_toolchain_bin_a}" || -n "${default_toolchain_bin_b}" ]]; then
+  if [[ -z "${default_toolchain_bin_a}" || -z "${default_toolchain_bin_b}" ||
+    "${default_toolchain_bin_a}" == "${default_toolchain_bin_b}" ]]; then
+    echo "repo-cargo collapsed distinct default worktree executable lanes" >&2
+    exit 1
+  fi
 fi
 
 echo "repo-cargo linked-worktree cache identity selftest passed"

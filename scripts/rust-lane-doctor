@@ -46,6 +46,7 @@ fi
 default_env="$(./scripts/repo-cargo --print-env)"
 default_target="$(value_from_env CARGO_TARGET_DIR "${default_env}")"
 default_home="$(value_from_env CARGO_HOME "${default_env}")"
+default_lane="$(value_from_env lane_key "${default_env}")"
 default_rustup_toolchain="$(value_from_env RUSTUP_TOOLCHAIN "${default_env}")"
 default_toolchain_bin="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${default_env}")"
 default_rustc="$(value_from_env RUSTC "${default_env}")"
@@ -61,11 +62,14 @@ lane_a_target="$(value_from_env CARGO_TARGET_DIR "${lane_a_env}")"
 lane_b_target="$(value_from_env CARGO_TARGET_DIR "${lane_b_env}")"
 lane_a_home="$(value_from_env CARGO_HOME "${lane_a_env}")"
 lane_b_home="$(value_from_env CARGO_HOME "${lane_b_env}")"
+lane_a_toolchain_bin="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${lane_a_env}")"
+lane_b_toolchain_bin="$(value_from_env MEERKAT_RUST_TOOLCHAIN_BIN "${lane_b_env}")"
 
-if [[ "${lane_a_target}" != "${lane_b_target}" ]]; then
-  pass "RUST_LANE_ID creates distinct target directories"
+if [[ "${lane_a_target}" != "${lane_b_target}" &&
+  "${lane_a_toolchain_bin}" != "${lane_b_toolchain_bin}" ]]; then
+  pass "RUST_LANE_ID creates distinct target and toolchain-wrapper directories"
 else
-  bad "RUST_LANE_ID target directories collide"
+  bad "RUST_LANE_ID target or toolchain-wrapper directories collide"
 fi
 
 codex_agent_env="$(
@@ -161,8 +165,8 @@ if [[ -x "${default_rustc}" ]]; then
 fi
 if [[ -n "${rust_channel}" ]] &&
   [[ "${default_rustc_release}" == "${rust_channel}" ]] &&
-  [[ "${default_rustc}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"*"/rustc" ]] &&
-  [[ "${default_toolchain_bin}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"* ]]; then
+  [[ "${default_rustc}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"*"/${default_lane}/rustc" ]] &&
+  [[ "${default_toolchain_bin}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"*"/${default_lane}" ]]; then
   pass "repo-cargo resolves stable pinned Rust toolchain wrappers"
 else
   bad "repo-cargo does not resolve stable pinned Rust toolchain wrappers"

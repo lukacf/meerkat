@@ -232,6 +232,14 @@ repos:
         always_run: true
         stages: [pre-push]
 
+      - id: release-packaging-isolation-contract
+        name: parallel release packaging isolates outputs and preserves failures
+        entry: scripts/test-release-packaging-isolation.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       - id: cargo-test
         name: workspace deterministic unit + integration + e2e gate
         entry: scripts/pre-push-unit.sh

@@ -477,7 +477,7 @@ impl CopilotChatCompletionsClientSpec {
             supports_temperature,
             supports_thinking,
             supports_reasoning,
-            supports_image_input: false,
+            supports_image_input: true,
             supports_image_tool_results,
         }
     }
@@ -2049,6 +2049,39 @@ mod tests {
     };
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
     use std::collections::VecDeque;
+
+    struct SpecAuthorizer;
+
+    #[async_trait]
+    impl HttpAuthorizer for SpecAuthorizer {
+        async fn authorize(
+            &self,
+            _request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "copilot-spec-test"
+        }
+    }
+
+    #[test]
+    fn chat_completions_spec_constructor_preserves_historical_image_input_support() {
+        let spec = CopilotChatCompletionsClientSpec::new(
+            Provider::OpenAI,
+            "model".to_string(),
+            "https://example.test".to_string(),
+            Arc::new(SpecAuthorizer),
+            true,
+            true,
+            true,
+            false,
+        );
+
+        assert!(spec.supports_image_input());
+        assert!(!spec.with_image_input_support(false).supports_image_input());
+    }
 
     fn account_identity() -> AuthCredentialIdentity {
         AuthCredentialIdentity::Account(CredentialAccountRef {

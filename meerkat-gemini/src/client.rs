@@ -5336,6 +5336,49 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn stream_dispatch_projects_canonical_replay_into_captured_request() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, Arc::clone(&seen)).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![
+                Message::User(UserMessage::text("listen")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Transcript {
+                        text: "spoken replay".to_string(),
+                        source: meerkat_core::TranscriptSource::Spoken,
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("continue")),
+            ],
+        );
+
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        let bodies = seen.lock().expect("request body capture lock");
+        assert_eq!(bodies.len(), 1);
+        let contents = bodies[0]["contents"].as_array().expect("contents array");
+        let assistant = contents
+            .iter()
+            .find(|message| message["role"] == "model")
+            .expect("projected model message");
+        assert_eq!(
+            assistant["parts"],
+            serde_json::json!([{"text": "spoken replay"}])
+        );
+        server.abort();
+    }
+
     #[test]
     fn replay_projection_rejects_duplicate_tool_use_ids() {
         let client = GeminiClient::new("test-key".to_string());

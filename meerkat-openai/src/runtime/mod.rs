@@ -280,6 +280,83 @@ impl OpenAiProviderRuntime {
     }
 }
 
+fn build_openai_client(
+    connection: ResolvedConnection,
+    supports_image_input: bool,
+) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+    let backend_kind = match connection.backend {
+        NormalizedBackendKind::OpenAi(kind) => kind,
+        other => unreachable!(
+            "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
+             — registry dispatch invariant violated"
+        ),
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(authorizer) = connection.resolved_authorizer() {
+        let base_url = match backend_kind {
+            OpenAiBackendKind::ChatGptBackend => {
+                chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?
+            }
+            OpenAiBackendKind::AzureOpenAi => {
+                azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
+            }
+            OpenAiBackendKind::OpenAiApi => connection
+                .backend_profile
+                .base_url
+                .clone()
+                .unwrap_or_else(|| backend_kind.default_base_url().into()),
+            OpenAiBackendKind::Copilot => {
+                return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+            }
+        };
+        let mut client =
+            crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                .with_image_input_support(supports_image_input)
+                .with_authorizer(authorizer);
+        if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
+            client = client.with_chatgpt_backend_wire();
+        } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
+            client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
+        }
+        return Ok(Arc::new(client));
+    }
+    #[cfg(target_arch = "wasm32")]
+    let secret = connection
+        .resolved_secret()
+        .ok_or(ProviderClientError::MissingFeature(
+            "openai-authorizer-backed auth not available on wasm32",
+        ))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let secret = connection
+        .resolved_secret()
+        .ok_or(ProviderClientError::NoCredentialMaterial)?;
+    let client = match backend_kind {
+        OpenAiBackendKind::OpenAiApi => match &connection.backend_profile.base_url {
+            Some(url) => crate::OpenAiClient::new_with_base_url(secret, url.clone()),
+            None => crate::OpenAiClient::new(secret),
+        }
+        .with_image_input_support(supports_image_input),
+        OpenAiBackendKind::ChatGptBackend => {
+            let base_url =
+                chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?;
+            crate::OpenAiClient::new_with_base_url(secret, base_url)
+                .with_image_input_support(supports_image_input)
+                .with_extra_headers(chatgpt_backend_extra_headers(&connection))
+                .with_chatgpt_backend_wire()
+        }
+        OpenAiBackendKind::AzureOpenAi => {
+            let base_url = azure_openai_base_url(connection.backend_profile.base_url.as_deref())?;
+            crate::OpenAiClient::new_with_base_url(secret, base_url)
+                .with_image_input_support(supports_image_input)
+                .with_azure_openai_wire(azure_openai_wire_config(&connection))
+        }
+        OpenAiBackendKind::Copilot => {
+            return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+        }
+    };
+    Ok(Arc::new(client))
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl ProviderRuntime for OpenAiProviderRuntime {
@@ -517,93 +594,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         &self,
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        // ProviderRuntimeRegistry dispatches on Provider enum; non-OpenAI
-        // arms are unreachable at runtime.
-        let backend_kind = match connection.backend {
-            NormalizedBackendKind::OpenAi(k) => k,
-            other => unreachable!(
-                "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
-                 — registry dispatch invariant violated"
-            ),
-        };
-        // Authorizer-backed path (ExternalAuthorizer→DynamicAuthorizer
-        // envelope). Wire through OpenAiClient.with_authorizer so the
-        // request uses HttpAuthorizer::authorize for headers rather
+        // Authorizer-backed connections use HttpAuthorizer rather
         // than Authorization: Bearer <api_key>. Plan §6.11: read the
-        // authorizer from the auth lease directly instead of the
-        // (deleted side channel).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(authorizer) = connection.resolved_authorizer() {
-            let base_url = match backend_kind {
-                OpenAiBackendKind::ChatGptBackend => {
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?
-                }
-                OpenAiBackendKind::AzureOpenAi => {
-                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
-                }
-                OpenAiBackendKind::OpenAiApi => connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| backend_kind.default_base_url().into()),
-                OpenAiBackendKind::Copilot => {
-                    return Err(ProviderClientError::MissingFeature("copilot-text-target"));
-                }
-            };
-            let mut client =
-                crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
-                    .with_authorizer(authorizer);
-            if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
-                client = client.with_chatgpt_backend_wire();
-            } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
-                client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
-            }
-            return Ok(Arc::new(client));
-        }
-        // No inline secret and no DynamicAuthorizer kind: the
-        // lease was constructed empty. Surface as missing credential
-        // material (or MissingFeature on wasm32 where authorizers
-        // don't compile) so surfaces get a typed error.
-        #[cfg(target_arch = "wasm32")]
-        let secret = connection
-            .resolved_secret()
-            .ok_or(ProviderClientError::MissingFeature(
-                "openai-authorizer-backed auth not available on wasm32",
-            ))?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let secret = connection
-            .resolved_secret()
-            .ok_or(ProviderClientError::NoCredentialMaterial)?;
-        match backend_kind {
-            OpenAiBackendKind::OpenAiApi => {
-                // S1-verified: OpenAiClient::new returns Self (infallible).
-                let client = match &connection.backend_profile.base_url {
-                    Some(url) => crate::OpenAiClient::new_with_base_url(secret, url.clone()),
-                    None => crate::OpenAiClient::new(secret),
-                };
-                Ok(Arc::new(client))
-            }
-            OpenAiBackendKind::ChatGptBackend => {
-                // ChatGPT backend: emit account_id + fedramp wire
-                // headers per Codex bearer_auth_provider.rs:23-38.
-                let base_url =
-                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())?;
-                let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
-                    .with_extra_headers(chatgpt_backend_extra_headers(&connection))
-                    .with_chatgpt_backend_wire();
-                Ok(Arc::new(client))
-            }
-            OpenAiBackendKind::AzureOpenAi => {
-                let base_url =
-                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?;
-                let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
-                    .with_azure_openai_wire(azure_openai_wire_config(&connection));
-                Ok(Arc::new(client))
-            }
-            OpenAiBackendKind::Copilot => {
-                Err(ProviderClientError::MissingFeature("copilot-text-target"))
-            }
-        }
+        // authorizer directly from the auth lease.
+        build_openai_client(connection, true)
     }
 
     fn build_text_client(
@@ -614,8 +608,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             target.connection().backend,
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::Copilot)
         ) {
-            let (_, _, connection) = target.into_parts();
-            return self.build_client(connection);
+            let (_, profile, connection) = target.into_parts();
+            return build_openai_client(connection, profile.profile().image_input);
         }
         #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
         {
@@ -855,8 +849,9 @@ mod tests {
         Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
     };
     use meerkat_core::{
-        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageProviderTerminalObservation,
-        OpenAiAuthMetadata, ProviderAuthMetadata,
+        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ContentBlock, ImageData,
+        ImageProviderTerminalObservation, Message, OpenAiAuthMetadata, ProviderAuthMetadata,
+        UserMessage,
     };
     use meerkat_llm_core::{
         ProviderImageGenerationRequest,
@@ -981,6 +976,27 @@ mod tests {
                 "openai:test",
             )),
         }
+    }
+
+    #[test]
+    fn profile_aware_openai_builder_disables_image_replay() {
+        let client = build_openai_client(resolved_openai_connection(), false)
+            .expect("profile-aware OpenAI client");
+        let projected = client
+            .project_replay_messages(&[Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "IMAGE_BYTES".to_string(),
+                    },
+                },
+            ]))])
+            .expect("non-vision replay projection");
+
+        assert!(matches!(
+            &projected[0],
+            Message::User(user) if matches!(user.content.as_slice(), [ContentBlock::Text { .. }])
+        ));
     }
 
     fn resolved_realtime_target(

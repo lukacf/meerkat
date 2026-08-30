@@ -2245,7 +2245,7 @@ mod tests {
         ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
         SystemMessage, ToolResult, UserMessage,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
@@ -3777,7 +3777,9 @@ mod tests {
     // SSE stream regression tests
     // =========================================================================
 
-    use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+    use axum::{
+        Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post,
+    };
     use tokio::net::TcpListener;
 
     async fn messages_sse(State(payload): State<String>) -> impl IntoResponse {
@@ -3796,6 +3798,46 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[derive(Clone)]
+    struct AnthropicReplayCaptureState {
+        payload: String,
+        request_bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn anthropic_replay_capture(
+        State(state): State<AnthropicReplayCaptureState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .request_bodies
+            .lock()
+            .expect("request body capture lock")
+            .push(body);
+        ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    async fn spawn_anthropic_replay_capture_server(
+        payload: String,
+    ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        let request_bodies = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(anthropic_replay_capture))
+            .with_state(AnthropicReplayCaptureState {
+                payload,
+                request_bodies: Arc::clone(&request_bodies),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replay capture server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve replay capture server");
+        });
+        (format!("http://{addr}"), request_bodies, handle)
     }
 
     #[derive(Clone)]
@@ -4666,6 +4708,53 @@ mod tests {
             "web_search should not be a top-level body key"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_dispatch_projects_canonical_replay_into_captured_request() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, request_bodies, server) =
+            spawn_anthropic_replay_capture_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .expect("client");
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage::text("listen")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Transcript {
+                        text: "spoken replay".to_string(),
+                        source: meerkat_core::TranscriptSource::Spoken,
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("continue")),
+            ],
+        );
+
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        let bodies = request_bodies.lock().expect("request body capture lock");
+        assert_eq!(bodies.len(), 1);
+        let messages = bodies[0]["messages"].as_array().expect("messages array");
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("projected assistant message");
+        assert_eq!(
+            assistant["content"][0],
+            serde_json::json!({"type": "text", "text": "spoken replay"})
+        );
+        server.abort();
     }
 
     #[test]

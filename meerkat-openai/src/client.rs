@@ -8216,6 +8216,50 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
     }
 
+    #[tokio::test]
+    async fn stream_dispatch_applies_non_vision_replay_to_captured_request() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+        )
+        .to_string();
+        let (base_url, server) =
+            spawn_openai_stub_server_with_body(payload, Arc::clone(&seen)).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url)
+            .with_image_input_support(false);
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+                meerkat_core::SystemNoticeKind::ExternalEvent,
+                None,
+                SystemNoticeBlock::ExternalEvent {
+                    source: "console".to_string(),
+                    event_type: "operator_message".to_string(),
+                    summary: None,
+                    body: Some("inspect this".to_string()),
+                    payload: None,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "NESTED_IMAGE_BYTES".to_string(),
+                        },
+                    }],
+                },
+            ))],
+        );
+
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        let bodies = seen.lock().expect("request body capture lock");
+        assert_eq!(bodies.len(), 1);
+        let encoded = serde_json::to_string(&bodies[0]).expect("encode captured request");
+        assert!(!encoded.contains("NESTED_IMAGE_BYTES"));
+        assert!(!encoded.contains("input_image"));
+        assert!(encoded.contains("[image: image/png]"));
+        server.abort();
+    }
+
     #[test]
     fn replay_projection_rejects_duplicate_tool_use_ids() {
         let client = OpenAiClient::new("test-key".to_string());

@@ -1479,6 +1479,34 @@ mod tests {
         (format!("http://{addr}/v1"), handle)
     }
 
+    async fn spawn_compatible_replay_capture_server(
+        mode: OpenAiCompatibleMode,
+        payload: String,
+    ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        let request_bodies = Arc::new(Mutex::new(Vec::new()));
+        let route = match mode {
+            OpenAiCompatibleMode::Responses => "/v1/responses",
+            OpenAiCompatibleMode::ChatCompletions => "/v1/chat/completions",
+        };
+        let app = Router::new()
+            .route(route, post(responses_sse))
+            .with_state(ResponsesStubState {
+                payload,
+                auth_headers: Arc::new(Mutex::new(Vec::new())),
+                request_bodies: Arc::clone(&request_bodies),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replay capture server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve replay capture server");
+        });
+        (format!("http://{addr}/v1"), request_bodies, handle)
+    }
+
     #[derive(Clone)]
     struct ChatAuthRetryState {
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -3204,79 +3232,101 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn non_vision_compatible_modes_strip_nested_notice_images_from_serialized_requests() {
+    async fn assert_compatible_dispatch_strips_nested_image(mode: OpenAiCompatibleMode) {
         use meerkat_core::{SystemNoticeKind, SystemNoticeMessage};
 
-        for mode in [
-            OpenAiCompatibleMode::Responses,
-            OpenAiCompatibleMode::ChatCompletions,
-        ] {
-            let client = OpenAiCompatibleClient::new_with_options(
-                mode,
-                "remote-model".to_string(),
-                "https://example.test".to_string(),
-                None,
-                options(true, true, true, true),
-            )
-            .with_image_input_support(false);
-            let mut request = LlmRequest::new(
-                "remote-model",
-                vec![Message::SystemNotice(SystemNoticeMessage::with_block(
-                    SystemNoticeKind::ExternalEvent,
-                    None,
-                    SystemNoticeBlock::ExternalEvent {
-                        source: "console".to_string(),
-                        event_type: "operator_message".to_string(),
-                        summary: None,
-                        body: Some("inspect this".to_string()),
-                        payload: None,
-                        content: vec![ContentBlock::Image {
-                            media_type: "image/png".to_string(),
-                            data: ImageData::Inline {
-                                data: "NESTED_IMAGE_BYTES".to_string(),
-                            },
-                        }],
-                    },
-                ))],
-            );
-            request.messages = client
-                .project_replay_messages(&request.messages)
-                .expect("project non-vision notice");
-
-            let body = match mode {
-                OpenAiCompatibleMode::Responses => client
-                    .responses_delegate
-                    .as_ref()
-                    .expect("responses delegate")
-                    .build_request_body(&client.request_with_remote_model(&request))
-                    .expect("build responses body"),
-                OpenAiCompatibleMode::ChatCompletions => client
-                    .build_chat_completions_body(&request)
-                    .expect("build chat body"),
-            };
-            let encoded = serde_json::to_string(&body).expect("encode request body");
-            assert!(!encoded.contains("NESTED_IMAGE_BYTES"));
-            assert!(!encoded.contains("input_image"));
-            assert!(!encoded.contains("image_url"));
-            assert!(encoded.contains("[image: image/png]"));
+        let payload = match mode {
+            OpenAiCompatibleMode::Responses => concat!(
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            ),
+            OpenAiCompatibleMode::ChatCompletions => concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+                "data: [DONE]\n\n"
+            ),
         }
+        .to_string();
+        let (base_url, request_bodies, server) =
+            spawn_compatible_replay_capture_server(mode, payload).await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            mode,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            options(true, true, true, true),
+        )
+        .with_image_input_support(false);
+        let request = LlmRequest::new(
+            "remote-model",
+            vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+                SystemNoticeKind::ExternalEvent,
+                None,
+                SystemNoticeBlock::ExternalEvent {
+                    source: "console".to_string(),
+                    event_type: "operator_message".to_string(),
+                    summary: None,
+                    body: Some("inspect this".to_string()),
+                    payload: None,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "NESTED_IMAGE_BYTES".to_string(),
+                        },
+                    }],
+                },
+            ))],
+        );
+
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        let bodies = request_bodies.lock().expect("request body capture lock");
+        assert_eq!(bodies.len(), 1);
+        let encoded = serde_json::to_string(&bodies[0]).expect("encode request body");
+        assert!(!encoded.contains("NESTED_IMAGE_BYTES"));
+        assert!(!encoded.contains("input_image"));
+        assert!(!encoded.contains("image_url"));
+        assert!(encoded.contains("[image: image/png]"));
+        drop(bodies);
+        server.abort();
     }
 
-    #[test]
-    fn compatible_modes_serialize_the_verified_collapsed_tool_result() {
+    #[tokio::test]
+    async fn compatible_responses_dispatch_strips_nested_images_from_captured_request() {
+        assert_compatible_dispatch_strips_nested_image(OpenAiCompatibleMode::Responses).await;
+    }
+
+    #[tokio::test]
+    async fn compatible_chat_dispatch_strips_nested_images_from_captured_request() {
+        assert_compatible_dispatch_strips_nested_image(OpenAiCompatibleMode::ChatCompletions).await;
+    }
+
+    #[tokio::test]
+    async fn compatible_stream_dispatch_serializes_exact_collapsed_tool_result() {
         for mode in [
             OpenAiCompatibleMode::Responses,
             OpenAiCompatibleMode::ChatCompletions,
         ] {
+            let payload = match mode {
+                OpenAiCompatibleMode::Responses => concat!(
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                    "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+                ),
+                OpenAiCompatibleMode::ChatCompletions => concat!(
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            }
+            .to_string();
+            let (base_url, request_bodies, server) =
+                spawn_compatible_replay_capture_server(mode, payload).await;
             let client = OpenAiCompatibleClient::new_with_options(
                 mode,
                 "remote-model".to_string(),
-                "https://example.test".to_string(),
+                base_url,
                 None,
                 options(true, true, true, false),
             );
-            let mut request = LlmRequest::new(
+            let request = LlmRequest::new(
                 "remote-model",
                 vec![
                     Message::BlockAssistant(BlockAssistantMessage::new(
@@ -3303,22 +3353,15 @@ mod tests {
                     )]),
                 ],
             );
-            request.messages = client
-                .project_replay_messages(&request.messages)
-                .expect("project compatible tool result");
-            let body = match mode {
-                OpenAiCompatibleMode::Responses => client
-                    .responses_delegate
-                    .as_ref()
-                    .expect("responses delegate")
-                    .build_request_body(&client.request_with_remote_model(&request))
-                    .expect("build responses body"),
-                OpenAiCompatibleMode::ChatCompletions => client
-                    .build_chat_completions_body(&request)
-                    .expect("build chat body"),
-            };
-            let encoded = serde_json::to_string(&body).expect("encode request body");
+
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            assert!(events.iter().all(Result::is_ok));
+            let bodies = request_bodies.lock().expect("request body capture lock");
+            assert_eq!(bodies.len(), 1);
+            let encoded = serde_json::to_string(&bodies[0]).expect("encode request body");
             assert!(encoded.contains("first\\nsecond"));
+            drop(bodies);
+            server.abort();
         }
     }
 }

@@ -1021,6 +1021,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 .clone();
             let model = identity.model.clone();
             let supports_temperature = profile.profile().supports_temperature;
+            let supports_image_input = profile.profile().image_input;
             let supports_image_tool_results = profile.profile().image_tool_results;
             let factory: meerkat_copilot::CopilotRouteClientFactory =
                 Arc::new(move |route, connection| {
@@ -1067,7 +1068,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             true,
                             true,
                             supports_image_tool_results,
-                        ),
+                        )
+                        .with_image_input_support(supports_image_input),
                     )?;
                     Ok(Arc::new(GeminiCopilotChatClient { inner: client }))
                 });

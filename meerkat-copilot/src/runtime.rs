@@ -453,6 +453,7 @@ pub struct CopilotChatCompletionsClientSpec {
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
+    supports_image_input: bool,
     supports_image_tool_results: bool,
 }
 
@@ -476,8 +477,20 @@ impl CopilotChatCompletionsClientSpec {
             supports_temperature,
             supports_thinking,
             supports_reasoning,
+            supports_image_input: false,
             supports_image_tool_results,
         }
+    }
+
+    #[must_use]
+    pub fn with_image_input_support(mut self, supports_image_input: bool) -> Self {
+        self.supports_image_input = supports_image_input;
+        self
+    }
+
+    #[must_use]
+    pub const fn supports_image_input(&self) -> bool {
+        self.supports_image_input
     }
 
     #[allow(clippy::type_complexity)]

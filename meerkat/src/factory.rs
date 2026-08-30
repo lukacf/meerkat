@@ -1722,6 +1722,7 @@ struct SelfHostedClientSpec {
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
+    supports_image_input: bool,
     supports_image_tool_results: bool,
 }
 
@@ -4569,6 +4570,7 @@ impl AgentFactory {
             supports_temperature: profile.supports_temperature,
             supports_thinking: profile.supports_thinking,
             supports_reasoning: profile.supports_reasoning,
+            supports_image_input: profile.image_input,
             supports_image_tool_results: profile.image_tool_results,
         })
     }
@@ -4639,18 +4641,21 @@ impl AgentFactory {
                 .clone()
                 .unwrap_or(spec.base_url);
             Ok(SelfHostedClientBuild {
-                client: Arc::new(OpenAiCompatibleClient::new_with_options(
-                    spec.mode,
-                    spec.remote_model,
-                    base_url,
-                    bearer_token,
-                    OpenAiCompatibleClientOptions {
-                        supports_temperature: spec.supports_temperature,
-                        supports_thinking: spec.supports_thinking,
-                        supports_reasoning: spec.supports_reasoning,
-                        supports_image_tool_results: spec.supports_image_tool_results,
-                    },
-                )),
+                client: Arc::new(
+                    OpenAiCompatibleClient::new_with_options(
+                        spec.mode,
+                        spec.remote_model,
+                        base_url,
+                        bearer_token,
+                        OpenAiCompatibleClientOptions {
+                            supports_temperature: spec.supports_temperature,
+                            supports_thinking: spec.supports_thinking,
+                            supports_reasoning: spec.supports_reasoning,
+                            supports_image_tool_results: spec.supports_image_tool_results,
+                        },
+                    )
+                    .with_image_input_support(spec.supports_image_input),
+                ),
                 durable_auth_binding,
                 credential_identity: connection.credential_identity,
             })

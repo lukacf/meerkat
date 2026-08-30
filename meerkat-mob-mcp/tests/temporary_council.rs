@@ -1981,6 +1981,11 @@ async fn a_remote_capability_acquired_but_never_seated_is_recovered_from_persist
         .insert_new(&record)
         .await
         .expect("write the crashed council record");
+    fixture
+        .state
+        .mob_destroy(&fixture.source_mob_id())
+        .await
+        .expect("remove the exact owner handle before recovery");
 
     let reports = fixture
         .state
@@ -2004,12 +2009,9 @@ async fn a_remote_capability_acquired_but_never_seated_is_recovered_from_persist
         debt.subject.contains("remote-crash"),
         "the debt names the exact capability: {debt:?}"
     );
-    // The debt is a ROUTING failure, which can only happen if the reference
-    // itself resolved: realm-local capability custody holds no record for this
-    // request id at all.
     assert!(
-        debt.detail.contains("revocation failed"),
-        "the reference resolved from council custody; only routing failed: {debt:?}"
+        debt.detail.contains("exact owner handle is unavailable"),
+        "a Host route without its exact owner must not use a fallback mob: {debt:?}"
     );
     assert!(
         !debt.detail.contains("capability custody read failed"),

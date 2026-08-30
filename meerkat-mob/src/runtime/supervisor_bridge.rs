@@ -147,6 +147,7 @@ pub(crate) struct MobSupervisorBridge {
     /// matching identity lease has been installed on the shared acceptor.
     #[cfg(not(target_arch = "wasm32"))]
     controlling_reply_endpoint: StdRwLock<Option<PeerAddress>>,
+    shutdown_complete: std::sync::atomic::AtomicBool,
 }
 
 /// Linear owner for one bridge request correlation.
@@ -542,6 +543,7 @@ impl MobSupervisorBridge {
             controlling_acceptor: Mutex::new(controlling_acceptor),
             #[cfg(not(target_arch = "wasm32"))]
             controlling_reply_endpoint: StdRwLock::new(controlling_reply_endpoint),
+            shutdown_complete: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1490,6 +1492,13 @@ impl MobSupervisorBridge {
         // is generation-exact, so a successor that has already rebound this
         // authority key keeps its route.
         self.runtime_with_gate_held().await.retire_inproc_route();
+        self.shutdown_complete
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.shutdown_complete
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Rebuild the supervisor runtime under a (possibly new) authority record,
@@ -1858,6 +1867,9 @@ impl MobSupervisorBridge {
         recipient: &TrustedPeerDescriptor,
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let _authority_guard = self.authority_gate.read().await;
+        if self.is_shutdown() {
+            return Err(MobError::ActorCommandChannelClosed);
+        }
         self.supervisor_spec_for_authority_and_recipient_with_gate_held(authority, recipient)
             .await
     }
@@ -2182,6 +2194,11 @@ impl MobSupervisorBridge {
         timeout: Duration,
     ) -> Result<serde_json::Value, BridgeRequestFailure> {
         let _authority_guard = self.authority_gate.write().await;
+        if self.is_shutdown() {
+            return Err(BridgeRequestFailure::BeforeSend(
+                MobError::ActorCommandChannelClosed,
+            ));
+        }
         // A concurrent durable rotation may have installed the requested
         // authority while this worker was queued.
         if self.live_transport_uses_authority(&authority) {
@@ -2289,6 +2306,11 @@ impl MobSupervisorBridge {
             )));
         }
         let authority_guard = self.authority_gate.read().await;
+        if self.is_shutdown() {
+            return Err(BridgeRequestFailure::BeforeSend(
+                MobError::ActorCommandChannelClosed,
+            ));
+        }
         if self.live_transport_uses_authority(authority) {
             return self
                 .send_bridge_command_with_live_runtime_classified(
@@ -2342,6 +2364,11 @@ impl MobSupervisorBridge {
             .lock_owned()
             .await;
         let _authority_guard = self.authority_gate.read().await;
+        if self.is_shutdown() {
+            return Err(BridgeRequestFailure::BeforeSend(
+                MobError::ActorCommandChannelClosed,
+            ));
+        }
         if self.live_transport_uses_authority(authority) {
             return self
                 .send_bridge_command_with_live_runtime_classified(
@@ -4815,6 +4842,55 @@ mod tests {
         bridge.shutdown().await;
         remote_runtime.stop_listeners_for_rebind().await;
         assert_eq!(config.registration_count_for_test().await, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn fixed_port_alternate_worker_refuses_after_shutdown_wins() {
+        let (bridge, current, remote_runtime, _remote_dsl, remote, _supervisor, _advertised) =
+            fixed_private_bridge_with_remote("fixed-shutdown-wins").await;
+        let mut alternate = SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        alternate.epoch = current.epoch + 1;
+        let alternate_supervisor = bridge
+            .supervisor_spec_for_authority_and_recipient(&alternate, &remote)
+            .await
+            .expect("alternate supervisor spec before shutdown");
+        let command = super::super::bridge_protocol::BridgeCommand::HostStatus(
+            super::super::bridge_protocol::BridgeHostStatusPayload {
+                supervisor: alternate_supervisor.into(),
+                epoch: alternate.epoch,
+                binding_generation: 1,
+                protocol_version: super::super::bridge_protocol::BridgeProtocolVersion::V4,
+                mob_id: "mob/fixed-shutdown-wins".to_string(),
+            },
+        );
+
+        bridge.shutdown().await;
+        let result = Arc::clone(&bridge)
+            .send_fixed_port_bridge_command_as_authority_owned(
+                alternate,
+                remote,
+                command,
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(BridgeRequestFailure::BeforeSend(
+                MobError::ActorCommandChannelClosed
+            ))
+        ));
+        assert!(
+            bridge
+                .runtime()
+                .await
+                .bound_tcp_listener_address()
+                .is_none(),
+            "a shutdown-winning fixed-port request must not resurrect its listener"
+        );
+        remote_runtime.stop_listeners_for_rebind().await;
     }
 
     #[cfg(not(target_arch = "wasm32"))]

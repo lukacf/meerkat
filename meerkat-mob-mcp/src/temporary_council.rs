@@ -3405,38 +3405,108 @@ async fn cleanup_council(
             }
         };
         // Routing is by the capability's OWN owner route inside the mob actor,
-        // so any live handle in this state can serve a Local route and the
-        // source mob's handle is what reaches a Host route's bound supervisor.
-        // Try the source mob first, then the temporary mob, then any managed
-        // mob — a council must not strand a revocation just because the mob it
-        // happened to ask through is gone.
-        let source_revoker = state.handle_for(&participant.source_mob_id).await.ok();
-        let fallback_revoker = match temporary.clone() {
-            Some(handle) => Some(handle),
-            None => state.any_managed_handle().await,
+        // so any live handle in this state can serve a Local route. A Host
+        // route first tries its source actor, then uses that source handle's
+        // persisted supervisor + host-binding records through a different live
+        // transport. The fallback mob's own host bindings are never authority.
+        let (source_revoker, source_lookup_error) =
+            match state.handle_for(&participant.source_mob_id).await {
+                Ok(handle) => (Some(handle), None),
+                Err(MobError::MobNotFound(_)) => (None, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+        let (fallback_revoker, fallback_lookup_error) = match temporary.clone() {
+            Some(handle) => (Some(handle), None),
+            None => match state
+                .any_managed_handle_except(&participant.source_mob_id)
+                .await
+            {
+                Ok(handle) => (handle, None),
+                Err(error) => (None, Some(error.to_string())),
+            },
         };
-        if source_revoker.is_none() && fallback_revoker.is_none() {
+        if source_revoker.is_none()
+            && (fallback_revoker.is_none()
+                || matches!(
+                    capability.owner_route(),
+                    meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Host { .. }
+                ))
+        {
             debts.push(TemporaryCouncilCleanupDebt {
                 subject: format!("capability:{}", participant.capability_request_id),
-                detail: format!(
-                    "no live mob handle can serve revocation for source mob {}",
-                    participant.source_mob_id
-                ),
+                detail: source_lookup_error
+                    .or(fallback_lookup_error)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "exact owner handle is unavailable for source mob {}",
+                            participant.source_mob_id
+                        )
+                    }),
             });
             continue;
         }
-        let mut revocation_error = None;
+        let mut revocation_error = source_lookup_error.or(fallback_lookup_error);
         let mut revoked = false;
-        for revoker in [source_revoker, fallback_revoker].into_iter().flatten() {
+        enum RevocationAttempt<'a> {
+            Live(&'a MobHandle),
+            SourceOwned {
+                owner: &'a MobHandle,
+                recovery_transport: Option<&'a MobHandle>,
+            },
+        }
+        let owner_attempt = source_revoker
+            .as_ref()
+            .map(|owner| match capability.owner_route() {
+                meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Host { .. } => {
+                    RevocationAttempt::SourceOwned {
+                        owner,
+                        recovery_transport: fallback_revoker.as_ref(),
+                    }
+                }
+                meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Local { .. } => {
+                    RevocationAttempt::Live(owner)
+                }
+            });
+        let local_fallback = match capability.owner_route() {
+            meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Local { .. } => {
+                fallback_revoker.as_ref().map(RevocationAttempt::Live)
+            }
+            meerkat_mob::forked_participant::ForkedParticipantOwnerRoute::Host { .. } => None,
+        };
+        for revoker in [owner_attempt, local_fallback].into_iter().flatten() {
             let Some(remaining) = budget_remaining(state, budget) else {
                 budget_exhausted = true;
                 revocation_error =
                     Some("revocation exceeded the bounded cleanup budget".to_string());
                 break;
             };
+            let revocation = async {
+                match revoker {
+                    RevocationAttempt::Live(handle) => {
+                        handle
+                            .revoke_forked_participant(
+                                state.console_principal_snapshot(),
+                                &capability,
+                            )
+                            .await
+                    }
+                    RevocationAttempt::SourceOwned {
+                        owner,
+                        recovery_transport,
+                    } => {
+                        owner
+                            .revoke_forked_participant_with_recovery(
+                                state.console_principal_snapshot(),
+                                recovery_transport,
+                                &capability,
+                            )
+                            .await
+                    }
+                }
+            };
             match tokio::time::timeout(
                 remaining,
-                revoker.revoke_forked_participant(state.console_principal_snapshot(), &capability),
+                revocation,
             )
             .await
             {

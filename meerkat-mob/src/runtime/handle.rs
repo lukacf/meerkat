@@ -4146,6 +4146,7 @@ pub struct MobHandle {
     pub(super) definition: Arc<MobDefinition>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) run_store: Arc<dyn MobRunStore>,
+    pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
@@ -6870,6 +6871,182 @@ impl MobHandle {
                 },
             )
             .await?
+    }
+
+    /// Revoke through the source owner, recovering only after its actor closes.
+    ///
+    /// `self` remains the source authority. A distinct live handle may supply
+    /// transport after actor-channel closure, but its own mob and host facts are
+    /// never consulted. Any live-actor error returns without alternate signing.
+    pub async fn revoke_forked_participant_with_recovery(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        recovery_transport: Option<&MobHandle>,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+    ) -> Result<crate::forked_participant::ForkedParticipantRevocationOutcome, MobError> {
+        let source_error = if self.supervisor_bridge.is_shutdown() {
+            MobError::ActorCommandChannelClosed
+        } else {
+            match self
+                .revoke_forked_participant(caller.clone(), capability)
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(
+                    error @ (MobError::ActorCommandChannelClosed
+                    | MobError::ActorReplyChannelClosed),
+                ) => error,
+                Err(error) => return Err(error),
+            }
+        };
+        let transport = recovery_transport.ok_or(source_error)?;
+        if Arc::ptr_eq(&self.supervisor_bridge, &transport.supervisor_bridge) {
+            return Err(MobError::ActorCommandChannelClosed);
+        }
+        transport
+            .revoke_forked_participant_from_persisted_owner(caller, self, capability)
+            .await
+    }
+
+    async fn revoke_forked_participant_from_persisted_owner(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        owner: &MobHandle,
+        capability: &crate::forked_participant::ForkedParticipantRef,
+    ) -> Result<crate::forked_participant::ForkedParticipantRevocationOutcome, MobError> {
+        let now_ms = if matches!(caller, crate::control_policy::MobControlPrincipal::Owner) {
+            0
+        } else {
+            super::scope_gate::control_now_ms()
+        };
+        owner
+            .clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .resolve_control_policy(now_ms)?
+            .require(crate::ControlScope::Cancel)?;
+
+        let (owner_realm, host_id) = match capability.owner_route() {
+            crate::forked_participant::ForkedParticipantOwnerRoute::Host { realm_id, host_id } => {
+                (realm_id, host_id)
+            }
+            crate::forked_participant::ForkedParticipantOwnerRoute::Local { .. } => {
+                return Err(MobError::ForkedParticipantRefused(Box::new(
+                    crate::forked_participant::ForkedParticipantError::CapabilityRejected {
+                        detail:
+                            "persisted owner recovery is only valid for a host-owned capability"
+                                .to_string(),
+                    },
+                )));
+            }
+        };
+        let expected_realm =
+            meerkat_core::mob_realm_id(owner.definition.id.as_str()).map_err(|error| {
+                MobError::Internal(format!(
+                    "source mob '{}' has no canonical capability realm: {error}",
+                    owner.definition.id
+                ))
+            })?;
+        if owner_realm != &expected_realm {
+            return Err(MobError::ForkedParticipantRefused(Box::new(
+                crate::forked_participant::ForkedParticipantError::CapabilityRejected {
+                    detail: format!(
+                        "capability owner realm '{}' does not match source mob '{}' realm '{}'",
+                        owner_realm, owner.definition.id, expected_realm
+                    ),
+                },
+            )));
+        }
+
+        let unavailable = |rejection| MobError::ForkedParticipantOwnerHostUnavailable {
+            host_id: host_id.as_str().to_string(),
+            rejection,
+        };
+        let authority = owner
+            .runtime_metadata
+            .load_supervisor_authority(&owner.definition.id)
+            .await?
+            .ok_or_else(|| {
+                unavailable(crate::ForkedParticipantOwnerHostRejection::RouteUnusable)
+            })?;
+        if authority.keypair().public_key().to_peer_id().as_str() != authority.public_peer_id {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::RouteUnusable,
+            ));
+        }
+        let host = owner
+            .runtime_metadata
+            .load_mob_host_authority(&owner.definition.id, host_id.as_str())
+            .await?
+            .ok_or_else(|| unavailable(crate::ForkedParticipantOwnerHostRejection::HostNotBound))?;
+        if host.capabilities.protocol_min > 6 || host.capabilities.protocol_max < 6 {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::ProtocolUnsupported,
+            ));
+        }
+        if host.host_id != host_id.as_str()
+            || host.peer_id != host.host_id
+            || host.binding_generation == 0
+            || host.authority_epoch != authority.epoch
+        {
+            return Err(unavailable(
+                crate::ForkedParticipantOwnerHostRejection::RouteUnusable,
+            ));
+        }
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            host.host_id.clone(),
+            host.peer_id,
+            host.signing_key,
+            host.endpoint,
+        )
+        .map_err(|_| unavailable(crate::ForkedParticipantOwnerHostRejection::RouteUnusable))?;
+        let supervisor = self
+            .supervisor_bridge
+            .supervisor_spec_for_authority_and_recipient(&authority, &peer)
+            .await?;
+        let command = super::bridge_protocol::BridgeCommand::RevokeForkedParticipant(
+            super::forked_participant_routing::revoke_payload(
+                supervisor.into(),
+                authority.epoch,
+                &owner.definition.id,
+                host_id.as_str(),
+                host.binding_generation,
+                capability,
+            ),
+        );
+        let value = self
+            .supervisor_bridge
+            .send_bridge_command_as_authority(
+                &authority,
+                &peer,
+                &command,
+                super::forked_participant_routing::FORKED_PARTICIPANT_BRIDGE_TIMEOUT,
+            )
+            .await?;
+        if let Some(rejection) = super::bridge_protocol::decode_bridge_rejection_reply(
+            command.protocol_version(),
+            &value,
+        ) {
+            return Err(MobError::from(rejection));
+        }
+        let revoked: super::bridge_protocol::BridgeForkedParticipantRevokedResponse =
+            super::bridge_protocol::decode_bridge_payload(
+                &command,
+                value,
+                "recovered forked-participant revocation",
+            )?;
+        Ok(match revoked.outcome {
+            super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::Revoked {
+                cleanup_pending,
+            } => crate::forked_participant::ForkedParticipantRevocationOutcome::Revoked {
+                cleanup_pending,
+            },
+            super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::PendingAttachedRelease => {
+                crate::forked_participant::ForkedParticipantRevocationOutcome::PendingAttachedRelease
+            }
+            super::bridge_protocol::BridgeForkedParticipantRevocationOutcome::Converged => {
+                crate::forked_participant::ForkedParticipantRevocationOutcome::Converged
+            }
+        })
     }
 
     /// Attach a LOCAL source-owned forked participant to a temporary

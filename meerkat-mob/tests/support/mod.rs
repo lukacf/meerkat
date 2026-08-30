@@ -2667,7 +2667,10 @@ fn scripted_create_forked_participant_reply(
             source_identity: payload.source_member.agent_identity.clone(),
             fork_session_id: uuid::Uuid::new_v4().to_string(),
             owner_route: BridgeForkedParticipantOwnerRoute::Host {
-                realm_id: "global".to_string(),
+                realm_id: meerkat_core::mob_realm_id(&payload.source_member.mob_id)
+                    .expect("scripted source mob has a canonical realm")
+                    .as_str()
+                    .to_string(),
                 host_id: payload.source_member.host_id.clone(),
             },
             source_session_id: payload.source_member.member_session_id.clone(),

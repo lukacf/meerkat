@@ -37,8 +37,8 @@ use meerkat_mob::runtime::bridge_protocol::{
     BridgeForkedParticipantOwnerRoute, BridgeProtocolVersion, BridgeRejectionCause,
 };
 use meerkat_mob::{
-    AgentIdentity, ForkedParticipantLeaseOperation, ForkedParticipantSourceRejection,
-    MobControlPrincipal, MobError,
+    AgentIdentity, ForkedParticipantLeaseOperation, ForkedParticipantOwnerHostRejection,
+    ForkedParticipantSourceRejection, MobControlPrincipal, MobError,
 };
 use support::{
     ControllingMob, REAL_COMMS_TEST_LOCK, ScriptedForkedParticipantTamper, StallGate,
@@ -899,4 +899,169 @@ async fn placed_revoke_routes_by_capability_owner_host_after_the_source_is_absen
         .await
         .expect("a repeated revocation converges");
     assert_eq!(repeat, ForkedParticipantRevocationOutcome::Converged);
+}
+
+/// Recovered revocation refuses persisted authority that cannot prove the
+/// capability's exact owner route or V6 support. Neither refusal may send the
+/// bearer capability to a host.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_revoke_refuses_under_versioned_and_corrupt_owner_routes() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let source_host = spawn_scripted_host_peer("fp-recovered-source-host").await;
+    let source = create_controlling_mob("fp-recovered-source").await;
+    let source_report = source.bind_scripted(&source_host).await;
+    source
+        .spawn_placed("worker", "remote", &source_report.host_id)
+        .await
+        .expect("placed spawn commits");
+    let capability = create(&source, "remote", "req-recovered-refusal")
+        .await
+        .expect("placed create");
+    let transport = create_controlling_mob("fp-recovered-transport").await;
+
+    let corrupt_route = tampered(
+        &capability,
+        "owner_route",
+        serde_json::json!({
+            "kind": "host",
+            "realm_id": "global",
+            "host_id": source_report.host_id,
+        }),
+    );
+    source
+        .handle
+        .shutdown()
+        .await
+        .expect("source actor shuts down before persisted recovery");
+    let corrupt_error = source
+        .handle
+        .revoke_forked_participant_with_recovery(
+            MobControlPrincipal::Owner,
+            Some(&transport.handle),
+            &corrupt_route,
+        )
+        .await
+        .expect_err("a foreign owner realm must fail closed");
+    assert!(
+        matches!(corrupt_error, MobError::ForkedParticipantRefused(_)),
+        "the corrupt route is a typed capability refusal: {corrupt_error:?}"
+    );
+    assert!(
+        source_host
+            .received_revoke_forked_participant_payloads()
+            .is_empty(),
+        "route corruption must be rejected before bridge traffic"
+    );
+    let stopped_transport = create_controlling_mob("fp-recovered-stopped-transport").await;
+    stopped_transport
+        .handle
+        .shutdown()
+        .await
+        .expect("recovery transport shuts down");
+    let stopped_error = source
+        .handle
+        .revoke_forked_participant_with_recovery(
+            MobControlPrincipal::Owner,
+            Some(&stopped_transport.handle),
+            &capability,
+        )
+        .await
+        .expect_err("a stopped fallback transport must fail before sending");
+    assert!(
+        matches!(stopped_error, MobError::ActorCommandChannelClosed),
+        "unexpected stopped-transport error: {stopped_error:?}"
+    );
+    assert!(
+        source_host
+            .received_revoke_forked_participant_payloads()
+            .is_empty(),
+        "a stopped fallback transport must not receive or send the capability"
+    );
+    let recovered = source
+        .handle
+        .revoke_forked_participant_with_recovery(
+            MobControlPrincipal::Owner,
+            Some(&transport.handle),
+            &capability,
+        )
+        .await
+        .expect("an intact V6 owner route recovers through a live transport");
+    assert!(matches!(
+        recovered,
+        ForkedParticipantRevocationOutcome::Revoked { .. }
+    ));
+    assert_eq!(
+        source_host
+            .received_revoke_forked_participant_payloads()
+            .len(),
+        1,
+        "recovery sends exactly one revoke under the persisted owner authority"
+    );
+
+    let legacy_host = spawn_scripted_host_peer("fp-recovered-v5-host").await;
+    legacy_host.advertise_protocol_versions(vec![
+        BridgeProtocolVersion::V2,
+        BridgeProtocolVersion::V3,
+        BridgeProtocolVersion::V4,
+        BridgeProtocolVersion::V5,
+    ]);
+    let legacy_owner = create_controlling_mob("fp-recovered-v5-owner").await;
+    let legacy_report = legacy_owner.bind_scripted(&legacy_host).await;
+    let legacy_realm =
+        meerkat_core::mob_realm_id(legacy_owner.mob_id.as_str()).expect("canonical mob realm");
+    let under_versioned = tampered(
+        &capability,
+        "owner_route",
+        serde_json::json!({
+            "kind": "host",
+            "realm_id": legacy_realm.as_str(),
+            "host_id": legacy_report.host_id,
+        }),
+    );
+    let live_error = legacy_owner
+        .handle
+        .revoke_forked_participant_with_recovery(
+            MobControlPrincipal::Owner,
+            Some(&transport.handle),
+            &under_versioned,
+        )
+        .await
+        .expect_err("a live source refusal must not use alternate authority");
+    assert_eq!(
+        source_rejection(&live_error),
+        ForkedParticipantSourceRejection::HostProtocolUnsupported
+    );
+    assert!(
+        legacy_host
+            .received_revoke_forked_participant_payloads()
+            .is_empty(),
+        "a live source refusal must not trigger alternate bridge traffic"
+    );
+    legacy_owner
+        .handle
+        .shutdown()
+        .await
+        .expect("legacy owner actor shuts down before persisted recovery");
+    let version_error = legacy_owner
+        .handle
+        .revoke_forked_participant_with_recovery(
+            MobControlPrincipal::Owner,
+            Some(&transport.handle),
+            &under_versioned,
+        )
+        .await
+        .expect_err("a pre-V6 persisted host binding must fail closed");
+    assert!(matches!(
+        version_error,
+        MobError::ForkedParticipantOwnerHostUnavailable {
+            rejection: ForkedParticipantOwnerHostRejection::ProtocolUnsupported,
+            ..
+        }
+    ));
+    assert!(
+        legacy_host
+            .received_revoke_forked_participant_payloads()
+            .is_empty(),
+        "a pre-V6 host must never receive the capability"
+    );
 }

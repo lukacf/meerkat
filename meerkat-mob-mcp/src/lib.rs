@@ -850,22 +850,29 @@ impl MobMcpState {
         self.console_principal.clone()
     }
 
-    /// Any managed mob handle, for placement-blind capability verbs that only
-    /// need a live actor to route through.
+    /// Any managed transport handle other than the named authority.
     ///
-    /// Capability routing is decided by the capability's own immutable owner
-    /// route inside the actor, not by which mob was asked, so this is a
-    /// last-resort carrier rather than an authority choice.
-    async fn any_managed_handle(&self) -> Option<MobHandle> {
-        if self.ensure_restored().await.is_err() {
-            return None;
-        }
-        self.mobs.read().await.values().next().map(|managed| {
-            managed
-                .handle
-                .clone()
-                .with_command_authority(CommandAuthority::principal(self.console_principal.clone()))
-        })
+    /// The bridge send atomically excludes shutdown; this selection is not a
+    /// liveness or authority decision.
+    async fn any_managed_handle_except(
+        &self,
+        excluded: &MobId,
+    ) -> Result<Option<MobHandle>, MobError> {
+        self.ensure_restored().await?;
+        Ok(self
+            .mobs
+            .read()
+            .await
+            .iter()
+            .find(|(mob_id, _)| *mob_id != excluded)
+            .map(|(_, managed)| {
+                managed
+                    .handle
+                    .clone()
+                    .with_command_authority(CommandAuthority::principal(
+                        self.console_principal.clone(),
+                    ))
+            }))
     }
 
     fn temporary_council_reserve_inflight(

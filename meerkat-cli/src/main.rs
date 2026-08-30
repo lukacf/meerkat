@@ -27984,35 +27984,159 @@ mod docs_cli_examples {
         Some(tokens)
     }
 
-    /// Doc lines that are illustrative shapes rather than literal
-    /// invocations: placeholders, shell composition, or output elision.
-    /// Subcommands that exist only behind build features: doc examples
-    /// using them are valid for full builds and must be skipped when this
-    /// test runs in a trimmed feature-matrix combo.
-    fn subcommand_compiled_out(line: &str) -> bool {
-        let mut tokens = line.split_whitespace();
-        if tokens.next() != Some("rkat") {
-            return false;
-        }
-        let gated_subcommand = match tokens.next() {
-            Some("mob") => cfg!(not(feature = "mob")),
-            Some("mcp") => cfg!(not(feature = "mcp")),
-            Some("skill" | "skills") => cfg!(not(feature = "skills")),
-            Some("workgraph") => cfg!(not(feature = "workgraph")),
-            _ => false,
-        };
-        // Feature-gated FLAGS (cfg'd fields on Run/Resume) are also absent
-        // from trimmed builds.
-        let gated_flag = (line.contains("--skill") && cfg!(not(feature = "skills")))
-            || ((line.contains("--wait-for-mcp") || line.contains("--mcp-auth"))
-                && cfg!(not(feature = "mcp")));
-        gated_subcommand || gated_flag
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CliFeature {
+        Mcp,
+        Mob,
+        Skills,
     }
 
-    fn skippable(line: &str) -> bool {
-        if subcommand_compiled_out(line) {
-            return true;
+    impl CliFeature {
+        const ALL: [Self; 3] = [Self::Mcp, Self::Mob, Self::Skills];
+
+        fn compiled(self) -> bool {
+            match self {
+                Self::Mcp => cfg!(feature = "mcp"),
+                Self::Mob => cfg!(feature = "mob"),
+                Self::Skills => cfg!(feature = "skills"),
+            }
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct RequiredFeatures {
+        mcp: bool,
+        mob: bool,
+        skills: bool,
+    }
+
+    impl RequiredFeatures {
+        fn insert(&mut self, feature: CliFeature) {
+            match feature {
+                CliFeature::Mcp => self.mcp = true,
+                CliFeature::Mob => self.mob = true,
+                CliFeature::Skills => self.skills = true,
+            }
+        }
+
+        fn contains(self, feature: CliFeature) -> bool {
+            match feature {
+                CliFeature::Mcp => self.mcp,
+                CliFeature::Mob => self.mob,
+                CliFeature::Skills => self.skills,
+            }
+        }
+
+        fn iter(self) -> impl Iterator<Item = CliFeature> {
+            CliFeature::ALL
+                .into_iter()
+                .filter(move |feature| self.contains(*feature))
+        }
+
+        fn is_empty(self) -> bool {
+            !self.mcp && !self.mob && !self.skills
+        }
+
+        fn only(feature: CliFeature) -> Self {
+            let mut required = Self::default();
+            required.insert(feature);
+            required
+        }
+    }
+
+    fn top_level_subcommand(tokens: &[std::ffi::OsString]) -> Option<(usize, &str)> {
+        let mut index = 1;
+        while let Some(token) = tokens.get(index).and_then(|token| token.to_str()) {
+            if super::is_root_flag_without_value(token)
+                || super::is_root_flag_with_attached_value(token)
+            {
+                index += 1;
+            } else if super::is_root_flag_with_value(token) {
+                index += 2;
+            } else if token.starts_with('-') {
+                return None;
+            } else {
+                return Some((index, token));
+            }
+        }
+        None
+    }
+
+    /// Feature ownership follows the cfg gates on `Commands` and its
+    /// feature-gated `run` flags. Global options may precede the
+    /// subcommand, so classification uses the same root-option vocabulary as
+    /// CLI argument normalization rather than assuming argv[1] is a command.
+    fn required_features(tokens: &[std::ffi::OsString]) -> RequiredFeatures {
+        let mut required = RequiredFeatures::default();
+        let Some((command_index, command)) = top_level_subcommand(tokens) else {
+            return required;
+        };
+        match command {
+            "mcp" => required.insert(CliFeature::Mcp),
+            "mob" => required.insert(CliFeature::Mob),
+            "skill" => {
+                required.insert(CliFeature::Skills);
+            }
+            _ => {}
+        }
+        if command != "run" {
+            return required;
+        }
+        for token in tokens.iter().skip(command_index + 1) {
+            let Some(token) = token.to_str() else {
+                continue;
+            };
+            if token == "--" {
+                break;
+            }
+            let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
+            match flag {
+                "--skill" => required.insert(CliFeature::Skills),
+                "--wait-for-mcp" | "--mcp-auth" => {
+                    required.insert(CliFeature::Mcp);
+                }
+                _ => {}
+            }
+        }
+        required
+    }
+
+    fn supported_by(tokens: &[String], feature_enabled: impl Fn(CliFeature) -> bool) -> bool {
+        let normalized = super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+        required_features(&normalized).iter().all(feature_enabled)
+    }
+
+    enum ExampleValidation {
+        Accepted,
+        UnsupportedFeature,
+        Rejected(clap::Error),
+    }
+
+    fn validate_example(
+        tokens: &[String],
+        feature_enabled: impl Fn(CliFeature) -> bool,
+    ) -> ExampleValidation {
+        let normalized = super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+        match super::Cli::try_parse_from(&normalized) {
+            Ok(_) => ExampleValidation::Accepted,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                ExampleValidation::Accepted
+            }
+            Err(_) if !required_features(&normalized).iter().all(feature_enabled) => {
+                ExampleValidation::UnsupportedFeature
+            }
+            Err(err) => ExampleValidation::Rejected(err),
+        }
+    }
+
+    /// Doc lines that are illustrative shapes rather than literal
+    /// invocations: placeholders, shell composition, or output elision.
+    fn skippable(line: &str) -> bool {
         line.contains('<')
             || line.contains('[')
             || line.contains("...")
@@ -28089,20 +28213,11 @@ mod docs_cli_examples {
                     let Some(tokens) = split_tokens(&line) else {
                         continue;
                     };
-                    checked += 1;
-                    // Validate through the binary's REAL ingress: the arg
-                    // normalization shim (default-run injection, resume
-                    // shortcuts) runs before clap in `main`.
-                    let normalized =
-                        super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
-                    if let Err(err) = super::Cli::try_parse_from(&normalized) {
-                        // `--help` / `--version` examples parse successfully;
-                        // clap models their output as an "error" kind.
-                        if !matches!(
-                            err.kind(),
-                            clap::error::ErrorKind::DisplayHelp
-                                | clap::error::ErrorKind::DisplayVersion
-                        ) {
+                    match validate_example(&tokens, CliFeature::compiled) {
+                        ExampleValidation::Accepted => checked += 1,
+                        ExampleValidation::UnsupportedFeature => {}
+                        ExampleValidation::Rejected(err) => {
+                            checked += 1;
                             failures.push(format!("{}: `{line}`: {err}", path.display()));
                         }
                     }
@@ -28118,6 +28233,104 @@ mod docs_cli_examples {
             "documented rkat invocations the CLI rejects:\n{}",
             failures.join("\n")
         );
+    }
+
+    #[test]
+    fn feature_owned_examples_are_checked_exactly_when_supported() {
+        for (line, owner) in [
+            (
+                "rkat --realm team-alpha mob hosts release-triage",
+                CliFeature::Mob,
+            ),
+            ("rkat --realm=team-alpha mcp list", CliFeature::Mcp),
+            ("rkat run --skill reviewer summarize", CliFeature::Skills),
+            ("rkat run --mcp-auth interactive summarize", CliFeature::Mcp),
+        ] {
+            let tokens = split_tokens(line).expect("fixture must tokenize");
+            let normalized = super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+            assert_eq!(
+                required_features(&normalized),
+                RequiredFeatures::only(owner),
+                "{line}"
+            );
+            assert!(
+                supported_by(&tokens, |_| true),
+                "feature-enabled build must check `{line}`"
+            );
+            assert!(
+                !supported_by(&tokens, |feature| feature != owner),
+                "feature-disabled build must skip `{line}`"
+            );
+            let validation = validate_example(&tokens, CliFeature::compiled);
+            if owner.compiled() {
+                assert!(
+                    matches!(validation, ExampleValidation::Accepted),
+                    "enabled feature fixture must parse: `{line}`"
+                );
+            } else {
+                assert!(
+                    matches!(validation, ExampleValidation::UnsupportedFeature),
+                    "disabled feature fixture must be skipped: `{line}`"
+                );
+            }
+        }
+
+        for line in [
+            "rkat --realm mob workgraph list",
+            "rkat run \"ask the mob to help\"",
+            "rkat run -- --skill",
+        ] {
+            let tokens = split_tokens(line).expect("fixture must tokenize");
+            let normalized = super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+            assert!(
+                required_features(&normalized).is_empty(),
+                "ungated example was assigned a feature owner: `{line}`"
+            );
+            assert!(
+                supported_by(&tokens, |_| false),
+                "ungated example must be checked in every build: `{line}`"
+            );
+            assert!(
+                matches!(
+                    validate_example(&tokens, CliFeature::compiled),
+                    ExampleValidation::Accepted
+                ),
+                "valid ungated example must parse: `{line}`"
+            );
+        }
+
+        for line in ["rkat skills list", "rkat resume --skill reviewer prompt"] {
+            let tokens = split_tokens(line).expect("fixture must tokenize");
+            let normalized = super::normalize_cli_args(tokens.iter().map(std::ffi::OsString::from));
+            assert!(required_features(&normalized).is_empty(), "{line}");
+            assert!(
+                matches!(
+                    validate_example(&tokens, CliFeature::compiled),
+                    ExampleValidation::Rejected(_)
+                ),
+                "invalid ungated example must be rejected: `{line}`"
+            );
+        }
+
+        let passthrough =
+            split_tokens("rkat mcp add server -- command --skill").expect("fixture must tokenize");
+        let normalized =
+            super::normalize_cli_args(passthrough.iter().map(std::ffi::OsString::from));
+        assert_eq!(
+            required_features(&normalized),
+            RequiredFeatures::only(CliFeature::Mcp)
+        );
+        assert!(
+            supported_by(&passthrough, |feature| feature == CliFeature::Mcp),
+            "passthrough flags must not acquire feature ownership"
+        );
+    }
+
+    #[test]
+    fn compiled_feature_ownership_matches_cargo_features() {
+        assert_eq!(CliFeature::Mcp.compiled(), cfg!(feature = "mcp"));
+        assert_eq!(CliFeature::Mob.compiled(), cfg!(feature = "mob"));
+        assert_eq!(CliFeature::Skills.compiled(), cfg!(feature = "skills"));
     }
 }
 

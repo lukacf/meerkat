@@ -967,6 +967,12 @@ pub(super) enum MobCommand {
         message: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    #[cfg(test)]
+    ParkActorForObservationTest {
+        entered_tx: oneshot::Sender<()>,
+        release_rx: oneshot::Receiver<()>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Snapshot the T2 DSL field projections (member state markers, wiring
     /// edges, identity→runtime map, tasks + task id sets) directly from the
     /// DSL authority. Test-only read seam used by the runtime-parity
@@ -1393,6 +1399,21 @@ pub(super) struct RetireMemberIncarnation {
 }
 
 impl MobCommand {
+    /// Whether this command is an explicitly classified observation whose
+    /// work has no value after its caller drops the reply receiver.
+    ///
+    /// Keep this allowlist narrow. `QueryPhase` is deliberately excluded:
+    /// actor-liveness probes retain and resume that same reply future after
+    /// their initial budget. Reads backed by other authorities are also
+    /// excluded because they may carry reconciliation or custody semantics.
+    pub(super) fn is_abandoned_observation(&self) -> bool {
+        match self {
+            Self::ProjectMemberList { reply_tx, .. } => reply_tx.is_closed(),
+            Self::ProjectMemberStatus { reply_tx, .. } => reply_tx.is_closed(),
+            _ => false,
+        }
+    }
+
     pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Spawn { .. } => "Spawn",
@@ -1471,6 +1492,8 @@ impl MobCommand {
             Self::LifecycleSnapshot { .. } => "LifecycleSnapshot",
             #[cfg(test)]
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
+            #[cfg(test)]
+            Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
             #[cfg(test)]
             Self::DslT2Snapshot { .. } => "DslT2Snapshot",
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",

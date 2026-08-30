@@ -1714,6 +1714,7 @@ struct MockSessionService {
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
     prompts: RwLock<Vec<(SessionId, String)>>,
+    session_read_calls: AtomicU64,
     create_requests: RwLock<Vec<CreateSessionRecord>>,
     /// Records whether each create_session had external_tools configured.
     create_with_external_tools: RwLock<Vec<bool>>,
@@ -1896,6 +1897,7 @@ impl MockSessionService {
             runtime_adapter: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
+            session_read_calls: AtomicU64::new(0),
             create_requests: RwLock::new(Vec::new()),
             create_with_external_tools: RwLock::new(Vec::new()),
             create_with_compaction_curators: RwLock::new(Vec::new()),
@@ -2525,6 +2527,10 @@ impl MockSessionService {
     fn set_execution_snapshot_delay_ms(&self, delay_ms: u64) {
         self.execution_snapshot_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn session_read_calls(&self) -> u64 {
+        self.session_read_calls.load(Ordering::Relaxed)
     }
 
     async fn wait_for_execution_snapshot(&self) {
@@ -3411,6 +3417,7 @@ impl SessionService for MockSessionService {
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        self.session_read_calls.fetch_add(1, Ordering::Relaxed);
         let session = self
             .live_session_clone(id)
             .await
@@ -53944,6 +53951,123 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
         snapshot.current_bridge_session_id.as_ref(),
         Some(receipt.bridge_session_id().expect("session-backed")),
         "machine-routed member_status should preserve the active session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_abandoned_queued_member_status_observations_do_not_execute() {
+    const ABANDONED_OBSERVATIONS: u64 = 8;
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("w-abandoned-status");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn worker");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (park_reply_tx, park_reply_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand::internal(
+            super::state::MobCommand::ParkActorForObservationTest {
+                entered_tx,
+                release_rx,
+                reply_tx: park_reply_tx,
+            },
+        ))
+        .await
+        .expect("queue actor park command");
+    entered_rx.await.expect("actor should enter park command");
+
+    let reads_before = service.session_read_calls();
+    for _ in 0..ABANDONED_OBSERVATIONS {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .command_tx
+            .send(super::scope_gate::RoutedMobCommand {
+                authority: handle.command_authority.clone(),
+                cmd: super::state::MobCommand::ProjectMemberStatus {
+                    agent_identity: identity.clone(),
+                    reply_tx,
+                },
+            })
+            .await
+            .expect("queue abandoned member-status observation");
+        drop(reply_rx);
+    }
+
+    let (open_reply_tx, open_reply_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand {
+            authority: handle.command_authority.clone(),
+            cmd: super::state::MobCommand::ProjectMemberStatus {
+                agent_identity: identity,
+                reply_tx: open_reply_tx,
+            },
+        })
+        .await
+        .expect("queue live member-status observation");
+
+    release_tx.send(()).expect("release parked actor");
+    park_reply_rx
+        .await
+        .expect("park reply channel")
+        .expect("park command");
+    open_reply_rx
+        .await
+        .expect("live observation reply channel")
+        .expect("live member-status observation");
+
+    assert_eq!(
+        service.session_read_calls() - reads_before,
+        1,
+        "closed receivers must skip their queued cross-component reads; the open receiver executes exactly once"
+    );
+}
+
+#[test]
+fn test_abandoned_observation_allowlist_excludes_phase_and_mutations() {
+    let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+    drop(status_rx);
+    let abandoned_status = super::state::MobCommand::ProjectMemberStatus {
+        agent_identity: AgentIdentity::from("abandoned-status"),
+        reply_tx: status_tx,
+    };
+    assert!(abandoned_status.is_abandoned_observation());
+    assert_eq!(
+        abandoned_status.required_control_scope(),
+        Some(crate::machines::mob_machine::ControlScope::List),
+        "abandoned observations must still cross ordinary scope and fence admission"
+    );
+
+    let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+    drop(list_rx);
+    assert!(
+        super::state::MobCommand::ProjectMemberList {
+            include_retiring: false,
+            reply_tx: list_tx,
+        }
+        .is_abandoned_observation()
+    );
+
+    let (phase_tx, phase_rx) = tokio::sync::oneshot::channel();
+    drop(phase_rx);
+    assert!(
+        !super::state::MobCommand::QueryPhase { reply_tx: phase_tx }.is_abandoned_observation(),
+        "QueryPhase liveness probes must always reach actor execution"
+    );
+
+    let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+    drop(complete_rx);
+    assert!(
+        !super::state::MobCommand::Complete {
+            reply_tx: complete_tx,
+        }
+        .is_abandoned_observation(),
+        "mutations must survive caller cancellation"
     );
 }
 

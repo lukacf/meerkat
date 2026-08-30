@@ -240,6 +240,7 @@ impl MobCommand {
             | Self::OrchestratorSnapshot { .. }
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
+            | Self::ParkActorForObservationTest { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
     }
@@ -501,6 +502,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::LifecycleNotificationBurst { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::ParkActorForObservationTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(any(test, feature = "test-support"))]

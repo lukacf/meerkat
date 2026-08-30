@@ -5952,6 +5952,11 @@ struct ExactRemoteTurnResidency<'a> {
 }
 
 impl MobActor {
+    fn abandoned_observation_control(cmd: &MobCommand) -> Option<ActorLoopControl> {
+        cmd.is_abandoned_observation()
+            .then_some(ActorLoopControl::ProceedBoundary)
+    }
+
     fn peer_only_member_control_error(
         runtime_mode: crate::MobRuntimeMode,
         action: &str,
@@ -22684,6 +22689,20 @@ impl MobActor {
                     let _ = reply_tx.send(burst_result);
                 }
                 #[cfg(test)]
+                MobCommand::ParkActorForObservationTest {
+                    entered_tx,
+                    release_rx,
+                    reply_tx,
+                } => {
+                    let _ = entered_tx.send(());
+                    let result = release_rx.await.map_err(|_| {
+                        MobError::Internal(
+                            "observation abandonment test dropped actor release".to_string(),
+                        )
+                    });
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
                 MobCommand::DslT2Snapshot { reply_tx } => {
                     let dsl = self.dsl_authority.state();
                     let _ = reply_tx.send(super::state::MobDslT2Snapshot {
@@ -24134,24 +24153,30 @@ impl MobActor {
                 // reply channel by `reject_scope_denied`.
                 ScopeAdmission::Denied => continue,
             };
-            // Only actor-admitted lifecycle authority can invalidate a
-            // retained explicit-Resume terminal. A caller that merely fails
-            // mailbox/scope admission must not erase the still-authoritative
-            // result. This serialized boundary also fences late publication
-            // from the predecessor generation.
-            if matches!(
-                &cmd,
-                MobCommand::Stop { .. }
-                    | MobCommand::Complete { .. }
-                    | MobCommand::Reset { .. }
-                    | MobCommand::Destroy { .. }
-                    | MobCommand::Shutdown { .. }
-            ) {
-                self.explicit_resume_operations
-                    .invalidate_after_lifecycle_admission();
-            }
-            match self
-                .dispatch_command_boxed(
+            let control = if let Some(control) = Self::abandoned_observation_control(&cmd) {
+                tracing::debug!(
+                    command_kind = cmd.kind(),
+                    "MobActor skipped abandoned observation"
+                );
+                control
+            } else {
+                // Only actor-admitted lifecycle authority can invalidate a
+                // retained explicit-Resume terminal. A caller that merely fails
+                // mailbox/scope admission must not erase the still-authoritative
+                // result. This serialized boundary also fences late publication
+                // from the predecessor generation.
+                if matches!(
+                    &cmd,
+                    MobCommand::Stop { .. }
+                        | MobCommand::Complete { .. }
+                        | MobCommand::Reset { .. }
+                        | MobCommand::Destroy { .. }
+                        | MobCommand::Shutdown { .. }
+                ) {
+                    self.explicit_resume_operations
+                        .invalidate_after_lifecycle_admission();
+                }
+                self.dispatch_command_boxed(
                     &authority,
                     cmd,
                     &mut command_rx,
@@ -24159,7 +24184,8 @@ impl MobActor {
                     &mut host_status_polls_in_flight,
                 )
                 .await
-            {
+            };
+            match control {
                 ActorLoopControl::ProceedBoundary => {}
                 ActorLoopControl::SkipBoundary => continue,
                 ActorLoopControl::BreakActor => break,
@@ -57346,6 +57372,22 @@ mod runtime_observation_tests {
 #[allow(clippy::expect_used)]
 mod routed_effect_containment_tests {
     use super::*;
+
+    #[test]
+    fn abandoned_observation_proceeds_through_actor_boundary() {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let command = MobCommand::ProjectMemberStatus {
+            agent_identity: AgentIdentity::from("abandoned-status"),
+            reply_tx,
+        };
+
+        assert_eq!(
+            MobActor::abandoned_observation_control(&command),
+            Some(ActorLoopControl::ProceedBoundary),
+            "abandonment must skip only handler execution, not fail-stop and routed-effect housekeeping"
+        );
+    }
 
     #[test]
     fn runtime_retire_route_is_deferred_until_correlated_detach_closes() {

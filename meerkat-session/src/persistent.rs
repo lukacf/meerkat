@@ -11758,8 +11758,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     /// Shut down all sessions.
-    pub async fn shutdown(&self) {
-        self.inner.shutdown().await;
+    pub async fn shutdown(&self) -> Result<(), SessionError> {
+        self.inner.shutdown().await
     }
 
     /// Cancel all active checkpointer gates.

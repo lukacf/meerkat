@@ -2095,7 +2095,10 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
     // A real process loss destroys the session-service actors as well as the
     // mob actor. This same-process fixture must establish that boundary
     // explicitly before lifetime 2 can claim the same participant names.
-    service_1.shutdown().await;
+    service_1
+        .shutdown()
+        .await
+        .expect("shutdown first session service");
     drop(handle_1);
     drop(service_1);
     drop(store_1);

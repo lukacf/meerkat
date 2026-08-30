@@ -862,6 +862,9 @@ pub enum ServerError {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Session-service shutdown error.
+    #[error("Session shutdown error: {0}")]
+    Session(#[from] meerkat_core::SessionError),
 }
 
 /// JSON-RPC server over async reader/writer streams.
@@ -1426,7 +1429,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // runtime where client disconnect should not destroy state).
         self.request_executor.shutdown_and_abort_stragglers().await;
         if !self.skip_shutdown_on_eof {
-            self.router.runtime().shutdown().await;
+            self.router.runtime().shutdown().await?;
         }
         Ok(())
     }

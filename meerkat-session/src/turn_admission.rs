@@ -154,6 +154,15 @@ pub(crate) struct TurnAdmissionSlot {
     projection: TurnAdmissionProjection,
 }
 
+#[must_use = "session teardown authorization must be consumed at the actor exit boundary"]
+pub(crate) struct SessionTeardownAuthorization {
+    _private: (),
+}
+
+impl SessionTeardownAuthorization {
+    pub(crate) fn complete_task_exit(self) {}
+}
+
 impl TurnAdmissionSlot {
     pub(crate) fn new() -> Self {
         let mut slot = Self {
@@ -518,15 +527,30 @@ impl TurnAdmissionSlot {
 
     /// Signal to the machine that teardown may proceed. Accepted only after
     /// the drain obligation has been closed.
-    pub(crate) fn authorize_session_teardown(&mut self) -> Result<(), TurnAdmissionError> {
+    pub(crate) fn authorize_session_teardown(
+        &mut self,
+    ) -> Result<SessionTeardownAuthorization, TurnAdmissionError> {
         let from = self.phase();
-        self.authority
-            .authorize_session_teardown()
-            .map(|_| ())
-            .map_err(|_| TurnAdmissionError {
+        let effects =
+            self.authority
+                .authorize_session_teardown()
+                .map_err(|_| TurnAdmissionError {
+                    from,
+                    op: "authorize_session_teardown",
+                })?;
+        if effects.iter().any(|effect| {
+            matches!(
+                effect,
+                authority::SessionTurnAdmissionEffect::SessionTeardownAuthorized
+            )
+        }) {
+            Ok(SessionTeardownAuthorization { _private: () })
+        } else {
+            Err(TurnAdmissionError {
                 from,
                 op: "authorize_session_teardown",
             })
+        }
     }
 
     fn refresh_projection(&mut self) -> Result<(), TurnAdmissionError> {

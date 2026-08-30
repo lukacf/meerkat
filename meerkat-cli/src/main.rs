@@ -11595,10 +11595,17 @@ async fn run_agent(
                 // Unregister the runtime-backed executor before awaiting stream tasks.
                 // The adapter owns the boxed executor, and the executor now holds the
                 // caller stream sender for runtime-backed turns.
-                unregister_cli_runtime_session(&runtime_adapter, &session_id).await?;
-                service.shutdown().await;
+                let mut shutdown_error = None;
+                if let Err(error) =
+                    unregister_cli_runtime_session(&runtime_adapter, &session_id).await
+                {
+                    accumulate_anyhow_error(&mut shutdown_error, error);
+                }
+                if let Err(error) = service.shutdown().await {
+                    accumulate_anyhow_error(&mut shutdown_error, error.into());
+                }
                 shutdown_mcp(&mcp_adapter).await;
-                Ok(())
+                shutdown_error.map_or(Ok(()), Err)
             },
         ))
         .await?;
@@ -12286,12 +12293,19 @@ async fn resume_session_with_llm_override(
                 log_stage("service.create_session(done)");
 
                 // Shutdown the session service and MCP connections gracefully.
-                unregister_cli_runtime_session(&resume_adapter, &session_id).await?;
+                let mut shutdown_error = None;
+                if let Err(error) =
+                    unregister_cli_runtime_session(&resume_adapter, &session_id).await
+                {
+                    accumulate_anyhow_error(&mut shutdown_error, error);
+                }
                 log_stage("service.shutdown");
-                service.shutdown().await;
+                if let Err(error) = service.shutdown().await {
+                    accumulate_anyhow_error(&mut shutdown_error, error.into());
+                }
                 log_stage("shutdown_mcp");
                 shutdown_mcp(&mcp_adapter).await;
-                Ok(())
+                shutdown_error.map_or(Ok(()), Err)
             },
         ))
         .await?;
@@ -18117,6 +18131,18 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn shutdown_error_accumulation_preserves_every_failure() {
+        let mut error = None;
+        accumulate_anyhow_error(&mut error, anyhow::anyhow!("unregister failed"));
+        accumulate_anyhow_error(&mut error, anyhow::anyhow!("session shutdown failed"));
+
+        assert_eq!(
+            error.expect("both failures must be retained").to_string(),
+            "unregister failed; additionally failed during shutdown: session shutdown failed"
+        );
+    }
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")

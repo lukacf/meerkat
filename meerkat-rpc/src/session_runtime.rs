@@ -10647,7 +10647,7 @@ impl SessionRuntime {
     }
 
     /// Shut down the runtime, closing all sessions.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), meerkat_core::SessionError> {
         // Clear pending sessions.
         self.staged_sessions.clear().await;
         self.runtime_pre_admissions
@@ -10663,7 +10663,7 @@ impl SessionRuntime {
         self.shutdown_schedule_host().await;
 
         // Shut down the service.
-        self.service.shutdown().await;
+        let service_shutdown = self.service.shutdown().await;
 
         #[cfg(feature = "mcp")]
         {
@@ -10683,6 +10683,7 @@ impl SessionRuntime {
         if let Err(error) = self.runtime_adapter.abort_comms_drains().await {
             tracing::warn!(%error, "failed to abort comms drains during runtime shutdown");
         }
+        service_shutdown
     }
 
     #[cfg(feature = "mcp")]
@@ -23955,7 +23956,7 @@ mod tests {
         assert!(runtime.session_state(&s2).await.unwrap().is_some());
 
         // Shutdown
-        runtime.shutdown().await;
+        runtime.shutdown().await.expect("runtime shutdown");
 
         // Both should be gone from the sessions map
         let sessions = runtime.list_sessions(Default::default()).await.unwrap();

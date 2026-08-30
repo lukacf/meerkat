@@ -1050,16 +1050,18 @@ async fn load_config_async(
 /// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
 fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, String> {
     match requested {
-        Some(true) => {
-            let support = if cfg!(feature = "comms") {
-                meerkat::surface::KeepAliveSupport::Available
-            } else {
-                meerkat::surface::KeepAliveSupport::Unavailable
-            };
-            meerkat::surface::resolve_keep_alive_for_surface(true, support).map(Some)
-        }
+        Some(value) => validate_effective_keep_alive(value).map(|()| Some(value)),
         other => Ok(other), // None (inherit) or Some(false) (disable) pass through
     }
+}
+
+fn validate_effective_keep_alive(keep_alive: bool) -> Result<(), String> {
+    let support = if cfg!(feature = "comms") {
+        meerkat::surface::KeepAliveSupport::Available
+    } else {
+        meerkat::surface::KeepAliveSupport::Unavailable
+    };
+    meerkat::surface::resolve_keep_alive_for_surface(keep_alive, support).map(|_| ())
 }
 
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), String> {
@@ -4395,6 +4397,7 @@ async fn handle_meerkat_resume(
         Some(val) => val,
         None => stored_metadata.keep_alive,
     };
+    validate_effective_keep_alive(keep_alive).map_err(ToolCallError::invalid_params)?;
     let comms_name = input
         .comms_name
         .clone()
@@ -7308,6 +7311,60 @@ mod tests {
     fn test_resolve_keep_alive_rejects_when_comms_disabled() {
         let err = resolve_keep_alive(Some(true)).expect_err("keep_alive should be rejected");
         assert!(err.contains("keep_alive requires comms support"));
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[tokio::test]
+    async fn test_meerkat_resume_rejects_inherited_persisted_keep_alive_without_comms() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            None,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+        )
+        .await;
+        let mut session = Session::new();
+        let session_id = session.id().clone();
+        session
+            .set_session_metadata(meerkat::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-opus-4-6".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: true,
+                comms_name: Some("persisted-mcp-agent".to_string()),
+                peer_meta: None,
+                realm_id: Some(state.realm_id.clone()),
+                instance_id: state.instance_id.clone(),
+                backend: Some(state.backend.clone()),
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("session metadata should serialize");
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("session build state should serialize");
+        store.save(&session).await.expect("persisted session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
+
+        let error = Box::pin(handle_meerkat_resume(
+            &state,
+            bounded_resume_input(session_id.to_string(), vec![]),
+            None,
+            None,
+        ))
+        .await
+        .expect_err("inherited keep_alive should reject without surface comms");
+
+        assert!(error.message.contains("keep_alive requires comms support"));
     }
 
     #[cfg(feature = "comms")]

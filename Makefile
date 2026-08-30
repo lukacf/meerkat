@@ -179,6 +179,8 @@ test-feature-matrix-surface:
 	CARGO="$(CARGO)" ./scripts/run-surface-feature-matrix
 	$(CARGO) test -p rkat --no-default-features --features session-store,mcp tests::test_resolve_keep_alive_roundtrip -- --exact
 	$(CARGO) test -p rkat --no-default-features --features session-store,comms,mcp tests::test_resolve_keep_alive_roundtrip -- --exact
+	$(CARGO) test -p meerkat-rest --no-default-features tests::test_continue_session_rejects_inherited_persisted_keep_alive_without_comms -- --exact
+	$(CARGO) test -p meerkat-mcp-server --no-default-features tests::test_meerkat_resume_rejects_inherited_persisted_keep_alive_without_comms -- --exact
 	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 
 # Session capability matrix (A-F builds from spec)

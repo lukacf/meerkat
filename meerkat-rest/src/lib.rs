@@ -2038,18 +2038,20 @@ fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
 /// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
 fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError> {
     match requested {
-        Some(true) => {
-            let support = if cfg!(feature = "comms") {
-                meerkat::surface::KeepAliveSupport::Available
-            } else {
-                meerkat::surface::KeepAliveSupport::Unavailable
-            };
-            meerkat::surface::resolve_keep_alive_for_surface(true, support)
-                .map(Some)
-                .map_err(ApiError::BadRequest)
-        }
+        Some(value) => validate_effective_keep_alive(value).map(|()| Some(value)),
         other => Ok(other), // None (inherit) or Some(false) (disable) pass through
     }
+}
+
+fn validate_effective_keep_alive(keep_alive: bool) -> Result<(), ApiError> {
+    let support = if cfg!(feature = "comms") {
+        meerkat::surface::KeepAliveSupport::Available
+    } else {
+        meerkat::surface::KeepAliveSupport::Unavailable
+    };
+    meerkat::surface::resolve_keep_alive_for_surface(keep_alive, support)
+        .map(|_| ())
+        .map_err(ApiError::BadRequest)
 }
 
 /// Default keep-alive TTL applied to per-turn metadata when the REST wire
@@ -6302,6 +6304,18 @@ async fn continue_session_inner(
             Some(val) => val,
             None => stored_metadata.keep_alive,
         };
+        if let Err(error) = validate_effective_keep_alive(keep_alive) {
+            let error = unregister_rest_runtime_after_api_error_locked(
+                state,
+                &session_id,
+                runtime_was_registered,
+                error,
+            )
+            .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(error));
+        }
         let effective_comms_name = req
             .comms_name
             .clone()
@@ -6833,6 +6847,18 @@ async fn continue_session_inner(
             Some(val) => val,
             None => stored_metadata.keep_alive,
         };
+        if let Err(error) = validate_effective_keep_alive(keep_alive) {
+            let error = unregister_rest_runtime_after_api_error_locked(
+                state,
+                &session_id,
+                runtime_was_registered,
+                error,
+            )
+            .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(error));
+        }
         let effective_comms_name = req
             .comms_name
             .clone()
@@ -11883,6 +11909,7 @@ mod tests {
         assert_eq!(create.enable_shell, Some(false));
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_create_session_route_rejects_reserved_mob_peer_meta_labels() {
         use axum::body::Body;
@@ -13518,7 +13545,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "comms")]
     fn rest_supervisor_bridge_params() -> Value {
         let pubkey = [7u8; 32];
         json!({
@@ -13539,6 +13565,93 @@ mod tests {
     fn test_resolve_keep_alive_rejects_when_comms_disabled() {
         let err = resolve_keep_alive(Some(true)).expect_err("keep_alive should be rejected");
         assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[tokio::test]
+    async fn test_continue_session_rejects_inherited_persisted_keep_alive_without_comms() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        for force_rebuild in [false, true] {
+            let pre_session = Session::new();
+            let session_id = pre_session.id().clone();
+            let comms_name = format!("persisted-rest-agent-{session_id}");
+            let bindings = state
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("runtime bindings should prepare");
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: resolved_default_model(&state).await,
+                    prompt: "Hello".to_string().into(),
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        resume_session: Some(pre_session),
+                        comms_name: Some(comms_name),
+                        keep_alive: true,
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("persisted keep-alive fixture should be created");
+
+            let outcome = Box::pin(continue_session_inner(
+                &state,
+                &created.session_id.to_string(),
+                ContinueSessionRequest {
+                    injected_context: None,
+                    transient_turn_context: None,
+                    session_id: created.session_id.to_string(),
+                    prompt: ContentInput::Text("Continue".to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    auth_binding: None,
+                    max_tokens: force_rebuild.then_some(state.max_tokens),
+                    hooks_override: None,
+                    enable_web_search: None,
+                    skill_refs: None,
+                    turn_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await;
+
+            match outcome {
+                RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(message))) => {
+                    assert!(
+                        message.contains("keep_alive requires comms support"),
+                        "unexpected rejection for force_rebuild={force_rebuild}: {message}"
+                    );
+                }
+                other => panic!(
+                    "expected inherited keep_alive rejection for force_rebuild={force_rebuild}, got {other:?}"
+                ),
+            }
+        }
     }
 
     #[cfg(feature = "comms")]

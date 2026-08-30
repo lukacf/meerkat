@@ -135,3 +135,13 @@ inventory::submit! {
 /// their bodies remain owned here.
 #[doc(hidden)]
 pub fn link_embedded_skill_registrations() {}
+
+/// Confirm keep-alive mode availability when this crate is linked.
+///
+/// New product surfaces should call
+/// `meerkat::surface::resolve_keep_alive_for_surface()` with their own typed
+/// compiled-availability witness so dependency feature unification cannot
+/// change the result.
+pub fn validate_keep_alive(requested: bool) -> Result<bool, String> {
+    Ok(requested)
+}

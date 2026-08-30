@@ -26,8 +26,9 @@
 //!   with a typed terminal outcome instead of dropping reply channels, then
 //!   close the obligation with `ResolvePendingAdmissionDrained`. The final
 //!   teardown step (`AuthorizeSessionTeardown` -> `SessionTeardownAuthorized`)
-//!   is guarded on the drain obligation being closed, so "torn down" is
-//!   *defined* as "pending admission work resolved".
+//!   is guarded on the drain obligation being closed and authorization not
+//!   having been issued already, so "torn down" is *defined* as "pending
+//!   admission work resolved" and teardown authority is one-shot.
 //! - **D2a — total inputs in `ShuttingDown`.** Inputs that legitimately race
 //!   archive/discard teardown (`ClaimTurn`, `AbortClaim`, `BeginTurn`,
 //!   `ResolveStartTurnDisposition`, and `ResolveRuntimeKeepAlive`) are accepted in
@@ -140,6 +141,9 @@ machine! {
             // feedback after it has flushed the session command queue and
             // resolved every pending admission waiter with a typed terminal.
             admission_drain_pending: bool,
+            // One-shot teardown authority. Once set, no shell call can mint a
+            // second SessionTeardownAuthorized effect for this session task.
+            teardown_authorized: bool,
             last_public_terminal: Option<Enum<StartTurnPublicTerminal>>,
         }
 
@@ -147,6 +151,7 @@ machine! {
             interrupt_pending = false,
             shutdown_pending = false,
             admission_drain_pending = false,
+            teardown_authorized = false,
             last_public_terminal = None,
         }
 
@@ -220,6 +225,14 @@ machine! {
         // unrepresentable.
         invariant drain_obligation_only_while_shutting_down {
             self.admission_drain_pending == false || self.lifecycle_phase == Phase::ShuttingDown
+        }
+
+        invariant teardown_authorization_only_after_drain {
+            self.teardown_authorized == false
+            || (
+                self.lifecycle_phase == Phase::ShuttingDown
+                && self.admission_drain_pending == false
+            )
         }
 
         disposition TurnAdmissionProjected => local seam NoOwnerRealization,
@@ -545,14 +558,18 @@ machine! {
 
         // D1 final teardown gate: dropping the session task / live state is
         // only authorized once the drain obligation has closed, so "torn
-        // down" is defined as "pending admission work resolved".
+        // down" is defined as "pending admission work resolved". The generated
+        // state spends this authorization exactly once.
         transition AuthorizeSessionTeardown {
             on input AuthorizeSessionTeardown
             guard {
                 self.lifecycle_phase == Phase::ShuttingDown
                 && self.admission_drain_pending == false
+                && self.teardown_authorized == false
             }
-            update {}
+            update {
+                self.teardown_authorized = true;
+            }
             to ShuttingDown
             emit SessionTeardownAuthorized
         }

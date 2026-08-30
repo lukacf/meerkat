@@ -168,6 +168,7 @@ pub struct SessionTurnAdmissionMachineState {
     pub interrupt_pending: bool,
     pub shutdown_pending: bool,
     pub admission_drain_pending: bool,
+    pub teardown_authorized: bool,
     pub last_public_terminal: Option<StartTurnPublicTerminal>,
 }
 
@@ -240,6 +241,7 @@ impl SessionTurnAdmissionMachineAuthority {
         state.interrupt_pending = false;
         state.shutdown_pending = false;
         state.admission_drain_pending = false;
+        state.teardown_authorized = false;
         state.last_public_terminal = None;
         Self { state }
     }
@@ -837,13 +839,15 @@ impl SessionTurnAdmissionMachineAuthority {
             SessionTurnAdmissionInput::AuthorizeSessionTeardown => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown)
-                    && (self.state.admission_drain_pending == false)
+                    && ((self.state.admission_drain_pending == false)
+                        && (self.state.teardown_authorized == false))
                 {
                     matches.push(SessionTurnAdmissionTransition::AuthorizeSessionTeardown);
                 }
                 let transition = Self::single_transition(matches, "AuthorizeSessionTeardown")?;
                 match transition {
                     SessionTurnAdmissionTransition::AuthorizeSessionTeardown => {
+                        self.state.teardown_authorized = true;
                         self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
                         Ok(vec![SessionTurnAdmissionEffect::SessionTeardownAuthorized])
                     }

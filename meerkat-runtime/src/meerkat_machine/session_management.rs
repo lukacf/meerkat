@@ -9191,12 +9191,13 @@ impl MeerkatMachine {
     ///
     /// Slow mechanical joins run after an exact L + M capture with M released.
     /// The unregister worker's original exact L stays held through those joins
-    /// and the final compare-remove. The commit point then takes T while that
-    /// L is still held, queues for the sessions writer without another fence,
-    /// then non-blockingly acquires T and exact M, revalidates the complete
-    /// witness, and removes from the map without awaiting while multiple fences
-    /// are held. This bounded L -> sessions -> try(T) -> try(M) section is safe
-    /// only after the exact unregister
+    /// and the final compare-remove. The commit point queues for the sessions
+    /// writer without another fence, then non-blockingly acquires T and exact
+    /// M, revalidates the complete witness, and removes from the map without
+    /// awaiting while multiple fences are held. On T or M contention it drops
+    /// the sessions writer before awaiting the contended guard alone, releases
+    /// that guard, and retries the exact compare-remove. This bounded
+    /// L -> sessions -> try(T) -> try(M) section is safe only after the exact unregister
     /// coordinator is installed: every archive/retire T -> L path rejects that
     /// coordinator under T before attempting L.
     // These fields are the exact unregister witness and remain explicit so no

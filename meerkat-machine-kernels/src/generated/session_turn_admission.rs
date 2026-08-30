@@ -508,6 +508,7 @@ pub struct State {
     pub interrupt_pending: bool,
     pub shutdown_pending: bool,
     pub admission_drain_pending: bool,
+    pub teardown_authorized: bool,
     pub last_public_terminal: Option<StartTurnPublicTerminal>,
 }
 impl Default for State {
@@ -811,6 +812,7 @@ pub fn initial_state() -> State {
         interrupt_pending: false,
         shutdown_pending: false,
         admission_drain_pending: false,
+        teardown_authorized: false,
         last_public_terminal: None,
     }
 }

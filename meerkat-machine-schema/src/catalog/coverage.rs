@@ -1584,7 +1584,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "session_turn_admission_authority",
                 "SessionTurnAdmissionMachine",
                 "meerkat-session/src/generated/session_turn_admission.rs",
-                "generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, ResolvePendingAdmissionDrained, AuthorizeSessionTeardown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, PendingAdmissionDrainRequested, SessionTeardownAuthorized, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariants shutdown_phase_is_not_active and drain_obligation_only_while_shutting_down",
+                "generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, ResolvePendingAdmissionDrained, AuthorizeSessionTeardown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, PendingAdmissionDrainRequested, SessionTeardownAuthorized, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariants shutdown_phase_is_not_active, drain_obligation_only_while_shutting_down, and teardown_authorization_only_after_drain",
                 CoverageClaims::none()
                     .transitions(&[
                         "ProjectTurnAdmissionIdle",
@@ -1641,6 +1641,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     .invariants(&[
                         "shutdown_phase_is_not_active",
                         "drain_obligation_only_while_shutting_down",
+                        "teardown_authorization_only_after_drain",
                     ]),
             )],
             &[
@@ -1688,9 +1689,10 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "turn_admission_shutdown_drain_and_teardown",
-                    "RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, and RequestShutdownAlreadyShuttingDown establish the generated PendingAdmissionDrainRequested obligation; ResolvePendingAdmissionDrained closes it only in ShuttingDown, and AuthorizeSessionTeardown emits SessionTeardownAuthorized only after the shell has drained queued admission work, so every normal session-task exit consumes generated teardown authority",
+                    "RequestShutdownImmediateIdle and RequestShutdownImmediateAdmitted establish the generated PendingAdmissionDrainRequested obligation immediately; RequestShutdownDeferredRunning and RequestShutdownDeferredCompleting record shutdown_pending so FinalizeTurnToShutdown establishes that obligation after the active turn resolves; RequestShutdownAlreadyShuttingDown preserves rather than remints it; ResolvePendingAdmissionDrained closes it only in ShuttingDown, and AuthorizeSessionTeardown emits SessionTeardownAuthorized exactly once after the shell has drained queued admission work, so every normal session-task exit consumes singular generated teardown authority",
                     CoverageClaims::none()
                         .transitions(&[
+                            "FinalizeTurnToShutdown",
                             "RequestShutdownImmediateIdle",
                             "RequestShutdownImmediateAdmitted",
                             "RequestShutdownDeferredRunning",
@@ -1703,7 +1705,10 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "PendingAdmissionDrainRequested",
                             "SessionTeardownAuthorized",
                         ])
-                        .invariants(&["drain_obligation_only_while_shutting_down"]),
+                        .invariants(&[
+                            "drain_obligation_only_while_shutting_down",
+                            "teardown_authorization_only_after_drain",
+                        ]),
                 ),
                 scenario(
                     "turn_admission_dispatch_and_boundary_cancel",

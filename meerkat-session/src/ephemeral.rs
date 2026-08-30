@@ -4772,8 +4772,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         self.session_registered.notified().await;
     }
 
-    /// Shut down all sessions.
-    pub async fn shutdown(&self) -> Result<(), SessionError> {
+    /// Shut down all sessions on a legacy best-effort basis.
+    ///
+    /// Authorization failures are logged and the affected live handles remain
+    /// registered. Call [`Self::try_shutdown`] when shutdown failure must be
+    /// propagated to the caller.
+    pub async fn shutdown(&self) {
+        if let Err(error) = self.try_shutdown().await {
+            tracing::error!(%error, "best-effort session service shutdown was incomplete");
+        }
+    }
+
+    /// Shut down all sessions, returning the first typed authorization failure.
+    ///
+    /// Every session is attempted. Handles whose generated teardown authority
+    /// rejects shutdown remain registered for a later retry.
+    pub async fn try_shutdown(&self) -> Result<(), SessionError> {
         let (handles, first_error) = {
             let mut sessions = self.sessions.write().await;
             let pending = std::mem::take(&mut *sessions);
@@ -10271,6 +10285,19 @@ mod archive_shutdown_drain_tests {
             !slot.admission_drain_pending(),
             "channel-close teardown must close the generated drain obligation before actor exit"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_legacy_unit_return() {
+        let service = EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: DrainProbeHooks::new(),
+            },
+            1,
+        );
+
+        let shutdown_output: () = service.shutdown().await;
+        assert_eq!(shutdown_output, ());
     }
 }
 

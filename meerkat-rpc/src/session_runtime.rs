@@ -10646,8 +10646,20 @@ impl SessionRuntime {
         self.service.send_comms(session_id, command).await
     }
 
-    /// Shut down the runtime, closing all sessions.
-    pub async fn shutdown(&self) -> Result<(), meerkat_core::SessionError> {
+    /// Shut down the runtime on the legacy best-effort boundary.
+    ///
+    /// Cleanup failures are logged. Call [`Self::try_shutdown`] when shutdown
+    /// failure must be propagated to the owning surface.
+    pub async fn shutdown(&self) {
+        if let Err(error) = self.try_shutdown().await {
+            tracing::error!(%error, "best-effort session runtime shutdown was incomplete");
+        }
+    }
+
+    /// Shut down the runtime, returning a typed session teardown failure.
+    ///
+    /// MCP and comms cleanup still run when session teardown fails.
+    pub async fn try_shutdown(&self) -> Result<(), meerkat_core::SessionError> {
         // Clear pending sessions.
         self.staged_sessions.clear().await;
         self.runtime_pre_admissions
@@ -10663,7 +10675,7 @@ impl SessionRuntime {
         self.shutdown_schedule_host().await;
 
         // Shut down the service.
-        let service_shutdown = self.service.shutdown().await;
+        let service_shutdown = self.service.try_shutdown().await;
 
         #[cfg(feature = "mcp")]
         {
@@ -23956,7 +23968,8 @@ mod tests {
         assert!(runtime.session_state(&s2).await.unwrap().is_some());
 
         // Shutdown
-        runtime.shutdown().await.expect("runtime shutdown");
+        let shutdown_output: () = runtime.shutdown().await;
+        assert_eq!(shutdown_output, ());
 
         // Both should be gone from the sessions map
         let sessions = runtime.list_sessions(Default::default()).await.unwrap();

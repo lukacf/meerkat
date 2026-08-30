@@ -4098,7 +4098,10 @@ impl ControllingMob {
             // must establish the same boundary explicitly. Weak witnesses make
             // the wait a direct regression check for detached task ownership:
             // the pre-fix persistent drain kept one of these alive forever.
-            service.shutdown().await.expect("session service shutdown");
+            service
+                .try_shutdown()
+                .await
+                .expect("session service shutdown");
             drop(service);
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while runtime_release_witnesses

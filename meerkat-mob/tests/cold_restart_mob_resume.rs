@@ -2096,7 +2096,7 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
     // mob actor. This same-process fixture must establish that boundary
     // explicitly before lifetime 2 can claim the same participant names.
     service_1
-        .shutdown()
+        .try_shutdown()
         .await
         .expect("shutdown first session service");
     drop(handle_1);

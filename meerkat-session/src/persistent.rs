@@ -11757,9 +11757,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.wait_session_registered().await;
     }
 
-    /// Shut down all sessions.
-    pub async fn shutdown(&self) -> Result<(), SessionError> {
-        self.inner.shutdown().await
+    /// Shut down all sessions on the legacy best-effort boundary.
+    ///
+    /// Call [`Self::try_shutdown`] when the caller must observe a typed
+    /// authorization failure.
+    pub async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+
+    /// Shut down all sessions, returning the first typed authorization failure.
+    pub async fn try_shutdown(&self) -> Result<(), SessionError> {
+        self.inner.try_shutdown().await
     }
 
     /// Cancel all active checkpointer gates.
@@ -16628,6 +16636,20 @@ mod tests {
                 pending_head_canonical_boundary: None,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_legacy_unit_return() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+
+        let shutdown_output: () = service.shutdown().await;
+        assert_eq!(shutdown_output, ());
     }
 
     struct FailingInstructionActivationExportBuilder;

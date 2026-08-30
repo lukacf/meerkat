@@ -8885,9 +8885,9 @@ impl MeerkatMachine {
         }
         // Pending/terminal generated truth now rejects every ordinary
         // mutation. Release M before the atomic store transaction; the final
-        // T -> exact-L -> exact-M section below is only the compare-remove
-        // commit point. Retain L through the store operation so physical
-        // absence remains stable.
+        // exact-L -> sessions.write() -> try(T) -> try(M) section below is
+        // only the compare-remove commit point. Retain L through the store
+        // operation so physical absence remains stable.
         drop(final_stage_gate_guard);
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committed unregister");
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing durable unregister");
@@ -9197,9 +9197,9 @@ impl MeerkatMachine {
     /// awaiting while multiple fences are held. On T or M contention it drops
     /// the sessions writer before awaiting the contended guard alone, releases
     /// that guard, and retries the exact compare-remove. This bounded
-    /// L -> sessions -> try(T) -> try(M) section is safe only after the exact unregister
-    /// coordinator is installed: every archive/retire T -> L path rejects that
-    /// coordinator under T before attempting L.
+    /// L -> sessions.write() -> try(T) -> try(M) section is safe only after the
+    /// exact unregister coordinator is installed: every archive/retire T -> L
+    /// path rejects that coordinator under T before attempting L.
     // These fields are the exact unregister witness and remain explicit so no
     // partial lifecycle bundle can be mistaken for removal authority.
     #[allow(clippy::too_many_arguments)]

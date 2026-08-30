@@ -11601,7 +11601,7 @@ async fn run_agent(
                 {
                     accumulate_anyhow_error(&mut shutdown_error, error);
                 }
-                if let Err(error) = service.shutdown().await {
+                if let Err(error) = service.try_shutdown().await {
                     accumulate_anyhow_error(&mut shutdown_error, error.into());
                 }
                 shutdown_mcp(&mcp_adapter).await;
@@ -12300,7 +12300,7 @@ async fn resume_session_with_llm_override(
                     accumulate_anyhow_error(&mut shutdown_error, error);
                 }
                 log_stage("service.shutdown");
-                if let Err(error) = service.shutdown().await {
+                if let Err(error) = service.try_shutdown().await {
                     accumulate_anyhow_error(&mut shutdown_error, error.into());
                 }
                 log_stage("shutdown_mcp");

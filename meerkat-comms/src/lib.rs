@@ -135,18 +135,3 @@ inventory::submit! {
 /// their bodies remain owned here.
 #[doc(hidden)]
 pub fn link_embedded_skill_registrations() {}
-
-/// Confirm keep-alive mode availability when the comms crate is compiled in.
-///
-/// This function is intentionally a passthrough — its existence in the
-/// dependency graph *is* the validation. When `meerkat-comms` is linked,
-/// comms is available and keep-alive mode can be enabled. The feature-gate check
-/// lives in `meerkat::surface::resolve_keep_alive()`, which calls this
-/// function under `#[cfg(feature = "comms")]` and returns an error under
-/// `#[cfg(not(feature = "comms"))]`.
-///
-/// This two-layer design avoids duplicating the `cfg` check in every
-/// surface crate.
-pub fn validate_keep_alive(requested: bool) -> Result<bool, String> {
-    Ok(requested)
-}

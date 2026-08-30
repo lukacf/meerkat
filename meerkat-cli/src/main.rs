@@ -9513,7 +9513,13 @@ async fn create_mcp_tools(
 }
 
 fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
-    meerkat::surface::resolve_keep_alive(requested).map_err(|e| anyhow::anyhow!(e))
+    let support = if cfg!(feature = "comms") {
+        meerkat::surface::KeepAliveSupport::Available
+    } else {
+        meerkat::surface::KeepAliveSupport::Unavailable
+    };
+    meerkat::surface::resolve_keep_alive_for_surface(requested, support)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Load MCP tools as an external tool dispatcher for session build options.

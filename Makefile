@@ -177,6 +177,8 @@ test-feature-matrix-lib:
 test-feature-matrix-surface:
 	@echo "$(GREEN)Running surface feature matrix checks...$(NC)"
 	CARGO="$(CARGO)" ./scripts/run-surface-feature-matrix
+	$(CARGO) test -p rkat --no-default-features --features session-store,mcp tests::test_resolve_keep_alive_roundtrip -- --exact
+	$(CARGO) test -p rkat --no-default-features --features session-store,comms,mcp tests::test_resolve_keep_alive_roundtrip -- --exact
 	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 
 # Session capability matrix (A-F builds from spec)

@@ -1051,14 +1051,12 @@ async fn load_config_async(
 fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, String> {
     match requested {
         Some(true) => {
-            #[cfg(feature = "comms")]
-            {
-                meerkat::surface::resolve_keep_alive(true).map(Some)
-            }
-            #[cfg(not(feature = "comms"))]
-            {
-                Err("keep_alive requires comms support (build with --features comms)".to_string())
-            }
+            let support = if cfg!(feature = "comms") {
+                meerkat::surface::KeepAliveSupport::Available
+            } else {
+                meerkat::surface::KeepAliveSupport::Unavailable
+            };
+            meerkat::surface::resolve_keep_alive_for_surface(true, support).map(Some)
         }
         other => Ok(other), // None (inherit) or Some(false) (disable) pass through
     }

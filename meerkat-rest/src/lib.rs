@@ -2038,9 +2038,16 @@ fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
 /// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
 fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError> {
     match requested {
-        Some(true) => meerkat::surface::resolve_keep_alive(true)
-            .map(Some)
-            .map_err(ApiError::BadRequest),
+        Some(true) => {
+            let support = if cfg!(feature = "comms") {
+                meerkat::surface::KeepAliveSupport::Available
+            } else {
+                meerkat::surface::KeepAliveSupport::Unavailable
+            };
+            meerkat::surface::resolve_keep_alive_for_surface(true, support)
+                .map(Some)
+                .map_err(ApiError::BadRequest)
+        }
         other => Ok(other), // None (inherit) or Some(false) (disable) pass through
     }
 }

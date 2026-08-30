@@ -1020,26 +1020,43 @@ pub fn build_models_catalog_response(
     })
 }
 
-/// Validate whether keep-alive mode can be enabled in the current build.
+/// Whether the calling surface compiled the comms support required by keep-alive.
 ///
-/// Delegates to `meerkat_comms::validate_keep_alive()` when the comms feature
-/// is compiled in; returns an error if requested but comms is not available.
+/// This must be supplied by the surface rather than inferred from this crate's
+/// feature set: Cargo can unify `meerkat/comms` through an unrelated dependency
+/// without enabling comms on the surface itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeepAliveSupport {
+    Available,
+    Unavailable,
+}
+
+/// Validate whether keep-alive mode can be enabled by the calling surface.
 ///
-/// This is the canonical entry point — all surfaces should call this.
+/// This is the canonical policy entry point. Surfaces lower their own compiled
+/// comms feature into [`KeepAliveSupport`] and keep the policy decision here.
+pub fn resolve_keep_alive_for_surface(
+    requested: bool,
+    support: KeepAliveSupport,
+) -> Result<bool, String> {
+    if requested && support == KeepAliveSupport::Unavailable {
+        return Err("keep_alive requires comms support (build with --features comms)".to_string());
+    }
+    Ok(requested)
+}
+
+/// Validate keep-alive against the facade's compiled comms feature.
+///
+/// Runtime-backed product surfaces should call [`resolve_keep_alive_for_surface`]
+/// with their own feature availability so unrelated dependency feature
+/// unification cannot change the result.
 pub fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
-    #[cfg(feature = "comms")]
-    {
-        meerkat_comms::validate_keep_alive(requested)
-    }
-    #[cfg(not(feature = "comms"))]
-    {
-        if requested {
-            return Err(
-                "keep_alive requires comms support (build with --features comms)".to_string(),
-            );
-        }
-        Ok(false)
-    }
+    let support = if cfg!(feature = "comms") {
+        KeepAliveSupport::Available
+    } else {
+        KeepAliveSupport::Unavailable
+    };
+    resolve_keep_alive_for_surface(requested, support)
 }
 
 /// Reject public `PeerMeta` labels that are reserved for mob-managed sessions.
@@ -1305,6 +1322,19 @@ pub async fn emit_mcp_lifecycle_events(
 mod tests {
     use super::*;
     use meerkat_core::Config;
+
+    #[test]
+    fn keep_alive_resolution_uses_explicit_surface_support() {
+        assert_eq!(
+            resolve_keep_alive_for_surface(true, KeepAliveSupport::Available),
+            Ok(true)
+        );
+        assert!(resolve_keep_alive_for_surface(true, KeepAliveSupport::Unavailable).is_err());
+        assert_eq!(
+            resolve_keep_alive_for_surface(false, KeepAliveSupport::Unavailable),
+            Ok(false)
+        );
+    }
 
     #[test]
     fn runtime_host_capabilities_project_multi_host_mob_availability() {

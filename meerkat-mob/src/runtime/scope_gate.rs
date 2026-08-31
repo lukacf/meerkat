@@ -183,6 +183,7 @@ impl MobCommand {
             | Self::HostRuntimeIncarnationObserved { .. }
             | Self::HostOrphanReleaseCompleted { .. }
             | Self::PlacedBehaviorCompleted { .. }
+            | Self::ProjectMemberStatusObserved { .. }
             | Self::CommitFlowRunCommand { .. }
             | Self::CommitFlowTerminalization { .. }
             | Self::CommitFlowFrameStorePlan { .. }
@@ -321,6 +322,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ProjectMemberStatus { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ProjectMemberStatusObserved { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::GetIdentityIntent { reply_tx, .. } => {

@@ -590,6 +590,22 @@ impl LifecycleProgressSignal {
     }
 }
 
+pub(super) struct MemberStatusSessionObservation {
+    pub(super) output_preview: Option<String>,
+    pub(super) tokens_used: u64,
+    pub(super) genuinely_absent: bool,
+    pub(super) execution_snapshot: Option<meerkat_core::agent::AgentExecutionSnapshot>,
+    pub(super) observed_at_ms: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct MemberStatusProjectionTarget {
+    pub(super) bridge_session_id: Option<SessionId>,
+    pub(super) include_local_session_details: bool,
+    pub(super) agent_runtime_id: Option<AgentRuntimeId>,
+    pub(super) fence_token: Option<FenceToken>,
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -991,6 +1007,12 @@ pub(super) enum MobCommand {
     },
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
+    },
+    ProjectMemberStatusObserved {
+        agent_identity: crate::ids::AgentIdentity,
+        expected_target: MemberStatusProjectionTarget,
+        observation: Box<MemberStatusSessionObservation>,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
     GetIdentityIntent {
@@ -1499,6 +1521,7 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
+            Self::ProjectMemberStatusObserved { .. } => "ProjectMemberStatusObserved",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",
             Self::AdoptMemberIdentityDeclaration { .. } => "AdoptMemberIdentityDeclaration",

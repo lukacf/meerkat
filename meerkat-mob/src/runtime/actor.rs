@@ -5576,6 +5576,9 @@ pub(super) struct MobActor {
     /// executor instead. Mutating live Open/Control work uses
     /// `member_live_mutation_tasks` below.
     pub(super) actor_io_tasks: tokio::task::JoinSet<()>,
+    /// Actor-issued order for member-status observations. MobMachine remains
+    /// the authority that accepts or rejects each observation as monotonic.
+    pub(super) next_member_status_observed_at_ms: u64,
     /// Mutating member-live operations (Open/Control) have their own actor-owned
     /// lane. Lifecycle admission drains this set before publishing its durable
     /// work-origin fence, so an operation admitted while Running linearizes
@@ -5949,6 +5952,32 @@ struct ExactRemoteTurnResidency<'a> {
     member_session_id: &'a mob_dsl::SessionId,
     generation: u64,
     fence_token: u64,
+}
+
+pub(super) fn unavailable_member_progress(
+    include_local_session_details: bool,
+) -> Option<super::handle::MemberProgressSnapshot> {
+    include_local_session_details.then_some(super::handle::MemberProgressSnapshot {
+        run_state: super::handle::MemberRunState::Unknown,
+        in_flight_work: 0,
+        last_progress_at_ms: 0,
+        last_progress_event: super::handle::MemberProgressEvent::Unchanged,
+        health: super::handle::MemberHealthClass::Unknown,
+    })
+}
+
+pub(super) fn advance_member_status_observation_clock(
+    next_floor: u64,
+    wall_clock_ms: u64,
+) -> Result<(u64, u64), MobError> {
+    let issued = next_floor.max(wall_clock_ms);
+    let next = issued.checked_add(1).ok_or_else(|| {
+        MobError::Internal(
+            "member-status observation clock exhausted at u64::MAX; refusing duplicate order"
+                .to_string(),
+        )
+    })?;
+    Ok((issued, next))
 }
 
 impl MobActor {
@@ -11052,49 +11081,49 @@ impl MobActor {
         )
     }
 
-    async fn machine_member_material(
-        &mut self,
+    fn member_status_projection_target(
+        &self,
         agent_identity: &AgentIdentity,
-        include_session_details: bool,
-    ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
-        let roster_entry = {
-            let roster = self.roster.read().await;
-            roster.get(agent_identity).cloned()
-        };
+    ) -> Result<super::state::MemberStatusProjectionTarget, MobError> {
         let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
-        let include_local_session_details = include_session_details
-            && !self
-                .dsl_authority
-                .state()
-                .member_placement
-                .contains_key(&dsl_identity);
-        let current_bridge_session_id =
-            self.machine_bridge_session_id_for_identity(&domain_identity)?;
-        let machine_runtime = self
+        let runtime_material = self
             .dsl_authority
             .state()
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&domain_identity));
-        let member_present = roster_entry.is_some();
+        Ok(super::state::MemberStatusProjectionTarget {
+            bridge_session_id: self.machine_bridge_session_id_for_identity(&domain_identity)?,
+            include_local_session_details: !self
+                .dsl_authority
+                .state()
+                .member_placement
+                .contains_key(&dsl_identity),
+            agent_runtime_id: runtime_material
+                .as_ref()
+                .map(|(agent_runtime_id, _)| agent_runtime_id.clone()),
+            fence_token: runtime_material.map(|(_, fence_token)| fence_token),
+        })
+    }
 
-        let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
-            None => (None, 0),
+    pub(super) async fn observe_member_status_session(
+        session_service: Arc<dyn MobSessionService>,
+        agent_identity: AgentIdentity,
+        bridge_session_id: Option<SessionId>,
+        include_local_session_details: bool,
+        observed_at_ms: u64,
+    ) -> super::state::MemberStatusSessionObservation {
+        let (output_preview, tokens_used, genuinely_absent) = match bridge_session_id.as_ref() {
             Some(bridge_session_id) if include_local_session_details => {
-                match self.session_service.read(bridge_session_id).await {
+                match session_service.read(bridge_session_id).await {
                     Ok(view) => (
-                        view.state.last_assistant_text.clone(),
+                        view.state.last_assistant_text,
                         view.billing.total_tokens,
+                        false,
                     ),
                     Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                        // An ordinary read hides archived documents, so its
-                        // NotFound is NOT proof of absence. Only the typed
-                        // resume seam's explicit Absent may record the
-                        // permanent missing-session fact; an intact archived
-                        // document (revivable or held) simply reports no
-                        // local details.
                         let genuinely_absent = matches!(
-                            self.session_service
+                            session_service
                                 .observe_session_resume_authority(bridge_session_id)
                                 .await,
                             Ok(authority)
@@ -11103,15 +11132,7 @@ impl MobActor {
                                     super::session_service::SessionResumeLifecycle::NoCurrentDurableAuthority
                                 )
                         );
-                        if genuinely_absent {
-                            let _ = self
-                                .record_missing_member_bridge_session(
-                                    agent_identity,
-                                    bridge_session_id,
-                                    "member_status",
-                                )
-                                .await;
-                        } else {
+                        if !genuinely_absent {
                             tracing::debug!(
                                 %agent_identity,
                                 %bridge_session_id,
@@ -11120,13 +11141,140 @@ impl MobActor {
                                  missing bridge session"
                             );
                         }
-                        (None, 0)
+                        (None, 0, genuinely_absent)
                     }
-                    Err(_) => (None, 0),
+                    Err(_) => (None, 0, false),
                 }
             }
-            Some(_) => (None, 0),
+            Some(_) | None => (None, 0, false),
         };
+        let execution_snapshot = match (include_local_session_details, bridge_session_id.as_ref()) {
+            (true, Some(session_id)) => match tokio::time::timeout(
+                MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+                session_service.execution_snapshot(session_id),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => snapshot,
+                Ok(Err(_)) | Err(_) => None,
+            },
+            (false, _) | (true, None) => None,
+        };
+        super::state::MemberStatusSessionObservation {
+            output_preview,
+            tokens_used,
+            genuinely_absent,
+            execution_snapshot,
+            observed_at_ms,
+        }
+    }
+
+    fn issue_member_status_observed_at_ms(&mut self) -> Result<u64, MobError> {
+        let wall_clock_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let (issued, next) = advance_member_status_observation_clock(
+            self.next_member_status_observed_at_ms,
+            wall_clock_ms,
+        )?;
+        self.next_member_status_observed_at_ms = next;
+        Ok(issued)
+    }
+
+    fn spawn_member_status_projection(
+        &mut self,
+        agent_identity: AgentIdentity,
+        mut reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
+    ) {
+        if reply_tx.is_closed() {
+            return;
+        }
+        let expected_target = match self.member_status_projection_target(&agent_identity) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+        let observed_at_ms = match self.issue_member_status_observed_at_ms() {
+            Ok(observed_at_ms) => observed_at_ms,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+        let session_service = Arc::clone(&self.session_service);
+        let command_tx = self.command_tx.clone();
+        self.actor_io_tasks.spawn(async move {
+            let observation = tokio::select! {
+                biased;
+                () = reply_tx.closed() => return,
+                observation = Self::observe_member_status_session(
+                    session_service,
+                    agent_identity.clone(),
+                    expected_target.bridge_session_id.clone(),
+                    expected_target.include_local_session_details,
+                    observed_at_ms,
+                ) => observation,
+            };
+            if reply_tx.is_closed() {
+                return;
+            }
+            let permit = tokio::select! {
+                biased;
+                () = reply_tx.closed() => return,
+                permit = command_tx.reserve() => permit,
+            };
+            let Ok(permit) = permit else {
+                return;
+            };
+            if reply_tx.is_closed() {
+                return;
+            }
+            permit.send(RoutedMobCommand::internal(
+                MobCommand::ProjectMemberStatusObserved {
+                    agent_identity,
+                    expected_target,
+                    observation: Box::new(observation),
+                    reply_tx,
+                },
+            ));
+        });
+    }
+
+    async fn machine_member_material_from_observation(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        current_bridge_session_id: Option<SessionId>,
+        include_local_session_details: bool,
+        observation: super::state::MemberStatusSessionObservation,
+    ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
+        let roster_entry = {
+            let roster = self.roster.read().await;
+            roster.get(agent_identity).cloned()
+        };
+        let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let machine_runtime = self
+            .dsl_authority
+            .state()
+            .member_runtime_material_for_identity(&dsl_identity)
+            .map(|material| material.to_domain_for_identity(&domain_identity));
+        let member_present = roster_entry.is_some();
+        if observation.genuinely_absent
+            && let Some(bridge_session_id) = current_bridge_session_id.as_ref()
+        {
+            let _ = self
+                .record_missing_member_bridge_session(
+                    agent_identity,
+                    bridge_session_id,
+                    "member_status",
+                )
+                .await;
+        }
         let machine_lifecycle = self
             .dsl_authority
             .state()
@@ -11139,139 +11287,107 @@ impl MobActor {
                 .and_then(|entry| entry.kickoff.as_ref()),
         );
 
-        let progress = if include_local_session_details {
-            match current_bridge_session_id.as_ref() {
-                Some(session_id) => match tokio::time::timeout(
-                    MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
-                    self.session_service.execution_snapshot(session_id),
-                )
-                .await
+        let progress = match observation.execution_snapshot {
+            Some(snapshot) => {
+                let run_open = snapshot.active_run_id.is_some() && !snapshot.turn_terminal;
+                let pending_operations = snapshot
+                    .pending_operation_ids
+                    .as_ref()
+                    .map_or(0_u64, |ids| ids.len() as u64);
+                let in_flight_work = pending_operations
+                    .saturating_add(u64::from(snapshot.tool_calls_pending))
+                    .saturating_add(u64::from(run_open));
+                let progress_token = format!(
+                    "{:?}|{:?}|{}|{}|{}|{}",
+                    snapshot.active_run_id,
+                    snapshot.turn_phase,
+                    snapshot.boundary_count,
+                    snapshot.applied_cursor,
+                    snapshot.tool_calls_pending,
+                    pending_operations,
+                );
+                let observed_at_ms = observation.observed_at_ms;
+                if self.dsl_authority.state().lifecycle_phase == mob_dsl::MobPhase::Running {
+                    self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::ObserveMemberProgress {
+                            agent_identity: dsl_identity.clone(),
+                            run_open,
+                            in_flight_work,
+                            progress_token,
+                            observed_at_ms,
+                        },
+                        "member_status_observe_progress",
+                    )?;
+                }
+                let state = self.dsl_authority.state();
+                let run_state = if state
+                    .member_run_open
+                    .get(&dsl_identity)
+                    .copied()
+                    .unwrap_or(false)
                 {
-                    Ok(Ok(Some(snapshot))) => {
-                        let run_open = snapshot.active_run_id.is_some() && !snapshot.turn_terminal;
-                        let pending_operations = snapshot
-                            .pending_operation_ids
-                            .as_ref()
-                            .map_or(0_u64, |ids| ids.len() as u64);
-                        let in_flight_work = pending_operations
-                            .saturating_add(u64::from(snapshot.tool_calls_pending))
-                            .saturating_add(u64::from(run_open));
-                        let progress_token = format!(
-                            "{:?}|{:?}|{}|{}|{}|{}",
-                            snapshot.active_run_id,
-                            snapshot.turn_phase,
-                            snapshot.boundary_count,
-                            snapshot.applied_cursor,
-                            snapshot.tool_calls_pending,
-                            pending_operations,
-                        );
-                        let observed_at_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            .try_into()
-                            .unwrap_or(u64::MAX);
-                        if self.dsl_authority.state().lifecycle_phase == mob_dsl::MobPhase::Running
-                        {
-                            self.apply_dsl_input(
-                                mob_dsl::MobMachineInput::ObserveMemberProgress {
-                                    agent_identity: dsl_identity.clone(),
-                                    run_open,
-                                    in_flight_work,
-                                    progress_token,
-                                    observed_at_ms,
-                                },
-                                "member_status_observe_progress",
-                            )?;
-                        }
-                        let state = self.dsl_authority.state();
-                        let run_state = if state
-                            .member_run_open
-                            .get(&dsl_identity)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            super::handle::MemberRunState::RunOpen
-                        } else {
-                            super::handle::MemberRunState::Idle
-                        };
-                        let last_progress_event = match state
-                            .member_last_progress_event
-                            .get(&dsl_identity)
-                            .copied()
-                            .unwrap_or(mob_dsl::MemberProgressEventKind::Unchanged)
-                        {
-                            mob_dsl::MemberProgressEventKind::ExecutionAdvanced => {
-                                super::handle::MemberProgressEvent::ExecutionAdvanced
-                            }
-                            mob_dsl::MemberProgressEventKind::BecameIdle => {
-                                super::handle::MemberProgressEvent::BecameIdle
-                            }
-                            mob_dsl::MemberProgressEventKind::Unchanged => {
-                                super::handle::MemberProgressEvent::Unchanged
-                            }
-                        };
-                        let health = match state
-                            .member_health_class
-                            .get(&dsl_identity)
-                            .copied()
-                            .unwrap_or(mob_dsl::MemberHealthClass::Unknown)
-                        {
-                            mob_dsl::MemberHealthClass::Healthy => {
-                                super::handle::MemberHealthClass::Healthy
-                            }
-                            mob_dsl::MemberHealthClass::Degraded => {
-                                super::handle::MemberHealthClass::Degraded
-                            }
-                            mob_dsl::MemberHealthClass::Wedged => {
-                                super::handle::MemberHealthClass::Wedged
-                            }
-                            mob_dsl::MemberHealthClass::Unknown => {
-                                super::handle::MemberHealthClass::Unknown
-                            }
-                        };
-                        Some(super::handle::MemberProgressSnapshot {
-                            run_state,
-                            in_flight_work: state
-                                .member_in_flight_work
-                                .get(&dsl_identity)
-                                .copied()
-                                .unwrap_or(0),
-                            last_progress_at_ms: state
-                                .member_last_progress_at_ms
-                                .get(&dsl_identity)
-                                .copied()
-                                .unwrap_or(observed_at_ms),
-                            last_progress_event,
-                            health,
-                        })
+                    super::handle::MemberRunState::RunOpen
+                } else {
+                    super::handle::MemberRunState::Idle
+                };
+                let last_progress_event = match state
+                    .member_last_progress_event
+                    .get(&dsl_identity)
+                    .copied()
+                    .unwrap_or(mob_dsl::MemberProgressEventKind::Unchanged)
+                {
+                    mob_dsl::MemberProgressEventKind::ExecutionAdvanced => {
+                        super::handle::MemberProgressEvent::ExecutionAdvanced
                     }
-                    Ok(Ok(None) | Err(_)) | Err(_) => Some(super::handle::MemberProgressSnapshot {
-                        run_state: super::handle::MemberRunState::Unknown,
-                        in_flight_work: 0,
-                        last_progress_at_ms: 0,
-                        last_progress_event: super::handle::MemberProgressEvent::Unchanged,
-                        health: super::handle::MemberHealthClass::Unknown,
-                    }),
-                },
-                None => Some(super::handle::MemberProgressSnapshot {
-                    run_state: super::handle::MemberRunState::Unknown,
-                    in_flight_work: 0,
-                    last_progress_at_ms: 0,
-                    last_progress_event: super::handle::MemberProgressEvent::Unchanged,
-                    health: super::handle::MemberHealthClass::Unknown,
-                }),
+                    mob_dsl::MemberProgressEventKind::BecameIdle => {
+                        super::handle::MemberProgressEvent::BecameIdle
+                    }
+                    mob_dsl::MemberProgressEventKind::Unchanged => {
+                        super::handle::MemberProgressEvent::Unchanged
+                    }
+                };
+                let health = match state
+                    .member_health_class
+                    .get(&dsl_identity)
+                    .copied()
+                    .unwrap_or(mob_dsl::MemberHealthClass::Unknown)
+                {
+                    mob_dsl::MemberHealthClass::Healthy => {
+                        super::handle::MemberHealthClass::Healthy
+                    }
+                    mob_dsl::MemberHealthClass::Degraded => {
+                        super::handle::MemberHealthClass::Degraded
+                    }
+                    mob_dsl::MemberHealthClass::Wedged => super::handle::MemberHealthClass::Wedged,
+                    mob_dsl::MemberHealthClass::Unknown => {
+                        super::handle::MemberHealthClass::Unknown
+                    }
+                };
+                Some(super::handle::MemberProgressSnapshot {
+                    run_state,
+                    in_flight_work: state
+                        .member_in_flight_work
+                        .get(&dsl_identity)
+                        .copied()
+                        .unwrap_or(0),
+                    last_progress_at_ms: state
+                        .member_last_progress_at_ms
+                        .get(&dsl_identity)
+                        .copied()
+                        .unwrap_or(observed_at_ms),
+                    last_progress_event,
+                    health,
+                })
             }
-        } else {
-            None
+            None => unavailable_member_progress(include_local_session_details),
         };
 
         Ok(MobMemberLifecycleProjection::materialize(
             MobMemberLifecycleInput {
                 member_present,
                 machine_lifecycle,
-                output_preview,
-                tokens_used,
+                output_preview: observation.output_preview,
+                tokens_used: observation.tokens_used,
                 agent_identity: domain_identity,
                 agent_runtime_id: machine_runtime
                     .as_ref()
@@ -22899,11 +23015,37 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let _ = reply_tx.send(
-                        self.machine_member_material(&agent_identity, true)
+                                self.spawn_member_status_projection(agent_identity, reply_tx);
+                            }
+                            MobCommand::ProjectMemberStatusObserved {
+                                agent_identity,
+                                expected_target,
+                                observation,
+                                reply_tx,
+                            } => {
+                                if reply_tx.is_closed() {
+                                    return ActorLoopControl::ProceedBoundary;
+                                }
+                                match self.member_status_projection_target(&agent_identity) {
+                                    Ok(current_target) if current_target == expected_target => {
+                                        let result = self
+                                            .machine_member_material_from_observation(
+                                                &agent_identity,
+                                                current_target.bridge_session_id,
+                                                current_target.include_local_session_details,
+                                                *observation,
+                                            )
                             .await
-                            .map(|material| material.to_snapshot()),
-                    );
+                                            .map(|material| material.to_snapshot());
+                                        let _ = reply_tx.send(result);
+                                    }
+                                    Ok(_) => {
+                                        self.spawn_member_status_projection(agent_identity, reply_tx);
+                                    }
+                                    Err(error) => {
+                                        let _ = reply_tx.send(Err(error));
+                                    }
+                                }
                 }
                 MobCommand::GetIdentityIntent {
                     agent_identity,

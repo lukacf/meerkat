@@ -5139,6 +5139,22 @@ impl MobHandle {
             .map_err(|_| MobError::ActorReplyChannelClosed)
     }
 
+    #[cfg(test)]
+    pub(super) async fn enqueue_actor_command_for_test<R>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<R>) -> MobCommand,
+    ) -> Result<oneshot::Receiver<R>, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(super::scope_gate::RoutedMobCommand {
+                authority: self.command_authority.clone(),
+                cmd: build(reply_tx),
+            })
+            .await
+            .map_err(|_| MobError::ActorCommandChannelClosed)?;
+        Ok(reply_rx)
+    }
+
     async fn drive_resume_actor_operation(&self, operation: Arc<PendingResumeOperation>) {
         let terminal = match operation.deadline.checked_duration_since(Instant::now()) {
             None => Err(MobError::LifecycleOperationAdmissionPending {

@@ -2687,6 +2687,7 @@ const MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS: usize = 8;
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
 #[cfg(test)]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
+pub(super) const MAX_PENDING_MEMBER_STATUS_OBSERVATIONS: usize = 1;
 
 pub(super) fn advance_rotating_cursor(
     item_count: usize,
@@ -5576,6 +5577,7 @@ pub(super) struct MobActor {
     /// executor instead. Mutating live Open/Control work uses
     /// `member_live_mutation_tasks` below.
     pub(super) actor_io_tasks: tokio::task::JoinSet<()>,
+    pub(super) member_status_observation_permits: Arc<tokio::sync::Semaphore>,
     /// Actor-issued order for member-status observations. MobMachine remains
     /// the authority that accepts or rejects each observation as monotonic.
     pub(super) next_member_status_observed_at_ms: u64,
@@ -5973,11 +5975,52 @@ pub(super) fn advance_member_status_observation_clock(
     let issued = next_floor.max(wall_clock_ms);
     let next = issued.checked_add(1).ok_or_else(|| {
         MobError::Internal(
-            "member-status observation clock exhausted at u64::MAX; refusing duplicate order"
-                .to_string(),
+            "unable to issue a unique monotonic member-status observation order".to_string(),
         )
     })?;
     Ok((issued, next))
+}
+
+pub(super) fn member_status_wall_clock_ms() -> Result<u64, MobError> {
+    let elapsed = meerkat_core::time_compat::SystemTime::now()
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .map_err(|error| {
+            MobError::Internal(format!("member-status observation clock failed: {error}"))
+        })?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| {
+        MobError::Internal("member-status observation clock exceeds u64 milliseconds".to_string())
+    })
+}
+
+pub(super) async fn enqueue_member_status_observation(
+    command_tx: mpsc::Sender<RoutedMobCommand>,
+    agent_identity: AgentIdentity,
+    expected_target: super::state::MemberStatusProjectionTarget,
+    observation: super::state::MemberStatusSessionObservation,
+    observation_permit: tokio::sync::OwnedSemaphorePermit,
+    mut reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
+) -> bool {
+    let permit = tokio::select! {
+        biased;
+        () = reply_tx.closed() => return false,
+        permit = command_tx.reserve() => permit,
+    };
+    let Ok(permit) = permit else {
+        return false;
+    };
+    if reply_tx.is_closed() {
+        return false;
+    }
+    permit.send(RoutedMobCommand::internal(
+        MobCommand::ProjectMemberStatusObserved {
+            agent_identity,
+            expected_target,
+            observation: Box::new(observation),
+            observation_permit,
+            reply_tx,
+        },
+    ));
+    true
 }
 
 impl MobActor {
@@ -11170,12 +11213,7 @@ impl MobActor {
     }
 
     fn issue_member_status_observed_at_ms(&mut self) -> Result<u64, MobError> {
-        let wall_clock_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
+        let wall_clock_ms = member_status_wall_clock_ms()?;
         let (issued, next) = advance_member_status_observation_clock(
             self.next_member_status_observed_at_ms,
             wall_clock_ms,
@@ -11187,11 +11225,37 @@ impl MobActor {
     fn spawn_member_status_projection(
         &mut self,
         agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
+    ) {
+        self.spawn_member_status_projection_with_permit(agent_identity, reply_tx, None);
+    }
+
+    fn spawn_member_status_projection_with_permit(
+        &mut self,
+        agent_identity: AgentIdentity,
         mut reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
+        observation_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         if reply_tx.is_closed() {
             return;
         }
+        let observation_permit = match observation_permit {
+            Some(permit) => permit,
+            None => match self
+                .member_status_observation_permits
+                .clone()
+                .try_acquire_owned()
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let _ = reply_tx.send(Err(MobError::LifecycleOperationAdmissionPending {
+                        intent: "member_status_observation".to_string(),
+                        stage: "observation_lane_saturated",
+                    }));
+                    return;
+                }
+            },
+        };
         let expected_target = match self.member_status_projection_target(&agent_identity) {
             Ok(target) => target,
             Err(error) => {
@@ -11223,25 +11287,15 @@ impl MobActor {
             if reply_tx.is_closed() {
                 return;
             }
-            let permit = tokio::select! {
-                biased;
-                () = reply_tx.closed() => return,
-                permit = command_tx.reserve() => permit,
-            };
-            let Ok(permit) = permit else {
-                return;
-            };
-            if reply_tx.is_closed() {
-                return;
-            }
-            permit.send(RoutedMobCommand::internal(
-                MobCommand::ProjectMemberStatusObserved {
-                    agent_identity,
-                    expected_target,
-                    observation: Box::new(observation),
-                    reply_tx,
-                },
-            ));
+            enqueue_member_status_observation(
+                command_tx,
+                agent_identity,
+                expected_target,
+                observation,
+                observation_permit,
+                reply_tx,
+            )
+            .await;
         });
     }
 
@@ -11264,7 +11318,14 @@ impl MobActor {
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(&domain_identity));
         let member_present = roster_entry.is_some();
+        let observation_stale = self
+            .dsl_authority
+            .state()
+            .member_last_observed_at_ms
+            .get(&dsl_identity)
+            .is_some_and(|last_observed| *last_observed > observation.observed_at_ms);
         if observation.genuinely_absent
+            && !observation_stale
             && let Some(bridge_session_id) = current_bridge_session_id.as_ref()
         {
             let _ = self
@@ -23021,6 +23082,7 @@ impl MobActor {
                                 agent_identity,
                                 expected_target,
                                 observation,
+                                observation_permit,
                                 reply_tx,
                             } => {
                                 if reply_tx.is_closed() {
@@ -23040,7 +23102,11 @@ impl MobActor {
                                         let _ = reply_tx.send(result);
                                     }
                                     Ok(_) => {
-                                        self.spawn_member_status_projection(agent_identity, reply_tx);
+                                        self.spawn_member_status_projection_with_permit(
+                                            agent_identity,
+                                            reply_tx,
+                                            Some(observation_permit),
+                                        );
                                     }
                                     Err(error) => {
                                         let _ = reply_tx.send(Err(error));

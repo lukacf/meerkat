@@ -10076,16 +10076,12 @@ impl MobBuilder {
                 .values()
                 .copied()
                 .max()
-                .unwrap_or(0)
-                .saturating_add(1);
-            let wall_clock_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            let next_member_status_observed_at_ms =
-                recovered_member_status_observed_at_ms.max(wall_clock_ms);
+                .unwrap_or(0);
+            let (_, next_member_status_observed_at_ms) =
+                super::actor::advance_member_status_observation_clock(
+                    recovered_member_status_observed_at_ms,
+                    super::actor::member_status_wall_clock_ms()?,
+                )?;
 
             let mut actor = MobActor {
                 definition,
@@ -10138,6 +10134,9 @@ impl MobBuilder {
                 lifecycle_tasks: tokio::task::JoinSet::new(),
                 pending_lifecycle_delivery_error: None,
                 actor_io_tasks: tokio::task::JoinSet::new(),
+                member_status_observation_permits: Arc::new(tokio::sync::Semaphore::new(
+                    super::actor::MAX_PENDING_MEMBER_STATUS_OBSERVATIONS,
+                )),
                 next_member_status_observed_at_ms,
                 member_live_mutation_tasks: tokio::task::JoinSet::new(),
                 member_live_open_cleanup_obligations: BTreeMap::new(),

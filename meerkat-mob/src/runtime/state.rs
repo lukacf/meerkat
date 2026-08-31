@@ -1013,6 +1013,7 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         expected_target: MemberStatusProjectionTarget,
         observation: Box<MemberStatusSessionObservation>,
+        observation_permit: tokio::sync::OwnedSemaphorePermit,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
     GetIdentityIntent {

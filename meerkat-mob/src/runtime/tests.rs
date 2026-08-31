@@ -51567,7 +51567,7 @@ fn test_runtime_owner_is_derived_from_machine_placement_before_session_shape() {
     use crate::machines::mob_machine as mob_dsl;
 
     let identity = AgentIdentity::from("placed-owner-predicate");
-    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
     let mut state = mob_dsl::MobMachineAuthority::new().state().clone();
 
     // `Some(session_id)` alone is not local ownership: host-materialized refs

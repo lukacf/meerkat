@@ -23076,42 +23076,42 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                                self.spawn_member_status_projection(agent_identity, reply_tx);
-                            }
-                            MobCommand::ProjectMemberStatusObserved {
+                    self.spawn_member_status_projection(agent_identity, reply_tx);
+                }
+                MobCommand::ProjectMemberStatusObserved {
+                    agent_identity,
+                    expected_target,
+                    observation,
+                    observation_permit,
+                    reply_tx,
+                } => {
+                    if reply_tx.is_closed() {
+                        return ActorLoopControl::ProceedBoundary;
+                    }
+                    match self.member_status_projection_target(&agent_identity) {
+                        Ok(current_target) if current_target == expected_target => {
+                            let result = self
+                                .machine_member_material_from_observation(
+                                    &agent_identity,
+                                    current_target.bridge_session_id,
+                                    current_target.include_local_session_details,
+                                    *observation,
+                                )
+                                .await
+                                .map(|material| material.to_snapshot());
+                            let _ = reply_tx.send(result);
+                        }
+                        Ok(_) => {
+                            self.spawn_member_status_projection_with_permit(
                                 agent_identity,
-                                expected_target,
-                                observation,
-                                observation_permit,
                                 reply_tx,
-                            } => {
-                                if reply_tx.is_closed() {
-                                    return ActorLoopControl::ProceedBoundary;
-                                }
-                                match self.member_status_projection_target(&agent_identity) {
-                                    Ok(current_target) if current_target == expected_target => {
-                                        let result = self
-                                            .machine_member_material_from_observation(
-                                                &agent_identity,
-                                                current_target.bridge_session_id,
-                                                current_target.include_local_session_details,
-                                                *observation,
-                                            )
-                            .await
-                                            .map(|material| material.to_snapshot());
-                                        let _ = reply_tx.send(result);
-                                    }
-                                    Ok(_) => {
-                                        self.spawn_member_status_projection_with_permit(
-                                            agent_identity,
-                                            reply_tx,
-                                            Some(observation_permit),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        let _ = reply_tx.send(Err(error));
-                                    }
-                                }
+                                Some(observation_permit),
+                            );
+                        }
+                        Err(error) => {
+                            let _ = reply_tx.send(Err(error));
+                        }
+                    }
                 }
                 MobCommand::GetIdentityIntent {
                     agent_identity,

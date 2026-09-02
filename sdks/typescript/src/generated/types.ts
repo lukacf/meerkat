@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.8.31
+// Contract version: 0.8.32
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.8.31";
+export const CONTRACT_VERSION = "0.8.32";
 
 export type Value = unknown;
 

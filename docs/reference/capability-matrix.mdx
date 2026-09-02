@@ -143,27 +143,27 @@ v1 (recorded v2 hardening).
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "=0.8.31", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.8.32", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "=0.8.31", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "=0.8.32", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "=0.8.31", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "=0.8.32", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add facade-local predicate-schedule helper re-exports. The schedule service
 # and WorkGraph substrate are already linked.
-meerkat = { version = "=0.8.31", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "=0.8.32", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Broad native facade with WebSocket live support
-meerkat = { version = "=0.8.31", features = [
+meerkat = { version = "=0.8.32", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "live",
   "atif", # 0.8.23+
 ] }
 
 # WebRTC is separate and still needs `rkat-rpc --live-webrtc` at runtime
-meerkat = { version = "=0.8.31", features = ["openai-realtime", "live-webrtc"] }
+meerkat = { version = "=0.8.32", features = ["openai-realtime", "live-webrtc"] }
 ```
 
 ## Runtime capabilities

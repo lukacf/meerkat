@@ -11997,13 +11997,20 @@ async fn resume_session_with_llm_override(
         // resumed session would accept the call, commit the request, and never
         // realize it. Routing through the shared CLI builder is what keeps
         // resume identical to a fresh run.
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let default_schedule_tools =
+            Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
+                as Arc<dyn AgentToolDispatcher>);
+        let default_workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+            scoped_workgraph_service(scope, &persistence),
+        )) as Arc<dyn AgentToolDispatcher>);
         let (service, resume_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             config.clone(),
             persistence.clone(),
             config_base_dir.join("config_state.json"),
-            None,
-            None,
+            default_schedule_tools,
+            default_workgraph_tools,
         );
 
         log_stage("compose_external_tool_dispatchers");

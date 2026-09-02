@@ -30,6 +30,19 @@ them.
 
 ### Added
 
+- Added a canonical typed transcript-replay projection across Anthropic,
+  Gemini, OpenAI Responses, OpenAI-compatible Responses, and compatible Chat
+  dispatch. Replay now preserves provider metadata, tool-result collapse,
+  nested notice images, constructor compatibility, and profile-aware image
+  capability instead of relying on provider-specific transcript rewriting.
+- Added durable Mob definition epochs. `MobCreated` establishes epoch 1 and
+  `MobDefinitionUpdated` is the sole successor, committed through
+  `MobStorage::update_definition` under generated `MobMachine` CAS authority.
+  Sealed definition snapshots and `MobBuilder::for_resume_verified` bind resume
+  to the inspected definition, epoch, and event cursor. SQLite commits authority
+  and projection atomically, including recovery of the exact legacy
+  one-epoch-ahead projection residue; mismatched and split/custom stores remain
+  fail-closed with typed errors.
 - Added `brain_swap`, a model-authored permanent model switch that takes effect
   before the next input is admitted. The current run remains on its original
   model; committed requests survive restart and resolve through the existing

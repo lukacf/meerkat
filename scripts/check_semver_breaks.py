@@ -481,6 +481,25 @@ def names_symbol(body: str, symbol: str) -> bool:
     return re.search(pattern, body) is not None
 
 
+ENUM_WILDCARD_LINTS = {
+    "enum_no_repr_variant_discriminant_changed",
+    "partial_ord_enum_variants_reordered",
+}
+
+
+def names_finding_symbol(body: str, finding: Finding, index: int, symbol: str) -> bool:
+    if names_symbol(body, symbol):
+        return True
+    if (
+        finding.lint_id in ENUM_WILDCARD_LINTS
+        and index > 0
+        and finding.symbols
+        and names_symbol(body, f"{finding.symbols[0]}::*")
+    ):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
@@ -634,7 +653,11 @@ def check_named(parsed: ReportParse, section: Section) -> list[str]:
                 f"Teach scripts/check_semver_breaks.py this lint's message shape."
             )
             continue
-        missing = [symbol for symbol in finding.symbols if not names_symbol(body, symbol)]
+        missing = [
+            symbol
+            for index, symbol in enumerate(finding.symbols)
+            if not names_finding_symbol(body, finding, index, symbol)
+        ]
         if missing:
             errors.append(
                 f"[{finding.crate}] {finding.lint_id}: `{finding.item}` is not named "

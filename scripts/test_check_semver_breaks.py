@@ -321,6 +321,48 @@ Failed in:
 class NamingTests(unittest.TestCase):
     """Hole A: reported breaks must be NAMED, not merely accompanied by a heading."""
 
+    def test_enum_wildcard_declares_discriminant_and_partial_ord_movements_only(self) -> None:
+        section = gate.Section(
+            "## [9.9.9] - 2026-01-01",
+            "9.9.9",
+            " - 2026-01-01",
+            "\n### Breaking\n\n- `GeneratedInput::*` changed ordinal position.\n",
+        )
+        covered = gate.ReportParse(
+            findings=[
+                gate.Finding(
+                    "enum_no_repr_variant_discriminant_changed",
+                    "generated",
+                    "variant GeneratedInput::Existing 1 -> 2",
+                    ("GeneratedInput", "Existing"),
+                    True,
+                ),
+                gate.Finding(
+                    "partial_ord_enum_variants_reordered",
+                    "generated",
+                    "GeneratedInput::Existing moved from position 1 to 2",
+                    ("GeneratedInput", "Existing"),
+                    True,
+                ),
+            ]
+        )
+        self.assertEqual(gate.check_named(covered, section), [])
+
+        added = gate.ReportParse(
+            findings=[
+                gate.Finding(
+                    "enum_variant_added",
+                    "generated",
+                    "variant GeneratedInput:NewVariant",
+                    ("GeneratedInput", "NewVariant"),
+                    True,
+                )
+            ]
+        )
+        errors = gate.check_named(added, section)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("`NewVariant`", errors[0])
+
     def test_real_0_8_23_notes_name_every_reported_meerkat_sqlite_break(self) -> None:
         parsed = gate.parse_report(SQLITE_REPORT)
         errors = gate.check_named(parsed, section_for(REPO_CHANGELOG, "0.8.23"))

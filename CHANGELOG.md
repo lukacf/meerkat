@@ -30,6 +30,73 @@ them.
 
 ## [0.8.32] - 2026-09-02
 
+### Breaking
+
+- **Generated machine vocabularies gained exhaustive variants and shifted
+  ordinal/discriminant order.** Exact-pinned consumers must update exhaustive
+  matches for `Input`, `InputKind`, `Effect`, `EffectKind`, `TransitionId`,
+  `MeerkatMachineInput`, `MeerkatMachineInputVariant`, `MobMachineInput`,
+  `MobMachineInputVariant`, `MobMachineEffect`, and
+  `MobMachineEffectVariant`. Pre-existing variant ordering changed across
+  `InputKind::*`, `EffectKind::*`, `TransitionId::*`,
+  `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MobMachineInput::*`, `MobMachineInputVariant::*`, `MobMachineEffect::*`,
+  and `MobMachineEffectVariant::*`. New variants are
+  `AdvanceDefinitionEpoch`, `DefinitionEpochAdvanced`,
+  `ImportCommittedModelRoutingHandoff`, `ClaimModelRoutingHandoff`,
+  `RealizeModelRoutingHandoff`, `DenyModelRoutingHandoff`,
+  `ArchiveUnresolvedModelRoutingHandoff`,
+  `ImportCommittedModelRoutingHandoffFirstIdle`,
+  `ImportCommittedModelRoutingHandoffFirstAttached`,
+  `ImportCommittedModelRoutingHandoffFirstRunning`,
+  `ImportCommittedModelRoutingHandoffFirstRetired`,
+  `ImportCommittedModelRoutingHandoffAlreadyExactIdle`,
+  `ImportCommittedModelRoutingHandoffAlreadyExactAttached`,
+  `ImportCommittedModelRoutingHandoffAlreadyExactRunning`,
+  `ImportCommittedModelRoutingHandoffAlreadyExactRetired`,
+  `ClaimModelRoutingHandoffImportedIdle`,
+  `ClaimModelRoutingHandoffImportedAttached`,
+  `ClaimModelRoutingHandoffImportedRunning`,
+  `ClaimModelRoutingHandoffAlreadyClaimedIdle`,
+  `ClaimModelRoutingHandoffAlreadyClaimedAttached`,
+  `ClaimModelRoutingHandoffAlreadyClaimedRunning`,
+  `ClaimModelRoutingHandoffAlreadyRealizedIdle`,
+  `ClaimModelRoutingHandoffAlreadyRealizedAttached`,
+  `ClaimModelRoutingHandoffAlreadyRealizedRunning`,
+  `RealizeModelRoutingHandoffClaimedIdle`,
+  `RealizeModelRoutingHandoffClaimedAttached`,
+  `RealizeModelRoutingHandoffClaimedRunning`,
+  `RealizeModelRoutingHandoffAlreadyRealizedIdle`,
+  `RealizeModelRoutingHandoffAlreadyRealizedAttached`,
+  `RealizeModelRoutingHandoffAlreadyRealizedRunning`,
+  `DenyModelRoutingHandoffPendingIdle`,
+  `DenyModelRoutingHandoffPendingAttached`,
+  `DenyModelRoutingHandoffPendingRunning`,
+  `DenyModelRoutingHandoffAlreadyDeniedIdle`,
+  `DenyModelRoutingHandoffAlreadyDeniedAttached`,
+  `DenyModelRoutingHandoffAlreadyDeniedRunning`,
+  `ArchiveUnresolvedModelRoutingHandoffPendingRetired`,
+  `ArchiveUnresolvedModelRoutingHandoffAlreadyArchivedRetired`, and
+  `AdvanceDefinitionEpochRunning`.
+- **Generated state records gained required fields.** Struct literals for
+  `State`, `MeerkatMachineState`, `MobMachineState`, and
+  `SessionTurnAdmissionMachineState` must provide the new
+  `model_routing_handoff`, `definition_epoch`, and `teardown_authorized`
+  fields as applicable.
+- **The runtime LLM reconfiguration trait gained required methods.**
+  Implementers of `SessionRuntimeLlmReconfigureService` must add
+  `live_model_routing_control_history` and
+  `commit_model_routing_control_record_durable_first`.
+- **A runtime commit-result compatibility method is deprecated.**
+  `PreparedRuntimeSessionCommitResult::downstream_projection_required` remains
+  callable in 0.8.32 but downstreams should stop using it.
+- **Mob definition authority enums gained exhaustive variants.** Consumers
+  matching `MobError`, `MobEventKind`, or `MobStoreError` must handle
+  `MobDefinitionAuthorityChanged`, `MobDefinitionUpdated`,
+  `DefinitionEpochAuthorityRequired`, `MobDefinitionAlreadyCreated`,
+  `DefinitionEpochEventHeadConflict`, `MobDefinitionProjectionMismatch`, and
+  `DefinitionEpochPersistenceUnavailable`.
+
 ### Added
 
 - Added a canonical typed transcript-replay projection across Anthropic,

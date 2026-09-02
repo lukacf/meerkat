@@ -155,6 +155,10 @@ pub(crate) mod private {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     pub trait MobEventStoreSealed: Send + Sync {
+        fn supports_atomic_projection_ahead_epoch_repair(&self) -> bool {
+            false
+        }
+
         fn definition_resume_gate(&self) -> Arc<tokio::sync::RwLock<()>> {
             static GATE: std::sync::OnceLock<Arc<tokio::sync::RwLock<()>>> =
                 std::sync::OnceLock::new();

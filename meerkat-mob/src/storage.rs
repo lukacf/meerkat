@@ -417,8 +417,20 @@ impl MobStorage {
                 actual: current_epoch,
             });
         }
-        self.converge_definition_projection(&current_definition, current_epoch)
-            .await?;
+        let projection_ahead_repair = matches!(
+            self.definition_projection_health().await?,
+            Some(MobDefinitionProjectionHealth::Diverged {
+                authority_epoch,
+                projection_revision,
+                kind: MobDefinitionProjectionMismatchKind::ProjectionAhead,
+            }) if authority_epoch == current_epoch
+                && projection_revision == next_epoch
+                && self.events.supports_atomic_projection_ahead_epoch_repair()
+        );
+        if !projection_ahead_repair {
+            self.converge_definition_projection(&current_definition, current_epoch)
+                .await?;
+        }
 
         let mut authority =
             crate::runtime::recover_definition_epoch_authority(&events, &current_definition)?;

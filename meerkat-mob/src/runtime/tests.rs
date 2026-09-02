@@ -9486,6 +9486,8 @@ async fn create_test_mob_with_run_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: run_store,
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -11924,6 +11926,8 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -12821,6 +12825,8 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         events: events.clone(),
         runs: runs.clone(),
         specs: specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: runtime_metadata.clone(),
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -13018,6 +13024,8 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         events,
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -13115,6 +13123,8 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         events: Arc::new(event_store),
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -23530,6 +23540,8 @@ async fn test_cold_running_resume_reestablishes_autonomous_startup_ready_without
         events,
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity,
         identity_member,
@@ -23686,6 +23698,8 @@ async fn assert_cold_running_local_resume_fails_closed(
         events: events.clone(),
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity,
         identity_member,
@@ -45021,6 +45035,8 @@ async fn test_explicit_fail_step_routes_generated_supervisor_escalation_effect()
         events: event_store.clone(),
         runs: run_store.clone(),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -45918,6 +45934,8 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -46033,6 +46051,8 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -62997,6 +63017,8 @@ async fn create_test_mob_with_realm_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -63101,6 +63123,8 @@ async fn test_spawn_realm_ref_without_store_returns_error() {
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,

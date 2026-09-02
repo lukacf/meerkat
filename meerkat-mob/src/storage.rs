@@ -63,6 +63,12 @@ pub struct MobDefinitionSnapshot {
     event_cursor: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DefinitionProjectionComposition {
+    Independent,
+    AtomicSqlite,
+}
+
 impl MobDefinitionSnapshot {
     #[must_use]
     pub fn definition(&self) -> &MobDefinition {
@@ -92,6 +98,8 @@ pub struct MobStorage {
     pub(crate) runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
     pub(crate) specs: Arc<dyn MobSpecStore>,
+    /// Proof that the event and spec stores share one built-in transaction boundary.
+    pub(crate) definition_projection_composition: DefinitionProjectionComposition,
     /// Runtime metadata store for supervisor authority and compatibility projections.
     pub(crate) runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     /// Sole desired-state authority for identity intent, leases, and immutable custody.
@@ -129,6 +137,7 @@ impl MobStorage {
             events: Arc::new(events),
             runs,
             specs,
+            definition_projection_composition: DefinitionProjectionComposition::Independent,
             runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
             identity: Arc::new(identity),
             identity_member: Some(identity_member),
@@ -156,6 +165,7 @@ impl MobStorage {
             events,
             runs,
             specs,
+            definition_projection_composition: DefinitionProjectionComposition::Independent,
             runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
             identity: Arc::new(InMemoryMobIdentityStore::new()),
             identity_member: None,
@@ -179,6 +189,7 @@ impl MobStorage {
             events,
             runs,
             specs,
+            definition_projection_composition: DefinitionProjectionComposition::Independent,
             runtime_metadata,
             identity: Arc::new(InMemoryMobIdentityStore::new()),
             identity_member: None,
@@ -225,6 +236,7 @@ impl MobStorage {
             events,
             runs: authority_validating_mob_run_store(runs),
             specs,
+            definition_projection_composition: DefinitionProjectionComposition::Independent,
             runtime_metadata,
             identity,
             identity_member: None,
@@ -425,7 +437,8 @@ impl MobStorage {
                 kind: MobDefinitionProjectionMismatchKind::ProjectionAhead,
             }) if authority_epoch == current_epoch
                 && projection_revision == next_epoch
-                && self.events.supports_atomic_projection_ahead_epoch_repair()
+                && self.definition_projection_composition
+                    == DefinitionProjectionComposition::AtomicSqlite
         );
         if !projection_ahead_repair {
             self.converge_definition_projection(&current_definition, current_epoch)
@@ -559,6 +572,7 @@ impl MobStorage {
             events: Arc::new(stores.event_store()),
             runs: authority_validating_mob_run_store(Arc::new(stores.run_store())),
             specs: Arc::new(stores.spec_store()),
+            definition_projection_composition: DefinitionProjectionComposition::AtomicSqlite,
             runtime_metadata: Arc::new(stores.runtime_metadata_store()),
             identity: Arc::new(identity),
             identity_member: Some(identity_member),
@@ -1699,6 +1713,98 @@ mod tests {
             Some(definition),
             "projection-first state must not rewrite event authority"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn assert_split_sqlite_projection_ahead_refused(projected_matches_declared: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let stores = SqliteMobStores::open(directory.path().join("mob.db")).unwrap();
+        let sqlite_events = stores.event_store();
+        let sqlite_specs = stores.spec_store();
+        let definition = valid_definition("definition-split-projection");
+        sqlite_events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        sqlite_specs
+            .put_spec(&definition.id, &definition, None)
+            .await
+            .unwrap();
+
+        let mut declared = definition.clone();
+        declared.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        let mut projected = declared.clone();
+        if !projected_matches_declared {
+            projected.image_generation_provider = Some(meerkat_core::Provider::Gemini);
+        }
+        let external_specs = Arc::new(InMemoryMobSpecStore::new());
+        external_specs
+            .put_spec(&definition.id, &definition, None)
+            .await
+            .unwrap();
+        external_specs
+            .put_spec(&definition.id, &projected, Some(1))
+            .await
+            .unwrap();
+
+        let storage = MobStorage::custom(
+            Arc::new(sqlite_events),
+            Arc::new(InMemoryMobRunStore::new()),
+            external_specs.clone(),
+            Arc::new(InMemoryMobIdentityStore::new()),
+            Arc::new(InMemoryMobIdentityStatusStore::new()),
+        );
+        let cursor_before = storage.events.latest_cursor().await.unwrap();
+        let event_count_before = storage.events.replay_all().await.unwrap().len();
+
+        let error = storage
+            .update_definition(1, declared)
+            .await
+            .expect_err("split store composition must never adopt projection residue");
+        assert!(matches!(
+            error,
+            MobError::MobDefinitionProjectionMismatch {
+                authority_epoch: 1,
+                projection_revision: 2,
+                kind: MobDefinitionProjectionMismatchKind::ProjectionAhead,
+                ..
+            }
+        ));
+        assert_eq!(storage.events.latest_cursor().await.unwrap(), cursor_before);
+        assert_eq!(
+            storage.events.replay_all().await.unwrap().len(),
+            event_count_before
+        );
+        assert_eq!(
+            storage.created_definition().await.unwrap(),
+            Some(definition.clone())
+        );
+        assert_eq!(
+            sqlite_specs.get_spec(&definition.id).await.unwrap(),
+            Some((definition.clone(), 1))
+        );
+        assert_eq!(
+            external_specs.get_spec(&definition.id).await.unwrap(),
+            Some((projected, 2))
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn split_sqlite_event_and_custom_spec_refuses_exact_projection_ahead_residue() {
+        assert_split_sqlite_projection_ahead_refused(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn split_sqlite_event_and_custom_spec_refuses_mismatched_projection_ahead_residue() {
+        assert_split_sqlite_projection_ahead_refused(false).await;
     }
 
     #[tokio::test]

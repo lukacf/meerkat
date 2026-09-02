@@ -7159,10 +7159,6 @@ fn validate_initial_mob_created_sqlite(
 
 #[async_trait]
 impl private::MobEventStoreSealed for SqliteMobEventStore {
-    fn supports_atomic_projection_ahead_epoch_repair(&self) -> bool {
-        true
-    }
-
     fn definition_resume_gate(&self) -> Arc<tokio::sync::RwLock<()>> {
         Arc::clone(&self.event_bus.definition_resume_gate)
     }

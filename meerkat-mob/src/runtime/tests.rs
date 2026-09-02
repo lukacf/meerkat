@@ -9486,6 +9486,8 @@ async fn create_test_mob_with_run_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: run_store,
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -11924,6 +11926,8 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -11981,6 +11985,136 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn durable_definition_update_adopts_exact_projection_ahead_residue_atomically() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let directory = tempfile::tempdir().expect("temporary mob directory");
+    let database = directory.path().join("mob.db");
+    let storage = MobStorage::persistent(&database).expect("open persistent mob storage");
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let mut updated = definition.clone();
+    let added_profile = updated
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile exists")
+        .clone();
+    updated
+        .profiles
+        .insert(ProfileName::from("reviewer"), added_profile);
+
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob");
+    handle.shutdown().await.expect("stop process-local actor");
+    drop(handle);
+
+    let projection_revision = storage
+        .specs
+        .put_spec(&mob_id, &updated, Some(1))
+        .await
+        .expect("model released projection-only update");
+    assert_eq!(projection_revision, 2);
+
+    let receipt = storage
+        .update_definition(1, updated.clone())
+        .await
+        .expect("adopt exact projection residue through canonical authority");
+    assert_eq!(receipt.epoch, 2);
+    assert_eq!(receipt.projection_revision, 2);
+    assert!(matches!(
+        storage
+            .definition_projection_health()
+            .await
+            .expect("projection health"),
+        Some(crate::MobDefinitionProjectionHealth::Healthy {
+            authority_epoch: 2,
+            projection_revision: 2,
+        })
+    ));
+    let events = storage.events.replay_all().await.expect("replay events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                crate::MobEventKind::MobDefinitionUpdated {
+                    epoch: 2,
+                    definition,
+                } if definition.as_ref() == &updated
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_definition_update_refuses_different_projection_ahead_residue() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let directory = tempfile::tempdir().expect("temporary mob directory");
+    let database = directory.path().join("mob.db");
+    let storage = MobStorage::persistent(&database).expect("open persistent mob storage");
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let mut declared = definition.clone();
+    declared
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists")
+        .as_inline_mut()
+        .unwrap()
+        .peer_description = "declared update".to_string();
+    let mut residue = declared.clone();
+    residue
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists")
+        .as_inline_mut()
+        .unwrap()
+        .peer_description = "different projection-only update".to_string();
+
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob");
+    handle.shutdown().await.expect("stop process-local actor");
+    drop(handle);
+    assert_eq!(
+        storage
+            .specs
+            .put_spec(&mob_id, &residue, Some(1))
+            .await
+            .expect("model released projection-only update"),
+        2
+    );
+
+    assert!(matches!(
+        storage.update_definition(1, declared).await,
+        Err(MobError::MobDefinitionProjectionMismatch {
+            authority_epoch: 1,
+            projection_revision: 2,
+            kind: crate::MobDefinitionProjectionMismatchKind::ProjectionAhead,
+            ..
+        })
+    ));
+    assert!(
+        storage
+            .events
+            .replay_all()
+            .await
+            .expect("replay events")
+            .iter()
+            .all(|event| !matches!(event.kind, crate::MobEventKind::MobDefinitionUpdated { .. }))
+    );
 }
 
 #[tokio::test]
@@ -12691,6 +12825,8 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         events: events.clone(),
         runs: runs.clone(),
         specs: specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: runtime_metadata.clone(),
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -12888,6 +13024,8 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         events,
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -12985,6 +13123,8 @@ async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_p
         events: Arc::new(event_store),
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity: identity_store.clone(),
         identity_member: Some(identity_store.clone()),
@@ -23400,6 +23540,8 @@ async fn test_cold_running_resume_reestablishes_autonomous_startup_ready_without
         events,
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity,
         identity_member,
@@ -23556,6 +23698,8 @@ async fn assert_cold_running_local_resume_fails_closed(
         events: events.clone(),
         runs,
         specs,
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata,
         identity,
         identity_member,
@@ -44891,6 +45035,8 @@ async fn test_explicit_fail_step_routes_generated_supervisor_escalation_effect()
         events: event_store.clone(),
         runs: run_store.clone(),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -45788,6 +45934,8 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -45903,6 +46051,8 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: storage.runtime_metadata.clone(),
         identity: storage.identity.clone(),
         identity_member: storage.identity_member.clone(),
@@ -62867,6 +63017,8 @@ async fn create_test_mob_with_realm_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,
@@ -62971,6 +63123,8 @@ async fn test_spawn_realm_ref_without_store_returns_error() {
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
         runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         identity: Arc::new(InMemoryMobIdentityStore::new()),
         identity_member: None,

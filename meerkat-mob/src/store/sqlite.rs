@@ -7353,7 +7353,9 @@ impl private::MobEventStoreSealed for SqliteMobEventStore {
                     event.mob_id
                 )));
             };
-            if projected.revision > previous_epoch {
+            let exact_projection_ahead_residue =
+                projected.revision == epoch && projected.definition == proposed;
+            if projected.revision > previous_epoch && !exact_projection_ahead_residue {
                 return Err(MobStoreError::MobDefinitionProjectionMismatch {
                     mob_id: event.mob_id,
                     authority_epoch: previous_epoch,
@@ -7373,7 +7375,7 @@ impl private::MobEventStoreSealed for SqliteMobEventStore {
                     kind: crate::error::MobDefinitionProjectionMismatchKind::DefinitionMismatch,
                 });
             }
-            if projected.revision != previous_epoch {
+            if projected.revision != previous_epoch && !exact_projection_ahead_residue {
                 return Err(MobStoreError::CasConflict(format!(
                     "mob '{}' definition projection changed during epoch CAS",
                     event.mob_id

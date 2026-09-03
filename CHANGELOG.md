@@ -213,6 +213,22 @@ them.
   render as before. Behaviour change for exact-pinned hosts: the system prompt
   of every mob-enabled session shrinks by roughly 16 KB, which moves the
   prompt-cache prefix once after upgrade.
+- **The preloaded `workgraph-workflow` skill now states the rules members
+  kept getting wrong.** Every mob member with `tools.workgraph` receives this
+  skill in its prompt, but the text never said which way a `parent` edge
+  points or when to add one, that `workgraph_close` records `completed` when
+  `status` is omitted, that `workgraph_list` and `workgraph_snapshot` hide
+  terminal items unless `include_terminal` is true, or that a `labels` filter
+  requires every listed label; it also said a `blocks` edge is satisfied by any
+  terminally resolved blocker when only `completed` satisfies it. The skill now
+  spells out the child (`from_id`) to parent (`to_id`) direction and the
+  parent join policies, that `status` must be passed explicitly with `failed`
+  for a refuted hypothesis and `cancelled` for dropped work, the
+  `include_terminal` and match-all `labels` filter semantics, and the
+  `completed`-only blocker rule. Tool descriptions and schemas are unchanged.
+  Behaviour change for exact-pinned hosts: the preloaded skill text grows by
+  about 1.5 KB, which moves the prompt-cache prefix of WorkGraph-capable
+  members once after upgrade.
 
 ## [0.8.33] - 2026-09-04
 

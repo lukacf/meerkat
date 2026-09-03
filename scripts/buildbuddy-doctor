@@ -61,6 +61,12 @@ else
   bad "BuildBuddy API key is not configured; set BUILDBUDDY_API_KEY or add it to ~/.zshrc"
 fi
 
+if scripts/test-build-backend-env.sh >/dev/null 2>&1; then
+  pass "Build backend imports only allowlisted login-shell secrets"
+else
+  bad "Build backend login-shell secret import contract failed"
+fi
+
 bb_bin=""
 if [[ -n "${BUILDBUDDY_BB:-}" && -x "${BUILDBUDDY_BB}" ]]; then
   bb_bin="${BUILDBUDDY_BB}"

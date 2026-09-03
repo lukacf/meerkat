@@ -15916,7 +15916,6 @@ impl MobActor {
     /// machine journal still carries a stale session binding for it.
     async fn prepare_explicit_resume_member_sessions(
         &self,
-        deadline: Instant,
         admission: super::state::LifecycleAdmissionSignal,
         progress: &super::state::LifecycleProgressSignal,
     ) -> Result<Vec<ExplicitResumeMemberRebuild>, MobError> {
@@ -15987,7 +15986,7 @@ impl MobActor {
                 .provisioner
                 .prepare_member_session_for_explicit_resume(
                     &session_id,
-                    deadline,
+                    Instant::now() + super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT,
                     Some(admission.clone()),
                 )
                 .await?;
@@ -16137,7 +16136,7 @@ impl MobActor {
                 .provisioner
                 .prepare_member_session_for_explicit_resume(
                     &replacement_session_id,
-                    deadline,
+                    Instant::now() + super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT,
                     Some(admission.clone()),
                 )
                 .await?;
@@ -23389,7 +23388,6 @@ impl MobActor {
 
                             let rebuild = match self
                                 .prepare_explicit_resume_member_sessions(
-                                    deadline,
                                     admission.clone(),
                                     &progress,
                                 )
@@ -23436,24 +23434,6 @@ impl MobActor {
                             // retired foreign attachments; failure remains a
                             // stopped, discoverable session set that an
                             // explicit retry can rebuild.
-                            if Instant::now() >= deadline {
-                                let timeout_error =
-                                    MobError::LifecycleOperationAdmissionPending {
-                                        intent: "explicit_resume".to_string(),
-                                        stage: "lifecycle_transition_admission",
-                                    };
-                                if !rebuilt_attachment
-                                    && let Err(stop_error) =
-                                        self.stop_all_autonomous_members_for_rollback().await
-                                {
-                                    self.provisioner.cancel_all_checkpointers().await;
-                                    return Err(MobError::Internal(format!(
-                                        "{timeout_error}; exact pre-admission Resume rollback failed while stopping autonomous loops: {stop_error}"
-                                    )));
-                                }
-                                self.provisioner.cancel_all_checkpointers().await;
-                                return Err(timeout_error);
-                            }
                             admission.admit();
                             progress.awaiting_stage(
                                 super::state::LifecycleProgressStage::DurableResumeTransition,

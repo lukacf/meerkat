@@ -489,6 +489,7 @@ impl LifecycleAdmissionSignal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LifecycleProgressStage {
     LifecycleAuthorityAdmission,
+    MemberAttachmentSessionPreparation,
     MemberLiveMaterialization,
     MemberCommsReadiness,
     AutonomousRuntimeReadiness,
@@ -501,6 +502,7 @@ impl LifecycleProgressStage {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::LifecycleAuthorityAdmission => "lifecycle_authority_admission",
+            Self::MemberAttachmentSessionPreparation => "member_attachment_session_preparation",
             Self::MemberLiveMaterialization => "member_live_materialization",
             Self::MemberCommsReadiness => "member_comms_readiness",
             Self::AutonomousRuntimeReadiness => "autonomous_runtime_readiness",

@@ -200,6 +200,19 @@ them.
   bootstrap read; it now propagates the `ConfigError` too, so the binary has
   one read path with one failure mode (no observable change: the bootstrap
   read had already refused).
+### Changed
+
+- **Mob-enabled sessions no longer render the agent-facing mob tool
+  descriptions into the system prompt.** The facade appended every mob tool's
+  description under `# Available Tools` even though each provider already
+  receives the same text through `ToolDef.description`, so a `tools.mob`
+  member paid the 19-tool mob surface's ~16 KB of descriptions twice on every
+  request. The mob surface is now mounted without a prompt inventory, the
+  convention exact deferred-catalog dispatchers already follow; the tool
+  definitions the model receives are unchanged and non-mob tool families still
+  render as before. Behaviour change for exact-pinned hosts: the system prompt
+  of every mob-enabled session shrinks by roughly 16 KB, which moves the
+  prompt-cache prefix once after upgrade.
 
 ## [0.8.33] - 2026-09-04
 

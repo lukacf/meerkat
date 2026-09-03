@@ -64,33 +64,93 @@ meerkat_secret_env_key_allowed() {
   esac
 }
 
-meerkat_load_local_secrets_env() {
-  local root secrets_env loaded_env line key value
-  root="${1:-}"
-  secrets_env="$(meerkat_discover_local_secrets_env "${root}")"
-  if [[ -z "${secrets_env}" ]]; then
-    return 0
-  fi
+meerkat_exported_env_key_is_set() {
+  local exported_key
+  while IFS= read -r exported_key; do
+    if [[ "${exported_key}" == "$1" ]]; then
+      return 0
+    fi
+  done < <(compgen -e)
+  return 1
+}
 
-  if ! loaded_env="$(
-    set +u
-    set -a
-    # shellcheck disable=SC1090
-    source "${secrets_env}" >/dev/null
-    env
-  )"; then
-    echo "warning: failed to load local secrets env from ${secrets_env}" >&2
-    return 0
-  fi
-
-  while IFS= read -r line; do
-    key="${line%%=*}"
-    value="${line#*=}"
-    if [[ "${key}" == "${line}" ]]; then
+meerkat_import_allowed_env() {
+  local record key value import_status index
+  local keys=()
+  local values=()
+  import_status=1
+  while IFS= read -r -d '' record; do
+    key="${record%%=*}"
+    value="${record#*=}"
+    if [[ "${key}" == "__MEERKAT_ENV_IMPORT_STATUS" ]]; then
+      import_status="${value}"
       continue
     fi
-    if meerkat_secret_env_key_allowed "${key}" && [[ -z "${!key:-}" ]]; then
-      export "${key}=${value}"
+    if [[ "${key}" == "${record}" || ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      continue
     fi
-  done <<< "${loaded_env}"
+    if meerkat_secret_env_key_allowed "${key}" && ! meerkat_exported_env_key_is_set "${key}"; then
+      keys[${#keys[@]}]="${key}"
+      values[${#values[@]}]="${value}"
+    fi
+  done
+  if [[ "${import_status}" != "0" ]]; then
+    return 1
+  fi
+  for ((index = 0; index < ${#keys[@]}; index++)); do
+    export "${keys[index]}=${values[index]}"
+  done
+}
+
+meerkat_login_zsh_env_enabled() {
+  case "${MEERKAT_IMPORT_LOGIN_ZSH_ENV:-1}" in
+    0|false|FALSE|no|NO|off|OFF)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+meerkat_load_local_secrets_env() {
+  local root secrets_env restore_xtrace
+  root="${1:-}"
+  secrets_env="$(meerkat_discover_local_secrets_env "${root}")"
+  restore_xtrace=0
+  if [[ "$-" == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
+
+  if [[ -n "${secrets_env}" ]]; then
+    if ! meerkat_import_allowed_env < <(
+      set +u
+      set -a
+      # shellcheck disable=SC1090
+      if source "${secrets_env}" >/dev/null 2>&1 && /usr/bin/env -0; then
+        printf '__MEERKAT_ENV_IMPORT_STATUS=0\0'
+      else
+        printf '__MEERKAT_ENV_IMPORT_STATUS=1\0'
+      fi
+    ); then
+      echo "warning: failed to load local secrets env from ${secrets_env}" >&2
+    fi
+  fi
+
+  # Live lanes may start from a non-login agent process. Import only the
+  # established secret allowlist; set MEERKAT_IMPORT_LOGIN_ZSH_ENV=0 to opt out.
+  if meerkat_login_zsh_env_enabled && command -v zsh >/dev/null 2>&1; then
+    meerkat_import_allowed_env < <(
+      if zsh -lic '/usr/bin/env -0 >&3' 3>&1 >/dev/null 2>&1; then
+        printf '__MEERKAT_ENV_IMPORT_STATUS=0\0'
+      else
+        printf '__MEERKAT_ENV_IMPORT_STATUS=1\0'
+      fi
+    ) || true
+  fi
+
+  if [[ "${restore_xtrace}" == "1" ]]; then
+    set -x
+  fi
 }

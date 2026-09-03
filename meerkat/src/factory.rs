@@ -6351,13 +6351,18 @@ impl AgentFactory {
                 .build_mob_tools(mob_args)
                 .await
                 .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
-            // The mob surface is mounted without a `# Available Tools` prompt
-            // inventory. Its descriptions already reach every provider through
+            // The mob family is mounted without a `# Available Tools` prompt
+            // inventory: this surface is composed after the inventory was
+            // rendered, and `render_tool_usage_instructions` skips every tool
+            // with `ToolSourceKind::Mob` provenance, which also covers the
+            // operator family that arrives through `external_tools`. The
+            // descriptions already reach every provider through
             // `ToolDef.description`; rendering them a second time cost each
-            // mob-enabled session roughly 16 KB of system prompt per request
-            // (19 agent-facing tools, ~15.8 KB of description text). Exact
-            // deferred-catalog dispatchers already omit the inventory; the mob
-            // family follows that convention. Non-mob families are unchanged.
+            // mob-enabled session roughly 16.6 KB of system prompt per request
+            // (19 agent-facing tools, ~15.8 KB, plus the 12-tool operator
+            // family, ~0.75 KB). Exact deferred-catalog dispatchers already
+            // omit the inventory; the mob family follows that convention.
+            // Non-mob families are unchanged.
             // Use DynamicToolComposite (not ToolGateway) so dynamic child
             // dispatchers (e.g. callback tools) can surface additions between turns.
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -15719,14 +15724,30 @@ fn render_tool_usage_instructions(dispatcher: &dyn AgentToolDispatcher) -> Strin
     }
 
     let tools = dispatcher.tools();
-    if tools.is_empty() {
+    // The mob family carries no prompt inventory. Its descriptions already
+    // reach every provider through `ToolDef.description`, and the family is
+    // mounted through two dispatchers (the agent-facing mob surface and the
+    // operator tools composed into `external_tools`), so the rule keys on
+    // `ToolSourceKind::Mob` provenance rather than on the call site. Every
+    // other family renders exactly as before.
+    let mut rendered = tools
+        .iter()
+        .filter(|tool| !has_mob_provenance(tool))
+        .peekable();
+    if rendered.peek().is_none() {
         return String::new();
     }
     let mut out = String::from("# Available Tools\n\n");
-    for tool in tools.iter() {
+    for tool in rendered {
         out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
     }
     out
+}
+
+fn has_mob_provenance(tool: &meerkat_core::ToolDef) -> bool {
+    tool.provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.kind == meerkat_core::ToolSourceKind::Mob)
 }
 
 fn deferred_catalog_guidance() -> &'static str {
@@ -15938,21 +15959,24 @@ mod prompt_tests {
         build_config
     }
 
-    /// Item A3: the agent-facing mob surface carries 19 tools whose
-    /// descriptions total ~15.8 KB (`delegate` alone is 2,464 bytes; with the
-    /// 12-tool operator family the mob-attributable total is ~16.6 KB). Every
-    /// provider already receives that text through `ToolDef.description`, so
-    /// rendering it again under `# Available Tools` cost each mob-enabled
-    /// session roughly 16 KB of system prompt on every request. Mounting the
-    /// mob surface must therefore leave the system prompt byte-identical to a
-    /// build without it, while the mob tool definitions (descriptions intact)
-    /// still reach the provider-facing visible tool set and non-mob tools keep
-    /// their inventory entry.
+    /// Item A3: the mob family reaches a `tools.mob` member through two
+    /// dispatchers, the agent-facing mob surface (19 tools, ~15.8 KB of
+    /// descriptions; `delegate` alone is 2,464 bytes) and the 12-tool operator
+    /// family composed into `external_tools` (~0.75 KB), ~16.6 KB in total.
+    /// Every provider already receives that text through
+    /// `ToolDef.description`, so rendering it again under `# Available Tools`
+    /// cost each mob-enabled session roughly 16.6 KB of system prompt on every
+    /// request. Mounting both families must therefore leave the system prompt
+    /// byte-identical to a build without them, while the mob tool definitions
+    /// (descriptions intact) still reach the provider-facing visible tool set
+    /// and non-mob tools keep their inventory entry.
     #[tokio::test]
     async fn mounting_mob_tools_leaves_system_prompt_byte_identical_saving_16kb_of_descriptions() {
         const DELEGATE_DESCRIPTION: &str =
             "Run one exact bounded helper task in an implicit mob, then retire the helper.";
         const SPAWN_DESCRIPTION: &str = "Spawn a member into any mob you manage.";
+        const OPERATOR_SPAWN_DESCRIPTION: &str =
+            "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.";
 
         let plain_temp = tempfile::tempdir().unwrap();
         let plain_agent = AgentFactory::new(plain_temp.path().join("sessions"))
@@ -15972,6 +15996,22 @@ mod prompt_tests {
             pending_sources: Arc::from([]),
         });
         let mut mob_build_config = external_only_build_config();
+        // The operator family is not a separate mount: meerkat-mob composes it
+        // into the member's external tools with Mob provenance, so the
+        // external dispatcher of the mob-enabled build carries one such tool
+        // next to the plain external tool.
+        let mut external_with_operator: Vec<Arc<ToolDef>> = tools(&["visible"]).to_vec();
+        external_with_operator.extend(
+            mob_surface_tools(&[("spawn_member", OPERATOR_SPAWN_DESCRIPTION)])
+                .iter()
+                .cloned(),
+        );
+        mob_build_config.external_tools = Some(Arc::new(UsageTestDispatcher {
+            tools: external_with_operator.into(),
+            exact_catalog: false,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        }));
         mob_build_config.mob_tool_authority_context = Some(
             meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
                 .expect("generated create-only mob authority"),
@@ -15995,11 +16035,15 @@ mod prompt_tests {
         );
         assert!(
             !with_mob.contains(DELEGATE_DESCRIPTION) && !with_mob.contains(SPAWN_DESCRIPTION),
-            "mob tool descriptions must not be rendered into the system prompt: {with_mob}"
+            "mob surface descriptions must not be rendered into the system prompt: {with_mob}"
+        );
+        assert!(
+            !with_mob.contains(OPERATOR_SPAWN_DESCRIPTION),
+            "operator family descriptions must not be rendered into the system prompt: {with_mob}"
         );
         assert_eq!(
             with_mob, without_mob,
-            "mounting the mob surface must leave the system prompt byte-identical"
+            "mounting both mob families must leave the system prompt byte-identical"
         );
 
         let visible = mob_agent.tool_scope().visible_tools();
@@ -16014,6 +16058,54 @@ mod prompt_tests {
         assert!(
             visible.iter().any(|tool| tool.name == "mob_spawn_member"),
             "every mob tool stays visible to the model; only the prompt duplicate is gone"
+        );
+        let operator_spawn = visible
+            .iter()
+            .find(|tool| tool.name == "spawn_member")
+            .expect("the operator family stays visible to the model");
+        assert_eq!(
+            operator_spawn.description, OPERATOR_SPAWN_DESCRIPTION,
+            "the operator tool definition keeps its full description"
+        );
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_omits_mob_provenance_tools_and_keeps_the_rest() {
+        let mut mixed: Vec<Arc<ToolDef>> = tools(&["visible"]).to_vec();
+        mixed.extend(
+            mob_surface_tools(&[("spawn_member", "Spawn a mob member from a profile.")])
+                .iter()
+                .cloned(),
+        );
+        let dispatcher = UsageTestDispatcher {
+            tools: mixed.into(),
+            exact_catalog: false,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+
+        let usage = render_tool_usage_instructions(&dispatcher);
+        assert_eq!(
+            usage, "# Available Tools\n\n## visible\nvisible tool\n\n",
+            "only the non-mob tool renders, exactly as before"
+        );
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_is_empty_when_every_tool_is_mob_provenance() {
+        let dispatcher = UsageTestDispatcher {
+            tools: mob_surface_tools(&[
+                ("spawn_member", "Spawn a mob member from a profile."),
+                ("member_status", "Get a member's execution status snapshot."),
+            ]),
+            exact_catalog: false,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+
+        assert!(
+            render_tool_usage_instructions(&dispatcher).is_empty(),
+            "a mob-only dispatcher renders no header and no entries"
         );
     }
 

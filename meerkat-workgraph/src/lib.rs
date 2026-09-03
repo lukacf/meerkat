@@ -159,7 +159,9 @@ mod workgraph_workflow_skill_tests {
     //! vocabulary: a rename in `types.rs` or a rewrite of the skill that drops
     //! a rule fails here rather than silently changing what members are told.
 
-    use crate::types::{CloseWorkItemRequest, WorkEdgeKind, WorkItemFilter, WorkStatus};
+    use crate::types::{
+        CloseWorkItemRequest, FailedChildJoinPolicy, WorkEdgeKind, WorkItemFilter, WorkStatus,
+    };
     use serde::Serialize;
 
     const SKILL_BODY: &str = include_str!("../skills/workgraph-workflow/SKILL.md");
@@ -189,6 +191,30 @@ mod workgraph_workflow_skill_tests {
         assert!(
             text.contains("points from the child (`from_id`) to the parent (`to_id`)"),
             "skill must state the parent edge direction"
+        );
+    }
+
+    #[test]
+    fn skill_distinguishes_accept_from_propagate_join_policies() {
+        // `accept` yields ChildJoinDisposition::Satisfied (the parent can
+        // proceed); `propagate` yields PropagateFailure/PropagateCancellation,
+        // which closes the parent with the child's terminal status. A member
+        // that reads them as equivalent picks `propagate` expecting a
+        // completable parent.
+        let text = skill_text();
+        let accept = wire_name(FailedChildJoinPolicy::Accept);
+        let propagate = wire_name(FailedChildJoinPolicy::Propagate);
+        assert!(
+            text.contains(&format!(
+                "`{accept}` lets the parent proceed without that child"
+            )),
+            "skill must say accept keeps the parent completable"
+        );
+        assert!(
+            text.contains(&format!(
+                "`{propagate}` closes the parent with the child's status"
+            )),
+            "skill must say propagate terminates the parent"
         );
     }
 

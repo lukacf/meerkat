@@ -82,6 +82,33 @@ pub struct ToolConfig {
     pub rust_bundles: Vec<String>,
 }
 
+impl ToolConfig {
+    /// Every key a `[profiles.<name>.tools]` table may declare, in
+    /// declaration order, exactly as the serde derive reads them.
+    ///
+    /// `ToolConfig` has no `deny_unknown_fields` for the same reason
+    /// [`Profile`] has none (see [`Profile::FIELD_NAMES`]): it is the
+    /// persisted profile shape. `MobDefinition::from_toml` compares the
+    /// `tools` sub-table of each inline profile against this list so a typo
+    /// such as `comm = true` is reported instead of silently leaving the
+    /// category off. A serde-derived drift test keeps it equal to the
+    /// derive's own field list.
+    pub const FIELD_NAMES: &'static [&'static str] = &[
+        "builtins",
+        "shell",
+        "comms",
+        "memory",
+        "workgraph",
+        "mob",
+        "schedule",
+        "image_generation",
+        "read_only",
+        "mcp",
+        "mcp_servers",
+        "rust_bundles",
+    ];
+}
+
 /// Binding for a profile in a mob definition.
 ///
 /// Profiles can be defined inline (the existing behavior) or reference
@@ -126,6 +153,16 @@ impl ProfileBinding {
             Self::Inline(_) => None,
         }
     }
+
+    /// The only key a realm-reference profile table declares.
+    ///
+    /// The untagged derive tries `RealmRef` first and, having no
+    /// `deny_unknown_fields`, accepts a table that carries `realm_profile`
+    /// plus anything else, dropping the rest. `MobDefinition::from_toml`
+    /// therefore compares a realm-reference table against this list: a key
+    /// from the closed [`UnsupportedProfileKey`] list refuses the parse
+    /// exactly as for an inline profile, and any other extra key warns.
+    pub const REALM_REF_FIELD_NAMES: &'static [&'static str] = &["realm_profile"];
 }
 
 /// Agent-owned spawn tooling mode for child members.
@@ -415,8 +452,10 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn profile_field_names_match_serde_derive() {
+    /// Capture the field list a struct's serde derive announces through
+    /// `deserialize_struct`, without producing a value. `None` means the
+    /// derive never entered `deserialize_struct`.
+    fn derive_field_names<'de, T: serde::Deserialize<'de>>() -> Option<&'static [&'static str]> {
         use std::cell::Cell;
 
         /// A deserializer that never produces a value: it only records the
@@ -464,14 +503,55 @@ mod tests {
             captured: &captured,
         };
         assert!(
-            Profile::deserialize(probe).is_err(),
-            "the probe never yields a Profile"
+            T::deserialize(probe).is_err(),
+            "the probe never yields a value"
         );
+        captured.get()
+    }
+
+    #[test]
+    fn profile_field_names_match_serde_derive() {
         assert_eq!(
-            captured.get(),
+            derive_field_names::<Profile>(),
             Some(Profile::FIELD_NAMES),
-            "Profile::FIELD_NAMES drifted from the serde derive's field list              (None means the derive never entered deserialize_struct)"
+            "Profile::FIELD_NAMES drifted from the serde derive's field list \
+             (None means the derive never entered deserialize_struct)"
         );
+    }
+
+    #[test]
+    fn tool_config_field_names_match_serde_derive() {
+        assert_eq!(
+            derive_field_names::<ToolConfig>(),
+            Some(ToolConfig::FIELD_NAMES),
+            "ToolConfig::FIELD_NAMES drifted from the serde derive's field list \
+             (None means the derive never entered deserialize_struct)"
+        );
+    }
+
+    #[test]
+    fn realm_ref_field_names_match_the_serialized_binding() {
+        // The untagged enum never enters `deserialize_struct` for the variant,
+        // so the drift check runs serializer-side: the keys a `RealmRef`
+        // binding emits are exactly the keys a realm-reference table may
+        // declare.
+        let binding = ProfileBinding::RealmRef {
+            realm_profile: "reviewer".to_string(),
+        };
+        let table = toml::Value::try_from(&binding).expect("realm ref serializes to TOML");
+        let emitted: Vec<&str> = table
+            .as_table()
+            .expect("realm ref serializes as a table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(emitted, ProfileBinding::REALM_REF_FIELD_NAMES);
+        for key in UnsupportedProfileKey::ALL {
+            assert!(
+                !ProfileBinding::REALM_REF_FIELD_NAMES.contains(&key.as_str()),
+                "{key} must not be a realm-reference key"
+            );
+        }
     }
 
     #[test]

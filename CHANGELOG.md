@@ -214,30 +214,37 @@ them.
   profile has no system prompt, the member prompt is `profile.skills` resolved
   against an inline or path `[skills.<id>]` table, and identity-first hosts
   may set `DurableAgentSpec.additional_instructions` or a customizer's
-  `draft.system_prompt`. Behaviour change for exact-pinned hosts: a definition
-  that booted with the inert key now fails to load until the key moves into a
-  `[skills.<id>]` table. Signature changes named for the gate:
+  `draft.system_prompt`. A realm-reference table (`realm_profile = "..."`) is
+  refused for the same keys, because the untagged binding otherwise absorbs
+  them silently. The check runs on the TOML path only (`from_toml`,
+  `parse_toml`); a `MobDefinition` deserialized from JSON is not inspected.
+  Behaviour change for exact-pinned hosts: a definition that booted with the
+  inert key now fails to load until the key moves into a `[skills.<id>]`
+  table. Signature changes named for the gate:
   `MobDefinition::from_toml` returns `Result<MobDefinition, MobError>` instead
   of `Result<MobDefinition, toml::de::Error>`; `MobError` gained the variants
   `DefinitionParse(toml::de::Error)` (with `From<toml::de::Error>`) and
   `UnsupportedProfileKey { profile, key }`; `DiagnosticCode` gained
   `UnknownProfileKey`. New public items: `Profile::FIELD_NAMES`,
+  `ToolConfig::FIELD_NAMES`, `ProfileBinding::REALM_REF_FIELD_NAMES`,
   `meerkat_mob::UnsupportedProfileKey`, `MobDefinition::parse_toml`,
   `ParsedMobDefinition`, and `UnknownProfileKeys`.
 
 ### Changed
 
-- **Mob-enabled sessions no longer render the agent-facing mob tool
-  descriptions into the system prompt.** The facade appended every mob tool's
-  description under `# Available Tools` even though each provider already
-  receives the same text through `ToolDef.description`, so a `tools.mob`
-  member paid the 19-tool mob surface's ~16 KB of descriptions twice on every
-  request. The mob surface is now mounted without a prompt inventory, the
-  convention exact deferred-catalog dispatchers already follow; the tool
-  definitions the model receives are unchanged and non-mob tool families still
-  render as before. Behaviour change for exact-pinned hosts: the system prompt
-  of every mob-enabled session shrinks by roughly 16 KB, which moves the
-  prompt-cache prefix once after upgrade.
+- **Mob-enabled sessions no longer render mob tool descriptions into the
+  system prompt.** The facade appended every tool's description under
+  `# Available Tools` even though each provider already receives the same text
+  through `ToolDef.description`, so a `tools.mob` member paid the mob family's
+  ~16.6 KB of descriptions twice on every request: the 19-tool agent-facing
+  mob surface (~15.8 KB) and the 12-tool operator family that meerkat-mob
+  composes into the member's external tools (~0.75 KB). The prompt inventory
+  now skips every tool whose provenance is `ToolSourceKind::Mob`, whichever
+  dispatcher mounts it, the convention exact deferred-catalog dispatchers
+  already follow; the tool definitions the model receives are unchanged and
+  every non-mob tool family still renders as before. Behaviour change for
+  exact-pinned hosts: the system prompt of every mob-enabled session shrinks
+  by roughly 16.6 KB, which moves the prompt-cache prefix once after upgrade.
 - **The preloaded `workgraph-workflow` skill now states the rules members
   kept getting wrong.** Every mob member with `tools.workgraph` receives this
   skill in its prompt, but the text never said which way a `parent` edge
@@ -278,8 +285,17 @@ them.
   keys; parsing continues and the keys are ignored exactly as before. The new
   `MobDefinition::parse_toml` returns the typed definition together with the
   ignored keys and their diagnostics for hosts that surface diagnostics
-  structurally rather than through logs. Realm-reference bindings
-  (`realm_profile = "..."`) are not inspected.
+  structurally rather than through logs. The `tools` sub-table is compared
+  against the new `ToolConfig::FIELD_NAMES` the same way, so a typo such as
+  `comm = true` is reported as `profiles.<name>.tools.comm` instead of
+  silently leaving comms off, and a realm-reference table warns on every key
+  other than `realm_profile` (`ProfileBinding::REALM_REF_FIELD_NAMES`). The
+  diagnostic is produced by `parse_toml` only: no Meerkat surface emits
+  `unknown_profile_key` today, and `validate_definition` cannot, because the
+  typed definition it receives no longer holds the dropped keys. A host that
+  surfaces validate diagnostics structurally calls `parse_toml` and merges its
+  diagnostics with `validate_definition`'s; `from_toml` callers get the log
+  line.
 
 ## [0.8.33] - 2026-09-04
 

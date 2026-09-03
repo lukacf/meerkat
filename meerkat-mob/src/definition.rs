@@ -12,7 +12,7 @@
 use crate::MobBackendKind;
 use crate::error::MobError;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
-use crate::profile::{Profile, ProfileBinding, UnsupportedProfileKey};
+use crate::profile::{Profile, ProfileBinding, ToolConfig, UnsupportedProfileKey};
 use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use indexmap::IndexMap;
 use meerkat_core::schema::MeerkatSchema;
@@ -725,20 +725,23 @@ struct TomlDefinition {
     event_router: Option<EventRouterConfig>,
 }
 
-/// Keys one `[profiles.<name>]` table declared that [`Profile`] does not
+/// Keys one `[profiles.<name>]` table declared that its binding does not
 /// define, recorded by [`MobDefinition::parse_toml`] before the typed parse
 /// drops them.
 ///
-/// The typed [`MobDefinition`] cannot carry these (parsing discards them), so
-/// the parse result reports them here and projects them as warning
-/// diagnostics. Keys that name a platform concept the profile cannot honour
-/// never reach this list: they refuse the parse (see
-/// [`UnsupportedProfileKey`]).
+/// An inline profile accepts [`Profile::FIELD_NAMES`] and, under `tools`,
+/// [`ToolConfig::FIELD_NAMES`]; a realm reference accepts only
+/// [`ProfileBinding::REALM_REF_FIELD_NAMES`]. The typed [`MobDefinition`]
+/// cannot carry the rest (parsing discards them), so the parse result reports
+/// them here and projects them as warning diagnostics. Keys that name a
+/// platform concept the profile cannot honour never reach this list: they
+/// refuse the parse (see [`UnsupportedProfileKey`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownProfileKeys {
-    /// The inline profile whose table carried the keys.
+    /// The profile whose table carried the keys.
     pub profile: ProfileName,
-    /// The ignored keys, sorted.
+    /// The ignored keys relative to the profile table, sorted; a key under
+    /// the `tools` sub-table appears as `tools.<key>`.
     pub keys: Vec<String>,
 }
 
@@ -750,7 +753,7 @@ impl UnknownProfileKeys {
         self.keys.iter().map(move |key| Diagnostic {
             code: DiagnosticCode::UnknownProfileKey,
             message: format!(
-                "profile '{}' declares '{key}', which is not a profile field and is ignored",
+                "profile '{}' declares '{key}', which is not a key the profile accepts and is ignored",
                 self.profile.as_str()
             ),
             location: Some(format!("profiles.{}.{key}", self.profile.as_str())),
@@ -764,8 +767,8 @@ impl UnknownProfileKeys {
 pub struct ParsedMobDefinition {
     /// The typed definition.
     pub definition: MobDefinition,
-    /// Inline profiles whose tables declared keys [`Profile`] does not define,
-    /// in profile-name order; empty when every key was recognised.
+    /// Profiles whose tables declared keys their binding does not define, in
+    /// profile-name order; empty when every key was recognised.
     pub unknown_profile_keys: Vec<UnknownProfileKeys>,
 }
 
@@ -779,9 +782,13 @@ impl ParsedMobDefinition {
     }
 }
 
-/// Compare each inline `[profiles.<name>]` table against
-/// [`Profile::FIELD_NAMES`]: a key from the closed [`UnsupportedProfileKey`]
-/// list refuses the parse, every other unknown key is collected for a warning.
+/// Compare each `[profiles.<name>]` table against the keys its binding
+/// declares: [`Profile::FIELD_NAMES`] (plus [`ToolConfig::FIELD_NAMES`] for the
+/// `tools` sub-table) for an inline profile, and
+/// [`ProfileBinding::REALM_REF_FIELD_NAMES`] for a realm reference, which the
+/// untagged derive otherwise lets absorb any extra key. A key from the closed
+/// [`UnsupportedProfileKey`] list refuses the parse; every other unknown key
+/// is collected for a warning.
 fn inspect_profile_keys(
     profiles: &BTreeMap<ProfileName, ProfileBinding>,
     tables: &toml::Table,
@@ -791,20 +798,19 @@ fn inspect_profile_keys(
     };
     let mut unknown_profile_keys = Vec::new();
     for (name, binding) in profiles {
-        // A realm reference is `{ realm_profile = "..." }`; nothing in it is a
-        // `Profile` field and it is resolved elsewhere.
-        if binding.as_inline().is_none() {
-            continue;
-        }
         let Some(raw_profile) = raw_profiles
             .get(name.as_str())
             .and_then(toml::Value::as_table)
         else {
             continue;
         };
+        let declared: &[&str] = match binding {
+            ProfileBinding::Inline(_) => Profile::FIELD_NAMES,
+            ProfileBinding::RealmRef { .. } => ProfileBinding::REALM_REF_FIELD_NAMES,
+        };
         let mut keys = Vec::new();
         for key in raw_profile.keys() {
-            if Profile::FIELD_NAMES.contains(&key.as_str()) {
+            if declared.contains(&key.as_str()) {
                 continue;
             }
             if let Some(refused) = UnsupportedProfileKey::from_key(key) {
@@ -814,6 +820,18 @@ fn inspect_profile_keys(
                 });
             }
             keys.push(key.clone());
+        }
+        // The `tools` sub-table of an inline profile has its own closed field
+        // set; a typo there (`comm = true`) silently leaves the category off.
+        if binding.as_inline().is_some() {
+            if let Some(raw_tools) = raw_profile.get("tools").and_then(toml::Value::as_table) {
+                keys.extend(
+                    raw_tools
+                        .keys()
+                        .filter(|key| !ToolConfig::FIELD_NAMES.contains(&key.as_str()))
+                        .map(|key| format!("tools.{key}")),
+                );
+            }
         }
         if !keys.is_empty() {
             keys.sort();
@@ -909,10 +927,13 @@ impl MobDefinition {
     ///
     /// Refuses a `[profiles.<name>]` key that names a concept a profile cannot
     /// honour ([`MobError::UnsupportedProfileKey`], see
-    /// [`UnsupportedProfileKey`]) and logs one warning per inline profile
-    /// whose table carries any other key [`Profile`] does not define; parsing
-    /// continues and those keys are ignored. Use [`Self::parse_toml`] to
-    /// receive the ignored keys as typed diagnostics instead of a log line.
+    /// [`UnsupportedProfileKey`]), on inline and realm-reference tables alike,
+    /// and logs one warning per profile whose table (or `tools` sub-table)
+    /// carries any other key its binding does not define; parsing continues
+    /// and those keys are ignored. Use [`Self::parse_toml`] to receive the
+    /// ignored keys as typed diagnostics instead of a log line. Only this TOML
+    /// path inspects keys: a `MobDefinition` deserialized from JSON is not
+    /// checked.
     pub fn from_toml(content: &str) -> Result<Self, MobError> {
         let parsed = Self::parse_toml(content)?;
         for unknown in &parsed.unknown_profile_keys {
@@ -1014,7 +1035,6 @@ impl MobDefinition {
 )]
 mod tests {
     use super::*;
-    use crate::profile::ToolConfig;
 
     /// Shaped like HomeCore's production mob.toml: a host-private
     /// `role_summary` under every profile table (plus one more private key on
@@ -1287,6 +1307,119 @@ realm_profile = "org-reviewer"
         );
     }
 
+    #[test]
+    fn parse_toml_refuses_system_prompt_on_a_realm_reference_table() {
+        // The untagged derive picks `RealmRef` for any table carrying
+        // `realm_profile` and, lacking `deny_unknown_fields`, would absorb the
+        // prompt key without a trace.
+        let content = r#"
+[mob]
+id = "realm-ref-prompt"
+
+[profiles.shared]
+realm_profile = "org-reviewer"
+system_prompt = "You review code."
+"#;
+        let err = MobDefinition::parse_toml(content).expect_err("system_prompt is refused");
+        match &err {
+            MobError::UnsupportedProfileKey { profile, key } => {
+                assert_eq!(profile.as_str(), "shared");
+                assert_eq!(*key, UnsupportedProfileKey::SystemPrompt);
+            }
+            other => panic!("expected UnsupportedProfileKey, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                MobDefinition::from_toml(content),
+                Err(MobError::UnsupportedProfileKey { .. })
+            ),
+            "from_toml refuses the same table"
+        );
+    }
+
+    #[test]
+    fn parse_toml_warns_on_extra_keys_in_a_realm_reference_table_and_keeps_the_binding() {
+        let content = r#"
+[mob]
+id = "realm-ref-extra"
+
+[profiles.shared]
+realm_profile = "org-reviewer"
+role_summary = "host-private"
+model = "claude-sonnet-4-5"
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("extra keys warn, not refuse");
+        assert_eq!(
+            parsed.definition.profiles[&ProfileName::from("shared")].realm_ref_name(),
+            Some("org-reviewer"),
+            "the binding stays a realm reference"
+        );
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("shared"),
+                keys: vec!["model".to_string(), "role_summary".to_string()],
+            }],
+            "a realm reference accepts only realm_profile; even a Profile field is extra"
+        );
+        let diagnostics = parsed.diagnostics();
+        let locations: Vec<Option<&str>> =
+            diagnostics.iter().map(|d| d.location.as_deref()).collect();
+        assert_eq!(
+            locations,
+            vec![
+                Some("profiles.shared.model"),
+                Some("profiles.shared.role_summary")
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_toml_warns_on_unknown_tools_keys_with_the_sub_table_location() {
+        // `comm = true` is the exact typo that yields the comms=false wiring
+        // rejection at spawn; the parse must name it.
+        let content = r#"
+[mob]
+id = "tools-typo"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[profiles.worker.tools]
+comm = true
+builtins = true
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("tools typos warn, not refuse");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("worker"),
+                keys: vec!["tools.comm".to_string()],
+            }]
+        );
+        let diagnostics = parsed.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::UnknownProfileKey);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            diagnostics[0].location.as_deref(),
+            Some("profiles.worker.tools.comm")
+        );
+        assert!(
+            diagnostics[0].message.contains("'tools.comm'"),
+            "{}",
+            diagnostics[0].message
+        );
+        let worker = parsed.definition.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .expect("inline profile");
+        assert!(worker.tools.builtins, "recognised tools keys are kept");
+        assert!(
+            !worker.tools.comms,
+            "the typo does not enable comms; the warning is what the author gets"
+        );
+    }
+
     fn example_toml() -> &'static str {
         r#"
 [mob]
@@ -1400,7 +1533,7 @@ comms = true
     }
 
     #[test]
-    fn from_toml_accepts_declared_profile_keys_and_skips_realm_refs() {
+    fn from_toml_accepts_declared_profile_keys_and_bare_realm_refs() {
         // Serialize a populated `Profile` instead of hand-writing the table so
         // the accepted key set is the one the serializer emits; a rename on
         // either side shows up here, not only in the derive probe.
@@ -1441,6 +1574,23 @@ comms = true
             assert!(
                 Profile::FIELD_NAMES.contains(key),
                 "serializer emitted {key} which FIELD_NAMES does not declare"
+            );
+        }
+        let emitted_tools: Vec<&str> = worker
+            .get("tools")
+            .and_then(toml::Value::as_table)
+            .expect("tools serializes as a sub-table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            emitted_tools.len() > 5,
+            "populated tools emit their keys: {emitted_tools:?}"
+        );
+        for key in &emitted_tools {
+            assert!(
+                ToolConfig::FIELD_NAMES.contains(key),
+                "serializer emitted tools.{key} which ToolConfig::FIELD_NAMES does not declare"
             );
         }
 

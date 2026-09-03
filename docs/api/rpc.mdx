@@ -1652,8 +1652,8 @@ are a `ReadyWorkFilter`.
 
 There is no `include_terminal` here because a terminal item is never ready.
 Readiness is evaluated atomically over the namespace; a namespace with more
-than 1,000 items or 1,000 edges fails with `INVALID_PARAMS` and must be
-narrowed rather than truncated. The result is `{"items": [...]}`.
+than 1,000 items fails with `INVALID_PARAMS` and must be narrowed rather than
+truncated. The result is `{"items": [...]}`.
 
 ### workgraph/snapshot
 
@@ -1700,9 +1700,9 @@ Read one atomic observation of the namespace. Params are a
 `edges` contains only edges whose both endpoints are among the returned items,
 `attention` only bindings on those items, and `ready_item_ids` the subset of
 returned items that is ready at `captured_at`. A snapshot therefore omits an
-edge to a terminal item unless `include_terminal` is true. The same 1,000
-item, edge, and attention-binding atomic scan bounds apply as for
-`workgraph/ready`.
+edge to a terminal item unless `include_terminal` is true. The atomic scan is
+bounded before filtering: a namespace with more than 1,000 items, 1,000 edges,
+or 1,000 attention bindings fails with `INVALID_PARAMS` and must be narrowed.
 
 ### workgraph/events
 

@@ -33,9 +33,10 @@ scratch space and not semantic memory.
   points from the child (`from_id`) to the parent (`to_id`); add it right
   after creating the child, because `workgraph_create` has no parent field.
   A parent is not ready while any child is live, and a `failed` or
-  `cancelled` child keeps a `require_success` parent waiting unless the parent
-  was created with `failed_child_join_policy` or `cancelled_child_join_policy`
-  set to `accept` or `propagate`.
+  `cancelled` child keeps a `require_success` parent waiting. The parent's
+  `failed_child_join_policy` or `cancelled_child_join_policy` changes that:
+  `accept` lets the parent proceed without that child, while `propagate`
+  closes the parent with the child's status.
 - Attach evidence with `workgraph_add_evidence` for artifacts, PRs, logs,
   summaries, external tickets, or other proof that the work changed state.
 - Close with `workgraph_close` only when terminal truth exists, and always pass

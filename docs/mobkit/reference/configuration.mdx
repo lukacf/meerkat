@@ -109,9 +109,50 @@ The stock SDK gateway consumes the `runtime_options` object sent by Python and T
 | `control_grants_toml` | TOML string | Loads the closed `[control_grants]` table for `--control-listen`. Each caller public key is scoped to named control verbs and members, and the gateway binds every request signature to the local mob id as its audience. Omitting the field installs an empty deny-all table; an explicit value without `[control_grants]`, or with an unknown/invalid field, fails initialization. |
 | `event_log` | Object | Declares the operational event log. `storage = "memory"` (with optional `batch_size`, `flush_interval_ms`) keeps a bounded queryable in-process store so `mobkit/query_events` returns events instead of `no_event_log_configured`; `storage = "null"` declares that events are dropped. Both are declared-ephemeral choices; omitting the key means no ingestion at all, and any other storage kind fails initialization. Durable event-log backends are embedder-only (`UnifiedRuntimeBuilder` accepts any `EventLogStore`). |
 | `runtime_store` | Object | Declares the runtime store's durability. The store (`runtime.sqlite` — session resume, archive, retire) is persistent SQLite by default; the only accepted declaration is `{ "storage": "memory" }`, after which sessions do not survive gateway restart. A failed SQLite open without this declaration is a startup error (`-32014`), never a silent in-memory fallback. |
+| `declare_spec_update` | Object | One-shot canonical mob-definition compare-and-swap. `{ "expected_revision": N }` applies the `mob_config` supplied in the same `mobkit/init` request only when the durable definition is still at `N`. The launch must be authoritative and use persistent mob storage. Exact replay converges; stale revision or successor-content disagreement refuses initialization with typed storage error `-32014`. |
 | `compaction` | Object | Declares the host-level session-compaction policy for every agent the gateway builds: `auto_compact_threshold` (tokens, non-zero), `recent_turn_budget`, `max_summary_tokens`, `min_turns_between_compactions`. A compactor is always installed; this declares *when it fires*. **Omitting `auto_compact_threshold` inherits Meerkat's model-aware default — `context_window * 4 / 5`, i.e. ~840,000 tokens on a million-token model such as `gpt-5.6-sol`, which in practice never fires and resends the full transcript every turn.** Declaring the key pins it. A mob profile's own `auto_compact_threshold` still wins per member. Unknown keys and a zero threshold fail initialization. |
 
 Unsupported nested fields fail initialization with `-32602` instead of being silently ignored.
+
+### One-shot mob definition update
+
+Python hosts use the supported builder ceremony on the single activation
+authorized to change the durable definition:
+
+```python
+runtime = await (
+    MobKit.builder()
+    .mob("config/mob.toml")  # complete replacement definition
+    .persistent_state("/var/lib/homecore")
+    .declare_spec_update(expected_revision=1)
+    .gateway("/path/to/rpc_gateway")
+    .build()
+)
+```
+
+The builder sends the replacement TOML as top-level `mob_config` and emits:
+
+```json
+{
+  "runtime_options": {
+    "mob_composition": {"authority": "authoritative"},
+    "declare_spec_update": {"expected_revision": 1}
+  }
+}
+```
+
+The gateway delegates the mutation to Meerkat's canonical definition CAS. It
+does not append raw events, rewrite a projection independently, or treat the
+creation manifest as mutable authority. Remove `declare_spec_update(...)` from
+later ordinary restarts. A stale revision or different successor definition
+raises Python `StorageResolutionError`; an exact retry returns the already
+committed successor revision and converges its checked projection.
+
+This is a cold-activation ceremony, not a hot reload. Fully shut down the prior
+runtime before issuing the update: an already-running `MobHandle` keeps the
+definition it was constructed with. The CAS and verified-resume fence serialize
+the update with the next bootstrap, but they do not reconfigure an older live
+process.
 
 <Warning>
 `runtime_options.scheduling_files` was removed in contract 0.5.0 and is an

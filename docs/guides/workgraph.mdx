@@ -18,13 +18,17 @@ controls for trusted local operators.
 ## Start With The Namespace Grant
 
 An agent receives one host-issued `WorkGraphNamespaceGrant` containing its
-exact realm and namespace. Standard persistent surfaces grant `default`.
-Every tool call is scoped to that grant: omitting `namespace` uses the granted
-namespace, while a different namespace, realm, or `all_namespaces` request is
-rejected.
+exact realm and namespace. Standard hosts issue it for you: the `rkat`
+persistent surfaces (CLI, REST, JSON-RPC, MCP server) and the MobKit gateways
+grant the runtime's realm plus the `default` namespace to every agent with
+WorkGraph enabled, so nothing in a mob definition, the SDKs, or the RPC params
+asks you to issue one. Every tool call is scoped to that grant: omitting
+`namespace` uses the granted namespace, while a different namespace, realm, or
+`all_namespaces` request is rejected.
 
-Embedding hosts that need a domain namespace must issue that namespace in the
-agent build. Do not treat a caller-supplied namespace string as authority.
+Only an embedding Rust host that composes its own agent build issues a grant
+itself, and only such a host can choose a domain namespace other than
+`default`. Do not treat a caller-supplied namespace string as authority.
 
 ## Create Work
 

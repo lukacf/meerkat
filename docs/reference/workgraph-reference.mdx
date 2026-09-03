@@ -298,6 +298,29 @@ but the standard public services hold one namespace grant and reject it. A
 future/bespoke host needs a separate explicit multi-namespace capability; a
 namespace grant never implies one.
 
+## Filter Semantics
+
+The same filter fields drive the `workgraph_list`, `workgraph_ready`,
+`workgraph_snapshot`, and `workgraph_events` tools, the `workgraph/*` RPC
+methods, the REST query parameters, and the CLI flags. Their meaning is the
+same everywhere:
+
+| Field | Applies to | Semantics |
+|-------|------------|-----------|
+| `statuses` | list, snapshot | Keep items whose status is in the list. Checked before the terminality rule, so it does not by itself reveal terminal items |
+| `include_terminal` | list, snapshot | Default `false`: `completed`, `cancelled`, and `failed` items are dropped even when `statuses` names them, and a snapshot omits edges that touch them. `ready` has no such flag because a terminal item is never ready |
+| `labels` | list, ready, snapshot | Conjunction: an item must carry every listed label. Filter on one label to widen the result |
+| `limit` | list, ready, snapshot, events | Default 100, maximum 1,000; a larger value is `INVALID_PARAMS` before the store is read. Ready results are sorted by priority, then creation time, then id before the cut |
+| `after_seq` | events | Only events with `seq` strictly greater than the value; page forward from the last `seq` seen or a snapshot's `event_high_water_mark` |
+| `realm_id`, `namespace` | all | Default to the granted realm and namespace; any other value is rejected |
+| `all_namespaces` | list, snapshot, events | Present on the wire, rejected by the standard single-grant services |
+
+Items and edges are never deleted. No tool, RPC method, REST route, or CLI
+command unlinks an edge or removes an item; only the trusted attention prune
+deletes rows. Close an item that should leave live views as `cancelled`, and
+replace one with a `supersedes` edge from the successor (`from_id`) to the
+superseded item (`to_id`).
+
 ## CLI
 
 ```bash
@@ -323,5 +346,6 @@ not pass `--all-namespaces`.
 
 `workgraph-workflow` is an embedded builtin companion skill gated by the
 `work_graph` capability. It teaches agents how to use the WorkGraph tool family.
-It is discoverable through the normal skills inventory and is not automatically
-preloaded.
+Mob members whose profile sets `tools.workgraph = true` receive it preloaded;
+on other surfaces it is discoverable through the normal skills inventory and is
+not automatically preloaded.

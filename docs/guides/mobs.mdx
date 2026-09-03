@@ -132,6 +132,29 @@ Profiles are role contracts. Spawn requests may override selected profile
 fields, but the definition remains the durable source for the mob's intended
 shape.
 
+<Warning>
+**Every profile that spawns a member must set `comms = true` under `tools`.**
+A member's identity, roster entry, peer wiring, peer messaging, and the
+supervisor bridge are all keyed on its comms name (`{mob_id}/{role}/{member}`),
+and the comms tools are composed for every member, so a member without comms
+cannot be built. `comms` defaults to `false`, which means a profile that merely
+omits the key is rejected exactly like one that sets it to `false`. The
+rejection happens at spawn, before any session is created, and leaves no roster
+entry behind:
+
+`wiring error: profile '<name>' has tools.comms=false; mob meerkats require comms=true`
+
+It surfaces in two shapes. On the worker plane (`mob/spawn` and MobKit's
+`mobkit/ensure_member`) it is JSON-RPC error `-32602` with that text as the
+message, prefixed `ensure_member failed: ` on MobKit. On MobKit's
+identity-first plane the identity reconciles to outcome `broken`, and the same
+text is that identity's `error` in the bootstrap status
+(`mobkit/status_identity_bootstrap`, Python `identity_bootstrap_status()`).
+To keep a member from messaging peers, leave `comms = true` and add
+`read_only = true` (below) or deny `send_message` through a per-spawn
+`tool_access_policy` deny list; disabling comms is never the tool.
+</Warning>
+
 ### Read-only profiles
 
 `tools.read_only = true` declares a profile whose members may execute only
@@ -193,6 +216,90 @@ auto_compact_threshold = 60000
 # resumed durable sessions. Vocabulary: model | provider | provider_params.
 resume_overrides = ["model", "provider"]
 ```
+
+Anthropic prompt caching is a per-profile `provider_params` decision. The
+default is `automatic` on every backend that supports it (Anthropic API,
+Vertex, and Foundry); Bedrock and other backends that report automatic caching
+as unsupported stay `disabled`. Opt a profile out, or force caching on, with
+the nested `provider_tag` form:
+
+```toml
+[profiles.lead]
+model = "claude-opus-4-8"
+# Opt this profile out of Anthropic prompt caching.
+provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+
+[profiles.analyst]
+model = "claude-sonnet-4-6"
+# Force caching on, with the one-hour cache lifetime.
+provider_params = { provider_tag = { provider = "anthropic", cache_control = "automatic", cache_ttl = "1h" } }
+```
+
+`cache_control` lives inside `provider_tag`, not at the top of
+`provider_params`. The flat form `provider_params = { cache_control = "disabled" }`
+is rejected by the closed field set of `ProviderParamsOverride` and fails the
+whole definition parse, so a mob that boots today stops booting after that
+edit. The vocabulary is `automatic`, `system_prefix`,
+`system_and_conversation`, and `disabled`; `cache_ttl` is `5m` or `1h` and
+must be paired with an explicit non-`disabled` `cache_control` in the same tag.
+Add `provider_params` to `resume_overrides` when the change must reach members
+whose durable sessions already exist.
+
+### Member system prompt
+
+`peer_description` is the roster blurb other members see. It becomes the
+member's `PeerMeta.description`, so it shows up in a peer's `peers` tool output
+and in the `mob.peer_added` lifecycle notice wired peers receive. It is never
+part of this member's own system prompt.
+
+The member's own prompt comes from `profile.skills`. Each listed id is resolved
+against a `[skills.<id>]` table in the definition, and the resolved texts are
+joined in list order into the system prompt. An id with no `[skills.<id>]`
+table is a `missing_skill_ref` validation error and contributes nothing:
+
+```toml
+[profiles.analyst]
+model = "claude-sonnet-4-6"
+skills = ["analyst-role"]
+peer_description = "Investigates one issue and reports evidence"
+
+[profiles.analyst.tools]
+builtins = true
+comms = true
+
+[skills.analyst-role]
+source = "inline"
+content = """
+You investigate exactly one issue at a time. Report evidence, not opinion,
+and send your findings to the lead with send_message when you are done.
+"""
+
+# Or keep the text in a file:
+# [skills.analyst-role]
+# source = "path"
+# path = "skills/analyst-role.md"
+```
+
+A profile whose skills resolve to no text falls back to the host's configured
+default prompt, which is Meerkat's generic "You are an autonomous agent..."
+unless the realm config overrides it; either way it knows nothing about the
+mob or the member's role. The mob comms and WorkGraph operating skills are
+preloaded separately and survive any prompt override, so a role prompt does not
+have to repeat them.
+
+Identity-first hosts (MobKit) have two more knobs that reach the prompt
+without editing the definition: `DurableAgentSpec.additional_instructions`,
+appended after the skills text and baked once at materialization, and an
+`AgentCustomizer` whose `draft.system_prompt` replaces the assembled prompt.
+A host that keeps its own per-profile prompt key (HomeCore's `role_summary`)
+parses that key itself and lowers it to `additional_instructions`.
+
+There is no `system_prompt` key on a profile. Loading a definition whose
+`[profiles.<name>]` table carries `system_prompt` now fails with an error that
+names the profile, the key, and the mechanisms above. Any other key the profile
+does not declare is reported as a warning diagnostic by definition validation
+and logged when the definition loads; parsing continues, and the key is
+ignored.
 
 ### Custom model registry entries
 
@@ -1012,6 +1119,7 @@ wasm-pack output into that bundle; it does not compile wasm32.
 | Helper never replies | Confirm `--tools full` or mob tools are enabled, then inspect `mob_check_member` / `mob/member_status` |
 | `member_already_exists` | Pick a new `agent_identity` or `respawn` the existing member |
 | `profile_not_found` | Confirm the profile name exists in the `MobDefinition` or profile store |
+| `wiring error: ... mob meerkats require comms=true` | Set `comms = true` under the profile's `tools`; the key defaults to `false`, so omitting it is the same as disabling it. Keep comms on and use `read_only = true` or a `tool_access_policy` deny list when a member must not message peers |
 | `topology_violation` | Check role wiring and topology rules before sending work |
 | External spawn rejected | Verify the external binding includes address, Ed25519 identity, and typed bootstrap token |
 | Flow run missing | Use `mob/flows` first and confirm the `flow_id` exists in the definition |

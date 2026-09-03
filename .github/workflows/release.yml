@@ -470,27 +470,52 @@ jobs:
           path: .semver-recovery-policy
           persist-credentials: false
 
-      - if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
+      - if: >-
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.semver_evidence_job_id == '' &&
+            github.event.inputs.release_tag == ''
+          }}
         uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
+        if: >-
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.semver_evidence_job_id == '' &&
+            github.event.inputs.release_tag == ''
+          }}
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-semver-breaks
 
       - name: Install cargo-semver-checks
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
+        if: >-
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.semver_evidence_job_id == '' &&
+            github.event.inputs.release_tag == ''
+          }}
         uses: taiki-e/install-action@cargo-semver-checks
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Verify every reported break is named and the notes are stamped
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == '' }}
+        if: >-
+          ${{
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.semver_evidence_job_id == '' &&
+            github.event.inputs.release_tag == ''
+          }}
         run: make semver-breaks
 
       - name: Verify exact-tree pre-tag semver evidence
-        if: ${{ github.event_name != 'workflow_dispatch' }}
+        if: >-
+          ${{
+            github.event_name != 'workflow_dispatch' ||
+            (github.event.inputs.release_tag != '' &&
+             github.event.inputs.semver_evidence_job_id == '')
+          }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

@@ -82,8 +82,9 @@ When updating architecture docs or reviewing current code, do not stop at the
 - Azure OpenAI auth/backend support, project-local CLI realm defaults, HTML
   artifact output, typed transcript notices, provider-native search/image
   improvements, structured skill identity, and model-aware compaction defaults.
-- `gemini-3.5-flash` as the recommended Gemini text model; the older Gemini 3
-  Flash preview row is not the featured/default model.
+- `gemini-3.8-flash` as the recommended Gemini text model;
+  `gemini-3.7-flash` and older Gemini 3 Flash rows are supported but not
+  featured/default models.
 - Batch mob wiring (`wire_members_batch` / `MembersWiredBatch`), backpressured
   dense-mob delivery, autonomous member injector validation, spawn boundary
   customization, mob task-workflow guidance preloads, peer wake fixes, and safer

@@ -9,7 +9,7 @@
 
 use meerkat_core::Provider;
 use meerkat_core::model_profile::capabilities::{EffortLevel, ThinkingSupport};
-use meerkat_core::model_profile::catalog::ImageGenerationModelRoute;
+use meerkat_core::model_profile::catalog::{ImageGenerationModelRoute, ModelTier};
 use meerkat_models::capabilities::{all_capabilities, capabilities_for};
 use meerkat_models::catalog::{
     allowed_models, canonical, catalog, catalog_providers, default_image_generation_model,
@@ -180,22 +180,35 @@ fn catalog_matches_capability_table() {
 }
 
 #[test]
-fn claude_fable_5_in_catalog_without_changing_default_ladder() {
-    let entry = entry_for(Provider::Anthropic, "claude-fable-5")
-        .expect("claude-fable-5 must be in the catalog");
+fn claude_fable_51_is_recommended_without_changing_default_ladder() {
+    let entry = entry_for(Provider::Anthropic, "claude-fable-5-1")
+        .expect("claude-fable-5-1 must be in the catalog");
     assert_eq!(entry.provider, "anthropic");
-    assert_eq!(entry.display_name, "Claude Fable 5");
+    assert_eq!(entry.display_name, "Claude Fable 5.1");
+    assert_eq!(entry.tier, ModelTier::Recommended);
     assert_eq!(entry.context_window, Some(1_000_000));
     assert_eq!(entry.max_output_tokens, Some(128_000));
     assert!(
-        allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5"),
-        "claude-fable-5 must be in the Anthropic allowlist"
+        allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5-1"),
+        "claude-fable-5-1 must be in the Anthropic allowlist"
     );
-    // The Anthropic default is Opus 5, not Fable 5 — Fable 5 stays a
-    // premium opt-in. The cross-provider global default is independently
-    // owned by the OpenAI recommendation.
     assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5"));
     assert_eq!(global_default_model(), "gpt-5.6-sol");
+}
+
+#[test]
+fn gemini_38_owns_the_default_and_recommendation_ladder() {
+    let recommended = entry_for(Provider::Gemini, "gemini-3.8-flash")
+        .expect("gemini-3.8-flash must be in the catalog");
+    assert_eq!(recommended.display_name, "Gemini 3.8 Flash");
+    assert_eq!(recommended.tier, ModelTier::Recommended);
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-3.8-flash"));
+
+    for supported_id in ["gemini-3.7-flash", "gemini-3.5-flash"] {
+        let supported = entry_for(Provider::Gemini, supported_id)
+            .unwrap_or_else(|| panic!("{supported_id} must be in the catalog"));
+        assert_eq!(supported.tier, ModelTier::Supported);
+    }
 }
 
 #[test]
@@ -483,6 +496,47 @@ fn claude_fable_5_is_cataloged_with_official_limits() {
     assert!(caps.supports_web_search);
     assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
     assert!(caps.effort_levels.contains(&EffortLevel::Max));
+}
+
+#[test]
+fn claude_fable_51_is_cataloged_with_official_limits() {
+    let caps = capabilities_for(Provider::Anthropic, "claude-fable-5-1")
+        .expect("claude-fable-5-1 must be in the Anthropic catalog");
+    assert_eq!(caps.provider, Provider::Anthropic);
+    assert_eq!(caps.model_family, "claude-fable-5-1");
+    assert_eq!(caps.context_window, Some(1_000_000));
+    assert_eq!(caps.max_output_tokens, Some(128_000));
+    assert!(caps.max_output_tokens_beta.is_none());
+    assert_eq!(caps.thinking, ThinkingSupport::AnthropicAdaptiveOnly);
+    assert!(!caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k);
+    assert!(!caps.supports_thinking_budget_legacy);
+    assert!(caps.vision);
+    assert!(caps.supports_compaction);
+    assert!(caps.supports_structured_output);
+    assert!(caps.supports_web_search);
+    assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
+    assert!(caps.effort_levels.contains(&EffortLevel::Max));
+}
+
+#[test]
+fn gemini_38_and_37_capability_rows_match_the_current_flash_contract() {
+    for model in ["gemini-3.8-flash", "gemini-3.7-flash"] {
+        let caps = capabilities_for(Provider::Gemini, model)
+            .unwrap_or_else(|| panic!("{model} must be in the Gemini catalog"));
+        assert_eq!(caps.model_family, "gemini-3");
+        assert_eq!(caps.context_window, Some(1_048_576));
+        assert_eq!(caps.max_output_tokens, Some(65_536));
+        assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
+        assert!(!caps.supports_temperature);
+        assert!(!caps.supports_top_p);
+        assert!(!caps.supports_top_k);
+        assert!(!caps.supports_thinking_budget_legacy);
+        assert!(caps.vision);
+        assert!(caps.image_tool_results);
+        assert!(caps.inline_video);
+        assert!(caps.supports_structured_output);
+        assert!(caps.supports_web_search);
+    }
 }
 
 #[test]

@@ -78,7 +78,7 @@ is `0.8.x`; do not hardcode a stale patch pin). The OpenAI catalog default is
 `gpt-5.6-sol`, which is a limited preview; browser-facing examples should use
 `gpt-5.5` unless the proxy's API organization has preview access. Anthropic and
 Gemini examples should use the current `claude-opus-5` and
-`gemini-3.5-flash` defaults unless a test deliberately pins another model. WASM
+`gemini-3.8-flash` defaults unless a test deliberately pins another model. WASM
 mob flows use the same current
 identity-first mob runtime, including helper/fork/respawn controls and
 runtime-committed session projection behavior.

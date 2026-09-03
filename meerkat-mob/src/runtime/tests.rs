@@ -1820,6 +1820,7 @@ struct MockSessionService {
     interrupted_session_ids: std::sync::Mutex<Vec<SessionId>>,
     runtime_control_barrier: RwLock<Option<Arc<TestRuntimeControlBarrier>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
+    turn_finalization_delays_once: RwLock<HashMap<SessionId, u64>>,
     turn_finalization_acquire_started: AtomicU64,
     turn_finalization_acquire_completed: AtomicU64,
     turn_finalization_acquire_panics_remaining: AtomicU64,
@@ -1955,6 +1956,7 @@ impl MockSessionService {
             interrupted_session_ids: std::sync::Mutex::new(Vec::new()),
             runtime_control_barrier: RwLock::new(None),
             turn_finalization_gate: std::sync::RwLock::new(None),
+            turn_finalization_delays_once: RwLock::new(HashMap::new()),
             turn_finalization_acquire_started: AtomicU64::new(0),
             turn_finalization_acquire_completed: AtomicU64::new(0),
             turn_finalization_acquire_panics_remaining: AtomicU64::new(0),
@@ -2502,6 +2504,14 @@ impl MockSessionService {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
         gate
+    }
+
+    async fn delay_next_turn_finalization_acquire(&self, session_id: SessionId, delay: Duration) {
+        let delay_ms = u64::try_from(delay.as_millis()).expect("test delay fits u64 milliseconds");
+        self.turn_finalization_delays_once
+            .write()
+            .await
+            .insert(session_id, delay_ms);
     }
 
     fn turn_finalization_acquire_counts(&self) -> (u64, u64) {
@@ -4159,11 +4169,19 @@ impl MobSessionService for MockSessionService {
     #[allow(clippy::panic)]
     async fn acquire_runtime_turn_finalization_guard(
         &self,
-        _session_id: &SessionId,
+        session_id: &SessionId,
     ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
     {
         self.turn_finalization_acquire_started
             .fetch_add(1, Ordering::Release);
+        let delay_ms = self
+            .turn_finalization_delays_once
+            .write()
+            .await
+            .remove(session_id);
+        if let Some(delay_ms) = delay_ms {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         if self
             .turn_finalization_acquire_panics_remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -46097,6 +46115,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held_gate = Arc::clone(&gate).lock_owned().await;
     let boundary_baseline = service.turn_finalization_acquire_counts();
+    let materialization_baseline = service.recorded_create_requests().await.len();
     let assert_retained_retry = |error: &MobError| {
         match error {
             MobError::LifecycleOperationPending { intent } => assert!(
@@ -46167,6 +46186,11 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     assert_ne!(
         replacement_witness, foreign_witness,
         "the process-owned takeover must replace rather than adopt foreign A"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        materialization_baseline + 1,
+        "retained retries must materialize the replacement exactly once"
     );
 }
 
@@ -46357,6 +46381,84 @@ async fn test_explicit_resume_host_materialization_uses_typed_host_terminality()
 }
 
 #[tokio::test]
+async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watchdog() {
+    let storage = MobStorage::in_memory();
+    let storage_for_resume = MobStorage {
+        events: storage.events.clone(),
+        runs: storage.runs.clone(),
+        specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
+        runtime_metadata: storage.runtime_metadata.clone(),
+        identity: storage.identity.clone(),
+        identity_member: storage.identity_member.clone(),
+        identity_status: storage.identity_status.clone(),
+        identity_status_projection_order: storage.identity_status_projection_order.clone(),
+        realm_profiles: storage.realm_profiles.clone(),
+        forked_participants: storage.forked_participants.clone(),
+    };
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let mut session_ids = Vec::new();
+    for index in 0..4 {
+        let session_id = handle
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                AgentIdentity::from(format!("prepare-{index}")),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn turn-driven preparation member")
+            .bridge_session_id()
+            .cloned()
+            .expect("turn-driven member has bridge session");
+        session_ids.push(session_id);
+    }
+    handle.stop().await.expect("stop original mob");
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(storage_for_resume)
+        .with_session_service(service.clone())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("reconstruct stopped mob");
+
+    let per_member_delay = Duration::from_millis(600);
+    for session_id in session_ids {
+        service
+            .delay_next_turn_finalization_acquire(session_id, per_member_delay)
+            .await;
+    }
+
+    let started = Instant::now();
+    resumed
+        .resume_until_for_test(Instant::now() + Duration::from_secs(60))
+        .await
+        .expect("each completed member preparation must rearm the inactivity watchdog");
+    let elapsed = started.elapsed();
+    let pending_delays = service.turn_finalization_delays_once.read().await.len();
+    assert_eq!(
+        pending_delays, 0,
+        "every configured member preparation delay must be consumed"
+    );
+    assert!(
+        elapsed > super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT,
+        "production preparation must cumulatively exceed the inactivity window: elapsed={elapsed:?}, pending_delays={pending_delays}"
+    );
+    assert_eq!(
+        resumed.status().await.expect("resumed mob status"),
+        MobState::Running
+    );
+}
+
+#[tokio::test]
 async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let (command_tx, mut command_rx) =
@@ -46380,8 +46482,8 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
         };
         admission.admit();
         progress.awaiting_member(
-            &AgentIdentity::from("wedged-host-build"),
-            super::state::LifecycleProgressStage::MemberCommsReadiness,
+            &AgentIdentity::from("wedged-session-preparation"),
+            super::state::LifecycleProgressStage::MemberAttachmentSessionPreparation,
         );
         let _ = release_rx.await;
         let _ = reply_tx.send(Ok(()));
@@ -46393,7 +46495,7 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
     )
     .await
     .expect("stalled Resume returns after one progress-patience window")
-    .expect_err("a host build with no progress must fail closed");
+    .expect_err("member session preparation with no progress must fail closed");
     assert!(matches!(
         &error,
         MobError::LifecycleOperationProgressStalled {
@@ -46401,14 +46503,14 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
             member_id: Some(member_id),
             stage,
         } if intent == "explicit_resume"
-            && member_id.as_str() == "wedged-host-build"
-            && *stage == "member_comms_readiness"
+            && member_id.as_str() == "wedged-session-preparation"
+            && *stage == "member_attachment_session_preparation"
     ));
     let structured = error
         .structured_data()
         .expect("progress stall has stable structured diagnostics");
-    assert_eq!(structured["member_id"], "wedged-host-build");
-    assert_eq!(structured["stage"], "member_comms_readiness");
+    assert_eq!(structured["member_id"], "wedged-session-preparation");
+    assert_eq!(structured["stage"], "member_attachment_session_preparation");
     assert_eq!(structured["authority_retained"], true);
 
     let _ = release_tx.send(());

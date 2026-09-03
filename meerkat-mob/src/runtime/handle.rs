@@ -5319,6 +5319,13 @@ impl MobHandle {
                     });
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                         let stalled = progress_rx.borrow().clone();
+                        let elapsed = Instant::now().saturating_duration_since(stalled.observed_at);
+                        tracing::warn!(
+                            agent_identity = ?stalled.member_id,
+                            stage = stalled.stage.as_str(),
+                            elapsed_ms = elapsed.as_millis(),
+                            "explicit resume lifecycle progress stalled"
+                        );
                         return Err(MobError::LifecycleOperationProgressStalled {
                             intent: "explicit_resume".to_string(),
                             member_id: stalled.member_id,

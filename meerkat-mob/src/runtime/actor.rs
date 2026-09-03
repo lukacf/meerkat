@@ -15918,6 +15918,7 @@ impl MobActor {
         &self,
         deadline: Instant,
         admission: super::state::LifecycleAdmissionSignal,
+        progress: &super::state::LifecycleProgressSignal,
     ) -> Result<Vec<ExplicitResumeMemberRebuild>, MobError> {
         let entries = {
             let roster = self.roster.read().await;
@@ -15964,9 +15965,24 @@ impl MobActor {
                 .collect::<Result<Vec<_>, MobError>>()?
         };
 
+        let member_total = candidates.len();
         let mut rebuild = Vec::new();
         let mut listed_sessions = None;
-        for (entry, member_ref, session_id) in candidates {
+        for (member_index, (entry, member_ref, session_id)) in candidates.into_iter().enumerate() {
+            let member_position = member_index + 1;
+            progress.awaiting_member(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberAttachmentSessionPreparation,
+            );
+            let preparation_started = Instant::now();
+            tracing::info!(
+                agent_identity = %entry.agent_identity,
+                %session_id,
+                member_position,
+                member_total,
+                replacement_session = false,
+                "explicit resume member attachment/session preparation started"
+            );
             let requires_materialization = self
                 .provisioner
                 .prepare_member_session_for_explicit_resume(
@@ -15975,6 +15991,20 @@ impl MobActor {
                     Some(admission.clone()),
                 )
                 .await?;
+            progress.member_progress(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberAttachmentSessionPreparation,
+            );
+            tracing::info!(
+                agent_identity = %entry.agent_identity,
+                %session_id,
+                member_position,
+                member_total,
+                elapsed_ms = preparation_started.elapsed().as_millis(),
+                requires_materialization,
+                replacement_session = false,
+                "explicit resume member attachment/session preparation completed"
+            );
             if !requires_materialization {
                 continue;
             }
@@ -16090,6 +16120,19 @@ impl MobActor {
                     entry.agent_identity
                 ))
             })?;
+            progress.awaiting_member(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberAttachmentSessionPreparation,
+            );
+            let preparation_started = Instant::now();
+            tracing::info!(
+                agent_identity = %entry.agent_identity,
+                session_id = %replacement_session_id,
+                member_position,
+                member_total,
+                replacement_session = true,
+                "explicit resume member attachment/session preparation started"
+            );
             let replacement_requires_materialization = self
                 .provisioner
                 .prepare_member_session_for_explicit_resume(
@@ -16098,6 +16141,20 @@ impl MobActor {
                     Some(admission.clone()),
                 )
                 .await?;
+            progress.member_progress(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberAttachmentSessionPreparation,
+            );
+            tracing::info!(
+                agent_identity = %entry.agent_identity,
+                session_id = %replacement_session_id,
+                member_position,
+                member_total,
+                elapsed_ms = preparation_started.elapsed().as_millis(),
+                requires_materialization = replacement_requires_materialization,
+                replacement_session = true,
+                "explicit resume member attachment/session preparation completed"
+            );
             if let crate::launch::MemberLaunchMode::Resume {
                 bridge_session_id, ..
             } = &mut restore_spec.launch_mode
@@ -23334,6 +23391,7 @@ impl MobActor {
                                 .prepare_explicit_resume_member_sessions(
                                     deadline,
                                     admission.clone(),
+                                    &progress,
                                 )
                                 .await
                             {

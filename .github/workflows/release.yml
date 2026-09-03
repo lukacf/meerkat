@@ -1400,11 +1400,13 @@ jobs:
             echo "::error::No tag-triggered release run found for ${release_tag} at ${release_sha}."
             exit 1
           fi
+          # Recovery still verifies every crate, but cannot re-enforce the
+          # original tag-to-publication SLO after the recovery window opened.
           python3 scripts/verify-rust-release-public.py \
             --repo-root "${GITHUB_WORKSPACE}" \
             --tag-pushed-at "${tag_pushed_at}" \
             --deadline-seconds 900 \
-            --slo-seconds 1800
+            --slo-seconds ${{ github.event_name == 'workflow_dispatch' && '2147483647' || '1800' }}
 
       - name: Publish Python SDK
         if: >-

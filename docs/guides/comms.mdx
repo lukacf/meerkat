@@ -138,6 +138,32 @@ into `clean`.
 Cross-version note: an envelope carrying `content_taint` sent to an older receiver fails signature verification there (the older signable projection differs), so under the default `require_peer_auth = true` the envelope is dropped with a typed `InvalidSignature` error - loud and fail-closed. With `require_peer_auth = false` the older receiver skips verification and the declaration silently drops out of its typed view.
 </Accordion>
 
+### Peer identity and naming
+
+`peer_id` is the canonical routing key: a UUID derived from the peer's Ed25519
+public key. Every send addresses a `peer_id`. The `name` in the peer directory
+is a display label; it may collide, and it is never resolved into a route.
+
+Mob members are named by the typed `MemberCommsName`, rendered
+`{mob_id}/{role}/{member}`, where `role` is the profile name and `member` is
+the `AgentIdentity`. That is the string a peer sees in `peers` output and in
+every projected peer message (`Peer message from release-triage/analyst/analyst-1:`);
+projected peer requests carry the `peer_id` plus that display name. Each
+component must start with an ASCII letter or `_` and may contain only ASCII
+alphanumerics, `-`, or `_`, so MobKit identity-first members whose identities
+carry other characters (for example `domain:payments`) appear as `mk--` encoded
+segments (`release-triage/domain/mk--domain_cpayments`). MobKit decodes those
+segments only at its console and RPC projections; the model always sees the
+encoded form.
+
+Because the mob id is part of every member's name, renaming a mob (changing
+`definition.id`) re-mints every member's comms name and moves the members into
+a new `mob.<id>` realm with fresh sessions. Live trust and peer-directory
+entries are re-registered under the new names. The old `{old_mob}/...` names
+survive only in identity-keyed state a host keeps outside the mob realm, such
+as MobKit's per-identity agent memory, and that is where a renamed mob's stale
+names come back from.
+
 ## Trust model
 
 Agents maintain trusted peers in a `TrustStore` (`meerkat-comms/src/trust.rs`), keyed by the canonical `PeerId` — a UUIDv5 derived from the peer's Ed25519 public key. `PeerName` is display-only metadata: duplicate names across entries are legal, while a duplicate `PeerId` is a hard error. Resolving a name to a `PeerId` (`TrustStore::resolve_name`) returns a typed `TrustResolveError::Ambiguous` when more than one entry shares the name — the store never guesses.
@@ -324,7 +350,10 @@ may have committed the envelope before the acknowledgement was lost, so this
 is not automatic retry authority.
 
 <Accordion title="MessageIntent variants">
-The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) provides type-safe intent values for classifying incoming requests:
+The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) is the
+receiver-side classification of incoming requests and lifecycle notices. It is
+not an input vocabulary: none of the strings in this table can be passed as the
+`intent` of the `send_request` tool.
 
 | Variant | String | Description |
 |---------|--------|-------------|
@@ -341,7 +370,12 @@ The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) provides type-safe
 
 Standard strings are parsed into their enum variants; unknown strings become `Custom`.
 
-The LLM-facing `send_request` tool accepts a separate, closed intent vocabulary (`CommsPeerRequestIntent` in `meerkat-core`): `"checksum_token"` and `"supervisor.bridge"`. Unknown intents fail at the serde boundary.
+The LLM-facing `send_request` tool accepts a separate, closed intent vocabulary
+(`CommsPeerRequestIntent` in `meerkat-core`): `"checksum_token"` and
+`"supervisor.bridge"`. Unknown intents fail at the serde boundary. The closure
+is deliberate: every intent carries typed params and a typed result, so the
+request/response protocol stays fail-closed and schema-generated instead of
+free-form. An ordinary ask is `send_message` or `reply_to_peer`.
 </Accordion>
 
 ## LLM-facing tools
@@ -417,7 +451,7 @@ Send a structured ask to a peer when you want explicit `intent + params` and a c
 </ParamField>
 
 <ParamField path="intent" type="string" required>
-  Typed request intent: `"checksum_token"` or `"supervisor.bridge"`. Unknown intents are rejected at the serde boundary.
+  Typed request intent: `"checksum_token"` or `"supervisor.bridge"`. Unknown intents are rejected at the serde boundary. The `MessageIntent` table above is not this field's vocabulary; `"review"`, `"query"`, and the other classification strings are invalid arguments here.
 </ParamField>
 
 <ParamField path="params" type="object" required>
@@ -467,7 +501,7 @@ Send a response to a previously received request. Requires a runtime-bound comma
 </ParamField>
 
 <ParamField path="handling_mode" type="string">
-  Optional delivery mode override for terminal responses. Use `"queue"` for normal delivery or `"steer"` when you need immediate steer processing on runtime-backed sessions. Forbidden on `"accepted"` progress responses.
+  Optional delivery mode override for terminal responses. `"queue"` appends the response as a durable notice and runs the requester's reaction turn at its next run start; `"steer"` additionally preempts the requester's current run at its next boundary. Either way the response starts a new run and never lands inside the requester's running turn (see [Request and response across turns](#request-and-response-across-turns)). Forbidden on `"accepted"` progress responses.
 </ParamField>
 
 **Response**: `{"status": "sent", "kind": "peer_response", "receipt": {...}}`
@@ -531,6 +565,45 @@ Comms tool availability is reported per tool via the catalog
 called. `send_request` and `send_response` require runtime command authority;
 without one they are marked unavailable with the typed reason
 `RuntimeCommandAuthorityUnavailable`.
+
+### Request and response across turns
+
+Peer traffic is admitted by the runtime machine at boundaries it owns; it is
+not spliced into whatever the model is doing. These are the rules that matter
+when one member (the hub) asks others (the spokes) for something and wants to
+act on the answers:
+
+- A `queue` delivery (the default) that reaches a running target is staged for
+  that target's next run start. It becomes the next turn, never part of the
+  current one. An idle keep-alive session or mob member wakes on a queued peer
+  input by itself (the mob runtime owns the comms drain, including for
+  `turn_driven` members), so a host nudge is only ever needed for sequencing,
+  not for delivery.
+- A terminal `send_response` (`completed` or `failed`) is appended as a
+  durable notice and run as a new reaction turn of the requester. With
+  `handling_mode: "steer"` it also preempts the requester's current run at its
+  next boundary, but it still starts a new run; a reply never lands inside the
+  requester's running turn. An `accepted` progress response is coalesced into
+  the requester's next run and does not wake an idle requester.
+- Only `send_message`, `reply_to_peer`, and `send_request` with
+  `handling_mode: "steer"` inject into a running turn, at the target's next
+  run checkpoint, and only while the target is mid-turn. Steer aimed at an
+  idle target is normalised to `queue` and becomes an ordinary next turn.
+- There is no agent-facing await-reply primitive. The `wait` tool was removed
+  in 0.5.2 and `send_request` has no timeout. A hub that fans out asks and
+  then wants to wait ends its turn; the replies arrive as later turns, and the
+  hub reasons about them then.
+
+For a bounded ask whose answer must be used inside the same turn, use
+`delegate`: it spawns a helper and returns the helper's exact bounded result to
+the calling turn. For host-driven sequencing, send and then wait for the
+completion of the turn that send started (MobKit's `send_and_wait` and
+`dispatch_and_wait` do this with a completion baseline captured before
+delivery), or write the fan-out and fan-in as a mob flow (`dispatch_mode:
+"fan_out"` followed by a `depends_on` step with `dispatch_mode: "fan_in"`; see
+the [Mobs guide](/guides/mobs#flows)). `send_request` remains the correlated
+ask/reply protocol for its closed intent set, not a general "ask a peer and
+block" call.
 
 ## Inbox
 

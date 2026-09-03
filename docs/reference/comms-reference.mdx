@@ -13,6 +13,7 @@ rather than the operational guide.
 | --- | --- |
 | `PeerId` | Canonical routing identity, derived from the Ed25519 public key |
 | `PeerName` | Display label only; duplicate names are legal |
+| `MemberCommsName` | Mob member `PeerName`, rendered `{mob_id}/{role}/{member}`; three identifier-safe components, re-minted when the mob id changes |
 | `PeerAddress` | Typed `inproc`, `uds`, or `tcp` route |
 | `TrustStore` | Keyed by `PeerId`; name resolution fails as ambiguous instead of guessing |
 | Envelope signature | Ed25519 over canonical CBOR of `(id, from, to, kind)` |
@@ -45,8 +46,37 @@ revalidates that the peer is still trusted and reachable.
 
 `send_request` and `send_response` are not general task-tracking tools. The
 agent-facing request intent vocabulary is closed to `checksum_token` and
-`supervisor.bridge`. Ordinary collaboration should use `send_message` or
-`reply_to_peer`.
+`supervisor.bridge`, each with typed params and a typed result; the closure is
+the design, not a gap. The wider `MessageIntent` table in the guide
+(`delegate`, `status`, `review`, `query`, ...) is the receiver-side
+classification of incoming traffic and is never valid `send_request` input.
+Ordinary collaboration should use `send_message` or `reply_to_peer`.
+
+## Peer Identity And Naming
+
+| Fact | Contract |
+| --- | --- |
+| Routing key | `peer_id` (UUID derived from the Ed25519 public key); every send addresses it |
+| Display name | `name`; may collide, never resolved into a route |
+| Mob member name | `MemberCommsName` = `{mob_id}/{role}/{member}` (`role` = profile name, `member` = `AgentIdentity`); this is what peers see in `peers` output and in projected peer messages |
+| Component rule | Each component starts with an ASCII letter or `_` and contains only ASCII alphanumerics, `-`, or `_` |
+| MobKit identity-first members | Identities with other characters appear as `mk--` encoded segments (`domain:payments` becomes `mk--domain_cpayments`); decoded only at MobKit console and RPC projections |
+| Mob rename | Changing `definition.id` re-mints every member name and moves members into a new `mob.<id>` realm with fresh sessions; live trust and directory entries follow. Old names survive only in identity-keyed host-realm state such as MobKit agent memory, not in the transcript |
+
+## Request And Response Across Turns
+
+| Input | `queue` | `steer` |
+| --- | --- | --- |
+| `send_message`, `reply_to_peer`, `send_request` to a running target | Staged for the next run start (next turn) | Injected at the next run checkpoint of the running turn |
+| The same, to an idle target | New turn; wakes keep-alive sessions and mob members | Normalised to `queue`: new turn |
+| Terminal `send_response` (`completed`, `failed`) | Appended as a durable notice, then a new requester reaction turn at run start | Same, plus preemption of the current run at its next boundary; never inside the running turn |
+| `accepted` progress response | Coalesced into the requester's next run; does not wake an idle requester | Override forbidden |
+
+There is no agent-facing await-reply primitive and `send_request` has no
+timeout. Same-call sequencing is `delegate` (bounded helper result returned to
+the calling turn); host-side sequencing is send-then-wait-for-turn-completion
+(MobKit `send_and_wait`, `dispatch_and_wait`) or a mob flow with fan-out and
+fan-in steps.
 
 ## Host-side comms and ingress surfaces
 

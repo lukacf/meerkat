@@ -7,18 +7,40 @@ HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-dispatch-harness.XXX
 CACHE_REPO="${TEST_ROOT}-cache"
 ATTRIBUTION_ROOT="${TEST_ROOT}-attribution"
 LOCK_ROOT="${TEST_ROOT}-lock"
+LOCK_RELEASE="${LOCK_ROOT}/release"
 LOCK_FIRST_PID=""
 LOCK_SECOND_PID=""
+DISPATCH_READINESS_ATTEMPTS=900
+DISPATCH_POLL_SECONDS=0.05
+DISPATCH_EXIT_ATTEMPTS=100
+
+job_is_running() {
+  jobs -pr | grep -Fxq "$1"
+}
+
+wait_for_job_exit() {
+  local pid="$1"
+  for _ in $(seq 1 "$DISPATCH_EXIT_ATTEMPTS"); do
+    job_is_running "$pid" || return 0
+    sleep "$DISPATCH_POLL_SECONDS"
+  done
+  return 1
+}
+
 cleanup_harness() {
-  local residue_status=$?
-  if [[ -n "${LOCK_FIRST_PID}" ]]; then
-    kill "${LOCK_FIRST_PID}" 2>/dev/null || true
-    wait "${LOCK_FIRST_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${LOCK_SECOND_PID}" ]]; then
-    kill "${LOCK_SECOND_PID}" 2>/dev/null || true
-    wait "${LOCK_SECOND_PID}" 2>/dev/null || true
-  fi
+  local residue_status=$? pid
+  mkdir -p "$LOCK_ROOT"
+  : > "$LOCK_RELEASE"
+  for pid in "$LOCK_FIRST_PID" "$LOCK_SECOND_PID"; do
+    [[ -n "$pid" ]] || continue
+    if ! wait_for_job_exit "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      if ! wait_for_job_exit "$pid"; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
   # Attribution scenarios deliberately create paths the dispatcher cannot
   # remove; make them removable again before tearing the harness down.
   chmod -R u+rwx "$TEST_ROOT" "$HARNESS_ROOT" "$CACHE_REPO" "$ATTRIBUTION_ROOT" \
@@ -43,6 +65,23 @@ default_lane_for_root() {
   local canonical_root
   canonical_root="$(git -C "$1" rev-parse --show-toplevel)"
   printf 'pre-push-%s' "$(hash_path "$canonical_root")"
+}
+
+wait_for_observation() {
+  local path="$1"
+  local minimum_lines="$2"
+  local observed
+
+  for _ in $(seq 1 "$DISPATCH_READINESS_ATTEMPTS"); do
+    if [[ "$minimum_lines" -eq 0 ]]; then
+      [[ -f "$path" ]] && return 0
+    elif [[ -f "$path" ]]; then
+      observed="$(wc -l < "$path" | tr -d ' ')"
+      [[ "$observed" -ge "$minimum_lines" ]] && return 0
+    fi
+    sleep "$DISPATCH_POLL_SECONDS"
+  done
+  return 1
 }
 
 if ! grep -Fxq 'fail_fast: true' "$REPO_ROOT/.pre-commit-config.yaml"; then
@@ -239,7 +278,6 @@ git -C "$CACHE_REPO" worktree remove --force "$active_validation_tree"
 LOCK_REPO="${LOCK_ROOT}/repo"
 LOCK_BIN="${LOCK_ROOT}/bin"
 LOCK_ENTERED="${LOCK_ROOT}/entered"
-LOCK_RELEASE="${LOCK_ROOT}/release"
 LOCK_INVOCATIONS="${LOCK_ROOT}/invocations"
 mkdir -p "$LOCK_REPO" "$LOCK_BIN"
 git -C "$LOCK_REPO" init -q
@@ -254,7 +292,7 @@ cat > "${LOCK_BIN}/pre-commit" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$$" >> "$MEERKAT_DISPATCH_LOCK_INVOCATIONS"
 : > "$MEERKAT_DISPATCH_LOCK_ENTERED"
-while [[ ! -f "$MEERKAT_DISPATCH_LOCK_RELEASE" ]]; do
+while [[ -d "${MEERKAT_DISPATCH_LOCK_RELEASE%/*}" && ! -f "$MEERKAT_DISPATCH_LOCK_RELEASE" ]]; do
   sleep 0.05
 done
 EOF
@@ -278,11 +316,7 @@ run_lock_dispatch() {
 
 run_lock_dispatch refs/heads/first >"${LOCK_ROOT}/first.log" 2>&1 &
 LOCK_FIRST_PID=$!
-for _ in $(seq 1 100); do
-  [[ -f "$LOCK_ENTERED" ]] && break
-  sleep 0.05
-done
-if [[ ! -f "$LOCK_ENTERED" ]]; then
+if ! wait_for_observation "$LOCK_ENTERED" 0; then
   echo "first dispatcher did not enter the validation gate" >&2
   exit 1
 fi
@@ -336,23 +370,14 @@ run_parallel_dispatch() {
 run_parallel_dispatch "$LOCK_REPO" refs/heads/parallel-first \
   >"${LOCK_ROOT}/parallel-first.log" 2>&1 &
 LOCK_FIRST_PID=$!
-for _ in $(seq 1 100); do
-  [[ -f "$LOCK_ENTERED" ]] && break
-  sleep 0.05
-done
-if [[ ! -f "$LOCK_ENTERED" ]]; then
+if ! wait_for_observation "$LOCK_ENTERED" 0; then
   echo "first worktree dispatcher did not enter the validation gate" >&2
   exit 1
 fi
 run_parallel_dispatch "$LOCK_PEER_REPO" refs/heads/parallel-second \
   >"${LOCK_ROOT}/parallel-second.log" 2>&1 &
 LOCK_SECOND_PID=$!
-for _ in $(seq 1 100); do
-  [[ -f "$LOCK_INVOCATIONS" ]] &&
-    [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" == "2" ]] && break
-  sleep 0.05
-done
-if [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" != "2" ]]; then
+if ! wait_for_observation "$LOCK_INVOCATIONS" 2; then
   echo "independent source worktrees were serialized by one repository dispatcher lock" >&2
   exit 1
 fi

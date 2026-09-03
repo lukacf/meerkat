@@ -257,7 +257,7 @@ surface, not the old live-adapter/docs-refresh snapshot:
 
 - Default hosted text selections are OpenAI `gpt-5.6-sol` (limited preview;
   requires access for the relevant API organization or Codex workspace),
-  Anthropic `claude-opus-5`, and Gemini `gemini-3.8-flash`.
+  Anthropic `claude-opus-5`, and Gemini `gemini-3.5-flash`.
 - WorkGraph is available through agent `workgraph_*` tools plus host
   observability (`workgraph/list`, `ready`, `snapshot`, `events`,
   `goal/status`, `attention/list`, REST and SDK equivalents). CLI and trusted

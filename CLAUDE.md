@@ -524,8 +524,8 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 | Provider | Model Name |
 |----------|------------|
 | OpenAI | `gpt-5.6-sol` or `gpt-5.6-terra` or `gpt-5.6-luna` or `gpt-5.6` or `gpt-5.5` or `gpt-5.5-pro` or `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.3-codex` |
-| Gemini | `gemini-3.8-flash` or `gemini-3.7-flash` or `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
-| Anthropic | `claude-opus-5` or `claude-fable-5-1` or `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
+| Gemini | `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
+| Anthropic | `claude-opus-5` or `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
 These are catalog text-model ids (`meerkat-models` is the source of truth; `rkat models` prints the live list); models outside the catalog require a config `[models.<id>]` entry.
 GPT-5.6 is a limited preview; use `gpt-5.5` for generally runnable OpenAI

@@ -93,7 +93,7 @@ Apply the Rust Design Guidelines with extreme prejudice:
 - Model names must use current versions. Use `gpt-5.6-sol` only for
   preview-enabled OpenAI examples; prefer broadly available `gpt-5.5` for
   generally runnable OpenAI examples. Current Anthropic and Gemini examples
-  use `claude-opus-5` and `gemini-3.8-flash`.
+  use `claude-opus-4-8` and `gemini-3.5-flash`.
 - No older model names (gpt-4o-mini, gemini-2.0-flash, claude-3-7-sonnet-*)
 
 ### 6. VERSION AND SCHEMA HYGIENE

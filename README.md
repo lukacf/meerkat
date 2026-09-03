@@ -76,7 +76,7 @@ Use another provider by selecting a matching catalog model:
 
 ```bash
 rkat run --model claude-sonnet-4-6 "Explain async/await"
-rkat run --model gemini-3.5-flash "Explain async/await"
+rkat run --model gemini-3.8-flash "Explain async/await"
 rkat models
 ```
 
@@ -167,7 +167,7 @@ Current catalog defaults:
 |----------|---------|
 | Anthropic | `claude-opus-5` |
 | OpenAI | `gpt-5.6-sol` |
-| Gemini | `gemini-3.5-flash` |
+| Gemini | `gemini-3.8-flash` |
 
 Runtime model fallback is bounded and capability-aware. An accepted fallback
 re-resolves credentials and makes the new model/provider identity sticky for

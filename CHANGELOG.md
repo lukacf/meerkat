@@ -28,6 +28,13 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Added `gemini-3.8-flash` as the recommended and default Gemini text model,
+  cataloged `gemini-3.7-flash` as supported-only, and added recommended
+  Anthropic model `claude-fable-5-1`. The previous Gemini 3.5 Flash row remains
+  supported without retaining featured/default status.
+
 ## [0.8.32] - 2026-09-02
 
 ### Breaking

@@ -32,7 +32,7 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
 };
 
 /// Headers advertised for models with adaptive thinking + compaction
-/// (Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 4.6).
+/// (Fable 5.1, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 4.6).
 const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
@@ -52,8 +52,8 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 
 // ── Effort tiers ──────────────────────────────────────────────────────────
 
-/// Effort tiers accepted by the Claude 5 family (Opus 5, Fable 5) and
-/// Opus 4.8/4.7; `xhigh` sits between `high` and `max`.
+/// Effort tiers accepted by the Claude 5 family (Fable 5.1, Opus 5, Fable 5)
+/// and Opus 4.8/4.7; `xhigh` sits between `high` and `max`.
 const CLAUDE_5_OPUS_48_47_EFFORT: &[EffortLevel] = &[
     EffortLevel::Low,
     EffortLevel::Medium,
@@ -80,6 +80,66 @@ const OPUS_45_EFFORT: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::Medium, 
 
 /// Capability rows for Anthropic catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // Claude Fable 5.1
+    //
+    // Sources:
+    //   - Model page:
+    //     https://platform.claude.com/docs/en/models/fable-5-1/overview
+    //     (API ID claude-fable-5-1; 1M context; 128k max output; vision;
+    //      adaptive thinking always on; GA beginning September 1, 2026)
+    //   - What's new:
+    //     https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1
+    //     (successor to Fable 5 with the same core capability surface)
+    //   - Effort:
+    //     https://platform.claude.com/docs/en/build-with-claude/effort
+    //     (low/medium/high/xhigh/max)
+    //   - Compaction:
+    //     https://platform.claude.com/docs/en/build-with-claude/compaction
+    //   - Structured outputs:
+    //     https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    //
+    // ASSUMED from the claude-fable-5 row (family-conservative defaults):
+    //   - image_tool_results
+    //   - supports_inference_geo
+    //   - call_timeout_secs (Meerkat-owned operational default, Opus-tier 300s)
+    ModelCapabilities {
+        id: "claude-fable-5-1",
+        provider: Provider::Anthropic,
+        display_name: "Claude Fable 5.1",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "claude-fable-5-1",
+        context_window: Some(1_000_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        supports_reasoning: false,
+        effort_levels: CLAUDE_5_OPUS_48_47_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        call_timeout_secs: Some(300),
+    },
     // Claude Fable 5
     //
     // Sources (verified):

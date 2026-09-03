@@ -37,7 +37,7 @@ const DEFAULT_ANTHROPIC: &str = "claude-opus-5";
 // while OpenAI limits access to preview-enabled API organizations and Codex
 // workspaces. Operators without preview access must explicitly pin GPT-5.5.
 const DEFAULT_OPENAI: &str = "gpt-5.6-sol";
-const DEFAULT_GEMINI: &str = "gemini-3.5-flash";
+const DEFAULT_GEMINI: &str = "gemini-3.8-flash";
 
 /// Default model table consumed by [`ModelCatalog::default_model`].
 const DEFAULT_MODELS: &[(Provider, &str)] = &[

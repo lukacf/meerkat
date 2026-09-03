@@ -27,7 +27,7 @@ self-hosted aliases appear beside built-in models.
 |----------|-----------------|
 | Anthropic | `claude-opus-5` |
 | OpenAI | `gpt-5.6-sol` |
-| Gemini | `gemini-3.5-flash` |
+| Gemini | `gemini-3.8-flash` |
 | Global catalog default | `gpt-5.6-sol` |
 
 <Warning>
@@ -52,7 +52,8 @@ Use `rkat models` for every supported ID and its current limits.
     | Selected model | Context | Max output | Positioning |
     |----------------|---------|------------|-------------|
     | `claude-opus-5` | 1M | 128K | Default Anthropic model |
-    | `claude-fable-5` | 1M | 128K | Recommended catalog model |
+    | `claude-fable-5-1` | 1M | 128K | Recommended Fable model |
+    | `claude-fable-5` | 1M | 128K | Recommended previous Fable generation |
     | `claude-opus-4-8` | 1M | 128K | Recommended previous Opus generation |
     | `claude-sonnet-4-6` | 1M | 64K | Recommended Sonnet model |
 
@@ -89,13 +90,15 @@ Use `rkat models` for every supported ID and its current limits.
 
     | Model | Context | Max output | Positioning |
     |-------|---------|------------|-------------|
-    | `gemini-3.5-flash` | 1M | 64K | Default Gemini model |
+    | `gemini-3.8-flash` | 1M | 64K | Default and recommended Gemini model |
+    | `gemini-3.7-flash` | 1M | 64K | Supported previous Flash generation |
+    | `gemini-3.5-flash` | 1M | 64K | Supported previous Flash generation |
     | `gemini-3.1-pro-preview` | 1M | 64K | Advanced preview reasoning |
     | `gemini-3.1-flash-lite-preview` | 1M | 64K | Lightweight preview model |
 
     ```toml
     [agent]
-    model = "gemini-3.5-flash"
+    model = "gemini-3.8-flash"
     ```
   </Tab>
   <Tab title="Self-hosted">
@@ -257,12 +260,12 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
   </Tab>
   <Tab title="Gemini">
     ```bash
-    rkat run --model gemini-3.5-flash --params-json \
-      '{"provider_tag":{"provider":"gemini","thinking_budget":5000}}' \
+    rkat run --model gemini-3.8-flash --params-json \
+      '{"provider_tag":{"provider":"gemini","thinking_level":"medium"}}' \
       "Analyze this data"
     ```
 
-    Gemini provider parameters also include `top_k`.
+    Consult `rkat models` for the selected model's effective parameter schema.
   </Tab>
 </Tabs>
 

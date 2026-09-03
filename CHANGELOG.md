@@ -200,6 +200,31 @@ them.
   bootstrap read; it now propagates the `ConfigError` too, so the binary has
   one read path with one failure mode (no observable change: the bootstrap
   read had already refused).
+- **`MobDefinition::from_toml` refuses a profile-level `system_prompt` and
+  returns `MobError`.** `Profile` cannot carry `deny_unknown_fields` (it sits
+  under the untagged `ProfileBinding`, where a rejected key surfaces as an
+  opaque "did not match any variant" error, and it is the persisted profile
+  shape), so a `system_prompt = "..."` line under `[profiles.<name>]` was
+  dropped silently and the member ran on the default prompt; MobKit's own
+  fixtures carried the inert key. `from_toml` now compares each inline profile
+  table against the new `Profile::FIELD_NAMES` (kept honest by a serde-derived
+  drift test) and refuses `system_prompt`, `prompt`, and `instructions`, the
+  closed `UnsupportedProfileKey` list, with `MobError::UnsupportedProfileKey`,
+  whose message names the profile, the key, and where the concept lives: a
+  profile has no system prompt, the member prompt is `profile.skills` resolved
+  against an inline or path `[skills.<id>]` table, and identity-first hosts
+  may set `DurableAgentSpec.additional_instructions` or a customizer's
+  `draft.system_prompt`. Behaviour change for exact-pinned hosts: a definition
+  that booted with the inert key now fails to load until the key moves into a
+  `[skills.<id>]` table. Signature changes named for the gate:
+  `MobDefinition::from_toml` returns `Result<MobDefinition, MobError>` instead
+  of `Result<MobDefinition, toml::de::Error>`; `MobError` gained the variants
+  `DefinitionParse(toml::de::Error)` (with `From<toml::de::Error>`) and
+  `UnsupportedProfileKey { profile, key }`; `DiagnosticCode` gained
+  `UnknownProfileKey`. New public items: `Profile::FIELD_NAMES`,
+  `meerkat_mob::UnsupportedProfileKey`, `MobDefinition::parse_toml`,
+  `ParsedMobDefinition`, and `UnknownProfileKeys`.
+
 ### Changed
 
 - **Mob-enabled sessions no longer render the agent-facing mob tool
@@ -229,6 +254,32 @@ them.
   Behaviour change for exact-pinned hosts: the preloaded skill text grows by
   about 1.5 KB, which moves the prompt-cache prefix of WorkGraph-capable
   members once after upgrade.
+- **The `tools.comms=false` wiring error now carries its remedy.**
+  `build_agent_config` rejects a profile with comms disabled because the
+  member's identity, roster entry, wiring, and supervisor bridge are keyed on
+  its comms name, but `ToolConfig.comms` defaults to `false`, so a profile
+  that merely omitted the key was rejected with a message that named no fix.
+  The message keeps its `profile '<name>' has tools.comms=false; mob meerkats
+  require comms=true` prefix and adds that the default is false so omitting
+  the key counts as false, that the fix is `comms = true` under
+  `[profiles.<name>.tools]`, and that a member which must not message peers
+  keeps comms on and uses `read_only = true` or a per-spawn
+  `tool_access_policy` deny list. The default itself is unchanged. The
+  `Profile::peer_description` and `ToolConfig::comms` rustdoc now state that
+  the description is peer-facing discovery metadata (the `peers` tool and
+  `mob.peer_added`), not the member's system prompt, and that comms must be
+  true for every profile that spawns a member.
+- **Unknown `[profiles.<name>]` keys now warn instead of vanishing.** Every
+  key an inline profile table declares that `Profile` does not define (a
+  host-private key such as HomeCore's `role_summary`, or a typo) is reported
+  once per key as an `unknown_profile_key` warning diagnostic in the
+  `validate_definition` shape, and `MobDefinition::from_toml` logs one
+  `tracing::warn!` per affected profile naming the profile and its ignored
+  keys; parsing continues and the keys are ignored exactly as before. The new
+  `MobDefinition::parse_toml` returns the typed definition together with the
+  ignored keys and their diagnostics for hosts that surface diagnostics
+  structurally rather than through logs. Realm-reference bindings
+  (`realm_profile = "..."`) are not inspected.
 
 ## [0.8.33] - 2026-09-04
 

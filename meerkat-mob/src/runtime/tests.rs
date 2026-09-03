@@ -66484,6 +66484,8 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::KickoffWaitTimedOut { .. } => "kickoff_wait_timed_out".to_string(),
         MobError::ReadyWaitTimedOut { .. } => "ready_wait_timed_out".to_string(),
         MobError::DefinitionError(_) => "definition_error".to_string(),
+        MobError::DefinitionParse(_) => "definition_parse".to_string(),
+        MobError::UnsupportedProfileKey { .. } => "unsupported_profile_key".to_string(),
         MobError::FlowNotFound(_) => "flow_not_found".to_string(),
         MobError::FlowFailed { .. } => "flow_failed".to_string(),
         MobError::RunNotFound(_) => "run_not_found".to_string(),

@@ -295,10 +295,13 @@ A host that keeps its own per-profile prompt key (HomeCore's `role_summary`)
 parses that key itself and lowers it to `additional_instructions`.
 
 There is no `system_prompt` key on a profile. Loading a definition whose
-`[profiles.<name>]` table carries `system_prompt` now fails with an error that
+`[profiles.<name>]` table carries `system_prompt` (or its aliases `prompt` and
+`instructions`) fails with `MobError::UnsupportedProfileKey`, whose message
 names the profile, the key, and the mechanisms above. Any other key the profile
-does not declare is reported as a warning diagnostic by definition validation
-and logged when the definition loads; parsing continues, and the key is
+does not declare (a host-private key such as HomeCore's `role_summary`, or a
+typo) is reported once per key as an `unknown_profile_key` warning diagnostic,
+returned by `MobDefinition::parse_toml`, and `from_toml` logs one warning per
+affected profile when the definition loads; parsing continues, and the key is
 ignored.
 
 ### Custom model registry entries

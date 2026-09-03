@@ -46195,10 +46195,10 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
 }
 
 #[tokio::test]
-async fn test_explicit_resume_deadline_after_readiness_rolls_back_pre_admission_effects() {
+async fn test_admitted_explicit_resume_outlives_initial_caller_deadline() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let adapter = service.enable_runtime_adapter();
-    let session_id = handle
+    service.enable_runtime_adapter();
+    let _session_id = handle
         .spawn(
             ProfileName::from("worker"),
             AgentIdentity::from("resume-deadline-worker"),
@@ -46231,38 +46231,19 @@ async fn test_explicit_resume_deadline_after_readiness_rolls_back_pre_admission_
     tokio::time::sleep_until((deadline + Duration::from_millis(20)).into()).await;
     service.release_interaction_event_injector();
 
-    let error = tokio::time::timeout(Duration::from_secs(2), resume)
+    tokio::time::timeout(Duration::from_secs(2), resume)
         .await
-        .expect("process-owned Resume finishes its exact rollback")
+        .expect("process-owned Resume finishes after the initial caller deadline")
         .expect("Resume task")
-        .expect_err("expired pre-admission Resume must not transition Running");
-    assert!(
-        matches!(
-            &error,
-            MobError::LifecycleOperationAdmissionPending { intent, stage }
-                if intent == "explicit_resume" && *stage == "lifecycle_transition_admission"
-        ) || matches!(
-            &error,
-            MobError::LifecycleOperationPending { intent }
-                if intent == "explicit_resume"
-        ),
-        "deadline after readiness returned {error:?}"
-    );
+        .expect("admitted process-owned Resume must not inherit the caller deadline");
     assert_eq!(
         handle.status().await.unwrap(),
-        MobState::Stopped,
-        "pre-admission timeout must preserve the durable Stopped lifecycle"
+        MobState::Running,
+        "admitted process-owned Resume must reach the durable Running transition"
     );
-    tokio::time::timeout(
-        Duration::from_millis(100),
-        adapter.wait_comms_drain(&session_id),
-    )
-    .await
-    .expect("pre-admission timeout must join the freshly reopened exact comms drain")
-    .expect("rolled-back exact comms drain exits cleanly");
     assert!(
-        !service.checkpointers_armed(),
-        "pre-admission timeout must cancel the checkpointer origin it rearmed"
+        service.checkpointers_armed(),
+        "successful Resume keeps the rearmed checkpointer origin"
     );
 }
 
@@ -46405,7 +46386,8 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
         .await
         .expect("create mob");
     let mut session_ids = Vec::new();
-    for index in 0..4 {
+    const MEMBER_COUNT: usize = 5;
+    for index in 0..MEMBER_COUNT {
         let session_id = handle
             .spawn_with_options(
                 ProfileName::from("worker"),
@@ -46430,7 +46412,9 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
         .await
         .expect("reconstruct stopped mob");
 
-    let per_member_delay = Duration::from_millis(600);
+    let boundary_baseline = service.turn_finalization_acquire_counts();
+    let materialization_baseline = service.recorded_create_requests().await.len();
+    let per_member_delay = Duration::from_millis(550);
     for session_id in session_ids {
         service
             .delay_next_turn_finalization_acquire(session_id, per_member_delay)
@@ -46438,10 +46422,10 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
     }
 
     let started = Instant::now();
-    resumed
-        .resume_until_for_test(Instant::now() + Duration::from_secs(60))
+    tokio::time::timeout(Duration::from_secs(5), resumed.resume())
         .await
-        .expect("each completed member preparation must rearm the inactivity watchdog");
+        .expect("cumulative explicit Resume stays within the test harness bound")
+        .expect("each member owns a fresh retirement budget after Resume admission");
     let elapsed = started.elapsed();
     let pending_delays = service.turn_finalization_delays_once.read().await.len();
     assert_eq!(
@@ -46449,8 +46433,21 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
         "every configured member preparation delay must be consumed"
     );
     assert!(
-        elapsed > super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT,
-        "production preparation must cumulatively exceed the inactivity window: elapsed={elapsed:?}, pending_delays={pending_delays}"
+        elapsed > super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT,
+        "production preparation must cumulatively exceed the initial caller deadline: elapsed={elapsed:?}, pending_delays={pending_delays}"
+    );
+    assert_eq!(
+        service.turn_finalization_acquire_counts(),
+        (
+            boundary_baseline.0 + (MEMBER_COUNT as u64 * 4),
+            boundary_baseline.1 + (MEMBER_COUNT as u64 * 4),
+        ),
+        "each exact retire-and-materialize transaction must run its bounded boundary sequence once"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        materialization_baseline + MEMBER_COUNT,
+        "each exact member must materialize once after the durable transition"
     );
     assert_eq!(
         resumed.status().await.expect("resumed mob status"),

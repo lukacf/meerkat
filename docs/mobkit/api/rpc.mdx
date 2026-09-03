@@ -134,7 +134,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32014` | `mobkit/init` fail-closed storage refusal: file-name twins the storage layout refuses to pick between, a session/runtime/blob/metadata/console store that failed to open (formerly a silent in-memory fallback), or an uncreatable state root. The message carries the remediation (the storage doctor, or the explicit ephemeral declaration). The gateway writes the error response and exits. | none |
 | `-32015` | `mobkit/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry | none |
 | `-32016` | operator verb exists but its gateway wiring is absent (no compaction-floor registry / no concrete transcript-edit service threaded into the RPC context) | none |
-| `-32017` | a read-only console arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the arms that cross either loop (`identity/resolved_tools`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `MOBKIT_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
+| `-32017` | a read-only console arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the arms that cross either loop (`identity/resolved_tools`, `identity/routing_status`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `MOBKIT_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
 
 The `-32010` constant is exported from both SDKs as
 `MOB_EVENTS_STALE_CURSOR_CODE`. The Python and TypeScript SDKs auto-
@@ -579,6 +579,66 @@ Register a new route.
 ### `mobkit/routing/routes/delete`
 
 Remove a registered route.
+
+### `mobkit/identity/routing_status`
+
+Meerkat's typed model-routing status for the live session behind a MobKit
+identity. The result is meerkat's `SessionModelRoutingStatus` verbatim
+(`WireSessionModelRoutingStatus` is a type alias to it), flattened under
+`identity` and `session_id`. MobKit declares no mirror type, so this payload
+cannot drift from meerkat's contract.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | string | yes | Agent identity. `member_id` is accepted as an alias. |
+</Accordion>
+
+Result fields: `identity`, `session_id`, `baseline_model`, `effective_model`,
+and the optional `session_provider`, `active_turn_override`,
+`active_operation_override`, `pending_switch_turn`.
+
+`session_provider` is the typed provider of the session's current LLM identity.
+An absent `session_provider` means the runtime machine has no hydrated session
+LLM identity yet (pre-hydration). It is **not** a signal to re-derive a provider
+from `effective_model`: meerkat documents that re-derivation as silently wrong
+for models owned by a custom `ModelRegistry`, which is why the field is carried
+typed rather than inferred.
+
+**This method requires a resolved session.** Identity-first materializes an
+identity without activating it, so an identity that has been materialized but
+never addressed has no session and therefore no routing status. That is the
+expected state after a restart, not a defect. A fleet sweep should address an
+identity before reading, and label its coverage post-address rather than
+post-restart.
+
+Failures carry a machine-readable discriminator so a sweep can classify an
+identity rather than only fail it:
+
+| `reason` | Meaning |
+|----------|---------|
+| `runtime_unsupported` | The session service exposes no runtime adapter. Configuration, not state. |
+| `no_current_session` | The roster reports no current session. **Covers two cases this surface cannot distinguish:** an identity materialized but never addressed (the normal state at boot), and an identity that does not exist at all. A caller must not read this as proof the identity exists. |
+| `member_lookup_failed` | The mob could not resolve the member at all. A roster failure, not a session claim. |
+| `session_not_held` | A session resolved **and** meerkat answered `NotFound` for it. A real defect. |
+| `upstream_read_failed` | A session resolved and the upstream read failed some other way. Diagnoses nothing. |
+| `invalid_identity` | No usable identity was supplied. |
+
+Each reason is derived only from a fact MobKit observed. `session_not_held` is
+matched on `RuntimeDriverError::NotFound` structurally, never on message text;
+because that error is `#[non_exhaustive]`, every other upstream failure lands in
+`upstream_read_failed` rather than being asserted as a missing session.
+
+```json
+{"code": -32000,
+ "message": "routing_status unavailable: ...",
+ "data": {"kind": "routing_status_unavailable",
+          "reason": "no_current_session",
+          "identity": "domain:security"}}
+```
+
+SDKs: `handle.identity_routing_status(identity)` (Python),
+`handle.identityRoutingStatus(identity)` (TypeScript).
 
 ---
 

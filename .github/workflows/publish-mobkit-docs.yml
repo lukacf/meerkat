@@ -13,6 +13,7 @@ on:
 permissions:
   actions: write
   contents: write
+  issues: write
   pull-requests: write
 
 concurrency:
@@ -94,9 +95,8 @@ jobs:
         working-directory: docs
         run: npx --yes mint@4.2.728 broken-links
 
-      - name: Publish generated snapshot through a protected pull request
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Stage the generated snapshot on a publication branch
+        id: stage
         run: |
           set -euo pipefail
           git add docs/mobkit docs/docs.json
@@ -118,11 +118,61 @@ jobs:
 
           pr_branch="codex/publish-mobkit-docs-${MOBKIT_TAG#v}-${GITHUB_RUN_ID}"
           git push origin "HEAD:refs/heads/${pr_branch}"
+          echo "pushed_branch=${pr_branch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish generated snapshot through a protected pull request
+        id: pull_request
+        if: steps.stage.outputs.pushed_branch != ''
+        env:
+          # github.token cannot open pull requests while the repository setting
+          # "Allow GitHub Actions to create and approve pull requests" is off;
+          # every publication between 2026-08-24 and 2026-09-03 that reached
+          # this step died here after the branch was already pushed (two
+          # 2026-08-29 runs failed earlier, at `make docs-check`). A dedicated
+          # fine-grained token is preferred when the secret exists, so the
+          # workflow token itself is not widened. It only opens the pull
+          # request and needs exactly: Pull requests: read and write on this
+          # repository (Metadata: read is implied). CI dispatch and auto-merge
+          # below run under github.token, which already holds actions: write
+          # and contents: write; enabling auto-merge needs contents: write, so
+          # a pull-request-only token must not be asked to do it.
+          GH_TOKEN: ${{ secrets.MOBKIT_DOCS_PR_TOKEN || github.token }}
+          ACTIONS_TOKEN: ${{ github.token }}
+          PR_BRANCH: ${{ steps.stage.outputs.pushed_branch }}
+        run: |
+          set -euo pipefail
+          pr_branch="${PR_BRANCH}"
           pr_url=$(gh pr create \
             --base main \
             --head "${pr_branch}" \
             --title "docs: publish MobKit ${MOBKIT_TAG}" \
             --body "Publish the immutable ${MOBKIT_TAG} documentation snapshot after registry, generated-site, and link validation. This pull request is created because main requires the CI gate; the publication workflow must not bypass branch protection.")
-          gh workflow run ci.yml --ref "${pr_branch}"
-          gh pr merge "${pr_url}" --auto --squash
+          echo "pr_url=${pr_url}" >> "${GITHUB_OUTPUT}"
+          # A branch pushed with github.token triggers no workflow run on its
+          # own, so CI is dispatched with the workflow's own token, which holds
+          # the actions: write permission the dedicated token need not have.
+          GH_TOKEN="${ACTIONS_TOKEN}" gh workflow run ci.yml --ref "${pr_branch}"
+          GH_TOKEN="${ACTIONS_TOKEN}" gh pr merge "${pr_url}" --auto --squash
           echo "Queued protected MobKit docs publication: ${pr_url}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Report a publication that needs a human
+        # The branch is pushed but the pull request did not get opened or
+        # queued for merge. Leave the job red (nothing was published) but say
+        # so where someone will read it: the job summary and one tracking issue
+        # with a stable title, so repeated failures update it instead of
+        # piling up. Issue writes use github.token; Actions may open issues
+        # even where it may not open pull requests.
+        if: failure() && steps.stage.outputs.pushed_branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BRANCH: ${{ steps.stage.outputs.pushed_branch }}
+          PR_URL: ${{ steps.pull_request.outputs.pr_url }}
+        run: |
+          set -euo pipefail
+          python3 scripts/report-mobkit-docs-publication-failure.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${MOBKIT_TAG}" \
+            --branch "${PR_BRANCH}" \
+            --pull-request-url "${PR_URL}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --summary "${GITHUB_STEP_SUMMARY}"

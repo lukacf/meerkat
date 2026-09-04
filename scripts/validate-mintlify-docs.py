@@ -114,6 +114,17 @@ def slugify(heading: str) -> str:
     return encoded.strip("-")
 
 
+def normalize_anchor(anchor: str) -> str:
+    """Lower-case an anchor the way `slugify` does without corrupting escapes.
+
+    `slugify` lower-cases the heading text and then percent-encodes it, so the
+    hex digits of an escape stay upper-case (`capabilities%2Fget`). Lower-casing
+    the whole link anchor turned that into `capabilities%2fget` and rejected the
+    only form Mintlify resolves for a heading containing a slash.
+    """
+    return re.sub(r"%[0-9a-fA-F]{2}", lambda match: match.group(0).upper(), anchor.lower())
+
+
 def heading_slugs(path: Path) -> set[str]:
     text = strip_code_fences(path.read_text(encoding="utf-8"))
     slugs: set[str] = set()
@@ -250,7 +261,7 @@ def main() -> int:
                 errors.append(f"{public_path(path)} links to missing target '{target}'")
                 continue
             if anchor and resolved and resolved.suffix in {".md", ".mdx"}:
-                anchor = anchor.lower()
+                anchor = normalize_anchor(anchor)
                 if anchor not in slug_cache.get(resolved, set()):
                     errors.append(
                         f"{public_path(path)} links to missing anchor '{target}'"

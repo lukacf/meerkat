@@ -335,6 +335,34 @@ them.
   only with `DOCS_RS` set and no checkout visible, a visible checkout still wins
   and warns about nothing, the unset case still fails closed, and the suffix
   every dependent derives is byte-identical to the one `meerkat-core` exports.
+- **The MobKit docs mirror on docs.rkat.ai can no longer go stale silently.**
+  Every `publish-mobkit-docs.yml` run that reached the publication step pushed
+  the release's snapshot branch and then died at `gh pr create`, because the
+  repository forbids Actions from opening pull requests (two 2026-08-29 runs
+  failed earlier, at `make docs-check`); each run went red with nothing that
+  named the branch or what to do next, so docs.rkat.ai served MobKit 0.8.22
+  from 2026-08-24 until a hand-made pull request published 0.8.30 on
+  2026-09-03. The pull-request step now prefers a dedicated
+  `MOBKIT_DOCS_PR_TOKEN` secret over `github.token` when the secret exists
+  (used for `gh pr create` only, so a token scoped to Pull requests: read and
+  write suffices; auto-merge, which needs contents: write, runs under the
+  workflow's own token), and a failure after the branch is pushed writes the branch and the
+  exact recovery commands to the job summary and opens or updates one tracking
+  issue with a stable title (`scripts/report-mobkit-docs-publication-failure.py`)
+  instead of failing quietly. Every mirrored page now opens with a stamp naming
+  the documented MobKit version and release ref (`scripts/sync-mobkit-docs.py`),
+  so a reader can see that a page describes an older release than the one they
+  run; `docs/mobkit` was re-synced from the clean `v0.8.30` tag and differs only
+  by that stamp. A nightly `mobkit-docs-lag` job
+  (`scripts/check-mobkit-docs-lag.py`) compares `docs/mobkit/_source.json` with
+  the published, non-draft, non-prerelease MobKit releases and fails when more
+  than one release was published after the mirrored one. Separately,
+  `scripts/validate-mintlify-docs.py` stopped rejecting the one anchor form
+  Mintlify resolves for a slash-containing heading (`#capabilities%2Fget`): it
+  lower-cased the whole link anchor, hex digits of the escape included, while
+  its own heading slugs keep them upper-case. Negative tests now pin that a
+  link to a missing page and a link to a missing heading anchor both fail
+  `make docs-check`.
 
 ## [0.8.33] - 2026-09-04
 

@@ -139,6 +139,18 @@ them.
   taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
   behind a 60 s liveness bound that only a live holder that never releases
   can hit (a crashed holder's lock is released by the kernel).
+- **The Python SDK reports why rkat-rpc exited.** `MeerkatClient` spawned the
+  child with `stderr=PIPE` and never read it, so a child that refused to
+  start (for example `Store(UnledgeredDomainObjects ...)` on a pre-0.8.10
+  realm) surfaced only as `MeerkatError CONNECTION_CLOSED 'rkat-rpc process
+  closed'` and the operator never saw the reason; a chatty child under
+  `RUST_LOG` could also block on the full 64 KB pipe (#1103). The client now
+  drains stderr for the child's whole lifetime into a bounded
+  tail (the last 16 KB) and, when the transport closes unexpectedly, the
+  `CONNECTION_CLOSED` error carries that tail both in its message
+  (`rkat-rpc process closed; stderr tail:\n...`) and as
+  `details["stderr_tail"]`; requests made after the close carry the same
+  recorded fault. The drain task is cancelled and awaited by `close()`.
 - **The Python SDK's `MeerkatClient.close()` treats a child that already
   exited as already closed.** `close()` called `terminate()` on the rkat-rpc
   child unguarded, so when the child had exited on its own (a startup

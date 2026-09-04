@@ -224,6 +224,7 @@ from .streaming import (
     RPC_STDOUT_LIMIT_BYTES,
     EventStream,
     EventSubscription,
+    _StderrTail,
     _StdoutDispatcher,
 )
 from .tools import ToolRegistry
@@ -566,6 +567,7 @@ class MeerkatClient:
         self._capabilities: list[Capability] | None = None
         self._methods: set[str] = set()
         self._dispatcher: _StdoutDispatcher | None = None
+        self._stderr_tail: _StderrTail | None = None
         self._tool_registry = ToolRegistry()
         self._tool_registration_errors: dict[str, MeerkatError] = {}
         self._request = cast(RpcRequest, self._request_impl)
@@ -733,7 +735,14 @@ class MeerkatClient:
             limit=RPC_STDOUT_LIMIT_BYTES,
         )
         assert self._process.stdout is not None
+        # Drain stderr for the child's whole lifetime: an unread pipe blocks a
+        # chatty child once it fills, and the retained tail is what explains a
+        # child that exits before (or during) the handshake.
+        if self._process.stderr is not None:
+            self._stderr_tail = _StderrTail(self._process.stderr)
+            self._stderr_tail.start()
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
+        self._dispatcher.set_stderr_tail(self._stderr_tail)
         if self._process.stdin:
             self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
@@ -825,6 +834,11 @@ class MeerkatClient:
             if process.stdin:
                 process.stdin.close()
             await _terminate_child(process)
+        # Stop the stderr drain after the child is gone so it reads the pipe
+        # to EOF while the child is still shutting down.
+        if self._stderr_tail:
+            await self._stderr_tail.stop()
+            self._stderr_tail = None
 
     # -- Auth (Phase 4c.11 wrapper over auth.* RPC methods) ---------------
 

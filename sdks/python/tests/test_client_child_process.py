@@ -1,10 +1,17 @@
 """Tests for how ``MeerkatClient`` handles the rkat-rpc child process itself.
 
 The transport is a child process with three pipes, and the child can exit at
-any moment, most often right at startup. ``close()`` usually runs from the
-caller's ``finally`` after the ``MeerkatError`` that explained the exit, so a
-child that is already gone must be treated as already closed instead of
-raising ``ProcessLookupError`` over that error (meerkat issue #1103).
+any moment, most often right at startup. Two failure modes lived in the gaps
+between the pipes (meerkat issue #1103):
+
+* ``close()`` usually runs from the caller's ``finally`` after the
+  ``MeerkatError`` that explained the exit, so a child that is already gone
+  must be treated as already closed instead of raising ``ProcessLookupError``
+  over that error;
+* stderr was never read, so a child that refused to start left the caller
+  with a bare ``CONNECTION_CLOSED`` and no reason, and a chatty child could
+  block on the full pipe. The drain keeps a bounded tail and the
+  ``CONNECTION_CLOSED`` error carries it.
 
 The fake children here are tiny ``sh`` scripts written into ``tmp_path``.
 """
@@ -20,6 +27,12 @@ import pytest
 from meerkat import client as client_module
 from meerkat.client import MeerkatClient
 from meerkat.errors import MeerkatError
+from meerkat.streaming import STDERR_TAIL_LIMIT_BYTES, _StderrTail
+
+REFUSAL_LINE = (
+    "Error: session-store has objects outside the meerkat_schema ledger; "
+    "run `rkat storage migrate --apply --bridge-pre-0-8-10`"
+)
 
 
 def _write_fake_rpc(tmp_path: Path, body: str) -> str:
@@ -193,3 +206,141 @@ async def test_close_kills_and_reaps_after_terminate_grace(
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert process.returncode == -9
+
+
+# -- stderr drain and CONNECTION_CLOSED tail -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_stderr_tail_is_bounded_and_keeps_the_latest_bytes() -> None:
+    reader = asyncio.StreamReader()
+    tail = _StderrTail(reader, limit=32)
+    tail.start()
+
+    reader.feed_data(b"a" * 40)
+    reader.feed_data(b"b" * 8)
+    reader.feed_data(b"tail-end")
+    reader.feed_eof()
+    await tail.wait_closed(timeout=5)
+
+    text = tail.text()
+    assert len(text.encode()) == 32
+    assert text.endswith("bbbbbbbbtail-end")
+    assert "a" * 17 not in text
+    await tail.stop()
+
+
+@pytest.mark.asyncio
+async def test_stderr_tail_stop_cancels_a_drain_that_never_saw_eof() -> None:
+    reader = asyncio.StreamReader()
+    tail = _StderrTail(reader)
+    tail.start()
+    reader.feed_data(b"partial")
+    await asyncio.sleep(0)
+
+    await tail.stop()
+
+    assert tail.text() == "partial"
+    assert tail._task is None
+
+
+@pytest.mark.asyncio
+async def test_connect_reports_child_stderr_tail_when_child_exits(tmp_path: Path) -> None:
+    fake = _write_fake_rpc(
+        tmp_path,
+        f"echo 'rkat-rpc: starting' >&2\necho '{REFUSAL_LINE}' >&2\nexit 1\n",
+    )
+    client = MeerkatClient(fake)
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.connect()
+    await client.close()
+
+    err = excinfo.value
+    assert err.code == "CONNECTION_CLOSED"
+    assert err.message.startswith("rkat-rpc process closed")
+    assert REFUSAL_LINE in err.message
+    assert isinstance(err.details, dict)
+    assert err.details["stderr_tail"].splitlines() == [
+        "rkat-rpc: starting",
+        REFUSAL_LINE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_later_requests_after_child_exit_carry_the_same_stderr_tail(
+    tmp_path: Path,
+) -> None:
+    fake = _write_fake_rpc(tmp_path, f"echo '{REFUSAL_LINE}' >&2\nexit 1\n")
+    client = MeerkatClient(fake)
+
+    with pytest.raises(MeerkatError):
+        await client.connect()
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.list_realms()
+    await client.close()
+
+    assert excinfo.value.code == "CONNECTION_CLOSED"
+    assert excinfo.value.details == {"stderr_tail": REFUSAL_LINE}
+
+
+@pytest.mark.asyncio
+async def test_chatty_child_stderr_is_drained_and_tail_is_bounded(tmp_path: Path) -> None:
+    # Roughly 400 KB of stderr, several times the OS pipe buffer. An undrained
+    # pipe would block the child on the write forever and the connect below
+    # would hang instead of failing.
+    line_count = 4000
+    fake = _write_fake_rpc(
+        tmp_path,
+        "i=0\n"
+        f"while [ $i -lt {line_count} ]; do\n"
+        "  echo \"noise line $i ...................................................................................\" >&2\n"
+        "  i=$((i+1))\n"
+        "done\n"
+        "echo 'final reason' >&2\n"
+        "exit 1\n",
+    )
+    client = MeerkatClient(fake)
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await asyncio.wait_for(client.connect(), timeout=60)
+    await client.close()
+
+    err = excinfo.value
+    assert err.code == "CONNECTION_CLOSED"
+    tail = err.details["stderr_tail"]
+    assert len(tail.encode()) <= STDERR_TAIL_LIMIT_BYTES
+    assert tail.endswith("final reason")
+    assert f"noise line {line_count - 1} " in tail
+    assert "noise line 0 " not in tail
+
+
+@pytest.mark.asyncio
+async def test_connection_closed_without_stderr_output_keeps_plain_message(
+    tmp_path: Path,
+) -> None:
+    fake = _write_fake_rpc(tmp_path, "exit 0\n")
+    client = MeerkatClient(fake)
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.connect()
+    await client.close()
+
+    assert excinfo.value.code == "CONNECTION_CLOSED"
+    assert excinfo.value.message == "rkat-rpc process closed"
+    assert excinfo.value.details is None
+
+
+@pytest.mark.asyncio
+async def test_close_releases_the_stderr_drain_task(tmp_path: Path) -> None:
+    fake = _write_fake_rpc(tmp_path, "echo boom >&2\nexit 1\n")
+    client = MeerkatClient(fake)
+
+    with pytest.raises(MeerkatError):
+        await client.connect()
+    drain = client._stderr_tail
+    assert drain is not None and drain._task is not None
+    await client.close()
+
+    assert client._stderr_tail is None
+    assert drain._task is None

@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.33] - 2026-09-04
+
 ### Added
 
 - Added `gemini-3.8-flash` as the recommended and default Gemini text model,
@@ -9461,7 +9463,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.32...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.33...HEAD
+[0.8.33]: https://github.com/lukacf/meerkat/compare/v0.8.32...v0.8.33
 [0.8.32]: https://github.com/lukacf/meerkat/compare/v0.8.31...v0.8.32
 [0.8.31]: https://github.com/lukacf/meerkat/compare/v0.8.30...v0.8.31
 [0.8.30]: https://github.com/lukacf/meerkat/compare/v0.8.29...v0.8.30

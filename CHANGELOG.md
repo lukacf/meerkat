@@ -35,6 +35,16 @@ them.
   Anthropic model `claude-fable-5-1`. The previous Gemini 3.5 Flash row remains
   supported without retaining featured/default status.
 
+### Fixed
+
+- Stale live-session discard on `turn/start`, input ingress, and external
+  event injection now captures the exact current runtime registration witness
+  and awaits its owned unregister teardown to terminal completion instead of
+  the ordinary 2-second caller grace. Slow teardown (for example under remote
+  execution latency) no longer surfaces `UnregisterInProgress` to the caller
+  that is about to rematerialize the session; a same-SessionId replacement
+  registration is never joined, and an absent registration is already clean.
+
 ## [0.8.32] - 2026-09-02
 
 ### Breaking

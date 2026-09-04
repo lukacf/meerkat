@@ -425,6 +425,17 @@ them.
   `scripts/test-release-doctor-workflow-contract.sh` (pre-push, CI ratchets,
   and `make release-doctor`) proves both halves on fixtures derived from the
   committed workflow, so the doctor and the workflow cannot drift silently.
+- The pre-push dispatcher now bounds its own cache footprint. Every source
+  worktree owns a stable `pre-push-<hash>` validation lane whose hook worktree
+  and Cargo target directory (25-49 GB each on a warm machine) were never
+  removed, even after the source worktree was deleted. After each validation,
+  passed or failed, `scripts/pre-push-prune-lanes.sh` keeps the
+  `MEERKAT_PRE_PUSH_KEEP_LANES` (default 2) most recently used lanes per
+  repository, ranked by an explicit last-used stamp, and removes the rest.
+  Only exact `pre-push-<16 hex>` names directly under the repository's own
+  hook-cache and `targets/<schema>/<toolchain>/` roots are candidates; the
+  current lane and any lane with a live dispatcher lock are never removed.
+  Exact-tree evidence reuse is unchanged.
 
 ## [0.8.33] - 2026-09-04
 

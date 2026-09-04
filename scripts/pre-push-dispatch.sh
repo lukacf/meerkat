@@ -30,6 +30,7 @@ fi
 REMOTE_NAME="$1"
 REMOTE_URL="$2"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
+DISPATCH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ZERO_SHA="0000000000000000000000000000000000000000"
 CACHE_VERSION="v1"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_DISPATCH_LOCK_WAIT_SECS:-3600}"
@@ -118,7 +119,42 @@ validation_tree="${hook_cache_root}/worktrees/${validation_lane}"
 validation_run_root=""
 validation_tree_owned=0
 dispatcher_lock_held=0
+lane_targets_root=""
 export RUST_LANE_ID="${validation_lane}"
+
+# Lanes are stable per source worktree, so a deleted source worktree leaves its
+# hook worktree and multi-gigabyte Cargo target behind forever. Each validation
+# stamps its own lane as used and then keeps only the newest
+# MEERKAT_PRE_PUSH_KEEP_LANES lanes (default 2) per cache root. Lanes whose
+# dispatcher lock is live are never removed; the stamp lives inside the target
+# directory because a Cargo target's own mtime does not track use.
+resolve_lane_targets_root() {
+  local lane_target_dir print_env
+  print_env="$("${SOURCE_ROOT}/scripts/repo-cargo" --print-env 2>/dev/null)" || return 0
+  lane_target_dir="$(sed -n 's/^CARGO_TARGET_DIR=//p' <<<"$print_env" | head -n 1)"
+  [[ -n "$lane_target_dir" && -d "$lane_target_dir" ]] || return 0
+  [[ "$(basename "$lane_target_dir")" == "$validation_lane" ]] || return 0
+  case "$lane_target_dir" in
+    "${SOURCE_ROOT}"/*) return 0 ;;
+  esac
+  # <cache>/<repo-key>/targets/<schema>/<toolchain>/<lane>
+  lane_targets_root="$(dirname "$(dirname "$lane_target_dir")")"
+  [[ "$(basename "$(dirname "$lane_targets_root")")" == "targets" ]] || { lane_targets_root=""; return 0; }
+  touch "${lane_target_dir}/.meerkat-pre-push-last-used" 2>/dev/null || true
+}
+
+prune_validation_lanes() {
+  local -a prune_args=(
+    --hook-cache-root "${hook_cache_root}"
+    --current-lane "${validation_lane}"
+    --source-root "${SOURCE_ROOT}"
+  )
+  if [[ -n "${lane_targets_root}" ]]; then
+    prune_args+=(--targets-root "${lane_targets_root}")
+  fi
+  "${DISPATCH_DIR}/pre-push-prune-lanes.sh" "${prune_args[@]}" ||
+    echo "note: pre-push lane retention did not complete (exit $?)" >&2
+}
 
 release_dispatcher_lock() {
   if [[ "${dispatcher_lock_held}" -eq 1 ]]; then
@@ -139,6 +175,11 @@ cleanup() {
     if ! rm -rf -- "${validation_run_root}" 2>/dev/null; then
       echo "note: validation scratch directory left behind: ${validation_run_root}" >&2
     fi
+  fi
+  # Retention runs after every real validation, passed or failed, while this
+  # lane's lock is still held so no peer can mistake it for an idle lane.
+  if [[ "${validation_tree_owned}" -eq 1 && "${dispatcher_lock_held}" -eq 1 ]]; then
+    prune_validation_lanes || true
   fi
   release_dispatcher_lock
   # Residue must never decide the push. A failing command inside an EXIT trap
@@ -224,6 +265,9 @@ validation_run_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-exact.XXXXXX"
 
 validation_tree_owned=1
 git -C "$SOURCE_ROOT" worktree add --detach --quiet "$validation_tree" "$pushed_commit"
+
+dispatch_step="stamping the validation lane as used"
+resolve_lane_targets_root
 
 export PRE_COMMIT_REMOTE_NAME="$REMOTE_NAME"
 export PRE_COMMIT_REMOTE_URL="$REMOTE_URL"

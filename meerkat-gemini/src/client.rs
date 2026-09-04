@@ -424,8 +424,14 @@ impl GeminiClient {
         parts
     }
 
-    /// Build request body for Gemini API
-    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    /// Build request body for Gemini API.
+    ///
+    /// Public but hidden: the integration matrix in `meerkat-integration-tests`
+    /// runs every built-in tool definition through this exact builder to prove
+    /// the emitted `functionDeclarations[].parameters` stay inside the Gemini
+    /// Schema proto. It is not a supported host API.
+    #[doc(hidden)]
+    pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
         let mut system_instruction_parts = Vec::new();
         let mut leading_system_prefix = true;
@@ -1350,24 +1356,87 @@ fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, 
         });
     }
     lower_gemini_function_parameters_schema(&mut normalized);
-    strip_gemini_function_parameters_unsupported_keywords(&mut normalized);
+    normalize_gemini_enum_members(&mut normalized);
     Ok(normalized)
 }
 
+/// Fields declared by Gemini's `Schema` message
+/// (`google/ai/generativelanguage/v1beta/content.proto`), which is what
+/// `FunctionDeclaration.parameters` is parsed as. The proto3 JSON parser
+/// rejects any undeclared field with `400 INVALID_ARGUMENT`, so after lowering
+/// every object node is reduced to this positive list; a denylist of JSON
+/// Schema keywords can never be complete.
+///
+/// `title` is declared by the proto but deliberately not retained: the
+/// lowering has always removed it, and Vertex / Code Assist acceptance of
+/// `title` on function parameters is unverified. `format` values are passed
+/// through untouched; the proto documents the field as free-form.
+const GEMINI_FUNCTION_PARAMETERS_SCHEMA_FIELDS: &[&str] = &[
+    "type",
+    "format",
+    "description",
+    "nullable",
+    "enum",
+    "maxItems",
+    "minItems",
+    "properties",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "example",
+    "anyOf",
+    "propertyOrdering",
+    "default",
+    "items",
+    "minimum",
+    "maximum",
+];
+
+/// Lower a (ref-inlined) JSON Schema into the Gemini `Schema` proto subset.
+///
+/// Per object node, in order: tuple-form `items`/`prefixItems` collapse into
+/// one item schema, boolean schemas become the empty Schema or are removed,
+/// literal compositions and `const` collapse into `enum`, type arrays become
+/// scalar `type` plus `nullable` or `anyOf` (pre-order); the schema-bearing
+/// children (`properties` values, `items`, `anyOf`, `oneOf`, `allOf`) are
+/// lowered recursively; then `null` branches fold into `nullable`, a surviving
+/// `oneOf` is rewritten as `anyOf` (the only union the proto declares),
+/// `allOf` members are merged into the node, and finally every field outside
+/// [`GEMINI_FUNCTION_PARAMETERS_SCHEMA_FIELDS`] is dropped. Literal-valued
+/// fields (`enum`, `required`, `default`, `example`, `propertyOrdering`) are
+/// never walked as schemas. [`normalize_gemini_enum_members`] then makes every
+/// surviving `enum` proto-shaped in a second pass.
 fn lower_gemini_function_parameters_schema(value: &mut Value) {
     match value {
         Value::Object(obj) => {
+            lower_tuple_items(obj);
+            lower_boolean_child_schemas(obj);
             collapse_single_literal_composition(obj, "oneOf");
             collapse_single_literal_composition(obj, "anyOf");
             normalize_const_keyword(obj);
             normalize_type_array_keyword(obj);
 
-            for child in obj.values_mut() {
-                lower_gemini_function_parameters_schema(child);
+            for key in ["items", "oneOf", "anyOf", "allOf"] {
+                if let Some(child) = obj.get_mut(key) {
+                    lower_gemini_function_parameters_schema(child);
+                }
+            }
+            if let Some(Value::Object(properties)) = obj.get_mut("properties") {
+                // `properties` maps user-defined field names to schemas. Only
+                // the schemas are lowered; the names are never keywords.
+                for property_schema in properties.values_mut() {
+                    lower_gemini_function_parameters_schema(property_schema);
+                }
             }
 
             normalize_nullable_composition(obj, "oneOf");
             normalize_nullable_composition(obj, "anyOf");
+            rewrite_one_of_as_any_of(obj);
+            fold_all_of_into_parent(obj);
+            retain_gemini_schema_fields(obj);
         }
         Value::Array(items) => {
             for item in items {
@@ -1376,6 +1445,246 @@ fn lower_gemini_function_parameters_schema(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// JSON Schema tuple validation puts a LIST at `items` (draft-07, what
+/// schemars 0.8 emits for Rust tuples) or under `prefixItems` (2020-12), but
+/// `Schema.items` in the proto is a single message, so a list there is
+/// rejected with the same `Invalid value at ... (Schema)` 400 as a boolean
+/// schema. The positional members are lowered to one union item schema (every
+/// position may hold any of the declared members; a single member is used as
+/// is, no members means any item). A `prefixItems` list absorbs the `items`
+/// tail: an object tail joins the union, `items: false` closes the tuple so
+/// `maxItems` is pinned to the prefix length when unset, and `true` adds
+/// nothing. The `prefixItems` key itself falls to the allowlist.
+fn lower_tuple_items(obj: &mut Map<String, Value>) {
+    let prefix = match obj.remove("prefixItems") {
+        Some(Value::Array(prefix)) => Some(prefix),
+        Some(_) | None => None,
+    };
+    let positional = match obj.get("items") {
+        Some(Value::Array(_)) => match obj.remove("items") {
+            Some(Value::Array(positional)) => Some(positional),
+            Some(_) | None => None,
+        },
+        Some(_) | None => None,
+    };
+    if prefix.is_none() && positional.is_none() {
+        return;
+    }
+
+    let mut members: Vec<Value> = Vec::new();
+    if let Some(prefix) = prefix {
+        let prefix_len = prefix.len();
+        members.extend(prefix);
+        match obj.remove("items") {
+            Some(Value::Bool(false)) => {
+                if !obj.contains_key("maxItems") {
+                    obj.insert("maxItems".to_string(), Value::from(prefix_len));
+                }
+            }
+            Some(Value::Object(tail)) => members.push(Value::Object(tail)),
+            Some(_) | None => {}
+        }
+    }
+    if let Some(positional) = positional {
+        members.extend(positional);
+    }
+    let mut distinct: Vec<Value> = Vec::with_capacity(members.len());
+    for member in members {
+        if !distinct.contains(&member) {
+            distinct.push(member);
+        }
+    }
+
+    let item_schema = if distinct.len() == 1 {
+        distinct.pop().unwrap_or_else(|| Value::Object(Map::new()))
+    } else if distinct.is_empty() {
+        Value::Object(Map::new())
+    } else {
+        let mut union = Map::new();
+        union.insert("anyOf".to_string(), Value::Array(distinct));
+        Value::Object(union)
+    };
+    obj.insert("items".to_string(), item_schema);
+}
+
+/// `Schema.enum` is `repeated string` in the proto, and the Gemini / Vertex
+/// Schema reference documents non-string enumerations in stringified form
+/// (`{type: INTEGER, format: enum, enum: ["101", "201"]}`). The `const` and
+/// literal-composition passes collapse whatever literals a schema carried, so
+/// after the structural lowering every `enum` is normalized: numbers and
+/// booleans are stringified, a `null` member is expressed as `nullable` and
+/// dropped, and an `enum` carrying an object or array member (which the proto
+/// cannot hold) is removed, leaving `type` and `description`. This is a
+/// separate pass because the `enum: [null]` marker is how
+/// `normalize_nullable_composition` recognises a collapsed `const: null`
+/// branch while the parent node is still being lowered.
+fn normalize_gemini_enum_members(value: &mut Value) {
+    let Value::Object(obj) = value else {
+        return;
+    };
+    if let Some(Value::Array(members)) = obj.remove("enum") {
+        let mut normalized = Vec::with_capacity(members.len());
+        let mut saw_null = false;
+        let mut unrepresentable = false;
+        for member in members {
+            match member {
+                Value::String(text) => normalized.push(Value::String(text)),
+                Value::Number(number) => normalized.push(Value::String(number.to_string())),
+                Value::Bool(flag) => normalized.push(Value::String(flag.to_string())),
+                Value::Null => saw_null = true,
+                Value::Array(_) | Value::Object(_) => unrepresentable = true,
+            }
+        }
+        if saw_null {
+            obj.insert("nullable".to_string(), Value::Bool(true));
+        }
+        if !unrepresentable && !normalized.is_empty() {
+            obj.insert("enum".to_string(), Value::Array(normalized));
+        }
+    }
+    if let Some(Value::Object(properties)) = obj.get_mut("properties") {
+        for schema in properties.values_mut() {
+            normalize_gemini_enum_members(schema);
+        }
+    }
+    if let Some(items) = obj.get_mut("items") {
+        normalize_gemini_enum_members(items);
+    }
+    if let Some(Value::Array(variants)) = obj.get_mut("anyOf") {
+        for variant in variants {
+            normalize_gemini_enum_members(variant);
+        }
+    }
+}
+
+/// JSON Schema allows a bare boolean wherever a schema is expected: `true`
+/// admits any value (the shape schemars emits for `serde_json::Value` fields)
+/// and `false` admits none. The Schema proto is a message, so a boolean at a
+/// schema-bearing position is rejected with `Invalid value at ... (Schema),
+/// true`. `true` becomes the empty Schema (`TYPE_UNSPECIFIED`, no constraint;
+/// verified accepted by the API). `false` is expressed by removal: a property
+/// that admits no value is dropped together with its `required` entry, a union
+/// or conjunction member that admits nothing is dropped, and `items: false`
+/// becomes `maxItems: 0`.
+fn lower_boolean_child_schemas(obj: &mut Map<String, Value>) {
+    match obj.get("items") {
+        Some(Value::Bool(true)) => {
+            obj.insert("items".to_string(), Value::Object(Map::new()));
+        }
+        Some(Value::Bool(false)) => {
+            obj.insert("items".to_string(), Value::Object(Map::new()));
+            obj.insert("maxItems".to_string(), Value::from(0));
+        }
+        _ => {}
+    }
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(Value::Array(members)) = obj.get_mut(key) {
+            members.retain(|member| !matches!(member, Value::Bool(false)));
+            for member in members.iter_mut() {
+                if matches!(member, Value::Bool(true)) {
+                    *member = Value::Object(Map::new());
+                }
+            }
+        }
+    }
+    let mut dropped_properties = Vec::new();
+    if let Some(Value::Object(properties)) = obj.get_mut("properties") {
+        properties.retain(|name, schema| {
+            if matches!(schema, Value::Bool(false)) {
+                dropped_properties.push(name.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for schema in properties.values_mut() {
+            if matches!(schema, Value::Bool(true)) {
+                *schema = Value::Object(Map::new());
+            }
+        }
+    }
+    if dropped_properties.is_empty() {
+        return;
+    }
+    if let Some(Value::Array(required)) = obj.get_mut("required") {
+        required.retain(|name| {
+            name.as_str()
+                .is_none_or(|name| !dropped_properties.iter().any(|dropped| dropped == name))
+        });
+    }
+}
+
+/// The Schema proto declares `any_of` but no `one_of`. Gemini documents
+/// `oneOf` as treated like `anyOf`, and the dispatcher validates the real
+/// exclusivity at call time, so a non-literal `oneOf` is moved into `anyOf`.
+fn rewrite_one_of_as_any_of(obj: &mut Map<String, Value>) {
+    let Some(Value::Array(variants)) = obj.remove("oneOf") else {
+        return;
+    };
+    match obj.get_mut("anyOf") {
+        Some(Value::Array(existing)) => existing.extend(variants),
+        _ => {
+            obj.insert("anyOf".to_string(), Value::Array(variants));
+        }
+    }
+}
+
+/// `allOf` has no Schema proto field. Its members are conjunctive, so each
+/// object member is merged into the parent: member `properties` are added (an
+/// existing parent property wins), `required` is unioned, and any other field
+/// the parent lacks is copied. Members that the lowering emptied (typically
+/// `if`/`then` conditionals, which the proto cannot express) contribute
+/// nothing and disappear with the key.
+fn fold_all_of_into_parent(obj: &mut Map<String, Value>) {
+    let Some(Value::Array(members)) = obj.remove("allOf") else {
+        return;
+    };
+    for member in members {
+        let Value::Object(member) = member else {
+            continue;
+        };
+        for (key, value) in member {
+            match key.as_str() {
+                "properties" => {
+                    let Value::Object(member_properties) = value else {
+                        continue;
+                    };
+                    let parent = obj
+                        .entry("properties")
+                        .or_insert_with(|| Value::Object(Map::new()));
+                    if let Value::Object(parent_properties) = parent {
+                        for (name, schema) in member_properties {
+                            parent_properties.entry(name).or_insert(schema);
+                        }
+                    }
+                }
+                "required" => {
+                    let Value::Array(member_required) = value else {
+                        continue;
+                    };
+                    let parent = obj
+                        .entry("required")
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Value::Array(parent_required) = parent {
+                        for name in member_required {
+                            if !parent_required.contains(&name) {
+                                parent_required.push(name);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    obj.entry(key).or_insert(value);
+                }
+            }
+        }
+    }
+}
+
+fn retain_gemini_schema_fields(obj: &mut Map<String, Value>) {
+    obj.retain(|key, _| GEMINI_FUNCTION_PARAMETERS_SCHEMA_FIELDS.contains(&key.as_str()));
 }
 
 fn collapse_single_literal_composition(obj: &mut Map<String, Value>, key: &str) {
@@ -1634,51 +1943,6 @@ fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a 
     }
 
     Some(cursor)
-}
-
-fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value) {
-    match value {
-        Value::Object(obj) => {
-            obj.remove("$schema");
-            obj.remove("$defs");
-            obj.remove("defs");
-            obj.remove("definitions");
-            obj.remove("$ref");
-            obj.remove("$id");
-            obj.remove("$anchor");
-            obj.remove("const");
-            obj.remove("title");
-            obj.remove("additionalProperties");
-            obj.remove("if");
-            obj.remove("then");
-            obj.remove("else");
-            obj.remove("dependentRequired");
-            obj.remove("dependentSchemas");
-            obj.remove("unevaluatedProperties");
-
-            for (key, child) in obj.iter_mut() {
-                if key == "properties" {
-                    // The `properties` value is a map of property_name → schema.
-                    // Keys are user-defined field names (e.g. "title", "id"), NOT
-                    // JSON Schema keywords. Only recurse into each property's
-                    // schema without stripping keys from the map itself.
-                    if let Value::Object(props) = child {
-                        for prop_schema in props.values_mut() {
-                            strip_gemini_function_parameters_unsupported_keywords(prop_schema);
-                        }
-                    }
-                } else {
-                    strip_gemini_function_parameters_unsupported_keywords(child);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                strip_gemini_function_parameters_unsupported_keywords(item);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn text_event_for_part(
@@ -4404,8 +4668,17 @@ mod tests {
             lowered["properties"]["value"].get("anyOf").is_some(),
             "anyOf should be preserved"
         );
-        assert!(lowered.get("allOf").is_some(), "allOf should be preserved");
+        assert!(
+            lowered.get("allOf").is_none(),
+            "allOf has no Gemini Schema field and must be folded into the parent"
+        );
+        assert_eq!(
+            lowered["required"],
+            serde_json::json!(["status"]),
+            "allOf member `required` must be merged into the parent"
+        );
         assert_no_const_or_type_arrays(lowered);
+        assert_gemini_schema_fields_only(lowered);
         Ok(())
     }
 
@@ -4543,6 +4816,12 @@ mod tests {
         assert!(!rendered.contains("\"then\""));
         assert!(!rendered.contains("\"else\""));
         assert!(!rendered.contains("additionalProperties"));
+        assert!(
+            parameters.get("allOf").is_none(),
+            "an allOf emptied by conditional stripping must not survive as `allOf: [{{}}]`"
+        );
+        assert_eq!(parameters["properties"]["mode"]["type"], "string");
+        assert_gemini_schema_fields_only(parameters);
         Ok(())
     }
 
@@ -4764,6 +5043,480 @@ mod tests {
             "root-level title keyword should be stripped"
         );
 
+        Ok(())
+    }
+
+    /// Run one tool schema through the real request builder and return the
+    /// emitted `functionDeclarations[0].parameters`.
+    fn lower_tool_parameters_via_request_builder(schema: Value) -> Result<Value, LlmError> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".into(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        Ok(body["tools"][0]["functionDeclarations"][0]["parameters"].clone())
+    }
+
+    /// Every node reachable through schema-bearing positions is a Schema
+    /// message carrying only fields the Gemini Schema proto declares, with
+    /// `items` a single message, `anyOf` a list of messages, and `enum`
+    /// members strings (`repeated string`).
+    fn assert_gemini_schema_fields_only(value: &Value) {
+        let Value::Object(obj) = value else {
+            panic!("{value} is not a Schema message");
+        };
+        for (key, child) in obj {
+            assert!(
+                GEMINI_FUNCTION_PARAMETERS_SCHEMA_FIELDS.contains(&key.as_str()),
+                "`{key}` is not a Gemini Schema field: {value}"
+            );
+            match key.as_str() {
+                "properties" => {
+                    if let Value::Object(properties) = child {
+                        for property_schema in properties.values() {
+                            assert_gemini_schema_fields_only(property_schema);
+                        }
+                    }
+                }
+                "items" => {
+                    assert!(
+                        child.is_object(),
+                        "`items` must be a single Schema message, got {child}: {value}"
+                    );
+                    assert_gemini_schema_fields_only(child);
+                }
+                "anyOf" => {
+                    let Value::Array(entries) = child else {
+                        panic!("`anyOf` must be a list of Schema messages: {value}");
+                    };
+                    for entry in entries {
+                        assert_gemini_schema_fields_only(entry);
+                    }
+                }
+                "enum" => {
+                    let Value::Array(members) = child else {
+                        panic!("`enum` must be a list: {value}");
+                    };
+                    for member in members {
+                        assert!(
+                            member.is_string(),
+                            "`enum` members are strings in the proto, got {member}: {value}"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Regression (X1/A2): a root-level `not`, the pre-fix `workgraph_claim`
+    /// shape, has no Schema proto field and must not reach Gemini. `format`
+    /// values travel untouched.
+    #[test]
+    fn test_tool_schema_parameters_lower_boolean_schemas() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // `true` is what schemars emits for `serde_json::Value` fields (the
+        // `council` merge arguments, `mob_wire` peers); the live Gemini run
+        // rejected it with `Invalid value at ... (Schema), true`.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": true,
+                "never": false,
+                "list": {"type": "array", "items": true},
+                "closed": {"type": "array", "items": false},
+                "either": {"anyOf": [true, false, {"type": "string"}]},
+                "nested": {
+                    "type": "object",
+                    "properties": {"inner": true},
+                    "required": ["inner"]
+                }
+            },
+            "required": ["payload", "never", "list"]
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert_eq!(
+            parameters["properties"]["payload"],
+            serde_json::json!({}),
+            "a `true` schema becomes the empty Schema: {parameters}"
+        );
+        assert!(
+            parameters["properties"].get("never").is_none(),
+            "a `false` property is dropped: {parameters}"
+        );
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["payload", "list"]),
+            "the dropped property leaves `required`"
+        );
+        assert_eq!(
+            parameters["properties"]["list"]["items"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            parameters["properties"]["closed"]["items"],
+            serde_json::json!({})
+        );
+        assert_eq!(parameters["properties"]["closed"]["maxItems"], 0);
+        assert_eq!(
+            parameters["properties"]["either"]["anyOf"],
+            serde_json::json!([{}, {"type": "string"}]),
+            "`true` branches become the empty Schema and `false` branches are dropped"
+        );
+        assert_eq!(
+            parameters["properties"]["nested"]["properties"]["inner"],
+            serde_json::json!({}),
+            "boolean schemas are lowered at every depth"
+        );
+        assert_gemini_schema_fields_only(&parameters);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_drop_root_level_not() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "lease_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                "lease_expires_at": {"type": "string", "format": "date-time"}
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+            "not": {"required": ["lease_seconds", "lease_expires_at"]}
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert!(
+            parameters.get("not").is_none(),
+            "root-level `not` must be dropped: {parameters}"
+        );
+        assert_eq!(parameters["required"], serde_json::json!(["id"]));
+        assert_eq!(
+            parameters["properties"]["lease_expires_at"]["format"], "date-time",
+            "format values are passed through untouched"
+        );
+        assert_eq!(parameters["properties"]["lease_seconds"]["maximum"], 86400);
+        assert_gemini_schema_fields_only(&parameters);
+        Ok(())
+    }
+
+    /// Object-variant `oneOf` (the workgraph attention-target and schedule
+    /// target shapes) is rewritten as `anyOf`, which the proto declares; the
+    /// `const` discriminators inside the variants lower to `enum`.
+    #[test]
+    fn test_tool_schema_parameters_rewrite_object_one_of_as_any_of()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "session"},
+                                "session_id": {"type": "string"}
+                            },
+                            "required": ["kind", "session_id"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"const": "owner"},
+                                "owner_key": {
+                                    "type": "object",
+                                    "properties": {"id": {"type": "string"}},
+                                    "required": ["id"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "required": ["kind", "owner_key"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            },
+            "required": ["target"]
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+        let target = &parameters["properties"]["target"];
+
+        assert!(
+            target.get("oneOf").is_none(),
+            "object oneOf must be rewritten: {target}"
+        );
+        let variants = target["anyOf"].as_array().ok_or("anyOf array")?;
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[0]["properties"]["kind"]["enum"],
+            serde_json::json!(["session"])
+        );
+        assert_eq!(variants[0]["properties"]["kind"]["type"], "string");
+        assert_eq!(
+            variants[1]["required"],
+            serde_json::json!(["kind", "owner_key"])
+        );
+        assert_eq!(
+            variants[1]["properties"]["owner_key"]["properties"]["id"]["type"],
+            "string"
+        );
+        assert_gemini_schema_fields_only(&parameters);
+        Ok(())
+    }
+
+    /// `allOf` folds into its parent: `{if, then}` members (the schedule
+    /// target-binding shape) are emptied by the lowering and vanish, object
+    /// members contribute `properties` (parent wins on a name clash) and
+    /// union their `required`, other fields are copied when absent, and the
+    /// key itself is removed.
+    #[test]
+    fn test_tool_schema_parameters_fold_all_of_into_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "required": ["mode"],
+            "allOf": [
+                {
+                    "if": {"properties": {"mode": {"const": "shell"}}},
+                    "then": {"required": ["command"]}
+                },
+                {
+                    "properties": {
+                        "command": {"type": "string"},
+                        "mode": {"type": "integer"}
+                    },
+                    "required": ["command", "mode"]
+                },
+                {"description": "merged description", "minProperties": 1}
+            ]
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert!(
+            parameters.get("allOf").is_none(),
+            "allOf must be folded away: {parameters}"
+        );
+        assert_eq!(parameters["properties"]["command"]["type"], "string");
+        assert_eq!(
+            parameters["properties"]["mode"]["type"], "string",
+            "an existing parent property wins over an allOf member"
+        );
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["mode", "command"]),
+            "member required lists are unioned in order"
+        );
+        assert_eq!(parameters["description"], "merged description");
+        assert_eq!(parameters["minProperties"], 1);
+        assert_gemini_schema_fields_only(&parameters);
+        Ok(())
+    }
+
+    /// Fields outside the Schema proto are dropped at every depth, while
+    /// declared fields (including free-form `format` values) survive and
+    /// literal-valued fields such as `default` are not rewritten as schemas.
+    #[test]
+    fn test_tool_schema_parameters_retain_only_gemini_schema_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$comment": "root comment",
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "exclusiveMinimum": 0,
+                    "multipleOf": 1,
+                    "examples": [1]
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "pattern": "^[a-z]+$"},
+                    "uniqueItems": true,
+                    "contains": {"type": "string"}
+                },
+                "labels": {
+                    "type": "object",
+                    "patternProperties": {"^x-": {"type": "string"}},
+                    "additionalProperties": {"type": "string"},
+                    "default": {"title": "kept literal"}
+                }
+            },
+            "dependentRequired": {"count": ["tags"]},
+            "unevaluatedProperties": false
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert_gemini_schema_fields_only(&parameters);
+        assert_eq!(parameters["properties"]["count"]["format"], "uint32");
+        assert!(
+            parameters["properties"]["count"]
+                .get("exclusiveMinimum")
+                .is_none()
+        );
+        assert_eq!(
+            parameters["properties"]["tags"]["items"]["pattern"],
+            "^[a-z]+$"
+        );
+        assert!(parameters["properties"]["tags"].get("contains").is_none());
+        assert_eq!(
+            parameters["properties"]["labels"]["default"],
+            serde_json::json!({"title": "kept literal"}),
+            "literal default values are not walked as schemas"
+        );
+        assert!(
+            parameters["properties"]["labels"]
+                .get("patternProperties")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    /// Tuple validation puts a list at `items` (or under `prefixItems`);
+    /// `Schema.items` is a single message, so the positions collapse into one
+    /// union item schema and the tuple length survives as `maxItems`.
+    #[test]
+    fn test_tool_schema_parameters_lower_tuple_items() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pair": {
+                    "type": "array",
+                    "items": [{"type": "string"}, {"type": "integer"}],
+                    "minItems": 2,
+                    "maxItems": 2
+                },
+                "single": {"type": "array", "items": [{"type": "boolean"}]},
+                "empty": {"type": "array", "items": []},
+                "prefixed_closed": {
+                    "type": "array",
+                    "prefixItems": [{"type": "string"}, {"type": "number"}],
+                    "items": false
+                },
+                "prefixed_open": {
+                    "type": "array",
+                    "prefixItems": [{"type": "string"}],
+                    "items": {"type": "integer"}
+                },
+                "prefixed_any": {"type": "array", "prefixItems": [true, {"type": "string"}]}
+            }
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert_eq!(
+            parameters["properties"]["pair"]["items"],
+            serde_json::json!({"anyOf": [{"type": "string"}, {"type": "integer"}]}),
+            "positional members become one union item schema: {parameters}"
+        );
+        assert_eq!(parameters["properties"]["pair"]["maxItems"], 2);
+        assert_eq!(
+            parameters["properties"]["single"]["items"],
+            serde_json::json!({"type": "boolean"}),
+            "a single position is used as the item schema"
+        );
+        assert_eq!(
+            parameters["properties"]["empty"]["items"],
+            serde_json::json!({}),
+            "an empty tuple admits any item"
+        );
+        assert_eq!(
+            parameters["properties"]["prefixed_closed"]["items"],
+            serde_json::json!({"anyOf": [{"type": "string"}, {"type": "number"}]})
+        );
+        assert_eq!(
+            parameters["properties"]["prefixed_closed"]["maxItems"], 2,
+            "`items: false` after a prefix closes the tuple at the prefix length"
+        );
+        assert!(
+            parameters["properties"]["prefixed_closed"]
+                .get("prefixItems")
+                .is_none()
+        );
+        assert_eq!(
+            parameters["properties"]["prefixed_open"]["items"],
+            serde_json::json!({"anyOf": [{"type": "string"}, {"type": "integer"}]}),
+            "an object `items` tail joins the union"
+        );
+        assert_eq!(
+            parameters["properties"]["prefixed_any"]["items"],
+            serde_json::json!({"anyOf": [{}, {"type": "string"}]}),
+            "a boolean prefix member is lowered like any other boolean schema"
+        );
+        assert_gemini_schema_fields_only(&parameters);
+        Ok(())
+    }
+
+    /// `Schema.enum` is `repeated string`: literal compositions and `const`
+    /// values of other primitive types are stringified the way the Schema
+    /// reference documents (`{type: INTEGER, enum: ["101", "201"]}`), `null`
+    /// becomes `nullable`, and object literals cannot be enumerated at all.
+    #[test]
+    fn test_tool_schema_parameters_stringify_non_string_enum_members()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "level": {"oneOf": [{"const": 1}, {"const": 2}, {"const": 3}]},
+                "flag": {"const": true},
+                "ratio": {"type": "number", "enum": [0.5, 1.5]},
+                "maybe": {"enum": ["a", null]},
+                "none": {"const": null},
+                "shape": {"enum": [{"x": 1}, {"x": 2}], "description": "object literals"}
+            }
+        });
+
+        let parameters = lower_tool_parameters_via_request_builder(schema)?;
+
+        assert_eq!(
+            parameters["properties"]["level"],
+            serde_json::json!({"type": "integer", "enum": ["1", "2", "3"]}),
+            "integer literals keep their type and are enumerated as strings: {parameters}"
+        );
+        assert_eq!(
+            parameters["properties"]["flag"],
+            serde_json::json!({"type": "boolean", "enum": ["true"]})
+        );
+        assert_eq!(
+            parameters["properties"]["ratio"],
+            serde_json::json!({"type": "number", "enum": ["0.5", "1.5"]})
+        );
+        assert_eq!(
+            parameters["properties"]["maybe"],
+            serde_json::json!({"enum": ["a"], "nullable": true}),
+            "a null member becomes nullable"
+        );
+        assert_eq!(
+            parameters["properties"]["none"],
+            serde_json::json!({"nullable": true}),
+            "a lone null literal is just nullable"
+        );
+        assert_eq!(
+            parameters["properties"]["shape"],
+            serde_json::json!({"description": "object literals"}),
+            "object literals cannot be enumerated in the proto"
+        );
+        assert_gemini_schema_fields_only(&parameters);
         Ok(())
     }
 

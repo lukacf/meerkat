@@ -698,8 +698,14 @@ impl OpenAiClient {
         self
     }
 
-    /// Build request body for OpenAI Responses API
-    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    /// Build request body for OpenAI Responses API.
+    ///
+    /// Public but hidden: the integration matrix in `meerkat-integration-tests`
+    /// runs every built-in tool definition through this exact builder to prove
+    /// the emitted `tools[].parameters` carry no root-level combinator. It is
+    /// not a supported host API.
+    #[doc(hidden)]
+    pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let author_explicit_breakpoints = openai_tag(request).is_some_and(|tag| {
             tag.prompt_cache_enabled != Some(false)
                 && tag.prompt_cache_options.is_some_and(|options| {
@@ -891,18 +897,22 @@ impl OpenAiClient {
 
         if !request.tools.is_empty() {
             // Responses API tool format: {"type": "function", "name": "...", "parameters": {...}}
-            let tools: Vec<Value> = request
+            let tools = request
                 .tools
                 .iter()
-                .map(|t| {
-                    serde_json::json!({
+                .map(|t| -> Result<Value, LlmError> {
+                    let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
+                        &t.name,
+                        &t.input_schema,
+                    )?;
+                    Ok(serde_json::json!({
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema
-                    })
+                        "parameters": parameters
+                    }))
                 })
-                .collect();
+                .collect::<Result<Vec<Value>, LlmError>>()?;
             body["tools"] = Value::Array(tools);
         }
 
@@ -5569,6 +5579,48 @@ mod tests {
         assert!(tools[0]["parameters"].is_object());
         // Should NOT have "function" wrapper
         assert!(tools[0].get("function").is_none());
+    }
+
+    /// Regression (A2): the `workgraph_claim` schema shipped from 0.8.22 to
+    /// 0.8.33 carried a root-level `not`, which OpenAI's function-parameter
+    /// validator rejects. The Responses tools array must carry the normalized
+    /// schema while nested keywords OpenAI accepts stay untouched.
+    #[test]
+    fn test_tool_definition_drops_root_level_not_from_pre_fix_workgraph_claim_shape() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "workgraph_claim".into(),
+            description: "Claim a ready WorkGraph item with CAS revision checking.".to_string(),
+            input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),
+            provenance: None,
+        })]);
+
+        let body = client.build_request_body(&request).expect("build request");
+        let parameters = &body["tools"][0]["parameters"];
+
+        assert_eq!(body["tools"][0]["name"], "workgraph_claim");
+        assert!(
+            parameters.get("not").is_none(),
+            "root-level not must be dropped: {parameters}"
+        );
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["id", "expected_revision", "owner"])
+        );
+        assert_eq!(parameters["properties"]["lease_seconds"]["type"], "integer");
+        assert_eq!(
+            parameters["properties"]["owner"]["additionalProperties"],
+            serde_json::json!(false),
+            "nested keywords OpenAI accepts are left alone"
+        );
     }
 
     #[test]

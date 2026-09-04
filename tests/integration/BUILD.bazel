@@ -1196,6 +1196,77 @@ rust_test(
 )
 
 rust_test(
+    name = "provider_tool_schema_compat_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "provider_tool_schema_compat",
+    crate_root = "tests/provider_tool_schema_compat.rs",
+    crate_features = [
+        "experimental-gpt-live-e2e",
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/provider_tool_schema_compat.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.33",
+        "CARGO_BIN_NAME": "provider_tool_schema_compat",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    tags = [
+        "integration",
+    ],
+    data = [
+        ":package_runfiles",
+        "//:repo_governance_files",
+    ],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_copilot_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_providers_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+        "//tests/integration:meerkat_integration_tests_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "reserve_interaction_subscriber_fires_test",
     aliases = aliases(
         package_name = "tests/integration",

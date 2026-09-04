@@ -740,7 +740,7 @@ async fn configure_openai_live_session(
     session
         .send_raw(ClientEvent::SessionUpdate {
             event_id: None,
-            session: Box::new(openai_session_update(open_config, &policy)),
+            session: Box::new(openai_session_update(open_config, &policy)?),
         })
         .await?;
 
@@ -796,7 +796,7 @@ fn session_update_with_audio_text_modality(
 fn openai_session_update(
     open_config: &RealtimeSessionOpenConfig,
     policy: &OpenAiRealtimePolicy,
-) -> SessionUpdate {
+) -> Result<SessionUpdate, LlmError> {
     let turn_detection = match open_config.turning_mode {
         RealtimeTurningMode::ProviderManaged => Some(Nullable::Value(TurnDetection::ServerVad {
             threshold: None,
@@ -809,7 +809,7 @@ fn openai_session_update(
         RealtimeTurningMode::ExplicitCommit => Some(Nullable::Null),
     };
 
-    SessionUpdate {
+    Ok(SessionUpdate {
         // R5-2 follow-up: gpt-realtime-2 rejects `[audio, text]`
         // combined output modalities — "Supported combinations are:
         // ['text'] and ['audio']". Pin the session-level default to
@@ -839,16 +839,16 @@ fn openai_session_update(
                     language: None,
                 }),
             }),
-            Some(openai_realtime_tools(&open_config.visible_tools)),
+            Some(openai_realtime_tools(&open_config.visible_tools)?),
         ),
-    }
+    })
 }
 
 fn openai_projection_session_update(
     open_config: &RealtimeSessionOpenConfig,
     policy: &OpenAiRealtimePolicy,
-) -> SessionUpdate {
-    SessionUpdate {
+) -> Result<SessionUpdate, LlmError> {
+    Ok(SessionUpdate {
         // R5-2 follow-up: even the projection refresh path must pin
         // `Audio`. OpenAI's session-merge semantics preserve unset
         // fields — so omitting `output_modalities` here is happy-path
@@ -858,9 +858,9 @@ fn openai_projection_session_update(
         config: session_update_with_audio_text_modality(
             openai_provider_instructions(policy.output_language_instruction.clone()),
             None,
-            Some(openai_realtime_tools(&open_config.visible_tools)),
+            Some(openai_realtime_tools(&open_config.visible_tools)?),
         ),
-    }
+    })
 }
 
 /// R1: build a `session.update` payload from a `LiveProjectionSnapshot`.
@@ -886,7 +886,7 @@ fn openai_projection_session_update(
 fn openai_refresh_session_update_from_snapshot(
     snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
     policy: &OpenAiRealtimePolicy,
-) -> SessionUpdate {
+) -> Result<SessionUpdate, LlmError> {
     let instructions = openai_provider_instructions(policy.output_language_instruction.clone());
 
     // OpenAI Realtime only supports `audio/pcm` at 24 kHz today
@@ -924,7 +924,7 @@ fn openai_refresh_session_update_from_snapshot(
         })
     });
 
-    SessionUpdate {
+    Ok(SessionUpdate {
         // R5-2 follow-up: the refresh-from-snapshot seam previously
         // used `..SessionUpdateConfig::default()` and so emitted
         // `output_modalities = None`. OpenAI preserves unset fields on
@@ -936,9 +936,9 @@ fn openai_refresh_session_update_from_snapshot(
         config: session_update_with_audio_text_modality(
             instructions,
             audio,
-            Some(openai_realtime_tools(&snapshot.visible_tools)),
+            Some(openai_realtime_tools(&snapshot.visible_tools)?),
         ),
-    }
+    })
 }
 
 /// Provider-owned session instructions. Canonical transcript messages never
@@ -1131,13 +1131,21 @@ fn openai_canonical_realtime_transcription_companion() -> Option<&'static str> {
         .and_then(|caps| caps.transcription_companion_model)
 }
 
-fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
+fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Result<Vec<Tool>, LlmError> {
     visible_tools
         .iter()
-        .map(|tool| Tool::Function {
-            name: tool.name.clone().into(),
-            description: (!tool.description.trim().is_empty()).then(|| tool.description.clone()),
-            parameters: tool.input_schema.clone(),
+        .map(|tool| {
+            let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
+                &tool.name,
+                &tool.input_schema,
+            )?
+            .into_owned();
+            Ok(Tool::Function {
+                name: tool.name.clone().into(),
+                description: (!tool.description.trim().is_empty())
+                    .then(|| tool.description.clone()),
+                parameters,
+            })
         })
         .collect()
 }
@@ -3077,7 +3085,7 @@ impl OpenAiRealtimeSession {
         &mut self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<(), LlmError> {
-        let session_update = openai_projection_session_update(open_config, &self.realtime_policy);
+        let session_update = openai_projection_session_update(open_config, &self.realtime_policy)?;
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
@@ -3104,7 +3112,7 @@ impl OpenAiRealtimeSession {
         snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
     ) -> Result<(), LlmError> {
         let session_update =
-            openai_refresh_session_update_from_snapshot(snapshot, &self.realtime_policy);
+            openai_refresh_session_update_from_snapshot(snapshot, &self.realtime_policy)?;
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
                 event_id: None,
@@ -6416,6 +6424,39 @@ mod tests {
 
     type FakeEventQueue = Arc<Mutex<VecDeque<Result<Option<ServerEvent>, LlmError>>>>;
 
+    /// Regression (A2): live session tools are rendered through the shared
+    /// normalizer; the pre-fix `workgraph_claim` shape reaches the session
+    /// without its root-level `not`.
+    #[test]
+    fn openai_realtime_tools_drop_root_level_not_from_pre_fix_workgraph_claim_shape() {
+        let tools = openai_realtime_tools(&[ToolDef {
+            name: "workgraph_claim".into(),
+            description: "Claim a ready WorkGraph item.".to_string(),
+            input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),
+            provenance: None,
+        }])
+        .expect("object-root tool schema");
+        match tools.as_slice() {
+            [
+                Tool::Function {
+                    name, parameters, ..
+                },
+            ] => {
+                assert_eq!(name.as_str(), "workgraph_claim");
+                assert!(
+                    parameters.get("not").is_none(),
+                    "root-level not must be dropped: {parameters}"
+                );
+                assert_eq!(parameters["type"], "object");
+                assert_eq!(
+                    parameters["required"],
+                    serde_json::json!(["id", "expected_revision", "owner"])
+                );
+            }
+            other => panic!("expected one Tool::Function, got {other:?}"),
+        }
+    }
+
     #[test]
     fn synthetic_item_ids_fit_openai_realtime_limit() {
         for (id, prefix) in [
@@ -7347,8 +7388,8 @@ mod tests {
         let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
 
         for update in [
-            openai_session_update(&open_config, &policy),
-            openai_projection_session_update(&open_config, &policy),
+            openai_session_update(&open_config, &policy).expect("session update"),
+            openai_projection_session_update(&open_config, &policy).expect("projection update"),
         ] {
             let instructions = update
                 .config

@@ -28,6 +28,58 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gemini and OpenAI-compatible requests now accept every built-in tool
+  schema.** Gemini's `FunctionDeclaration.parameters` is an OpenAPI-subset
+  `Schema` proto that rejects any undeclared field with `400 INVALID_ARGUMENT`,
+  and the client lowered tool schemas with a denylist that had been patched
+  keyword by keyword since 0.4.5 and still let `not`, object-variant `oneOf`
+  and `allOf` residue (`allOf: [{}]` after conditional stripping) through. A
+  Gemini session carrying `workgraph_claim` (root-level `not`, since 0.8.22),
+  `workgraph_attention_reassign` or `workgraph_policy_escalate` (object
+  `oneOf`), the default-on schedule tools (object `oneOf` plus
+  `allOf`/`if`/`then`), or the `council` agent tool (schemars `oneOf`, since
+  0.8.31, so every mob-enabled Gemini member) failed on its first LLM call with
+  a non-retryable `invalid_request`. The Gemini lowering now keeps the existing
+  `$ref` inlining and const/type-array/nullable passes, rewrites a surviving
+  `oneOf` as `anyOf`, folds `allOf` members into their parent (members emptied
+  by conditional stripping are dropped), and then reduces every node to a
+  positive allowlist of the Schema proto fields; `format` values pass through
+  untouched. JSON Schema booleans, which the proto cannot parse at all, are
+  lowered too: `true` (the shape schemars emits for `serde_json::Value` fields
+  such as the `council` merge arguments and `mob_wire` peers) becomes the
+  empty Schema, and `false` is expressed by dropping the property, union
+  branch or item shape it guarded. A tuple-form `items` list (or
+  `prefixItems`) collapses into one union item schema because `Schema.items`
+  is a single message, and `enum` members are stringified because
+  `Schema.enum` is `repeated string` (a `null` member becomes `nullable`). On
+  the OpenAI side every emission site (Responses tools, Chat
+  Completions tools behind the `openai_compatible` transport, the realtime
+  text adapter and live tools) now runs one shared normalizer
+  (`meerkat_openai::normalize_openai_tool_parameters_schema`) that inlines
+  local `$ref`s, drops a root-level `not` and a root-level `enum`, folds
+  root-level `oneOf`/`anyOf`/`allOf` object members into
+  `properties`/`required` (literal discriminators from several variants merge
+  into one `enum`), and declares an untyped root `object`; nothing below the
+  root is rewritten because OpenAI accepts nested combinators. A tool whose
+  root declares a non-object `type` (a bare-enum root, which no provider's
+  function-parameter validator accepts) is refused with a typed
+  `invalid_request` naming the tool instead of being sent.
+  `workgraph_claim` no longer expresses the `lease_seconds`/`lease_expires_at`
+  exclusivity as a schema-level `not`: both property descriptions state it and
+  the claim machine remains the only enforcement point. Behaviour change for
+  exact-pinned hosts: Gemini, OpenAI Responses (api.openai.com hosts
+  included) and OpenAI-compatible Chat Completions models receive a lowered
+  or normalized form of the schema they were sent before; on the OpenAI paths
+  local `$ref` inlining duplicates a definition referenced more than once, so
+  schemars-typed tools such as `council` and `delegate` cost more tool-schema
+  tokens per request; and Gemini members that failed on their first turn
+  start working. `GeminiClient::build_request_body`,
+  `OpenAiClient::build_request_body` and
+  `OpenAiCompatibleClient::build_chat_completions_body` are now public but
+  `#[doc(hidden)]` so the integration matrix can drive the real builders.
+
 ## [0.8.33] - 2026-09-04
 
 ### Added

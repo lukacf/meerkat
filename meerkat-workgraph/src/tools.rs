@@ -744,22 +744,28 @@ fn claim_schema() -> Value {
             json!({
                 "type": "integer",
                 "minimum": 1,
-                "maximum": crate::types::MAX_WORK_CLAIM_LEASE_SECONDS
+                "maximum": crate::types::MAX_WORK_CLAIM_LEASE_SECONDS,
+                "description": "Relative lease duration in seconds. Mutually exclusive \
+                    with lease_expires_at: the claim is rejected when both are supplied."
             }),
         ),
         (
             "lease_expires_at".to_string(),
-            json!({ "type": "string", "format": "date-time" }),
+            json!({
+                "type": "string",
+                "format": "date-time",
+                "description": "Absolute RFC3339 lease expiry. Mutually exclusive with \
+                    lease_seconds: the claim is rejected when both are supplied."
+            }),
         ),
     ]);
-    let mut schema = object(properties, &["id", "expected_revision", "owner"]);
-    if let Some(schema) = schema.as_object_mut() {
-        schema.insert(
-            "not".to_string(),
-            json!({ "required": ["lease_seconds", "lease_expires_at"] }),
-        );
-    }
-    schema
+    // The lease_seconds/lease_expires_at exclusivity is enforced at runtime by
+    // the claim machine (`normalize_claim_lease`), which is the only
+    // enforcement point: the dispatcher never validates arguments against this
+    // schema. It is deliberately not expressed as a root-level JSON Schema
+    // `not`, because provider function-parameter validators (Gemini's Schema
+    // proto, OpenAI Chat Completions) reject root-level combinators.
+    object(properties, &["id", "expected_revision", "owner"])
 }
 
 fn update_schema() -> Value {
@@ -905,7 +911,7 @@ fn evidence_schema() -> Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -977,6 +983,51 @@ mod tests {
         "workgraph_link",
         "workgraph_add_evidence",
     ];
+
+    /// Provider function-parameter validators (Gemini's `parameters` Schema
+    /// proto, OpenAI Chat Completions) reject JSON Schema combinators at the
+    /// root of a tool schema, so no platform WorkGraph tool may carry one
+    /// there. Combinators nested under `properties` are lowered by the
+    /// provider clients and are out of scope for this gate.
+    #[test]
+    fn workgraph_tool_schemas_carry_no_root_level_combinators() {
+        const ROOT_COMBINATORS: &[&str] = &["not", "oneOf", "anyOf", "allOf", "if"];
+        for contract in WorkGraphToolContract::iter() {
+            let schema = contract.schema();
+            let root = schema
+                .as_object()
+                .unwrap_or_else(|| panic!("{} schema root must be an object", contract.name()));
+            assert_eq!(
+                root.get("type").and_then(Value::as_str),
+                Some("object"),
+                "{} schema root must declare type object",
+                contract.name()
+            );
+            for keyword in ROOT_COMBINATORS {
+                assert!(
+                    !root.contains_key(*keyword),
+                    "{} carries root-level `{keyword}`",
+                    contract.name()
+                );
+            }
+        }
+    }
+
+    /// The claim lease exclusivity moved from a root-level `not` into the two
+    /// property descriptions; each side must name the other so the model still
+    /// learns the constraint the runtime enforces.
+    #[test]
+    fn workgraph_claim_lease_exclusivity_is_stated_in_property_descriptions() {
+        let schema = WorkGraphToolContract::Claim.schema();
+        let lease_seconds = schema["properties"]["lease_seconds"]["description"]
+            .as_str()
+            .expect("lease_seconds carries a description");
+        let lease_expires_at = schema["properties"]["lease_expires_at"]["description"]
+            .as_str()
+            .expect("lease_expires_at carries a description");
+        assert!(lease_seconds.contains("lease_expires_at"));
+        assert!(lease_expires_at.contains("lease_seconds"));
+    }
 
     #[test]
     fn workgraph_tool_catalog_matches_canonical_operation_set_without_drift() {

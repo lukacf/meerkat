@@ -124,10 +124,13 @@ export RUST_LANE_ID="${validation_lane}"
 
 # Lanes are stable per source worktree, so a deleted source worktree leaves its
 # hook worktree and multi-gigabyte Cargo target behind forever. Each validation
-# stamps its own lane as used and then keeps only the newest
-# MEERKAT_PRE_PUSH_KEEP_LANES lanes (default 2) per cache root. Lanes whose
-# dispatcher lock is live are never removed; the stamp lives inside the target
-# directory because a Cargo target's own mtime does not track use.
+# stamps its own lane as used; after a PASSED gate, and only then, the newest
+# MEERKAT_PRE_PUSH_KEEP_LANES lanes (default 2) per cache root are kept. Lanes
+# that are live-locked, referenced by a live process, or active within the
+# MEERKAT_PRE_PUSH_LANE_IDLE_SECS window (default 6h) are never removed. The
+# stamp lives inside the target directory because a Cargo target's own mtime
+# does not track use. A failed gate never prunes: a peer that just failed on a
+# shared-machine condition (disk full, load) is about to retry on its lane.
 resolve_lane_targets_root() {
   local lane_target_dir print_env
   print_env="$("${SOURCE_ROOT}/scripts/repo-cargo" --print-env 2>/dev/null)" || return 0
@@ -144,15 +147,20 @@ resolve_lane_targets_root() {
 }
 
 prune_validation_lanes() {
-  local -a prune_args=(
-    --hook-cache-root "${hook_cache_root}"
-    --current-lane "${validation_lane}"
-    --source-root "${SOURCE_ROOT}"
-  )
-  if [[ -n "${lane_targets_root}" ]]; then
-    prune_args+=(--targets-root "${lane_targets_root}")
+  if [[ -z "${hook_cache_root}" || ! -d "${hook_cache_root}" ]]; then
+    echo "note: pre-push lane retention skipped: hook cache root unresolved." >&2
+    return 0
   fi
-  "${DISPATCH_DIR}/pre-push-prune-lanes.sh" "${prune_args[@]}" ||
+  if [[ -z "${lane_targets_root}" || ! -d "${lane_targets_root}" ]]; then
+    echo "note: pre-push lane retention skipped: Cargo targets root unresolved." >&2
+    return 0
+  fi
+  echo "pre-push lane retention (keep ${MEERKAT_PRE_PUSH_KEEP_LANES:-2}, idle ${MEERKAT_PRE_PUSH_LANE_IDLE_SECS:-21600}s):"
+  "${DISPATCH_DIR}/pre-push-prune-lanes.sh" \
+    --hook-cache-root "${hook_cache_root}" \
+    --targets-root "${lane_targets_root}" \
+    --current-lane "${validation_lane}" \
+    --source-root "${SOURCE_ROOT}" ||
     echo "note: pre-push lane retention did not complete (exit $?)" >&2
 }
 
@@ -175,11 +183,6 @@ cleanup() {
     if ! rm -rf -- "${validation_run_root}" 2>/dev/null; then
       echo "note: validation scratch directory left behind: ${validation_run_root}" >&2
     fi
-  fi
-  # Retention runs after every real validation, passed or failed, while this
-  # lane's lock is still held so no peer can mistake it for an idle lane.
-  if [[ "${validation_tree_owned}" -eq 1 && "${dispatcher_lock_held}" -eq 1 ]]; then
-    prune_validation_lanes || true
   fi
   release_dispatcher_lock
   # Residue must never decide the push. A failing command inside an EXIT trap
@@ -376,3 +379,9 @@ dispatch_step="recording exact-tree validation evidence"
 stamp_tmp="${hook_stamp}.tmp.$$"
 printf 'tree=%s\ncommit=%s\n' "$pushed_tree" "$pushed_commit" > "$stamp_tmp"
 mv "$stamp_tmp" "$hook_stamp"
+
+# Retention runs only here, after a passed gate, while this lane's lock is
+# still held so no peer can mistake it for an idle lane. It never decides the
+# push: the evidence stamp above is already durable.
+dispatch_step="applying pre-push lane retention"
+prune_validation_lanes || true

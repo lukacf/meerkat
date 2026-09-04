@@ -167,7 +167,27 @@ them.
   per-profile / per-request `provider_params` carrier and its `provider_tag`
   nesting. Behaviour change for exact-pinned hosts whose realm config already
   carries an inert `[agent] provider_params` table: that config now fails to
-  load until the table is moved onto a profile or removed.
+  load on every runtime-backed surface (CLI, rkat-rest, rkat-rpc, rkat-mcp;
+  the last two through the next entry) until the table is moved onto a
+  profile or removed.
+- **rkat-rpc and rkat-mcp fail startup on a head realm config that does not
+  load.** Both binaries read the head realm document with
+  `unwrap_or_else(|_| Config::default())`, and rkat-mcp additionally turned a
+  `Config::validate` failure into a warn log plus `Config::default()`, so a
+  head `.rkat/config.toml` that failed to read, parse, or validate was
+  replaced wholesale by defaults (default model, limits, tool toggles,
+  `[mob_host]`, auth bindings all dropped) and the process served on a
+  configuration the operator never wrote: silently on rkat-rpc, behind a warn
+  line on rkat-mcp, while rkat-rest and the CLI refused. The `[agent]
+  provider_params` refusal above would have vanished the same way on those
+  two surfaces. Both now propagate the typed `ConfigError` and exit before
+  serving, matching rkat-rest; the head-document read on rkat-rpc and the
+  store open, head read, and effective `validate` on rkat-mcp all fail
+  closed, while rkat-mcp's parent-chain compose fallback (head config without
+  inheritance, which never discards the head document) is unchanged.
+  Behaviour change for exact-pinned hosts whose head config is malformed or
+  carries `[agent] provider_params`: rkat-rpc and rkat-mcp now refuse to
+  start and print the error instead of booting on defaults.
 
 ## [0.8.33] - 2026-09-04
 

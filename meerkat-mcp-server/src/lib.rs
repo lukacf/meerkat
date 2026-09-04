@@ -1000,6 +1000,17 @@ fn mcp_realm_config_source(
     ))
 }
 
+/// Load the effective config for `realm_id`, failing closed on the head
+/// document.
+///
+/// The head realm document is authoritative, so a head that fails to read,
+/// parse, or pass its ingress checks (for example an unwired `[agent]
+/// provider_params` table) and an effective config that fails `validate` both
+/// surface as errors and stop startup, exactly as rkat-rest and the CLI do.
+/// Substituting `Config::default()` would boot the server on a configuration
+/// the operator never wrote. Only the parent-chain compose step keeps its
+/// narrower fallback (the head config without inheritance), which never
+/// discards the head document itself.
 async fn load_config_async(
     realm_id: &meerkat_core::connection::RealmId,
     realms_root: &std::path::Path,
@@ -1007,8 +1018,8 @@ async fn load_config_async(
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
     source: &Arc<meerkat_store::FilesystemRealmConfigSource>,
-) -> Config {
-    let store = match realm_config_store(
+) -> Result<Config, std::io::Error> {
+    let store = realm_config_store(
         realm_id,
         realms_root,
         backend_hint,
@@ -1017,11 +1028,17 @@ async fn load_config_async(
         source,
     )
     .await
-    {
-        Ok(store) => store,
-        Err(_) => return Config::default(),
-    };
-    let head_config = store.get().await.unwrap_or_else(|_| Config::default());
+    .map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to open realm config store for realm '{realm_id}': {err}"
+        ))
+    })?;
+    let head_config = store.get().await.map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to read head realm config for realm '{realm_id}': {err}"),
+        )
+    })?;
     // Fold the head realm's parent chain (head ⊕ ancestors ⊕ `global` tail) into
     // the effective config so top-level fields inherit before env overrides win.
     // A compose failure (e.g. malformed parent edge) falls back to the head
@@ -1040,11 +1057,15 @@ async fn load_config_async(
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
-    if let Err(err) = config.validate(meerkat_models::canonical()) {
-        tracing::warn!("Invalid realm config; using defaults: {}", err);
-        return Config::default();
-    }
     config
+        .validate(meerkat_models::canonical())
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid effective config for realm '{realm_id}': {err}"),
+            )
+        })?;
+    Ok(config)
 }
 
 /// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
@@ -1361,7 +1382,7 @@ impl MeerkatMcpState {
             bootstrap.realm.instance_id.as_deref(),
             &fs_realm_config_source,
         )
-        .await;
+        .await?;
         let store_path = persistence
             .store_path()
             .map(std::path::Path::to_path_buf)
@@ -1578,6 +1599,9 @@ impl MeerkatMcpState {
         let realms_root = locator.state_root;
         let fs_realm_config_source =
             mcp_realm_config_source(&realms_root, mcp_ambient_global_config_doc(&realms_root));
+        // Test-only constructor over a freshly generated isolated realm: a
+        // config-load failure is an environment defect the test must see.
+        #[allow(clippy::expect_used)]
         let mut config = load_config_async(
             &realm_id,
             &realms_root,
@@ -1586,7 +1610,8 @@ impl MeerkatMcpState {
             bootstrap.realm.instance_id.as_deref(),
             &fs_realm_config_source,
         )
-        .await;
+        .await
+        .expect("test-only mcp state must load its isolated realm config");
         if let Some(max_sessions) = max_sessions_override {
             config.limits.max_sessions = Some(max_sessions);
         }

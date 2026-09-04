@@ -3,8 +3,8 @@
 use clap::{Parser, ValueEnum};
 use meerkat::AgentFactory;
 use meerkat_core::{
-    Config, ConfigResolvedPaths, ConfigRuntime, ConfigStore, FileConfigStore, RealmConfig,
-    RealmSelection, TaggedConfigStore,
+    ConfigResolvedPaths, ConfigRuntime, ConfigStore, FileConfigStore, RealmConfig, RealmSelection,
+    TaggedConfigStore,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
 use std::path::PathBuf;
@@ -323,10 +323,22 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Compose inherited startup facts before building any process-owned
     // runtime capability. In particular, `[mob_host]` listen/advertise may
     // live in a parent realm while the head only tightens a resource bound.
-    let head_config = config_store
-        .get()
-        .await
-        .unwrap_or_else(|_| Config::default());
+    //
+    // The head document is authoritative, so a head that fails to read, parse,
+    // or pass its ingress checks (for example an unwired `[agent]
+    // provider_params` table) stops startup with the typed error, exactly as
+    // rkat-rest and the CLI do. Substituting `Config::default()` here would
+    // boot the server on a configuration the operator never wrote and would
+    // let the effective-config `validate` below pass on the defaulted head.
+    let head_config = config_store.get().await.map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "failed to read head realm config for realm '{}': {err}",
+                locator.realm
+            ),
+        )
+    })?;
     let mut config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
         .effective_config_over_head(&locator.realm, head_config)
         .await

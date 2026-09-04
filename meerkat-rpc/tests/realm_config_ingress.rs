@@ -41,12 +41,12 @@ const INITIALIZE_REQUEST: &str =
 /// (about 70 s) and below the CI unit profile's 240 s termination ceiling.
 const EXIT_DEADLINE: Duration = Duration::from_secs(200);
 
-/// Cargo advertises the crate's own binary to its integration tests at
-/// compile time; a runtime override is honoured for staged binaries.
+/// Cargo and nextest advertise the crate's own binary to its integration
+/// tests through the runtime environment. Resolving it there (never at compile
+/// time) keeps the test valid inside a nextest archive, where the binary lives
+/// at a different path than it did when the test was compiled.
 fn rkat_rpc_binary() -> Option<PathBuf> {
-    let advertised = std::env::var_os("CARGO_BIN_EXE_rkat-rpc")
-        .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_rkat-rpc").map(PathBuf::from))?;
+    let advertised = std::env::var_os("CARGO_BIN_EXE_rkat-rpc").map(PathBuf::from)?;
     advertised.exists().then_some(advertised)
 }
 

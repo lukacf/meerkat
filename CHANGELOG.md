@@ -139,6 +139,17 @@ them.
   taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
   behind a 60 s liveness bound that only a live holder that never releases
   can hit (a crashed holder's lock is released by the kernel).
+- **The Python SDK's `MeerkatClient.close()` treats a child that already
+  exited as already closed.** `close()` called `terminate()` on the rkat-rpc
+  child unguarded, so when the child had exited on its own (a startup
+  refusal, a crash) the call raised `ProcessLookupError` out of the caller's
+  `finally`, replacing the `MeerkatError` that explained the failure; a host
+  logged `ProcessLookupError()` for a day of jobs whose real cause was a
+  storage refusal at startup (#1103). `close()` now checks `returncode`
+  before signalling, treats `ProcessLookupError` from `terminate()`/`kill()`
+  as the vanished-child outcome it is, waits for the child after `kill()`
+  instead of abandoning it, and is idempotent. The original error reaches the
+  caller.
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

@@ -317,6 +317,39 @@ from .types import (
 
 _logger = logging.getLogger(__name__)
 
+# Grace period between SIGTERM and SIGKILL when closing the rkat-rpc child,
+# and again between SIGKILL and giving up on reaping it.
+CHILD_EXIT_TIMEOUT_SECS = 5.0
+
+
+async def _terminate_child(process: asyncio.subprocess.Process) -> None:
+    """Stop a child process, treating one that already exited as stopped.
+
+    ``returncode`` is checked first so a reaped child gets no signal at all.
+    A child that exited but has not been reaped yet, or whose transport was
+    closed by asyncio after exit, raises ``ProcessLookupError`` from
+    ``terminate()``/``kill()``; that is the same "already gone" outcome, not
+    a failure. ``wait()`` on an exited child returns at once.
+    """
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=CHILD_EXIT_TIMEOUT_SECS)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=CHILD_EXIT_TIMEOUT_SECS)
+    except asyncio.TimeoutError:
+        pass
+
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = (
@@ -776,19 +809,22 @@ class MeerkatClient:
         return self
 
     async def close(self) -> None:
-        """Terminate the rkat-rpc subprocess and release resources."""
+        """Terminate the rkat-rpc subprocess and release resources.
+
+        A child that has already exited (a startup refusal, a crash, an
+        operator kill) is already closed. ``close()`` usually runs from the
+        caller's ``finally`` after the ``MeerkatError`` that explained the
+        exit, so it must never raise ``ProcessLookupError`` over that error.
+        """
         if self._dispatcher:
             await self._dispatcher.stop()
             self._dispatcher = None
-        if self._process:
-            if self._process.stdin:
-                self._process.stdin.close()
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._process.kill()
-            self._process = None
+        process = self._process
+        self._process = None
+        if process is not None:
+            if process.stdin:
+                process.stdin.close()
+            await _terminate_child(process)
 
     # -- Auth (Phase 4c.11 wrapper over auth.* RPC methods) ---------------
 

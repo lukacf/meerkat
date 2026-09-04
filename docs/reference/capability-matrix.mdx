@@ -373,7 +373,7 @@ Gemini video URI support follows the active Google backend. Vertex Gemini accept
 
 ## Provider-native web search
 
-Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific request defaults at build time as a typed, never-persisted `ProviderTag` (the legacy-named `tool_defaults` half of `ProviderParamsCarrier`). These defaults include provider-native tool bodies and model-capability-derived cache policy. Effective per-turn params are a typed field-wise merge: explicit `provider_params` win and build defaults fill only the unset provider-native slots -- the old RFC 7396 raw-JSON merge-patch is retired.
+Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific request defaults at build time as a typed, never-persisted `ProviderTag` (the legacy-named `tool_defaults` half of `ProviderParamsCarrier`). These defaults include provider-native tool bodies and, for OpenAI, model-capability-derived prompt-cache options; the Anthropic prompt-cache default (`automatic` on the Anthropic API, Vertex, and Foundry, `disabled` on Bedrock and Copilot) is owned by the provider runtime's backend client rather than by build defaults, and an explicit `provider_tag.cache_control` overrides it. Effective per-turn params are a typed field-wise merge: explicit `provider_params` win and build defaults fill only the unset provider-native slots -- the old RFC 7396 raw-JSON merge-patch is retired.
 
 | Provider | Tool type | Config key | Default |
 |----------|-----------|------------|---------|

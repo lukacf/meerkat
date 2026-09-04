@@ -384,7 +384,9 @@ impl ConfigStore for FileConfigStore {
 
         let bytes = tokio::fs::read(&self.path).await?;
         let content = String::from_utf8(bytes).map_err(ConfigError::Utf8)?;
-        toml::from_str(&content).map_err(ConfigError::Parse)
+        let config: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+        config.reject_unwired_agent_provider_params()?;
+        Ok(config)
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {

@@ -39,6 +39,38 @@ them.
   body whose provider code, documented message prefix, or Google
   `QuotaFailure` detail names exhausted quota (see Fixed).
 
+### Billing-affecting default change
+
+- **Anthropic prompt caching is automatic by default again on the Anthropic
+  API, Vertex, and Foundry.** 0.8.22 (`3c7c8c1cb`) replaced the per-backend
+  default with a blanket `disabled` and inverted the test that pinned it,
+  while `docs/rust/advanced.mdx` kept promising `cache_control: automatic`; an
+  operator reading the docs believed caching was on and paid the full input
+  price on every turn. The provider runtime now derives the default from
+  backend capability: `automatic` wherever the backend supports Anthropic's
+  request-wide breakpoint, `disabled` on Amazon Bedrock and the GitHub Copilot
+  backend (both reject an explicit `automatic` locally; manual `system_prefix`
+  stays available), and `AnthropicClientBuilder` starts from `automatic` with
+  automatic support assumed; every configured backend, the plain API-key path
+  included, is built through the same two capability helpers, so the runtime
+  has one authority for this default. A direct `AnthropicClientBuilder` user
+  who declares `automatic_cache_control_supported(false)` for a custom backend
+  without also setting a non-automatic `default_cache_control` now fails the
+  first request locally with `invalid_request` naming the fix (the old
+  `disabled` default made that declaration inert). A profile that pins only
+  `cache_ttl` now rides the automatic default instead of failing its first
+  call. Behaviour change
+  for exact-pinned hosts upgrading from any release since 0.8.22: Anthropic
+  sessions that never set `cache_control` start paying five-minute cache
+  writes (1.25x the input rate) and reading cache hits (0.1x) again, visible
+  through `Usage.cache_creation_tokens` / `cache_read_tokens`. Opt out per
+  profile or request with the nested form; a flat `cache_control` key fails
+  the whole definition parse:
+
+  ```toml
+  provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+  ```
+
 ### Fixed
 
 - **An exhausted provider account fails in one round trip instead of after
@@ -119,6 +151,23 @@ them.
   `OpenAiClient::build_request_body` and
   `OpenAiCompatibleClient::build_chat_completions_body` are now public but
   `#[doc(hidden)]` so the integration matrix can drive the real builders.
+- **A profile-carried Anthropic `cache_ttl` survives a per-turn tag merge.**
+  `ProviderTag::merge_missing_from` filled every Anthropic knob except
+  `cache_ttl`, so a turn or draft tag layered over a profile that pinned
+  `cache_ttl = "1h"` silently fell back to the five-minute lifetime while
+  keeping the profile's `cache_control`. The fill is now complete. Behaviour
+  change for exact-pinned hosts that merge draft tags over profile tags (the
+  MobKit bridge does): the profile TTL now reaches the request.
+- **Realm `[agent] provider_params` is refused instead of silently ignored.**
+  `.rkat/config.toml` accepted an `[agent] provider_params` table (parsed
+  fail-closed) that no build path read and that `Config::merge` did not carry,
+  so an operator placing a fleet-wide cache policy there saw a clean boot and
+  no effect. `Config::merge_toml_str`, `FileConfigStore::get`, and
+  `Config::validate` now return a typed `ConfigError::Validation` naming the
+  per-profile / per-request `provider_params` carrier and its `provider_tag`
+  nesting. Behaviour change for exact-pinned hosts whose realm config already
+  carries an inert `[agent] provider_params` table: that config now fails to
+  load until the table is moved onto a profile or removed.
 
 ## [0.8.33] - 2026-09-04
 

@@ -45,8 +45,10 @@ pub struct AnthropicClient {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
-    /// Backend-owned fallback. This remains disabled unless an embedding host
-    /// deliberately overrides it; ordinary cache policy is profile-owned.
+    /// Backend-owned fallback cache policy: `Automatic` wherever the backend
+    /// supports Anthropic's request-wide automatic breakpoint (the builder
+    /// default), `Disabled` where it does not (Bedrock, Copilot). A typed
+    /// per-request or profile `cache_control` always wins over this default.
     default_cache_control: AnthropicCacheControlPolicy,
     /// Whether this backend accepts Anthropic's request-wide automatic cache
     /// policy. Amazon Bedrock supports manual breakpoints but not this mode.
@@ -78,7 +80,7 @@ impl AnthropicClientBuilder {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
-            default_cache_control: AnthropicCacheControlPolicy::Disabled,
+            default_cache_control: AnthropicCacheControlPolicy::Automatic,
             automatic_cache_control_supported: true,
             authorizer: None,
         }
@@ -103,9 +105,13 @@ impl AnthropicClientBuilder {
 
     /// Set the backend-owned default prompt-cache policy.
     ///
-    /// Per-request typed provider params still take precedence. Provider
-    /// runtimes use this to disable automatic caching for Amazon Bedrock while
-    /// keeping it enabled for Anthropic API, Vertex, and Foundry.
+    /// The builder starts from `Automatic`. Per-request typed provider params
+    /// still take precedence. Provider runtimes use this to disable automatic
+    /// caching for Amazon Bedrock and the Copilot route while keeping it
+    /// enabled for Anthropic API, Vertex, and Foundry; a direct builder user
+    /// targeting a custom backend without automatic support must pair a
+    /// non-automatic policy here with
+    /// [`automatic_cache_control_supported(false)`](Self::automatic_cache_control_supported).
     pub fn default_cache_control(mut self, policy: AnthropicCacheControlPolicy) -> Self {
         self.default_cache_control = policy;
         self
@@ -624,7 +630,7 @@ impl AnthropicClient {
     }
 
     /// Build request body for Anthropic API
-    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
         let mut leading_system_prefix = true;
@@ -3046,13 +3052,77 @@ mod tests {
         assert!(body.get("thinking").is_none());
         assert!(body.get("top_k").is_none());
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
-        assert!(
-            body.get("cache_control").is_none(),
-            "cache policy must remain disabled unless the profile or request opts in"
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "API-key clients default to Anthropic automatic prompt caching (docs/rust/advanced.mdx)"
         );
         assert!(
             body["messages"].to_string().find("cache_control").is_none(),
-            "disabled cache policy must not author conversation breakpoints"
+            "the automatic policy is request-wide and authors no conversation breakpoints"
+        );
+        Ok(())
+    }
+
+    /// The documented per-profile opt-out, `provider_params = { provider_tag =
+    /// { provider = "anthropic", cache_control = "disabled" } }`, reaches the
+    /// client as the request's provider tag and suppresses the automatic
+    /// default entirely.
+    #[test]
+    fn test_profile_cache_control_disabled_opts_out_of_automatic_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let messages = vec![
+            Message::System(SystemMessage::new("stable system prefix".to_string())),
+            Message::User(UserMessage::text("test".to_string())),
+        ];
+
+        let default_body =
+            client.build_request_body(&LlmRequest::new("claude-sonnet-4-6", messages.clone()))?;
+        assert_eq!(
+            default_body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "control: without the opt-out the same client caches automatically"
+        );
+
+        let profile: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
+            "provider_tag": { "provider": "anthropic", "cache_control": "disabled" }
+        }))?;
+        let tag = profile
+            .provider_tag
+            .ok_or("the profile must carry the anthropic tag")?;
+        let request = LlmRequest::new("claude-sonnet-4-6", messages).with_provider_params(tag);
+
+        let body = client.build_request_body(&request)?;
+
+        assert!(
+            !AnthropicClient::contains_cache_control(&body),
+            "the disabled opt-out must remove every cache_control marker: {body}"
+        );
+        assert_eq!(body["system"], "stable system prefix");
+        Ok(())
+    }
+
+    /// A profile that pins only `cache_ttl` rides the automatic default: the
+    /// lifetime is carried on the request-wide breakpoint instead of failing
+    /// the first call, which is what the 0.8.22 disabled default did.
+    #[test]
+    fn test_profile_cache_ttl_rides_the_automatic_default() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_anthropic_tag_merge(|tag| tag.cache_ttl = Some(AnthropicCacheTtl::OneHour));
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"})
         );
         Ok(())
     }

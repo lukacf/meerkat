@@ -1926,9 +1926,20 @@ impl MeerkatMachine {
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        self.prepare_session_runtime_bindings_with_attempt(session_id, preparation, None)
+            .await
+    }
+
+    pub(super) async fn prepare_session_runtime_bindings_with_attempt(
+        &self,
+        session_id: SessionId,
+        preparation: SessionBindingPreparation,
+        attempt: Option<&mut super::session_management::IdempotentBindingPreparationAttempt>,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         self.prepare_session_runtime_bindings_with_claim(
             session_id,
             preparation,
+            attempt,
             uuid::Uuid::new_v4(),
             true,
             None,
@@ -1940,6 +1951,7 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
         preparation: SessionBindingPreparation,
+        attempt: Option<&mut super::session_management::IdempotentBindingPreparationAttempt>,
         requested_claim_id: uuid::Uuid,
         release_materialization_claim_on_drop: bool,
         claim_state_sink: Option<
@@ -1977,57 +1989,13 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings registering session"
         );
-        #[cfg(target_arch = "wasm32")]
-        let inserted_by_call = if self.store.is_none() {
-            {
-                tracing::debug!(%session_id, "MeerkatMachine::prepare_session_runtime_bindings attempting storeless existing check lock");
-                let mut sessions = self.sessions.try_write().map_err(|_| {
-                    tracing::warn!(
-                        %session_id,
-                        "storeless session map busy while checking existing registration"
-                    );
-                    RuntimeDriverError::Internal(format!(
-                        "storeless session map busy while registering {session_id}"
-                    ))
-                })?;
-                tracing::debug!(%session_id, "MeerkatMachine::prepare_session_runtime_bindings locked storeless existing check");
-                if let Some(existing) = sessions.get_mut(&session_id) {
-                    tracing::debug!(
-                        %session_id,
-                        "MeerkatMachine::prepare_session_runtime_bindings found existing session"
-                    );
-                    if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
-                        return Err(error);
-                    }
-                    if existing.clear_dead_attachment() {
-                        existing.stage_generated_executor_exit_observation().map_err(|reason| {
-                            RuntimeDriverError::Internal(format!(
-                                "generated MeerkatMachine rejected executor-exit observation: {reason}"
-                            ))
-                        })?;
-                    }
-                    false
-                } else {
-                    drop(sessions);
-                    self.register_storeless_session_inner_sync_build_step(
-                        session_id.clone(),
-                        Some(Arc::clone(&candidate_materialization_claim_state)),
-                    )?
-                }
-            }
-        } else {
+        let (inserted_by_call, registration_guard) =
             Box::pin(self.register_session_inner_for_actor_materialization(
                 session_id.clone(),
                 Arc::clone(&candidate_materialization_claim_state),
+                attempt,
             ))
-            .await?
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let inserted_by_call = Box::pin(self.register_session_inner_for_actor_materialization(
-            session_id.clone(),
-            Arc::clone(&candidate_materialization_claim_state),
-        ))
-        .await?;
+            .await?;
         tracing::debug!(
             %session_id,
             inserted_by_call,
@@ -2040,6 +2008,7 @@ impl MeerkatMachine {
         let mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(&session_id)
             .await?;
+        drop(registration_guard);
         let (
             driver_handle,
             epoch_id,
@@ -2649,6 +2618,7 @@ impl MeerkatMachine {
             .prepare_session_runtime_bindings_with_claim(
                 session_id.clone(),
                 preparation,
+                None,
                 claim_id,
                 false,
                 Some(&claim_state_slot),

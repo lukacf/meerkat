@@ -16050,6 +16050,332 @@ mod stop_teardown_coordinator_class {
     }
 
     #[tokio::test]
+    async fn prepare_bindings_joins_retained_unregister_before_fresh_registration() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let predecessor = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("predecessor registration should expose exact epoch authority");
+        let unregister = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("owned teardown must retain the deterministic cleanup gate");
+        let prepare = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.prepare_bindings(session_id).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!prepare.is_finished());
+
+        release_cleanup.notify_one();
+        unregister
+            .await
+            .expect("unregister task should not panic")
+            .expect("the original unregister owner should complete");
+        let bindings = tokio::time::timeout(Duration::from_secs(2), prepare)
+            .await
+            .expect("binding preparation must finish after unregister settlement")
+            .expect("binding preparation task should not panic")
+            .expect("binding preparation must retry under fresh registration authority");
+        assert_ne!(bindings.epoch_id(), predecessor.epoch_id());
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn prepare_bindings_returns_typed_in_progress_when_unregister_outlives_grace() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let unregister = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("owned teardown must retain the deterministic cleanup gate");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            machine.prepare_idempotent_session_runtime_bindings(
+                &session_id,
+                crate::meerkat_machine::dispatch_session::SessionBindingPreparation::AuthoritativeRuntimeBinding,
+            ),
+        )
+        .await
+        .expect("binding preparation observation must remain caller-bounded")
+        .expect_err("retained unregister must remain typed in progress");
+        assert!(matches!(
+            error,
+            RuntimeDriverError::UnregisterInProgress { runtime_id }
+                if runtime_id == LogicalRuntimeId::for_session(&session_id)
+        ));
+        release_cleanup.notify_one();
+        let _ = unregister.await;
+    }
+
+    #[tokio::test]
+    async fn prepare_bindings_without_unregister_uses_direct_registration_path() {
+        let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+            &inner,
+        )));
+        let machine = MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+        let first = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("first direct binding preparation should succeed");
+        let lifecycle_writes = store.commit_machine_lifecycle_calls();
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            machine.prepare_bindings(session_id.clone()),
+        )
+        .await
+        .expect("stable no-saga binding preparation must not wait")
+        .expect("idempotent binding preparation should succeed");
+        assert_eq!(second.epoch_id(), first.epoch_id());
+        assert_eq!(
+            store.commit_machine_lifecycle_calls(),
+            lifecycle_writes,
+            "no-saga idempotent preparation must not perform durable lifecycle I/O"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_recovered_unregister_uses_one_caller_grace_for_binding_preparation() {
+        let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+            &inner,
+        )));
+        let first_machine = Arc::new(MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        let session_id = SessionId::new();
+        first_machine
+            .register_session(session_id.clone())
+            .await
+            .expect("first process should register the session");
+        let calls_before = store.commit_machine_lifecycle_calls();
+        store.fail_commit_machine_lifecycle_on_call(calls_before + 2);
+        let first_error = first_machine
+            .unregister_session(&session_id)
+            .await
+            .expect_err("first process should retain a durable unregister prefix");
+        assert!(matches!(
+            first_error,
+            RuntimeDriverError::RecoveryRepairBlocked { .. }
+        ));
+        drop(first_machine);
+
+        let persist_entered = Arc::new(Notify::new());
+        let release_persist = Arc::new(Notify::new());
+        store.arm_block_commit_machine_lifecycle_after_commit(
+            Arc::clone(&persist_entered),
+            Arc::clone(&release_persist),
+        );
+        let recovered = Arc::new(MeerkatMachine::persistent(
+            store as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        let started_at = tokio::time::Instant::now();
+        let prepare = {
+            let recovered = Arc::clone(&recovered);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                recovered
+                    .prepare_idempotent_session_runtime_bindings(
+                        &session_id,
+                        crate::meerkat_machine::dispatch_session::SessionBindingPreparation::AuthoritativeRuntimeBinding,
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), persist_entered.notified())
+            .await
+            .expect("cold-recovered teardown should reach the blocked persistence seam");
+        let error = tokio::time::timeout(Duration::from_secs(3), prepare)
+            .await
+            .expect("cold-recovered binding preparation must remain caller-bounded")
+            .expect("binding preparation task should not panic")
+            .expect_err("blocked cold teardown must remain typed in progress");
+        assert!(matches!(
+            error,
+            RuntimeDriverError::UnregisterInProgress { runtime_id }
+                if runtime_id == LogicalRuntimeId::for_session(&session_id)
+        ));
+        assert!(
+            started_at.elapsed() < Duration::from_secs(3),
+            "cold recovery must not mint a second caller-grace window"
+        );
+        release_persist.notify_one();
+    }
+
+    #[tokio::test]
+    async fn prepare_bindings_holds_registration_transaction_until_mutation_gate() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("runtime registration should succeed");
+        let held_mutation = machine
+            .lock_current_durability_ready_session_mutation_gate(&session_id)
+            .await
+            .expect("test should hold the current mutation gate");
+        let transaction_probe =
+            machine.probe_next_session_registration_transaction_contention_for_test(&session_id);
+        let prepare = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.prepare_bindings(session_id).await })
+        };
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), transaction_probe)
+                .await
+                .expect("preparation must enter the registration transaction")
+                .expect("registration contention probe must report")
+        );
+        let competing_transaction = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                machine
+                    .lock_session_registration_transaction(&session_id)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !competing_transaction.is_finished(),
+            "preparation must retain registration authority while awaiting the mutation gate"
+        );
+        drop(held_mutation);
+        let bindings = tokio::time::timeout(Duration::from_secs(1), prepare)
+            .await
+            .expect("binding preparation must acquire the released mutation gate")
+            .expect("binding preparation task should not panic")
+            .expect("binding preparation should succeed");
+        assert_eq!(bindings.session_id(), &session_id);
+        drop(
+            competing_transaction
+                .await
+                .expect("competing transaction task should not panic"),
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_bindings_rechecks_coordinator_after_transaction_wait() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("runtime registration should succeed");
+        let held_transaction = machine
+            .lock_session_registration_transaction(&session_id)
+            .await;
+        let transaction_probe =
+            machine.probe_next_session_registration_transaction_contention_for_test(&session_id);
+        let prepare = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.prepare_bindings(session_id).await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), transaction_probe)
+                .await
+                .expect("preparation must reach the contended transaction")
+                .expect("registration contention probe must report")
+        );
+
+        let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
+        {
+            let mut sessions = machine.sessions.write().await;
+            let entry = sessions
+                .get_mut(&session_id)
+                .expect("registered session must remain present");
+            entry.unregister_coordinator = Some(UnregisterTeardownCoordinator {
+                epoch_id: entry.epoch_id.clone(),
+                coordinator_id: uuid::Uuid::new_v4(),
+                result_rx,
+            });
+        }
+        drop(held_transaction);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while result_tx.receiver_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-transaction recheck must capture the exact coordinator");
+        machine
+            .sessions
+            .write()
+            .await
+            .get_mut(&session_id)
+            .expect("registered session must remain present")
+            .unregister_coordinator = None;
+        result_tx
+            .send(Some(Ok(())))
+            .expect("captured observer must remain subscribed");
+        let bindings = tokio::time::timeout(Duration::from_secs(1), prepare)
+            .await
+            .expect("binding preparation must remain bounded")
+            .expect("binding preparation task should not panic")
+            .expect("terminal coordinator evidence must authorize one retry");
+        assert_eq!(bindings.session_id(), &session_id);
+    }
+
+    #[tokio::test]
     async fn noncooperative_interrupt_and_executor_return_in_progress_then_converge() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let machine = Arc::new(MeerkatMachine::persistent(

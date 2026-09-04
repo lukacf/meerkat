@@ -194,6 +194,7 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
                         .get("max_bytes")
                         .and_then(serde_json::Value::as_u64),
                 },
+                LlmProviderErrorKind::QuotaExhausted => LlmError::QuotaExhausted { message },
                 LlmProviderErrorKind::ContentFiltered => {
                     LlmError::ContentFiltered { reason: message }
                 }

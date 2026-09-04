@@ -57,6 +57,12 @@ pub enum LlmProviderErrorKind {
     /// The provider rejected (or preflight proved) a serialized request body
     /// that exceeds its request-size cap.
     RequestTooLarge,
+    /// The provider account or project has no quota left (exhausted credits,
+    /// a spend cap or a hard billing limit). Terminal for the key until a
+    /// human tops up the account: no retry clears it and it is not a
+    /// per-window rate limit, which stays `RateLimited` with its
+    /// `Retry-After` hint.
+    QuotaExhausted,
     ContentFiltered,
     ServerError,
     ServerOverloaded,

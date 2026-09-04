@@ -21,7 +21,7 @@ enum UnregisterTeardownAdmission {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UnregisterTeardownWait {
-    CallerGrace,
+    CallerGrace(meerkat_core::time_compat::Instant),
     UntilTerminal,
     ReturnObserver,
 }
@@ -130,6 +130,74 @@ impl UnregisterEntryIncarnationWitness {
 /// unregister saga. Elapsing this grace never cancels the saga or its exact
 /// runtime-loop JoinHandle; it only returns typed in-progress truth.
 const UNREGISTER_CALLER_WAIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub(super) struct IdempotentBindingPreparationAttempt {
+    deadline: meerkat_core::time_compat::Instant,
+    observer: Option<RuntimeSessionUnregisterObserver>,
+}
+
+impl IdempotentBindingPreparationAttempt {
+    pub(super) fn new() -> Self {
+        Self {
+            deadline: meerkat_core::time_compat::Instant::now() + UNREGISTER_CALLER_WAIT_GRACE,
+            observer: None,
+        }
+    }
+
+    pub(super) fn deadline(&self) -> meerkat_core::time_compat::Instant {
+        self.deadline
+    }
+
+    fn remaining(&self) -> std::time::Duration {
+        self.deadline
+            .checked_duration_since(meerkat_core::time_compat::Instant::now())
+            .unwrap_or_default()
+    }
+
+    fn capture(&mut self, observer: RuntimeSessionUnregisterObserver) {
+        self.observer.get_or_insert(observer);
+    }
+
+    pub(super) async fn wait_for_captured_unregister(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let Some(mut observer) = self.observer.take() else {
+            return Ok(false);
+        };
+        if let Some(result) = observer.try_result()? {
+            return result.map(|()| true);
+        }
+        let remaining = self.remaining();
+        if remaining.is_zero() {
+            return Err(RuntimeDriverError::UnregisterInProgress {
+                runtime_id: LogicalRuntimeId::for_session(session_id),
+            });
+        }
+        let wait_for_result = async {
+            loop {
+                if let Some(result) = observer.try_result()? {
+                    return result;
+                }
+                observer.result_rx.changed().await.map_err(|_| {
+                    RuntimeDriverError::Internal(format!(
+                        "unregister coordinator result channel closed for session {session_id}"
+                    ))
+                })?;
+            }
+        };
+        match crate::tokio::time::timeout(remaining, wait_for_result).await {
+            Ok(result) => result.map(|()| true),
+            Err(_elapsed) => Err(RuntimeDriverError::UnregisterInProgress {
+                runtime_id: LogicalRuntimeId::for_session(session_id),
+            }),
+        }
+    }
+}
+
+fn unregister_caller_wait_deadline() -> meerkat_core::time_compat::Instant {
+    meerkat_core::time_compat::Instant::now() + UNREGISTER_CALLER_WAIT_GRACE
+}
 
 /// Maximum time an explicit stop caller waits for the independently-owned
 /// cleanup coordinator. The coordinator and exact executor remain owned after
@@ -1153,6 +1221,87 @@ async fn retire_ops_lifecycle_owner_for_unregister(
 }
 
 impl MeerkatMachine {
+    fn binding_unregister_observer(
+        &self,
+        session_id: &SessionId,
+        entry: &RuntimeSessionEntry,
+    ) -> Option<RuntimeSessionUnregisterObserver> {
+        let coordinator = entry.unregister_coordinator.as_ref()?;
+        (coordinator.epoch_id == entry.epoch_id).then(|| {
+            RuntimeSessionUnregisterObserver::new(
+                RuntimeSessionRegistrationWitness::new(
+                    Arc::downgrade(&self.shared),
+                    session_id.clone(),
+                    entry.epoch_id.clone(),
+                    Arc::downgrade(&entry.mutation_gate),
+                ),
+                coordinator.coordinator_id,
+                coordinator.result_rx.clone(),
+            )
+        })
+    }
+
+    async fn validate_binding_registration_transaction(
+        &self,
+        session_id: &SessionId,
+        attempt: &mut IdempotentBindingPreparationAttempt,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id)
+            && let Some(error) = entry.registration_blocked_by_unregister(session_id)
+        {
+            if matches!(error, RuntimeDriverError::NotReady { .. })
+                && let Some(observer) = self.binding_unregister_observer(session_id, entry)
+            {
+                attempt.capture(observer);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn lock_binding_registration_transaction(
+        &self,
+        session_id: &SessionId,
+        attempt: &mut IdempotentBindingPreparationAttempt,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        self.validate_binding_registration_transaction(session_id, attempt)
+            .await?;
+
+        let slot = self.session_registration_transaction_slot(session_id);
+        let remaining = attempt.remaining();
+        if !remaining.is_zero()
+            && let Ok(guard) = crate::tokio::time::timeout(
+                remaining,
+                self.lock_session_registration_transaction(session_id),
+            )
+            .await
+        {
+            self.validate_binding_registration_transaction(session_id, attempt)
+                .await?;
+            return Ok(guard);
+        }
+        if let Ok(guard) = Arc::clone(&slot).try_lock_owned() {
+            self.validate_binding_registration_transaction(session_id, attempt)
+                .await?;
+            return Ok(guard);
+        }
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id)
+            && let Some(error) = entry.registration_blocked_by_unregister(session_id)
+        {
+            if matches!(error, RuntimeDriverError::NotReady { .. })
+                && let Some(observer) = self.binding_unregister_observer(session_id, entry)
+            {
+                attempt.capture(observer);
+            }
+            return Err(error);
+        }
+        Err(RuntimeDriverError::Internal(format!(
+            "session registration transaction remained busy past binding preparation deadline for {session_id}"
+        )))
+    }
+
     /// Acquire the same session-scoped lease as `live/open`. A missing session
     /// is idempotent (`Ok(None)`). The unregister owner opens `Draining` under
     /// the matching mutation gate before proving physical channel absence, so
@@ -1569,37 +1718,115 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
         claim_state: Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
-    ) -> Result<bool, RuntimeDriverError> {
+        attempt: Option<&mut IdempotentBindingPreparationAttempt>,
+    ) -> Result<(bool, crate::tokio::sync::OwnedMutexGuard<()>), RuntimeDriverError> {
+        let (outcome, registration_guard) = self
+            .register_session_settling_cold_recovered_drain_with_transaction(
+                &session_id,
+                Some(claim_state),
+                attempt,
+            )
+            .await?;
+        Ok((outcome.inserted(), registration_guard))
+    }
+
+    pub(super) async fn register_session_settling_cold_recovered_drain(
+        &self,
+        session_id: &SessionId,
+        materialization_claim_state: Option<
+            Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
+        >,
+    ) -> Result<RegisterSessionInnerOutcome, RuntimeDriverError> {
+        let (outcome, _registration_guard) = self
+            .register_session_settling_cold_recovered_drain_with_transaction(
+                session_id,
+                materialization_claim_state,
+                None,
+            )
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn register_session_settling_cold_recovered_drain_with_transaction(
+        &self,
+        session_id: &SessionId,
+        materialization_claim_state: Option<
+            Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
+        >,
+        mut attempt: Option<&mut IdempotentBindingPreparationAttempt>,
+    ) -> Result<
+        (
+            RegisterSessionInnerOutcome,
+            crate::tokio::sync::OwnedMutexGuard<()>,
+        ),
+        RuntimeDriverError,
+    > {
         // Settle a cold-recovered unregister drain before reporting the
         // registration. Collapsing the witness to a bool here (as this did
         // through 0.8.23) hid `InsertedColdRecoveredDraining` from actor
         // materialization, which then staged RegisterSession into a Draining
         // authority and got a bare guard rejection - the permanent
         // resume wedge.
-        self.register_session_settling_cold_recovered_drain(&session_id, Some(claim_state))
-            .await
-            .map(RegisterSessionInnerOutcome::inserted)
-    }
-
-    async fn register_session_inner_with_materialization_origin(
-        &self,
-        session_id: SessionId,
-        materialization_claim_state: Option<
-            Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
-        >,
-    ) -> Result<RegisterSessionInnerOutcome, RuntimeDriverError> {
-        // Serialize the full absent-check -> durable recovery/epoch selection
-        // -> map publication transaction with final unregister removal. The
-        // session mutation gate does not exist while the entry is absent, so it
-        // cannot close this ABA window by itself.
-        let _registration_transaction_guard = self
-            .lock_session_registration_transaction(&session_id)
-            .await;
-        self.register_session_inner_under_registration_transaction(
-            session_id,
-            materialization_claim_state,
-        )
-        .await
+        let mut registration_guard = match attempt.as_deref_mut() {
+            Some(attempt) => {
+                self.lock_binding_registration_transaction(session_id, attempt)
+                    .await?
+            }
+            None => self.lock_session_registration_transaction(session_id).await,
+        };
+        let mut outcome = self
+            .register_session_inner_under_registration_transaction(
+                session_id.clone(),
+                materialization_claim_state.clone(),
+            )
+            .await?;
+        if outcome == RegisterSessionInnerOutcome::InsertedColdRecoveredDraining {
+            let epoch_id = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .map(|entry| entry.epoch_id.clone())
+                    .ok_or(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    })?
+            };
+            drop(registration_guard);
+            let wait = attempt
+                .as_ref()
+                .map_or(UnregisterTeardownWait::UntilTerminal, |attempt| {
+                    UnregisterTeardownWait::CallerGrace(attempt.deadline())
+                });
+            self.join_or_start_unregister_teardown_with_admission(
+                session_id,
+                Some(&epoch_id),
+                UnregisterTeardownCaller::Explicit,
+                UnregisterTeardownAdmission::AnyCurrentRegistration,
+                None,
+                wait,
+            )
+            .await?
+            .require_completed()?;
+            registration_guard = match attempt {
+                Some(attempt) => {
+                    self.lock_binding_registration_transaction(session_id, attempt)
+                        .await?
+                }
+                None => self.lock_session_registration_transaction(session_id).await,
+            };
+            outcome = self
+                .register_session_inner_under_registration_transaction(
+                    session_id.clone(),
+                    materialization_claim_state,
+                )
+                .await?;
+            if outcome == RegisterSessionInnerOutcome::InsertedColdRecoveredDraining {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "session {session_id} re-entered a cold-recovered unregister drain window \
+                     immediately after its teardown was concluded"
+                )));
+            }
+        }
+        Ok((outcome, registration_guard))
     }
 
     /// Register while the caller owns this session's stable absent-entry
@@ -2446,82 +2673,6 @@ impl MeerkatMachine {
                 Ok(RegisterSessionInnerOutcome::Inserted)
             }
         }
-    }
-
-    /// Register, concluding a cold-recovered unregister drain window first.
-    ///
-    /// A `Draining` image reconstructed from the durable unregister retry
-    /// record names producer obligations that belonged to a process which is
-    /// gone; `UnregisterTeardownMechanicalObservations::
-    /// from_durable_process_recovery` already records closing them as a
-    /// forced, process-loss disposition rather than clean quiescence. So the
-    /// escape from `Draining` is to CONCLUDE the teardown through its owning
-    /// authority, never to re-admit past open obligations: the three drain
-    /// feedback inputs are each guarded on `unregister_draining`, so moving
-    /// `registration_phase` off `Draining` while any obligation is open would
-    /// make a late producer's own completion unroutable.
-    ///
-    /// Through 0.8.23 no caller concluded it. A first turn that failed
-    /// terminally left the CLI unable to finish teardown, and every later
-    /// registration - resume included - was guard-rejected by construction,
-    /// which is why an incomplete cleanup read as a permanent verdict on the
-    /// session. This is the same settlement `ensure_runtime_executor_attachment`
-    /// already performs through `ExistingExecutorClaim::JoinUnregister`; it is
-    /// reused, not reimplemented.
-    ///
-    /// Called with NO session mutation gate held: the teardown takes the
-    /// session registration transaction and the exact mutation gate itself.
-    pub(super) async fn register_session_settling_cold_recovered_drain(
-        &self,
-        session_id: &SessionId,
-        materialization_claim_state: Option<
-            Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
-        >,
-    ) -> Result<RegisterSessionInnerOutcome, RuntimeDriverError> {
-        let outcome = self
-            .register_session_inner_with_materialization_origin(
-                session_id.clone(),
-                materialization_claim_state.clone(),
-            )
-            .await?;
-        if outcome != RegisterSessionInnerOutcome::InsertedColdRecoveredDraining {
-            return Ok(outcome);
-        }
-        let epoch_id = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(|entry| entry.epoch_id.clone())
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?
-        };
-        self.join_or_start_unregister_teardown_with_admission(
-            session_id,
-            Some(&epoch_id),
-            UnregisterTeardownCaller::Explicit,
-            UnregisterTeardownAdmission::AnyCurrentRegistration,
-            None,
-            UnregisterTeardownWait::UntilTerminal,
-        )
-        .await?;
-        // The settled teardown removed the exact entry, so this registration
-        // starts on a fresh authority. One retry only: a second cold-recovered
-        // drain here would mean the settlement did not remove what it just
-        // concluded, which is an authority defect and not something to spin on.
-        let readmitted = self
-            .register_session_inner_with_materialization_origin(
-                session_id.clone(),
-                materialization_claim_state,
-            )
-            .await?;
-        if readmitted == RegisterSessionInnerOutcome::InsertedColdRecoveredDraining {
-            return Err(RuntimeDriverError::Internal(format!(
-                "session {session_id} re-entered a cold-recovered unregister drain window \
-                 immediately after its teardown was concluded"
-            )));
-        }
-        Ok(readmitted)
     }
 
     pub(super) async fn unregister_session_inner_if_epoch(
@@ -5413,7 +5564,7 @@ impl MeerkatMachine {
             UnregisterTeardownCaller::Explicit,
             UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration,
             Some(witness),
-            UnregisterTeardownWait::CallerGrace,
+            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
         )
         .await?
         .require_completed()
@@ -6004,7 +6155,7 @@ impl MeerkatMachine {
             UnregisterTeardownCaller::Explicit,
             UnregisterTeardownAdmission::AnyCurrentRegistration,
             Some(registration),
-            UnregisterTeardownWait::CallerGrace,
+            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
         )
         .await?
         .require_completed()
@@ -6868,7 +7019,7 @@ impl MeerkatMachine {
             caller,
             UnregisterTeardownAdmission::AnyCurrentRegistration,
             None,
-            UnregisterTeardownWait::CallerGrace,
+            UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline()),
         )
         .await
         .and_then(UnregisterTeardownWaitOutcome::require_completed)
@@ -7267,13 +7418,11 @@ impl MeerkatMachine {
             UnregisterTeardownWait::UntilTerminal => wait_for_owned_result
                 .await
                 .map(|()| UnregisterTeardownWaitOutcome::Completed(true)),
-            UnregisterTeardownWait::CallerGrace => {
-                match crate::tokio::time::timeout(
-                    UNREGISTER_CALLER_WAIT_GRACE,
-                    wait_for_owned_result,
-                )
-                .await
-                {
+            UnregisterTeardownWait::CallerGrace(deadline) => {
+                let remaining = deadline
+                    .checked_duration_since(meerkat_core::time_compat::Instant::now())
+                    .unwrap_or_default();
+                match crate::tokio::time::timeout(remaining, wait_for_owned_result).await {
                     Ok(result) => result.map(|()| UnregisterTeardownWaitOutcome::Completed(true)),
                     Err(_elapsed) => Err(RuntimeDriverError::UnregisterInProgress {
                         runtime_id: LogicalRuntimeId::for_session(session_id),

@@ -10637,11 +10637,12 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
-        match Box::pin(self.prepare_session_runtime_bindings(
-            session_id.clone(),
-            super::dispatch_session::SessionBindingPreparation::AuthoritativeRuntimeBinding,
-        ))
-        .await
+        match self
+            .prepare_idempotent_session_runtime_bindings(
+                &session_id,
+                super::dispatch_session::SessionBindingPreparation::AuthoritativeRuntimeBinding,
+            )
+            .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
             Ok(_) => {
@@ -10711,13 +10712,14 @@ impl MeerkatMachine {
         &self,
         session_id: SessionId,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
-        match Box::pin(self.prepare_session_runtime_bindings(
-            session_id.clone(),
-            super::dispatch_session::SessionBindingPreparation::LocalSessionResources(
-                super::LocalSessionMaterializationMode::Ordinary,
-            ),
-        ))
-        .await
+        match self
+            .prepare_idempotent_session_runtime_bindings(
+                &session_id,
+                super::dispatch_session::SessionBindingPreparation::LocalSessionResources(
+                    super::LocalSessionMaterializationMode::Ordinary,
+                ),
+            )
+            .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
             Ok(_) => {
@@ -10736,5 +10738,32 @@ impl MeerkatMachine {
                 err.to_string(),
             )),
         }
+    }
+
+    pub(super) async fn prepare_idempotent_session_runtime_bindings(
+        &self,
+        session_id: &SessionId,
+        preparation: super::dispatch_session::SessionBindingPreparation,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        let mut attempt = super::session_management::IdempotentBindingPreparationAttempt::new();
+        let first = Box::pin(self.prepare_session_runtime_bindings_with_attempt(
+            session_id.clone(),
+            preparation,
+            Some(&mut attempt),
+        ))
+        .await;
+        let error = match first {
+            Ok(result) => return Ok(result),
+            Err(error) => error,
+        };
+        if !attempt.wait_for_captured_unregister(session_id).await? {
+            return Err(error);
+        }
+        Box::pin(self.prepare_session_runtime_bindings_with_attempt(
+            session_id.clone(),
+            preparation,
+            Some(&mut attempt),
+        ))
+        .await
     }
 }

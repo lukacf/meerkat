@@ -440,16 +440,26 @@ them.
   `MEERKAT_PRE_PUSH_LANE_IDLE_SECS` (default 6 hours). Every decision is
   logged as one `kept:` or `pruned:` line with its reason. Exact-tree
   evidence reuse is unchanged.
-- `discard_stale_live_session` now documents its teardown contract (exact
-  registration witness, terminal-completion wait, absent or replaced
-  registration treated as already clean, preserved error combination) and
-  logs at debug level when the captured registration was replaced before
-  unregister instead of dropping that result silently. The
-  `unregister_session_registration_until_terminal_if_current` doc now covers
-  exact-registration reoccupation callers, not only process-lifecycle owners.
-  Facade tests pin that an absent registration returns `Ok(())` and that a
-  teardown outliving the ordinary 2-second caller grace completes instead of
-  surfacing `UnregisterInProgress`.
+- `turn/start`, input ingress, and external event injection no longer tear
+  down a registered runtime that merely has no live actor yet. In a reopened
+  `rkat-rpc`, `monitors/start` attaches a runtime executor before any turn, and
+  the stale-projection check classified the absent live actor as stale, so
+  `discard_stale_live_session` unregistered the healthy registration and then
+  waited on its runtime loop to hand off while that loop was inside a recovery
+  continuation turn (the `durable_jobs_workgraph_recovery` flake, refs #1093).
+  The discard now keeps the registration when no live actor exists (the
+  in-loop recovery tail materializes the actor from durable authority) and
+  only discards the actor plus awaits the exact registration's owned teardown
+  to terminal completion when a live actor was actually present. Both skipped
+  paths (no live actor; captured registration already replaced) log at debug
+  level instead of dropping the result silently. The doc comments on
+  `discard_stale_live_session` and
+  `unregister_session_registration_until_terminal_if_current` state this
+  contract, including exact-registration reoccupation callers. Facade and RPC
+  tests pin that a registration without a live actor keeps its epoch across
+  `turn/start`, that an absent registration returns `Ok(())`, and that a live
+  actor's teardown outliving the ordinary 2-second caller grace completes
+  instead of surfacing `UnregisterInProgress`.
 
 ## [0.8.33] - 2026-09-04
 

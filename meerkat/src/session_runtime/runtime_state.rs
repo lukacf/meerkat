@@ -376,15 +376,24 @@ mod ops {
             result
         }
 
-        /// Discard a stale live session and unregister it from the
-        /// runtime adapter so the same `SessionId` can be rematerialized.
+        /// Discard a stale live session so the same `SessionId` can be
+        /// rematerialized, and unregister its runtime registration only when a
+        /// live actor was actually torn down.
         ///
         /// Contract:
-        /// - The service-side live projection is discarded first; an absent
-        ///   projection (`Ok(())` or `NotFound`) is already clean.
-        /// - The exact current [`RuntimeSessionRegistrationWitness`] is
-        ///   captured and its owned unregister teardown saga is awaited to
-        ///   terminal completion via
+        /// - Absent live projection: nothing is stale, so the runtime
+        ///   registration is kept as-is and `Ok(())` is returned. A
+        ///   registration without a live actor is a healthy state (for example
+        ///   `monitors/start` attaching an executor before any turn): the
+        ///   runtime loop's recovery tail materializes the actor from durable
+        ///   authority on the next accepted input. Tearing that registration
+        ///   down here would wait on a loop that may be inside a
+        ///   continuation turn, which is the `durable_jobs_workgraph_recovery`
+        ///   handoff stall.
+        /// - Behind live projection: the live actor is discarded first (a
+        ///   `NotFound` race is already clean), then the exact current
+        ///   [`RuntimeSessionRegistrationWitness`] is captured and its owned
+        ///   unregister teardown saga is awaited to terminal completion via
         ///   `unregister_session_registration_until_terminal_if_current`.
         ///   There is deliberately no outer bound: the saga is
         ///   coordinator-owned, so dropping this future never aborts
@@ -404,6 +413,18 @@ mod ops {
             &self,
             session_id: &SessionId,
         ) -> Result<(), SessionError> {
+            // Mechanical registry probe: no actor RPC, no durable arbitration,
+            // so a turn parked inside the actor cannot stall this check.
+            let live_actor_registered =
+                self.service.live_session_actor_registered(session_id).await;
+            if !live_actor_registered {
+                tracing::debug!(
+                    %session_id,
+                    "stale live-session discard found no live actor; keeping the runtime \
+                     registration for in-loop rematerialization from durable authority"
+                );
+                return Ok(());
+            }
             let discard_error = match self.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),

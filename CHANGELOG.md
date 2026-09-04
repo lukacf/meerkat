@@ -363,6 +363,19 @@ them.
   its own heading slugs keep them upper-case. Negative tests now pin that a
   link to a missing page and a link to a missing heading anchor both fail
   `make docs-check`.
+- **`rkat-mcp` now installs a tracing subscriber, so its warnings and errors
+  reach stderr instead of vanishing.** The MCP server binary depended on
+  `tracing` but never installed a subscriber, so every `tracing::warn!` and
+  `tracing::error!` raised in the process was dropped: an invalid realm config
+  fell back to defaults with no output, a panicked event task or a terminated
+  schedule-host supervisor left no trace, and the documented `verbose`
+  parameter of `meerkat_run`/`meerkat_resume` (server-side event logging at
+  `info`) never produced a line. The binary now mirrors `rkat-rpc`: an
+  `EnvFilter` with an `info` default, `RUST_LOG` overriding it (an unparsable
+  value is named on stderr before the default applies), and a formatting layer
+  that writes to stderr only, because stdout is the MCP JSON channel. Hosts
+  that launch `rkat-mcp` observe new stderr output; stdout framing is
+  unchanged.
 
 ## [0.8.33] - 2026-09-04
 

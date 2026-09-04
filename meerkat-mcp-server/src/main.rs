@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use tracing_subscriber::{
+    EnvFilter, filter::ParseError, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "rkat-mcp", version = env!("CARGO_PKG_VERSION"))]
@@ -67,8 +70,55 @@ struct ToolCompletion {
     response: Value,
 }
 
+/// Filter applied when `RUST_LOG` is unset or blank: the same `info` floor
+/// rkat-rpc uses, so the documented `verbose` event logging and every
+/// warn/error the server emits reach the operator by default.
+const DEFAULT_TRACE_FILTER: &str = "info";
+
+/// Resolve the subscriber filter from the process's optional `RUST_LOG` value.
+///
+/// Unset or blank selects [`DEFAULT_TRACE_FILTER`]. A value that does not
+/// parse is returned as `Err` so the caller can name the rejected directive
+/// on stderr before falling back, rather than dropping the operator's setting
+/// without a word.
+fn tracing_env_filter(rust_log: Option<&str>) -> Result<EnvFilter, ParseError> {
+    match rust_log
+        .map(str::trim)
+        .filter(|directives| !directives.is_empty())
+    {
+        Some(directives) => EnvFilter::try_new(directives),
+        None => Ok(EnvFilter::new(DEFAULT_TRACE_FILTER)),
+    }
+}
+
+/// Install the process-wide tracing subscriber.
+///
+/// Events go to stderr only: stdout is the MCP JSON channel and a single
+/// non-JSON line there would break the client's framing. Before this was
+/// installed, every `tracing::warn!`/`error!` in the server (an invalid realm
+/// config falling back to defaults, a panicked event task, a terminated
+/// schedule-host supervisor) was dropped, because nothing subscribed.
+fn init_tracing() {
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let filter = match tracing_env_filter(rust_log.as_deref()) {
+        Ok(filter) => filter,
+        Err(err) => {
+            eprintln!(
+                "rkat-mcp: ignoring RUST_LOG={:?} ({err}); using `{DEFAULT_TRACE_FILTER}`",
+                rust_log.as_deref().unwrap_or_default()
+            );
+            EnvFilter::new(DEFAULT_TRACE_FILTER)
+        }
+    };
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
     let args = Args::parse();
     let selection =
         RealmConfig::selection_from_inputs(args.realm, args.isolated, RealmSelection::Isolated)?;
@@ -454,6 +504,50 @@ mod tests {
         fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
             Err(serde::ser::Error::custom("forced serialization failure"))
         }
+    }
+
+    fn max_level_hint(filter: &EnvFilter) -> Option<tracing_subscriber::filter::LevelFilter> {
+        <EnvFilter as tracing_subscriber::Layer<tracing_subscriber::Registry>>::max_level_hint(
+            filter,
+        )
+    }
+
+    /// Unset or blank `RUST_LOG` selects the `info` floor shared with rkat-rpc.
+    #[test]
+    fn unset_or_blank_rust_log_selects_the_info_default() {
+        for rust_log in [None, Some(""), Some("   ")] {
+            let filter = tracing_env_filter(rust_log).expect("default filter parses");
+            assert_eq!(
+                max_level_hint(&filter),
+                Some(tracing_subscriber::filter::LevelFilter::INFO),
+                "RUST_LOG={rust_log:?}"
+            );
+        }
+    }
+
+    /// A parsable `RUST_LOG` replaces the default instead of layering on it.
+    #[test]
+    fn rust_log_overrides_the_default_filter() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        let debug = tracing_env_filter(Some("debug")).expect("debug parses");
+        assert_eq!(max_level_hint(&debug), Some(LevelFilter::DEBUG));
+        let error = tracing_env_filter(Some("error")).expect("error parses");
+        assert_eq!(max_level_hint(&error), Some(LevelFilter::ERROR));
+        let targeted =
+            tracing_env_filter(Some("warn,meerkat_mcp_server=trace")).expect("targets parse");
+        assert_eq!(max_level_hint(&targeted), Some(LevelFilter::TRACE));
+    }
+
+    /// An unparsable `RUST_LOG` surfaces as a typed error for the caller to
+    /// report; it is never silently replaced by the default.
+    #[test]
+    fn unparsable_rust_log_is_reported_not_swallowed() {
+        let rejected = tracing_env_filter(Some("meerkat_mcp_server=loud"));
+        assert!(
+            rejected.is_err(),
+            "an invalid level directive must be a ParseError"
+        );
     }
 
     /// Site-gate: an event serialization fault must surface as an error-level

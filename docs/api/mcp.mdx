@@ -317,6 +317,17 @@ over HTTP, that host owns transport authentication, authorization, and
 encryption; provider auth bindings configure outbound model credentials and do
 not authenticate inbound MCP callers.
 
+#### Logging
+
+`rkat-mcp` writes trace events to stderr only; stdout carries nothing but the
+MCP JSON channel. The default filter is `info`, which is what makes the
+`verbose` parameter of `meerkat_run` and `meerkat_resume` produce output.
+`RUST_LOG` replaces the default (`RUST_LOG=warn` keeps only warnings and
+errors; a blank value is treated as unset), and a value that does not parse is
+reported on stderr before the default applies, so an operator's typo is never
+swallowed. Clients that capture stderr see these lines; nothing changes on
+stdout.
+
 ## Tool reference
 
 ### meerkat_run

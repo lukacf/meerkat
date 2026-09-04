@@ -1,0 +1,406 @@
+---
+title: "Building And Deploying"
+description: "What a from-source build of Meerkat costs, how to keep it inside a small host's memory, how to containerize the binaries, and what the prebuilt release binaries guarantee."
+icon: "server"
+---
+
+Meerkat is a large Rust workspace. The featured install paths are prebuilt:
+the [Homebrew tap](/guides/cd-and-distribution#homebrew-tap), the GitHub
+Release archives, and the SDKs' automatic `rkat-rpc` download. This page is for
+everyone else: people who run `cargo install rkat`, embed the crates in their
+own binary, build inside a container, or need to know where the prebuilt
+binaries will and will not run. Every number below was measured against this
+repository; the memory and time figures come from one cold build described in
+[Build Cost](#build-cost).
+
+## What A Build Compiles
+
+The workspace has ~50 member crates. Its lockfile resolves ~670 package
+entries (~600 distinct crates) for the whole workspace with every feature,
+dev-dependency, and optional backend enabled. A default-feature
+`cargo install rkat` compiles ~380 crates.
+
+Most of those are ordinary. The cost is concentrated in a few very large
+first-party crates, each of which is one `rustc` and LLVM invocation:
+
+| Crate | Source lines (approx.) | Why it is large |
+|-------|------------------------|-----------------|
+| `meerkat-mob` | ~350k | Mob orchestration plus generated machine authority code |
+| `meerkat-runtime` | ~250k | Runtime control plane plus generated machines |
+| `meerkat-core` | ~180k | Agent loop, types, generated state machines |
+| `meerkat-machine-schema` | ~100k | Generated machine catalog (data-shaped code) |
+
+These four, plus the final `rkat` crate that pulls the whole surface into one
+binary, dominate both wall time and peak memory, which is why the release lane
+and the rest of this page talk about per-package `opt-level` pins rather than
+about the dependency count.
+
+Toolchain and native requirements:
+
+- The repository pins Rust `1.94.1` in `rust-toolchain.toml`;
+  `make install-build-deps` installs exactly that toolchain into a checkout.
+  The published crates declare `rust-version = "1.94.0"`, so
+  `cargo install rkat` needs Rust 1.94 or newer.
+- The default feature set needs a C compiler and libc headers (bundled SQLite
+  and a few other C sources compile through the `cc` crate) and nothing else.
+  TLS is `rustls`; no OpenSSL development package is required and the release
+  gate rejects binaries that link one.
+- `cmake` is needed only by the optional `live-webrtc` feature of the
+  `meerkat` facade and `meerkat-rpc` crates (meerkat-live `webrtc`, bundled
+  Opus through `audiopus_sys`). `rkat` has no such feature, and no shipped
+  binary enables it by default, so a `cargo install` of any of them never
+  compiles it.
+
+## Build Cost
+
+Two cold builds, measured for this page:
+
+```bash
+cargo build --locked -p rkat --release   # same package and profile as `cargo install rkat`
+```
+
+Both ran from an empty target directory with default features and Rust 1.94.1
+on an 18-core Apple M5 Max with 128 GiB of RAM, so nothing was
+memory-constrained and Cargo ran 18 jobs in parallel. The first used Cargo's
+default release profile; the second used the
+[low-memory profile](#low-memory-profile) below (`opt-level = 1` globally,
+`opt-level = 0` for `meerkat-machine-schema`), with the same job count so the
+per-crate peaks are comparable. Peaks were sampled once per second from `ps`.
+
+| Measurement | Cargo defaults | Low-memory profile |
+|-------------|----------------|--------------------|
+| Wall time | ~25 min 29 s | ~19 min 6 s |
+| Peak aggregate RSS of all compiler and linker processes | ~24.9 GiB (5 processes at the peak) | ~12.2 GiB (3 processes at the peak) |
+| Largest single `rustc` process | ~11.0 GiB (`meerkat-mob`) | ~11.5 GiB (`meerkat-mob`) |
+| Second and third largest | ~10.1 GiB (`rkat`), ~9.4 GiB (`meerkat-machine-schema`) | ~7.4 GiB (`meerkat-runtime`), ~5.5 GiB (`meerkat-rpc`) |
+| Target directory after the build | ~2.8 GiB | ~2.5 GiB |
+| Resulting `rkat` binary | ~225 MiB | ~196 MiB |
+
+How to translate that to your host:
+
+- **The largest single crate is the floor, and only `opt-level = 0` moves it.**
+  Even with `CARGO_BUILD_JOBS=1`, the build needs as much memory as its biggest
+  `rustc` process. In both runs above that was `meerkat-mob` at ~11 GiB: going
+  from `opt-level = 3` to `1` halved the aggregate peak, the `rkat` crate, and
+  `meerkat-machine-schema`, but left `meerkat-mob` where it was. A third run
+  (the same `rkat` build with the low-memory profile plus `meerkat-mob` pinned
+  to `opt-level = 0`) brought `meerkat-mob` down to ~6.3 GiB, after
+  which the largest process is `meerkat-runtime` at ~7.4
+  GiB. Below that, the levers are the feature set (dropping `mob` removes the
+  crate), swap, and the prebuilt binaries.
+- **Aggregate memory scales with the job count.** Cargo runs up to one `rustc`
+  per core. The aggregate peaks above happened while four or five large
+  first-party crates were compiling at once; with `N` jobs, budget for the `N`
+  largest crates that can be in flight together. `meerkat-mob`,
+  `meerkat-runtime`, and `meerkat-machine-schema` did overlap in the default
+  build, and that overlap produced its peak.
+- **Wall time scales with cores only up to the serial tail.** The hundreds of
+  small dependencies compile in parallel in the first few minutes, but the
+  large first-party crates depend on each other, and the final `rkat` crate
+  compiled alone for roughly the last third of the wall time. A 4-core cloud
+  VM should expect a few times the wall time above, and the tail does not
+  shrink with more cores. `cargo install` also has no warm cache to reuse, so
+  every install is a cold build.
+- **Disk is transient for `cargo install`.** The temporary target directory is
+  deleted after the binary is installed, but it must fit while the build runs.
+  A checkout that keeps its `target/` needs the full figure per profile.
+
+The project's own record of what happens on small hosts is in
+`.github/workflows/release.yml`: the Windows release lane runs on a 16 GB
+GitHub-hosted runner with no memory overcommit, and it documents `rustc`
+exceeding that runner's commit limit on the generated machine catalog. That
+lane therefore builds with `CARGO_BUILD_JOBS=2` and pins
+`meerkat-machine-schema` to `opt-level = 0` and `meerkat-runtime` and
+`meerkat-mcp` to `opt-level = 1`. The Linux and macOS release binaries keep
+full `opt-level = 3`; the pins are Windows-only. Continuous integration
+(`.github/workflows/ci.yml`) compiles its broad lane on BuildBuddy remote
+executors, with only the dense Mob topology job and the nightly lanes on
+GitHub-hosted runners; release binaries are produced only by the release
+workflow.
+
+Rough sizing, derived from the peaks above:
+
+| Host | Expectation |
+|------|-------------|
+| 32 GiB or more | Cargo's defaults work with all cores busy (measured aggregate peak ~24.9 GiB at 18 jobs). The low-memory profile still saves a quarter of the wall time. |
+| 16 GiB | Defaults do not fit with parallel jobs: `meerkat-mob` and `meerkat-runtime` overlapping at their default peaks already exceed 16 GiB. Use the low-memory profile below with `CARGO_BUILD_JOBS=2` (measured aggregate peak ~12.2 GiB at 18 jobs; the two largest crates sum to ~19 GiB if their peaks coincide) or `CARGO_BUILD_JOBS=1` for certainty. The release lane runs the per-package-pins variant of that profile with `CARGO_BUILD_JOBS=2` on its 16 GB runners. |
+| 8 to 12 GiB (small VPS, memory-limited CI container) | Add the small-host pin below (`meerkat-mob` at `opt-level = 0`) and use `CARGO_BUILD_JOBS=1`: the largest process is then `meerkat-runtime` at ~7.4 GiB, so 12 GiB fits and 8 GiB needs swap for headroom. |
+| Under 8 GiB | Build without the `mob` feature (see [Features](#what-each-lever-does)), or install a prebuilt binary. |
+
+## Lowering Memory
+
+### Where profile settings come from
+
+Cargo reads `[profile.*]` tables only from the root manifest of the build it
+is running. Two consequences matter here:
+
+- The Meerkat workspace ships **no** `[profile.release]`, so its own release
+  builds run at Cargo's defaults (`opt-level = 3`, `codegen-units = 16`,
+  `lto = false`, `debug = false`) except where a lane injects pins.
+- Even if it did, that would not reach you. `cargo install rkat` unpacks the
+  published `rkat` crate as the root of its own temporary workspace; the
+  repository's root `Cargo.toml` is not part of that crate. A downstream
+  binary that depends on `meerkat = "=0.8.32"` is likewise governed by its own
+  root manifest, never by Meerkat's.
+
+So the consumer sets the profile. `cargo install` honors Cargo configuration
+from a `.cargo/config.toml` in the directory you run it from (or
+`~/.cargo/config.toml`), from `CARGO_PROFILE_RELEASE_*` environment variables,
+and from `--config` on the command line. This was verified for this page with
+`cargo install -v`: with `CARGO_PROFILE_RELEASE_OPT_LEVEL=1` set, `rustc`
+receives `-C opt-level=1`. Library embedders put the same tables in their own
+root `Cargo.toml`.
+
+### Low-memory profile
+
+```toml
+# .cargo/config.toml in the directory you run `cargo install` from,
+# or ~/.cargo/config.toml. Library embedders: put the same tables in the
+# root Cargo.toml of your own binary crate instead.
+
+[profile.release]
+opt-level = 1        # cuts LLVM's working set on the generated crates the most
+codegen-units = 16   # Cargo's release default; read the notes before lowering it
+lto = false          # Cargo's default; never enable "thin" or "fat" on a small host
+debug = false
+strip = "symbols"    # smaller output; no effect on compile-time memory
+
+# Generated machine catalog: data-shaped code that gains nothing from
+# optimization. The release lane pins this on its 16 GB runners.
+[profile.release.package.meerkat-machine-schema]
+opt-level = 0
+```
+
+For hosts under 16 GiB, add the small-host pin. It is the only setting that
+moved `meerkat-mob` (~11.5 GiB at `opt-level = 1`, ~6.3 GiB
+at `0`); it trades CPU on the orchestration path for memory, so measure your
+workload before shipping a binary built this way:
+
+```toml
+[profile.release.package.meerkat-mob]
+opt-level = 0
+```
+
+To keep everything else at full optimization and only pin the generated
+crates (the exact shape the release lane uses on Windows), drop the global
+`opt-level` line and keep:
+
+```toml
+[profile.release.package.meerkat-machine-schema]
+opt-level = 0
+
+[profile.release.package.meerkat-runtime]
+opt-level = 1
+
+[profile.release.package.meerkat-mcp]
+opt-level = 1
+```
+
+The same settings on one command line, without a config file:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
+  cargo install rkat --locked \
+    --config 'profile.release.package.meerkat-machine-schema.opt-level=0'
+```
+
+Per-package profile keys have no environment-variable form, which is why the
+package pin goes through `--config`; repeat the flag with
+`profile.release.package.meerkat-mob.opt-level=0` for the small-host pin.
+
+### What each lever does
+
+- **`CARGO_BUILD_JOBS` (or `-j`)** caps the number of concurrent `rustc`
+  processes. Aggregate memory is the sum of the compilers running at once, so
+  this is the first lever on any memory-limited host. Wall time rises roughly
+  in proportion.
+- **`opt-level`**: going from `3` to `1` removes most of LLVM's expensive
+  passes. Measured on the crates whose peak is in LLVM, it halved the `rkat`
+  crate (~10.1 to ~4.8 GiB) and, together with the
+  `opt-level = 0` pin, `meerkat-machine-schema` (~9.4 to
+  ~4.8 GiB), and it cut the whole build's wall time from
+  ~25 min 29 s to ~19 min 6 s. It did not move `meerkat-mob`; only
+  `opt-level = 0` did (~11.5 to ~6.3 GiB). The runtime cost
+  of `1` is modest for an agent host that spends its time waiting on network
+  I/O. `opt-level = 0` is free for `meerkat-machine-schema` because it is a
+  generated catalog, not hot code; on `meerkat-mob` it is a real trade.
+- **`codegen-units`**: LLVM optimizes a crate's codegen units in parallel,
+  bounded by your core count, so a crate split into 16 units can hold 16 LLVM
+  contexts at once. Lowering it reduces that per-crate parallelism at the cost
+  of a longer compile for that crate, and `codegen-units = 1` also widens
+  inlining scope, which can raise memory for the largest crates. Measure on
+  your host before changing it; the release lane leaves it at 16.
+- **`lto`**: leave it at the default `false`. `"thin"` or `"fat"` LTO pulls the
+  whole dependency graph into one optimization pass at link time and multiplies
+  link-stage memory.
+- **Features**: `meerkat-cli/Cargo.toml` lists the subsystems behind `rkat`'s
+  default features (`mob`, `rpc-surface`, `openai-realtime`, `comms`,
+  `schedule`, `workgraph`, `mcp`, `skills`, storage backends, providers). A
+  narrower `--no-default-features --features ...` build compiles fewer crates;
+  dropping `mob` removes `meerkat-mob`, the crate that sets the memory floor
+  above, along with `meerkat-mob-mcp` and `meerkat-mob-pack`. The repository's
+  surface feature matrix (`scripts/run-surface-feature-matrix`, behind
+  `make test-feature-matrix-surface`) keeps three reduced `rkat` combinations compiling:
+  `--no-default-features --features session-store`, `session-store,mcp`, and
+  `session-store,comms,mcp,workgraph`. Other subsets are not exercised, so
+  check that yours builds before relying on it. Reduced builds are source
+  builds only; no reduced binaries are published (see the note under
+  [Homebrew Tap](/guides/cd-and-distribution#homebrew-tap)).
+
+## Containerizing The Binaries
+
+A Rust binary built for a `*-unknown-linux-gnu` target links the builder's
+glibc dynamically and records the newest glibc symbol version it used. The
+runtime image must provide a glibc at least that new, or the loader refuses to
+start the binary with `version 'GLIBC_2.xx' not found`. The reliable way to
+get that right in a two-stage image is to pin **one** Debian release for both
+stages, so the builder's glibc is the runtime's glibc:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+
+# One Debian release for both stages, so the glibc rkat links against in the
+# build stage is the glibc present in the runtime stage.
+ARG DEBIAN_RELEASE=bookworm
+
+FROM rust:1.94-${DEBIAN_RELEASE} AS build
+ARG RKAT_VERSION=0.8.32
+# Low-memory defaults for a 16 GB builder; remove both on a large build host.
+# Under 16 GB, also add: --config 'profile.release.package.meerkat-mob.opt-level=0'
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=1
+RUN cargo install rkat --version "=${RKAT_VERSION}" --locked --root /opt/rkat \
+      --config 'profile.release.package.meerkat-machine-schema.opt-level=0'
+
+FROM debian:${DEBIAN_RELEASE}-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/rkat/bin/rkat /usr/local/bin/rkat
+ENV RUST_LOG=warn
+WORKDIR /data
+ENTRYPOINT ["rkat"]
+```
+
+Notes on that file:
+
+- `ARG DEBIAN_RELEASE` is declared before the first `FROM` and used in both
+  `FROM` lines, so the two stages cannot drift apart when someone bumps one of
+  them. `rust:1.94-bookworm` matches the pinned toolchain family.
+- `--locked` builds with the `Cargo.lock` shipped inside the `rkat` crate, so
+  the container compiles the dependency set the release was tested with.
+- To build from a checkout instead of crates.io (unreleased commits, local
+  patches), replace the `RUN cargo install` line with `WORKDIR /src`,
+  `COPY . .`, and `cargo build --locked -p rkat --release`, and copy
+  `/src/target/release/rkat` (the build stage above sets no `WORKDIR`, so
+  without that line the checkout lands in `/`). The repository's own
+  [`examples/035-mdm-tux-rs/Dockerfile`](https://github.com/lukacf/meerkat/blob/main/examples/035-mdm-tux-rs/Dockerfile)
+  does exactly that for the example's binaries, with the same
+  `rust:1.94-bookworm` build stage and `debian:bookworm-slim` runtime stage.
+- The companion surfaces are separate crates with the same shape:
+  `cargo install meerkat-rpc` (binary `rkat-rpc`), `meerkat-rest`
+  (`rkat-rest`), and `meerkat-mcp-server` (`rkat-mcp`).
+- `rkat` resolves project realm state under `.rkat/` in its working directory
+  and the global realm's config under `~/.rkat/` (see
+  [Configuration](/concepts/configuration)); mount a volume at `/data`, and
+  point `HOME` at persisted storage if the global realm matters, so state
+  outlives the container.
+
+If you do not need to compile at all, the runtime stage alone can unpack a
+prebuilt Linux release archive. `debian:bookworm-slim` ships glibc 2.36, above
+the 2.31 floor the release binaries are built against (next section):
+
+```dockerfile
+FROM debian:bookworm-slim
+ARG RKAT_VERSION=0.8.32
+ARG RKAT_TARGET=x86_64-unknown-linux-gnu
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/lukacf/meerkat/releases/download/v${RKAT_VERSION}/rkat-${RKAT_VERSION}-${RKAT_TARGET}.tar.gz" \
+       | tar -xz -C /usr/local/bin \
+    && rkat --version
+```
+
+Verify the download against the release's `checksums.sha256` (and, if you use
+the GitHub CLI, its build provenance attestation; see below) before trusting it
+in production.
+
+Not covered by the prebuilt binaries: Alpine and other musl-based images. No
+musl target is published, and the glibc binaries are not tested under
+`gcompat`. Build from source on such a base or use a Debian-family image.
+
+## Where The Prebuilt Binaries Come From
+
+`.github/workflows/release.yml` builds and publishes the release assets when a
+`v*` tag is pushed. Each of the four binaries (`rkat`, `rkat-rpc`, `rkat-rest`,
+`rkat-mcp`) is packaged per target as `<binary>-<version>-<target>.tar.gz`
+(`.zip` on Windows), alongside `checksums.sha256` and `index.json`. The
+[Homebrew tap](/guides/cd-and-distribution#homebrew-tap) and the
+[SDK bootstrap](/guides/cd-and-distribution#sdk-bootstrap) consume these same
+assets. Targets:
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-pc-windows-msvc`
+
+Every archive carries a GitHub build provenance attestation
+(`actions/attest-build-provenance`), which binds the file's digest to the
+workflow run and commit that produced it:
+
+```bash
+gh attestation verify rkat-0.8.32-x86_64-unknown-linux-gnu.tar.gz --repo lukacf/meerkat
+```
+
+### Linux glibc floor
+
+The Linux GNU binaries are built inside the `buildpack-deps:bullseye` image
+(Debian 11, glibc 2.31) on both release lanes: the BuildBuddy lane pins that
+image as the execution container in `platforms/BUILD.bazel`, and the
+GitHub-hosted lane runs its Linux jobs under the same `container:`, because
+building directly on the Ubuntu 24.04 runner (glibc 2.39) would silently raise
+the floor. Packaging then runs
+`scripts/check-linux-release-binary-portability.sh` on every Linux binary and
+fails the release if either check trips:
+
+1. Any versioned glibc symbol reference is newer than the declared floor
+   (`MEERKAT_GLIBC_FLOOR=2.31`).
+2. The binary has a dynamic `NEEDED` entry on `libssl` or `libcrypto`. All
+   first-party TLS is `rustls`, so an OpenSSL dependency means a crate
+   regressed into a native-TLS stack.
+
+The gate exists because v0.8.21 shipped binaries referencing `GLIBC_2.34` that
+Debian 11 could not load; the floor is enforced on the produced file, not
+assumed from the build image.
+
+What that guarantees: a published Linux binary starts on any x86_64 or aarch64
+distribution whose glibc is 2.31 or newer (Debian 11 and later, Ubuntu 20.04
+and later, Debian-based container images from `bullseye` onward) and needs no
+OpenSSL runtime package. What it does not guarantee: musl-based systems (see
+above), or distributions older than glibc 2.31.
+
+### Other platforms
+
+The macOS binaries carry no notarization and the release workflow asserts no
+minimum macOS version (there is no deployment-target pin or gate); the
+GitHub-hosted lane ad-hoc codesigns them. The Windows binary is x86_64 only.
+The packaging step checks that every binary embeds the release version, so
+`rkat --version` on an installed binary tells you exactly which release it is.
+
+## MobKit
+
+MobKit's gateway binaries are built and released by the
+[meerkat-mobkit](https://github.com/lukacf/meerkat-mobkit) repository's own
+lane; the glibc floor and portability gate described on this page do not apply
+to them. Start from the [MobKit quickstart](/mobkit/quickstart) for its install
+and build paths.
+
+## See Also
+
+- [CD and distribution](/guides/cd-and-distribution) for the release pipeline,
+  Homebrew tap, SDK bootstrap, and credentials.
+- [Build And CI](/reference/build-and-ci) for the contributor build, test, and
+  BuildBuddy lanes.
+- [Quickstart](/quickstart) for the featured install paths.

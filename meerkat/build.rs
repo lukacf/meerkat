@@ -1,6 +1,8 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    let Some(suffix) = agent_factory_policy_bridge_symbol_suffix() else {
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
+    let Some(suffix) = agent_factory_policy_bridge_symbol_suffix().or_else(docs_rs_unlinked_suffix)
+    else {
         eprintln!("meerkat build could not locate the AgentFactory bridge symbol suffix");
         std::process::exit(1);
     };
@@ -103,4 +105,18 @@ fn core_manifest_dir_candidates(
     }
 
     candidates
+}
+
+/// docs.rs unpacks the crate under test into an isolated workdir with no
+/// sibling crates and runs build scripts under a `build/<pkg>/<hash>/out`
+/// target layout, so neither scan above can see a `meerkat-core` checkout
+/// there. rustdoc never links, so the documentation build continues with a
+/// fixed placeholder suffix and says so through `cargo:warning`; every other
+/// build keeps failing closed in `main`.
+fn docs_rs_unlinked_suffix() -> Option<String> {
+    std::env::var_os("DOCS_RS")?;
+    println!(
+        "cargo:warning=meerkat build could not locate the AgentFactory bridge symbol suffix; DOCS_RS is set, so the meerkat documentation build continues with the unlinked placeholder suffix docsrs_unlinked"
+    );
+    Some(String::from("docsrs_unlinked"))
 }

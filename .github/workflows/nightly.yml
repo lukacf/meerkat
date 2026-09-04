@@ -17,6 +17,9 @@ name: Nightly
 #                       (per push it is path-gated to wasm contract surfaces)
 #   release-packaging — per-crate `cargo package` dry-run (release hygiene)
 #   audit             — daily cargo-deny advisory sweep
+#   mobkit-docs-lag   - docs/mobkit mirror vs published MobKit releases;
+#                       fails when more than one release was published after
+#                       the mirrored one (publication has stalled silently)
 
 on:
   schedule:
@@ -296,3 +299,29 @@ jobs:
 
       - name: Cargo deny
         run: make audit
+
+  mobkit-docs-lag:
+    name: MobKit docs mirror lag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compare the mirrored MobKit release with the published releases
+        env:
+          # The workflow token can read another public repository's releases
+          # even with `contents: read` here. If lukacf/meerkat-mobkit stops
+          # being public, or the token loses that read, the API call fails and
+          # the job must fail as "lag unknown" rather than report zero lag.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          releases="${RUNNER_TEMP}/mobkit-releases.json"
+          if ! gh api "repos/lukacf/meerkat-mobkit/releases?per_page=100" > "${releases}"; then
+            echo "::error::Could not list lukacf/meerkat-mobkit releases with the workflow token; the MobKit docs mirror lag is unknown, not zero." >&2
+            exit 1
+          fi
+          python3 scripts/check-mobkit-docs-lag.py \
+            --manifest docs/mobkit/_source.json \
+            --releases "${releases}" \
+            --max-lag 1

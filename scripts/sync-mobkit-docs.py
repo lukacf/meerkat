@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "docs" / "mobkit"
 SITE_CONFIG = ROOT / "docs" / "docs.json"
+SOURCE_REPOSITORY = "https://github.com/lukacf/meerkat-mobkit"
 ASSET_PATHS = ("images", "logo.png")
 ROOT_LINK_RE = re.compile(r'(?P<prefix>\]\(|(?:href|src)=["\'])/(?P<path>[^/])')
 REQUIRED_PAGE_ICONS = {
@@ -137,16 +138,55 @@ def rewrite_root_links(text: str) -> str:
     )
 
 
-def ensure_page_icon(text: str, page_id: str) -> str:
-    icon = REQUIRED_PAGE_ICONS.get(page_id)
-    if icon is None or re.search(r"(?m)^icon\s*:", text):
-        return text
+def frontmatter_close(text: str, page_id: str) -> int:
+    """Return the offset of the newline that starts the closing frontmatter fence."""
     if not text.startswith("---\n"):
         raise SystemExit(f"MobKit page lacks frontmatter: {page_id}")
     end = text.find("\n---", 4)
     if end == -1:
         raise SystemExit(f"MobKit page has unclosed frontmatter: {page_id}")
+    return end
+
+
+def ensure_page_icon(text: str, page_id: str) -> str:
+    icon = REQUIRED_PAGE_ICONS.get(page_id)
+    if icon is None or re.search(r"(?m)^icon\s*:", text):
+        return text
+    end = frontmatter_close(text, page_id)
     return f'{text[:end]}\nicon: "{icon}"{text[end:]}'
+
+
+def version_stamp(
+    source_version: str,
+    source_ref: str | None,
+    source_commit: str,
+    source_repository: str = SOURCE_REPOSITORY,
+) -> str:
+    """Return the one-line freshness stamp every mirrored page carries.
+
+    docs.rkat.ai serves this snapshot until the next publication succeeds, and
+    publication has silently lagged MobKit releases before. The stamp names the
+    documented MobKit version on every page so a reader can tell that the page
+    they are on describes a release older than the one they run.
+    """
+    if source_ref is not None:
+        origin = f"[{source_ref}]({source_repository}/tree/{source_ref})"
+    else:
+        origin = f"commit [{source_commit[:12]}]({source_repository}/commit/{source_commit})"
+    return f"*This page documents MobKit v{source_version} (mirrored from {origin}).*"
+
+
+def stamp_page(text: str, stamp: str, page_id: str) -> str:
+    """Insert the version stamp as the first body line under the frontmatter."""
+    end = frontmatter_close(text, page_id)
+    close = end + len("\n---")
+    newline = text.find("\n", close)
+    if newline == -1:
+        head, body = text + "\n", ""
+    else:
+        head, body = text[: newline + 1], text[newline + 1 :]
+    body = body.lstrip("\n")
+    return f"{head}\n{stamp}\n\n{body}"
 
 
 def tree_digest(root: Path) -> str:
@@ -206,6 +246,9 @@ def build_snapshot(
     if len(page_ids) != len(set(page_ids)):
         raise SystemExit("MobKit docs navigation contains duplicate pages")
 
+    source_commit = git_output(source, "rev-parse", "HEAD")
+    stamp = version_stamp(source_version, source_ref, source_commit)
+
     destination.mkdir(parents=True, exist_ok=True)
     for page_id in page_ids:
         source_page = source_docs / f"{page_id}.mdx"
@@ -215,6 +258,7 @@ def build_snapshot(
         destination_page.parent.mkdir(parents=True, exist_ok=True)
         rendered = source_page.read_text(encoding="utf-8")
         rendered = ensure_page_icon(rendered, page_id)
+        rendered = stamp_page(rendered, stamp, page_id)
         rendered = rewrite_root_links(rendered)
         destination_page.write_text(rendered, encoding="utf-8")
 
@@ -227,10 +271,9 @@ def build_snapshot(
             destination_asset.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_asset, destination_asset)
 
-    source_commit = git_output(source, "rev-parse", "HEAD")
     manifest = {
         "generated": True,
-        "source_repository": "https://github.com/lukacf/meerkat-mobkit",
+        "source_repository": SOURCE_REPOSITORY,
         "source_ref": source_ref,
         "source_commit": source_commit,
         "source_version": source_version,

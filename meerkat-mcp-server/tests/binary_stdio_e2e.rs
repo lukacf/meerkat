@@ -10,8 +10,9 @@ use tokio::time::{Duration, timeout};
 
 fn mcp_binary_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat-mcp") {
-        let path = PathBuf::from(path);
-        if path.exists() {
+        // Bazel wires a runfiles-relative path; the server below is spawned
+        // with its own working directory, so resolve it first.
+        if let Ok(path) = PathBuf::from(path).canonicalize() {
             return Some(path);
         }
     }

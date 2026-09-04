@@ -520,6 +520,8 @@ docs-check:
 	@$(PYTHON) scripts/test_validate_mintlify_docs.py
 	@$(PYTHON) scripts/test_sync_mobkit_docs.py
 	@$(PYTHON) scripts/test_publish_mobkit_docs.py
+	@$(PYTHON) scripts/test_report_mobkit_docs_publication_failure.py
+	@$(PYTHON) scripts/test_check_mobkit_docs_lag.py
 	@$(PYTHON) scripts/test_usage_accounting_docs.py
 
 MOBKIT_REPO ?= ../meerkat-mobkit

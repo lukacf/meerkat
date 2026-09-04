@@ -70,6 +70,22 @@ them.
   ```toml
   provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
   ```
+### Added
+
+- **A "Building And Deploying" guide (`docs/guides/deploying.mdx`) now states
+  what a from-source build costs and what the prebuilt binaries guarantee.**
+  Nothing public said that `cargo install rkat` compiles at Cargo's default
+  `opt-level = 3` with no memory pins (the workspace ships no
+  `[profile.release]`, and a workspace profile would not reach `cargo install`
+  anyway), that the release lane's own low-memory levers (`CARGO_BUILD_JOBS`,
+  per-package `opt-level` pins) exist, or that Linux release binaries are built
+  inside `buildpack-deps:bullseye` behind a glibc 2.31 portability gate. The
+  guide records measured RAM, time, and disk for a cold release build of
+  `rkat`, the consumer-side `CARGO_PROFILE_RELEASE_*` and `.cargo/config.toml`
+  overrides that `cargo install` does honor, a two-stage Dockerfile that pins
+  one Debian release in both stages so the glibc the binary links against is
+  the glibc it runs on, and the release workflow's binary provenance and
+  portability guarantees.
 
 ### Fixed
 
@@ -296,6 +312,70 @@ them.
   surfaces validate diagnostics structurally calls `parse_toml` and merges its
   diagnostics with `validate_definition`'s; `from_toml` callers get the log
   line.
+- **docs.rs builds of `meerkat`, `meerkat-runtime`, `meerkat-session`,
+  `meerkat-mob`, and `meerkat-live` no longer abort in their build scripts.**
+  Each script derives its `meerkat-core` bridge symbol suffix by locating the
+  core checkout next to its own manifest or through the target tree's dep-info
+  files, and exited the build when neither scan found one. docs.rs unpacks the
+  crate under test into an isolated workdir with no sibling crates and, since
+  its 2026-08 nightly, runs build scripts under a `build/<pkg>/<hash>/out`
+  layout that the dep-info scan never matched, so every `meerkat` release since
+  0.8.18 (and `meerkat-session` since 0.8.30) failed to document. The scripts
+  now declare `cargo:rerun-if-env-changed=DOCS_RS` and, when the lookup fails
+  while `DOCS_RS` is set, emit a `cargo:warning` and continue with the fixed
+  placeholder suffix `docsrs_unlinked`: rustdoc never links, so the placeholder
+  only has to keep the documentation build alive. Every other build still fails
+  closed exactly as before, and `meerkat-core` publishes nothing new. The
+  alternative of passing the suffix through Cargo `links` metadata
+  (`DEP_MEERKAT_CORE_*`) was rejected: the security canary
+  `authority_build_scripts_do_not_leak_factory_seal_metadata` forbids it
+  because any direct dependent can read that metadata and generate matching
+  validator/finalizer symbols. Canary tests compile each build script
+  standalone and drive it under a docs.rs-shaped layout: the fallback applies
+  only with `DOCS_RS` set and no checkout visible, a visible checkout still wins
+  and warns about nothing, the unset case still fails closed, and the suffix
+  every dependent derives is byte-identical to the one `meerkat-core` exports.
+- **The MobKit docs mirror on docs.rkat.ai can no longer go stale silently.**
+  Every `publish-mobkit-docs.yml` run that reached the publication step pushed
+  the release's snapshot branch and then died at `gh pr create`, because the
+  repository forbids Actions from opening pull requests (two 2026-08-29 runs
+  failed earlier, at `make docs-check`); each run went red with nothing that
+  named the branch or what to do next, so docs.rkat.ai served MobKit 0.8.22
+  from 2026-08-24 until a hand-made pull request published 0.8.30 on
+  2026-09-03. The pull-request step now prefers a dedicated
+  `MOBKIT_DOCS_PR_TOKEN` secret over `github.token` when the secret exists
+  (used for `gh pr create` only, so a token scoped to Pull requests: read and
+  write suffices; auto-merge, which needs contents: write, runs under the
+  workflow's own token), and a failure after the branch is pushed writes the branch and the
+  exact recovery commands to the job summary and opens or updates one tracking
+  issue with a stable title (`scripts/report-mobkit-docs-publication-failure.py`)
+  instead of failing quietly. Every mirrored page now opens with a stamp naming
+  the documented MobKit version and release ref (`scripts/sync-mobkit-docs.py`),
+  so a reader can see that a page describes an older release than the one they
+  run; `docs/mobkit` was re-synced from the clean `v0.8.30` tag and differs only
+  by that stamp. A nightly `mobkit-docs-lag` job
+  (`scripts/check-mobkit-docs-lag.py`) compares `docs/mobkit/_source.json` with
+  the published, non-draft, non-prerelease MobKit releases and fails when more
+  than one release was published after the mirrored one. Separately,
+  `scripts/validate-mintlify-docs.py` stopped rejecting the one anchor form
+  Mintlify resolves for a slash-containing heading (`#capabilities%2Fget`): it
+  lower-cased the whole link anchor, hex digits of the escape included, while
+  its own heading slugs keep them upper-case. Negative tests now pin that a
+  link to a missing page and a link to a missing heading anchor both fail
+  `make docs-check`.
+- **`rkat-mcp` now installs a tracing subscriber, so its warnings and errors
+  reach stderr instead of vanishing.** The MCP server binary depended on
+  `tracing` but never installed a subscriber, so every `tracing::warn!` and
+  `tracing::error!` raised in the process was dropped: an invalid realm config
+  fell back to defaults with no output, a panicked event task or a terminated
+  schedule-host supervisor left no trace, and the documented `verbose`
+  parameter of `meerkat_run`/`meerkat_resume` (server-side event logging at
+  `info`) never produced a line. The binary now mirrors `rkat-rpc`: an
+  `EnvFilter` with an `info` default, `RUST_LOG` overriding it (an unparsable
+  value is named on stderr before the default applies), and a formatting layer
+  that writes to stderr only, because stdout is the MCP JSON channel. Hosts
+  that launch `rkat-mcp` observe new stderr output; stdout framing is
+  unchanged.
 
 ## [0.8.33] - 2026-09-04
 

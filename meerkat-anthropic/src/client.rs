@@ -16,6 +16,7 @@ use meerkat_core::{
     Usage,
 };
 use meerkat_llm_core::LlmError;
+use meerkat_llm_core::error::ProviderErrorObject;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
@@ -1895,6 +1896,19 @@ impl LlmClient for AnthropicClient {
 
                             let error = match error_type {
                                 "overloaded_error" => LlmError::ServerOverloaded,
+                                // The monthly spend cap shares the
+                                // rate_limit_error type and is told apart by
+                                // details.error_code; no retry clears it.
+                                "rate_limit_error"
+                                    if $event.error.as_ref().is_some_and(|error| {
+                                        ProviderErrorObject::deserialize(error)
+                                            .is_ok_and(|error| error.signals_quota_exhausted())
+                                    }) =>
+                                {
+                                    LlmError::QuotaExhausted {
+                                        message: error_msg.to_string(),
+                                    }
+                                }
                                 "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
                                 // Anthropic's typed request-size rejection
                                 // (2026-07-29 incident: an over-cap transcript
@@ -4184,6 +4198,58 @@ mod tests {
             server_blocks[1].2["content"][0]["url"],
             "https://example.com"
         );
+    }
+
+    /// A streamed rate_limit_error carrying the documented spend-cap code
+    /// terminalizes as exhausted quota; a plain rate_limit_error stays a
+    /// retryable rate limit.
+    #[tokio::test]
+    async fn test_stream_error_spend_cap_is_quota_exhaustion_and_rate_limit_retries() {
+        async fn first_error(payload: &str) -> LlmError {
+            let payload = [payload, ""].join("\n");
+            let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+            let client = AnthropicClient::builder("test-key".to_string())
+                .base_url(base_url)
+                .build()
+                .unwrap();
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello".to_string()))],
+            );
+            let mut stream = client.stream(&request);
+            let mut observed = None;
+            while let Some(event) = stream.next().await {
+                if let LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                } = event.expect("stream event")
+                {
+                    observed = Some(error);
+                    break;
+                }
+            }
+            server.abort();
+            observed.expect("expected Done with error outcome")
+        }
+
+        let spend_cap = first_error(
+            r#"data: {"type":"error","error":{"type":"rate_limit_error","message":"You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.","details":{"error_code":"enforced_spend_limit_reached"}}}"#,
+        )
+        .await;
+        assert!(
+            matches!(spend_cap, LlmError::QuotaExhausted { .. }),
+            "expected QuotaExhausted, got: {spend_cap:?}"
+        );
+        assert!(!spend_cap.is_retryable());
+
+        let rate_limit = first_error(
+            r#"data: {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed the rate limit for your organization of 50 requests per minute."}}"#,
+        )
+        .await;
+        assert!(
+            matches!(rate_limit, LlmError::RateLimited { .. }),
+            "expected RateLimited, got: {rate_limit:?}"
+        );
+        assert!(rate_limit.is_retryable());
     }
 
     /// Regression: Anthropic streaming error event must yield Done with error.

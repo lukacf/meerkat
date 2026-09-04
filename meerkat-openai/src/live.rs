@@ -4363,6 +4363,16 @@ fn map_openai_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> L
 
 fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
     let message = redact_realtime_image_text(&error.message);
+    // Exhausted quota arrives under its own error type (parsed as `Unknown`)
+    // or under `rate_limit_error`; the structured code decides before the
+    // type so neither path retries a dead key.
+    if error
+        .code
+        .as_deref()
+        .is_some_and(LlmError::code_signals_quota_exhausted)
+    {
+        return LlmError::QuotaExhausted { message };
+    }
     match error.error_type {
         ApiErrorType::RateLimitError => LlmError::RateLimited {
             retry_after_ms: None,
@@ -7414,6 +7424,24 @@ mod tests {
                     )
                 )
         ));
+    }
+
+    #[test]
+    fn api_error_mapping_terminalizes_exhausted_quota_before_the_rate_limit_class() {
+        for error_type in [ApiErrorType::Unknown, ApiErrorType::RateLimitError] {
+            let exhausted = map_openai_live_error(OpenAiLiveError::Api(ServerError {
+                error_type,
+                code: Some("insufficient_quota".to_string()),
+                message: "You exceeded your current quota".to_string(),
+                param: None,
+                event_id: None,
+            }));
+            assert!(
+                matches!(exhausted, LlmError::QuotaExhausted { .. }),
+                "{error_type:?} with insufficient_quota must be exhausted quota, got {exhausted:?}"
+            );
+            assert!(!exhausted.is_retryable());
+        }
     }
 
     #[test]

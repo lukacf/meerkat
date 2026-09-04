@@ -3088,6 +3088,11 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
         "rate_limit_exceeded" => LlmError::RateLimited {
             retry_after_ms: None,
         },
+        // Exhausted quota, credit, or spend limit shares the 429 family but
+        // no retry clears it; see `LlmError::QuotaExhausted`.
+        code if LlmError::code_signals_quota_exhausted(code) => LlmError::QuotaExhausted {
+            message: format!("{error_code}: {error_message}"),
+        },
         "server_error" => LlmError::ServerError {
             status: 500,
             message: error_message.to_string(),
@@ -7962,6 +7967,26 @@ mod tests {
             meerkat_core::error::LlmProviderErrorKind::ServerOverloaded
         );
         assert!(provider_error.is_retryable());
+    }
+
+    #[test]
+    fn insufficient_quota_stream_error_terminalizes_instead_of_retrying() {
+        let error = map_responses_stream_error(
+            "insufficient_quota",
+            "You exceeded your current quota, please check your plan and billing details.",
+        );
+
+        assert!(
+            matches!(&error, LlmError::QuotaExhausted { .. }),
+            "insufficient_quota must classify as exhausted quota, got {error:?}"
+        );
+        assert!(!error.is_retryable());
+        let meerkat_core::error::LlmFailureReason::ProviderError(provider_error) =
+            error.failure_reason()
+        else {
+            panic!("exhausted quota must retain a typed provider carrier");
+        };
+        assert!(!provider_error.is_retryable());
     }
 
     #[test]

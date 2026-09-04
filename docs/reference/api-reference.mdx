@@ -432,7 +432,7 @@ For session-service transport behavior specifically, see the [Capability matrix]
 
 All implement `AgentLlmClient` and normalize streaming responses to `LlmEvent` (text deltas, tool call deltas, usage updates, done).
 
-`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `InvalidInputShape`, `InvalidConfig`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check if an error should be retried.
+`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `InvalidInputShape`, `InvalidConfig`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `QuotaExhausted`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check if an error should be retried.
 
 ## Storage implementations
 

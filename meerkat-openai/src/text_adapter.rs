@@ -530,6 +530,12 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
     use oai_rt_rs::error::ApiErrorType;
     let message = err.message.clone();
     let code = err.code.as_deref().unwrap_or_default();
+    // Exhausted quota arrives under its own error type (which the realtime
+    // crate parses as `Unknown`) or under `rate_limit_error`; the structured
+    // code decides before the type so neither path retries a dead key.
+    if LlmError::code_signals_quota_exhausted(code) {
+        return LlmError::QuotaExhausted { message };
+    }
     match err.error_type {
         ApiErrorType::InvalidRequestError => {
             if code == "model_not_found" {
@@ -979,6 +985,31 @@ mod tests {
         );
 
         assert!(matches!(mapped, LlmError::NetworkTimeout { .. }));
+    }
+
+    #[test]
+    fn server_error_insufficient_quota_code_terminalizes_under_every_error_type() {
+        for error_type in [
+            oai_rt_rs::error::ApiErrorType::Unknown,
+            oai_rt_rs::error::ApiErrorType::RateLimitError,
+            oai_rt_rs::error::ApiErrorType::InvalidRequestError,
+        ] {
+            let mapped = map_server_error(oai_rt_rs::error::ServerError {
+                error_type,
+                code: Some("insufficient_quota".to_string()),
+                message:
+                    "You exceeded your current quota, please check your plan and billing details."
+                        .to_string(),
+                param: None,
+                event_id: None,
+            });
+
+            assert!(
+                matches!(mapped, LlmError::QuotaExhausted { .. }),
+                "{error_type:?} with insufficient_quota must be exhausted quota, got {mapped:?}"
+            );
+            assert!(!mapped.is_retryable());
+        }
     }
 
     #[test]

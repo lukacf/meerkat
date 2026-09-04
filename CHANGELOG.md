@@ -28,8 +28,48 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`meerkat_llm_core::LlmError` gained the `QuotaExhausted { message }`
+  variant** (`LlmError::QuotaExhausted`, an `enum_variant_added` finding). The
+  enum is not `#[non_exhaustive]`, so exact-pinned Rust consumers that match
+  `LlmError` exhaustively must add an arm; every in-workspace match and
+  MobKit's `classify_llm_error` matches already carry a wildcard.
+  `LlmError::from_http_status` returns the new variant for a 429, 400 or 402
+  body whose provider code, documented message prefix, or Google
+  `QuotaFailure` detail names exhausted quota (see Fixed).
+
 ### Fixed
 
+- **An exhausted provider account fails in one round trip instead of after
+  the rate-limit retry window.** `LlmError::from_http_status` mapped every
+  429 to the retryable `RateLimited` class, so a key whose account had no
+  quota left (OpenAI `429` with `error.code = "insufficient_quota"`) was
+  retried three times behind the 30-second rate-limit floor and surfaced only
+  after roughly 90 seconds of `retrying` events, as `llm_rate_limited`. The
+  provider error mapping now reads the body: OpenAI `insufficient_quota`,
+  `credit_balance_exhausted`, the organization/project spend-limit and
+  usage-limit codes and the legacy `billing_hard_limit_reached`; Anthropic's
+  monthly spend cap (`rate_limit_error` with `details.error_code =
+  "enforced_spend_limit_reached"`), its self-set spend limit `400` and HTTP
+  `402 billing_error`; Gemini `quota_exceeded` and a `RESOURCE_EXHAUSTED`
+  `QuotaFailure` on a daily window or a zero entitlement all map to the new
+  non-retryable `LlmError::QuotaExhausted`. The OpenAI Responses stream
+  error, realtime text adapter and live adapter paths and the Anthropic
+  stream error path classify the same codes. Ordinary per-minute rate limits
+  are unchanged and keep their `Retry-After` hint. On the wire the failure is
+  `llm_provider_error` with `non_retryable` retryability and
+  `details.class = "quota_exhausted"` as the machine-readable discriminator
+  (`details.message` carries the provider body verbatim). Its
+  `provider_error_kind` is still `invalid_request`: the schema-emitted
+  provider error kind vocabulary is unchanged in this release, so for this
+  class the kind is a known misnomer until a dedicated `quota_exhausted` kind
+  lands with a schema regeneration (tracked follow-up). Consumers branch on
+  `details.class`, not on the kind and not on the message text. Behaviour
+  change for exact-pinned hosts: a quota-exhausted turn now emits `run_failed`
+  within one round trip with no `retrying` events, and its reason is
+  `llm_provider_error` rather than `llm_rate_limited`. The new `LlmError`
+  variant is declared under Breaking.
 - **Gemini and OpenAI-compatible requests now accept every built-in tool
   schema.** Gemini's `FunctionDeclaration.parameters` is an OpenAPI-subset
   `Schema` proto that rejects any undeclared field with `400 INVALID_ARGUMENT`,

@@ -14777,6 +14777,22 @@ mod tests {
             .await
             .expect("registered runtime must expose an exact registration witness");
 
+        // Job-completion wake (jobs/cancel completing the monitor op): the
+        // idle loop applies a continuation with no prompt, which the in-loop
+        // recovery tail turns into a NoPendingBoundary terminal. That must
+        // not retire the registration while the prompt below is queued.
+        let (wake_outcome, _wake_completion) = runtime
+            .runtime_adapter()
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Continuation(
+                    meerkat_runtime::ContinuationInput::detached_background_op_completed(),
+                ),
+            )
+            .await
+            .expect("detached-op completion wake should be admitted");
+        assert!(wake_outcome.is_accepted());
+
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
             .start_turn_via_runtime(

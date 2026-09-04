@@ -214,6 +214,17 @@ fn unregister_caller_wait_deadline() -> meerkat_core::time_compat::Instant {
     meerkat_core::time_compat::Instant::now() + UNREGISTER_CALLER_WAIT_GRACE
 }
 
+/// Outcome of the runtime loop's no-pending teardown prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeLoopTeardownUnregisterAdmission {
+    /// `BeginUnregisterSession` was staged and its progress persisted; the
+    /// loop must hand off its exact executor to the unregister saga.
+    Began,
+    /// Admitted input was found queued under the mutation gate; nothing was
+    /// staged and the registration must keep serving.
+    QueuedWorkPresent,
+}
+
 /// Maximum time an explicit stop caller waits for the independently-owned
 /// cleanup coordinator. The coordinator and exact executor remain owned after
 /// this elapses; only the caller receives typed in-progress truth.
@@ -8125,9 +8136,41 @@ impl MeerkatMachine {
         session_id: &SessionId,
         driver: &SharedDriver,
     ) -> Result<(), RuntimeDriverError> {
+        self.begin_unregister_from_runtime_loop_teardown_inner(session_id, driver, false)
+            .await
+            .map(|_| ())
+    }
+
+    /// Runtime-loop no-pending teardown prefix that yields to admitted input.
+    ///
+    /// Under the session mutation gate, admitted-but-unstaged input in any
+    /// lane means the registration still has work to serve, so nothing is
+    /// staged and [`RuntimeLoopTeardownUnregisterAdmission::QueuedWorkPresent`]
+    /// is returned. The gate is what closes the race between the loop's
+    /// queue observation and this prefix: ingress admission takes the same
+    /// gate, so input cannot be admitted between the check and
+    /// `BeginUnregisterSession`.
+    pub(crate) async fn begin_unregister_from_runtime_loop_teardown_unless_queued(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<RuntimeLoopTeardownUnregisterAdmission, RuntimeDriverError> {
+        self.begin_unregister_from_runtime_loop_teardown_inner(session_id, driver, true)
+            .await
+    }
+
+    async fn begin_unregister_from_runtime_loop_teardown_inner(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+        yield_to_queued_input: bool,
+    ) -> Result<RuntimeLoopTeardownUnregisterAdmission, RuntimeDriverError> {
         let _gate_guard = self
             .lock_current_runtime_loop_driver_authority(session_id, driver)
             .await?;
+        if yield_to_queued_input && driver.lock().await.has_queued_input_in_any_lane() {
+            return Ok(RuntimeLoopTeardownUnregisterAdmission::QueuedWorkPresent);
+        }
         match self
             .stage_begin_unregister_session_authority(session_id)
             .await
@@ -8158,7 +8201,8 @@ impl MeerkatMachine {
             driver,
             "teardown-required runtime-loop unregister prefix",
         )
-        .await
+        .await?;
+        Ok(RuntimeLoopTeardownUnregisterAdmission::Began)
     }
 
     pub(super) async fn unregister_session_inner(

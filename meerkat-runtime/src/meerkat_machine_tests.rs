@@ -2825,6 +2825,155 @@ async fn teardown_required_runtime_loop_exit_unregisters_after_exact_cleanup() {
     assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 }
 
+/// Refs #1093: a no-pending terminal (for example the in-loop recovery tail
+/// applying a detached-op completion wake with no prompt) must not retire the
+/// registration while other admitted input is still queued behind it.
+#[tokio::test]
+async fn no_pending_runtime_loop_keeps_serving_when_other_input_is_queued() {
+    struct GatedNoPendingThenServingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        stop_calls: Arc<AtomicUsize>,
+        first_apply_started: Arc<Notify>,
+        release_first_apply: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedNoPendingThenServingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let call_index = self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            let terminal = if call_index == 0 {
+                self.first_apply_started.notify_one();
+                self.release_first_apply.notified().await;
+                Some(CoreApplyTerminal::NoPendingBoundary)
+            } else {
+                None
+            };
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                terminal,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let stop_calls = Arc::new(AtomicUsize::new(0));
+    let first_apply_started = Arc::new(Notify::new());
+    let release_first_apply = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(GatedNoPendingThenServingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                stop_calls: Arc::clone(&stop_calls),
+                first_apply_started: Arc::clone(&first_apply_started),
+                release_first_apply: Arc::clone(&release_first_apply),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered runtime must expose an exact registration witness");
+
+    // First batch: admitted alone and parked inside apply so the second input
+    // is queued outside it rather than folded into the same batch.
+    let (first_outcome, first_completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("no-pending wake"))
+        .await
+        .expect("first input should be admitted");
+    assert!(first_outcome.is_accepted());
+    tokio::time::timeout(Duration::from_secs(1), first_apply_started.notified())
+        .await
+        .expect("first apply must reach its gate");
+    let (second_outcome, second_completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("queued behind the wake"))
+        .await
+        .expect("second input should be admitted while the first executes");
+    assert!(second_outcome.is_accepted());
+    release_first_apply.notify_one();
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        first_completion
+            .expect("first input must carry a completion")
+            .wait(),
+    )
+    .await
+    .expect("no-pending batch must resolve")
+    .expect("no-pending batch must resolve with an outcome");
+    assert!(
+        !matches!(first, CompletionOutcome::RuntimeTerminated { .. }),
+        "no-pending batch must commit normally: {first:?}"
+    );
+    let second = tokio::time::timeout(
+        Duration::from_secs(2),
+        second_completion
+            .expect("second input must carry a completion")
+            .wait(),
+    )
+    .await
+    .expect("queued input must be applied by the next batch")
+    .expect("queued input must resolve with an outcome");
+    assert!(
+        matches!(
+            second,
+            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult
+        ),
+        "queued input must complete instead of observing runtime teardown: {second:?}"
+    );
+
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        stop_calls.load(Ordering::SeqCst),
+        0,
+        "no executor stop may run while admitted work was queued"
+    );
+    assert!(machine.contains_session(&session_id).await);
+    let after = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registration must survive the no-pending batch");
+    assert_eq!(after.epoch_id(), registration.epoch_id());
+    let live_state = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("generated registration must remain live");
+    assert_eq!(
+        live_state.registration_phase,
+        mm_dsl::RegistrationPhase::Active,
+        "no BeginUnregister may be staged while admitted work was queued"
+    );
+}
+
 #[tokio::test]
 async fn no_pending_runtime_loop_exit_persists_unregister_and_ensure_joins_settlement() {
     struct NoPendingExecutor {

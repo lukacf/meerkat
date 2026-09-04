@@ -1090,6 +1090,7 @@ pub(crate) use durability_health::{DurabilityHealthHandle, DurabilityReloadRequi
 
 pub(crate) use session_management::{
     DeleteOpsFinalizationAuthority, RetainOpsFinalizationAuthority,
+    RuntimeLoopTeardownUnregisterAdmission,
 };
 
 pub use composition::{MeerkatCompositionSignalDispatcher, MeerkatConsumerSurface};

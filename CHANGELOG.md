@@ -460,6 +460,17 @@ them.
   `turn/start`, that an absent registration returns `Ok(())`, and that a live
   actor's teardown outliving the ordinary 2-second caller grace completes
   instead of surfacing `UnregisterInProgress`.
+- The runtime loop no longer retires a registration on a no-pending-boundary
+  terminal while other admitted input is still queued behind it. Previously a
+  detached-job completion wake applied through the in-loop recovery tail with
+  no prompt produced `NoPendingBoundary`, the loop staged
+  `BeginUnregisterSession` and exited, and every queued input (including the
+  `turn/start` prompt admitted moments earlier) resolved
+  `RuntimeTerminated: runtime session unregistered` (refs #1093). The queue is
+  now observed under the driver lock before the terminal is classified, and
+  the teardown prefix re-checks it under the session mutation gate so input
+  admitted in between keeps the registration serving; with nothing queued the
+  no-pending terminal still tears down exactly as before.
 
 ## [0.8.33] - 2026-09-04
 

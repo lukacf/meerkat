@@ -187,7 +187,12 @@ them.
   inheritance, which never discards the head document) is unchanged.
   Behaviour change for exact-pinned hosts whose head config is malformed or
   carries `[agent] provider_params`: rkat-rpc and rkat-mcp now refuse to
-  start and print the error instead of booting on defaults.
+  start and print the error instead of booting on defaults. rkat-rest's
+  startup-log re-read of the head document carried the same
+  `unwrap_or_else(|_| Config::default())` behind its already fail-closed
+  bootstrap read; it now propagates the `ConfigError` too, so the binary has
+  one read path with one failure mode (no observable change: the bootstrap
+  read had already refused).
 
 ## [0.8.33] - 2026-09-04
 

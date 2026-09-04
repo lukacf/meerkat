@@ -7,7 +7,7 @@
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
 
 use clap::{Parser, ValueEnum};
-use meerkat_core::{Config, RealmConfig, RealmSelection, RuntimeBootstrap};
+use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_rest::{AppState, router};
 use meerkat_store::RealmBackend;
 use std::{net::SocketAddr, path::PathBuf};
@@ -99,11 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     // Read the current config early: API-key warning + startup log below.
-    let mut config = state
-        .config_store
-        .get()
-        .await
-        .unwrap_or_else(|_| Config::default());
+    // The bootstrap above already refused on an unloadable head document;
+    // this re-read propagates the same typed `ConfigError` so rkat-rest has
+    // one read path with one failure mode instead of a silent default.
+    let mut config = state.config_store.get().await.map_err(|err| {
+        format!(
+            "failed to read head realm config for realm '{}': {err}",
+            state.realm
+        )
+    })?;
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }

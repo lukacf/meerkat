@@ -70,6 +70,22 @@ them.
   ```toml
   provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
   ```
+### Added
+
+- **A "Building And Deploying" guide (`docs/guides/deploying.mdx`) now states
+  what a from-source build costs and what the prebuilt binaries guarantee.**
+  Nothing public said that `cargo install rkat` compiles at Cargo's default
+  `opt-level = 3` with no memory pins (the workspace ships no
+  `[profile.release]`, and a workspace profile would not reach `cargo install`
+  anyway), that the release lane's own low-memory levers (`CARGO_BUILD_JOBS`,
+  per-package `opt-level` pins) exist, or that Linux release binaries are built
+  inside `buildpack-deps:bullseye` behind a glibc 2.31 portability gate. The
+  guide records measured RAM, time, and disk for a cold release build of
+  `rkat`, the consumer-side `CARGO_PROFILE_RELEASE_*` and `.cargo/config.toml`
+  overrides that `cargo install` does honor, a two-stage Dockerfile that pins
+  one Debian release in both stages so the glibc the binary links against is
+  the glibc it runs on, and the release workflow's binary provenance and
+  portability guarantees.
 
 ### Fixed
 

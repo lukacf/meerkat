@@ -219,7 +219,8 @@
                 "pages": [
                   "guides/storage-operations",
                   "reference/build-and-ci",
-                  "guides/cd-and-distribution"
+                  "guides/cd-and-distribution",
+                  "guides/deploying"
                 ]
               }
             ]

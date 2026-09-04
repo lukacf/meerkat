@@ -166,10 +166,11 @@ them.
   `Config::validate` now return a typed `ConfigError::Validation` naming the
   per-profile / per-request `provider_params` carrier and its `provider_tag`
   nesting. Behaviour change for exact-pinned hosts whose realm config already
-  carries an inert `[agent] provider_params` table: that config now fails to
-  load on every runtime-backed surface (CLI, rkat-rest, rkat-rpc, rkat-mcp;
-  the last two through the next entry) until the table is moved onto a
-  profile or removed.
+  carries an inert `[agent] provider_params` table, whether in the head
+  `.rkat/config.toml`, a parent realm document, or the user-global
+  `~/.rkat/config.toml` tail: that config now fails to load on every
+  runtime-backed surface (CLI, rkat-rest, rkat-rpc, rkat-mcp; the last two
+  through the next entry) until the table is moved onto a profile or removed.
 - **rkat-rpc and rkat-mcp fail startup on a head realm config that does not
   load.** Both binaries read the head realm document with
   `unwrap_or_else(|_| Config::default())`, and rkat-mcp additionally turned a
@@ -182,12 +183,18 @@ them.
   provider_params` refusal above would have vanished the same way on those
   two surfaces. Both now propagate the typed `ConfigError` and exit before
   serving, matching rkat-rest; the head-document read on rkat-rpc and the
-  store open, head read, and effective `validate` on rkat-mcp all fail
-  closed, while rkat-mcp's parent-chain compose fallback (head config without
-  inheritance, which never discards the head document) is unchanged.
-  Behaviour change for exact-pinned hosts whose head config is malformed or
-  carries `[agent] provider_params`: rkat-rpc and rkat-mcp now refuse to
-  start and print the error instead of booting on defaults. rkat-rest's
+  store open, head read, parent-chain compose, and effective `validate` on
+  rkat-mcp all fail closed. The compose step on rkat-mcp previously fell back
+  to the head document without inheritance behind a warn line when a parent
+  realm document or the user-global `~/.rkat/config.toml` tail failed to
+  load, dropping the `global`-owned credential binding, model defaults, and
+  every inherited field, after which each `create_session` re-composed the
+  same chain and failed with the same error: a live server that could create
+  no session. It now propagates the compose error as rkat-rpc and rkat-rest
+  do. Behaviour change for exact-pinned hosts whose head, parent, or global
+  config is malformed or carries `[agent] provider_params`: rkat-rpc and
+  rkat-mcp now refuse to start and print the error instead of booting on
+  defaults or on the head document alone. rkat-rest's
   startup-log re-read of the head document carried the same
   `unwrap_or_else(|_| Config::default())` behind its already fail-closed
   bootstrap read; it now propagates the `ConfigError` too, so the binary has

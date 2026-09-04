@@ -1000,17 +1000,20 @@ fn mcp_realm_config_source(
     ))
 }
 
-/// Load the effective config for `realm_id`, failing closed on the head
-/// document.
+/// Load the effective config for `realm_id`, failing closed on every
+/// document in the realm chain.
 ///
 /// The head realm document is authoritative, so a head that fails to read,
 /// parse, or pass its ingress checks (for example an unwired `[agent]
 /// provider_params` table) and an effective config that fails `validate` both
 /// surface as errors and stop startup, exactly as rkat-rest and the CLI do.
 /// Substituting `Config::default()` would boot the server on a configuration
-/// the operator never wrote. Only the parent-chain compose step keeps its
-/// narrower fallback (the head config without inheritance), which never
-/// discards the head document itself.
+/// the operator never wrote. The parent-chain compose step fails closed for
+/// the same reason: an ancestor or the user-global `~/.rkat/config.toml`
+/// tail that fails to load carries the fleet's credential binding, model
+/// defaults, and limits, and every `create_session` re-composes the same
+/// chain, so booting on the head document alone would produce a live server
+/// that can create no session.
 async fn load_config_async(
     realm_id: &meerkat_core::connection::RealmId,
     realms_root: &std::path::Path,
@@ -1041,19 +1044,19 @@ async fn load_config_async(
     })?;
     // Fold the head realm's parent chain (head ⊕ ancestors ⊕ `global` tail) into
     // the effective config so top-level fields inherit before env overrides win.
-    // A compose failure (e.g. malformed parent edge) falls back to the head
-    // realm's own config rather than nuking everything to defaults.
+    // A compose failure (malformed parent edge, or an ancestor / global document
+    // that fails its ingress checks) stops startup with the typed error, as on
+    // rkat-rpc and rkat-rest.
     let dyn_source: Arc<dyn meerkat_core::RealmConfigSource> = Arc::clone(source) as _;
-    let mut config = match meerkat_core::EffectiveConfigReader::new(dyn_source)
-        .effective_config_over_head(realm_id, head_config.clone())
+    let mut config = meerkat_core::EffectiveConfigReader::new(dyn_source)
+        .effective_config_over_head(realm_id, head_config)
         .await
-    {
-        Ok(effective) => effective,
-        Err(err) => {
-            tracing::warn!("Failed to compose realm inheritance; using head config: {err}");
-            head_config
-        }
-    };
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to compose effective config for realm '{realm_id}': {err}"),
+            )
+        })?;
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }

@@ -1,10 +1,10 @@
 {
   "generated": true,
   "source_repository": "https://github.com/lukacf/meerkat-mobkit",
-  "source_ref": "v0.8.30",
-  "source_commit": "44f1c4ef3c6ae45079c54fac760bc703604d3f0b",
-  "source_version": "0.8.30",
+  "source_ref": "v0.8.31",
+  "source_commit": "255c65ae1d4f988b8c83699ee87344f89a87da11",
+  "source_version": "0.8.31",
   "source_docs_dirty": false,
   "public_pages": 26,
-  "content_sha256": "cf45263b1d801caebce20434285d1d184039a95c70a6f6385ff5adc8b2a5280b"
+  "content_sha256": "ed402745c558c12dabcf404dc6aaca65f10f491d06d62be604fdf03e272d1b0e"
 }

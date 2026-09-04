@@ -232,6 +232,24 @@ pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_st
 pub use identity_recovery_test_support::{
     IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
 };
+
+/// Test-support seam: the operator tool definitions a mob member receives
+/// from `MobOperatorToolDispatcher` (local flavor), so the provider schema
+/// matrix in meerkat-integration-tests lowers exactly the schemas members are
+/// sent rather than the separately defined `mob_*` MCP inventory.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn member_operator_tool_defs_for_test() -> Vec<Arc<ToolDef>> {
+    tools::local_operator_tool_defs()
+}
+
+/// Test-support seam: the remote-flavor operator tool definitions the member
+/// upcall surface advertises (`member_upcall::remote_operator_tool_defs`).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn remote_member_operator_tool_defs_for_test() -> Vec<Arc<ToolDef>> {
+    member_upcall::remote_operator_tool_defs()
+}
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub mod host_actor;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

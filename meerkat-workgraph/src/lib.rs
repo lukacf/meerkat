@@ -149,3 +149,153 @@ pub mod machine_schema_exports {
         )
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod workgraph_workflow_skill_tests {
+    //! The `workgraph-workflow` skill is preloaded into every mob member whose
+    //! profile sets `tools.workgraph`, so its steering text is agent-facing
+    //! behaviour. These tests pin the load-bearing sentences to the live type
+    //! vocabulary: a rename in `types.rs` or a rewrite of the skill that drops
+    //! a rule fails here rather than silently changing what members are told.
+
+    use crate::types::{
+        CloseWorkItemRequest, FailedChildJoinPolicy, WorkEdgeKind, WorkItemFilter, WorkStatus,
+    };
+    use serde::Serialize;
+
+    const SKILL_BODY: &str = include_str!("../skills/workgraph-workflow/SKILL.md");
+
+    /// Collapses the markdown hard wraps so sentences can be matched whole.
+    fn skill_text() -> String {
+        SKILL_BODY.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn wire_name(value: impl Serialize) -> String {
+        match serde_json::to_value(value) {
+            Ok(serde_json::Value::String(name)) => name,
+            other => panic!("expected a string wire name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_states_parent_edge_direction_from_child_to_parent() {
+        let text = skill_text();
+        let parent = wire_name(WorkEdgeKind::Parent);
+        assert!(
+            text.contains(&format!(
+                "Use `{parent}` when an item is one part of a larger commitment."
+            )),
+            "skill must say when to add a parent edge"
+        );
+        assert!(
+            text.contains("points from the child (`from_id`) to the parent (`to_id`)"),
+            "skill must state the parent edge direction"
+        );
+    }
+
+    #[test]
+    fn skill_distinguishes_accept_from_propagate_join_policies() {
+        // `accept` yields ChildJoinDisposition::Satisfied (the parent can
+        // proceed); `propagate` yields PropagateFailure/PropagateCancellation,
+        // which closes the parent with the child's terminal status. A member
+        // that reads them as equivalent picks `propagate` expecting a
+        // completable parent.
+        let text = skill_text();
+        let accept = wire_name(FailedChildJoinPolicy::Accept);
+        let propagate = wire_name(FailedChildJoinPolicy::Propagate);
+        assert!(
+            text.contains(&format!(
+                "`{accept}` lets the parent proceed without that child"
+            )),
+            "skill must say accept keeps the parent completable"
+        );
+        assert!(
+            text.contains(&format!(
+                "`{propagate}` closes the parent with the child's status"
+            )),
+            "skill must say propagate terminates the parent"
+        );
+    }
+
+    #[test]
+    fn skill_requires_explicit_close_status_and_names_the_completed_default() {
+        let text = skill_text();
+        let defaulted: CloseWorkItemRequest = serde_json::from_value(serde_json::json!({
+            "id": "work_item",
+            "expected_revision": 0
+        }))
+        .expect("close request without status deserializes through the wire default");
+        let default_status = wire_name(defaulted.status);
+        let failed = wire_name(WorkStatus::Failed);
+        let cancelled = wire_name(WorkStatus::Cancelled);
+        assert!(
+            text.contains("always pass `status`."),
+            "skill must require an explicit close status"
+        );
+        assert!(
+            text.contains(&format!("Omitting `status` records `{default_status}`")),
+            "skill must name the wire default it warns about"
+        );
+        assert!(
+            text.contains(&format!(
+                "a refuted hypothesis or a fix that did not work is `{failed}`"
+            )),
+            "skill must route a refuted hypothesis to the failed status"
+        );
+        assert!(
+            text.contains(&format!(
+                "`{cancelled}` means the work was dropped without a verdict"
+            )),
+            "skill must define the cancelled status"
+        );
+    }
+
+    #[test]
+    fn skill_states_that_list_and_snapshot_hide_terminal_items_without_include_terminal() {
+        let text = skill_text();
+        let filter = serde_json::to_value(WorkItemFilter {
+            include_terminal: true,
+            ..WorkItemFilter::default()
+        })
+        .expect("filter serializes");
+        let field = filter
+            .as_object()
+            .and_then(|object| object.keys().find(|key| key.as_str() == "include_terminal"))
+            .cloned()
+            .expect("WorkItemFilter carries the include_terminal wire field");
+        assert!(
+            text.contains(&format!(
+                "`workgraph_list` and `workgraph_snapshot` omit terminal items (`completed`, `cancelled`, `failed`) unless `{field}` is true"
+            )),
+            "skill must state the terminal-item default for list and snapshot"
+        );
+        assert!(
+            text.contains("`workgraph_ready` returns live eligible items only."),
+            "skill must state that ready never returns terminal items"
+        );
+    }
+
+    #[test]
+    fn skill_states_that_labels_filters_match_every_listed_label() {
+        let text = skill_text();
+        assert!(
+            text.contains(
+                "A `labels` filter on list, ready, or snapshot matches only items that carry every listed label."
+            ),
+            "skill must state the match-all labels semantics"
+        );
+    }
+
+    #[test]
+    fn skill_states_that_only_a_completed_blocker_satisfies_a_blocks_edge() {
+        let text = skill_text();
+        let completed = wire_name(WorkStatus::Completed);
+        assert!(
+            text.contains(&format!(
+                "only when the target must not be ready until the source is `{completed}`; a `failed` or `cancelled` blocker keeps the target blocked."
+            )),
+            "skill must not claim any terminal blocker satisfies a blocks edge"
+        );
+    }
+}

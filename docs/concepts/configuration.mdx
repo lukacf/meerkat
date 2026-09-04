@@ -221,10 +221,11 @@ hard call timeout applies).
 
 Unknown provider failures also enter the machine-authorized bounded retry path.
 Explicit terminal classes such as invalid requests, authentication failures,
-missing models, content filtering, context overflow, and oversized requests
-remain non-retryable. With the default `max_retries = 3`, a persistently
-unknown failure can make four provider attempts before returning
-`retry_exhausted`.
+exhausted quota or credit (OpenAI `insufficient_quota`, Anthropic spend caps,
+Gemini daily quota), missing models, content filtering, context overflow, and
+oversized requests remain non-retryable. With the default `max_retries = 3`,
+a persistently unknown failure can make four provider attempts before
+returning `retry_exhausted`.
 
 ## Turn and agent-lifetime bounds
 

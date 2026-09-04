@@ -10,8 +10,10 @@
 //! IDs).
 
 use crate::MobBackendKind;
+use crate::error::MobError;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
-use crate::profile::{Profile, ProfileBinding};
+use crate::profile::{Profile, ProfileBinding, ToolConfig, UnsupportedProfileKey};
+use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use indexmap::IndexMap;
 use meerkat_core::schema::MeerkatSchema;
 use meerkat_core::types::ContentInput;
@@ -723,6 +725,125 @@ struct TomlDefinition {
     event_router: Option<EventRouterConfig>,
 }
 
+/// Keys one `[profiles.<name>]` table declared that its binding does not
+/// define, recorded by [`MobDefinition::parse_toml`] before the typed parse
+/// drops them.
+///
+/// An inline profile accepts [`Profile::FIELD_NAMES`] and, under `tools`,
+/// [`ToolConfig::FIELD_NAMES`]; a realm reference accepts only
+/// [`ProfileBinding::REALM_REF_FIELD_NAMES`]. The typed [`MobDefinition`]
+/// cannot carry the rest (parsing discards them), so the parse result reports
+/// them here and projects them as warning diagnostics. Keys that name a
+/// platform concept the profile cannot honour never reach this list: they
+/// refuse the parse (see [`UnsupportedProfileKey`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownProfileKeys {
+    /// The profile whose table carried the keys.
+    pub profile: ProfileName,
+    /// The ignored keys relative to the profile table, sorted; a key under
+    /// the `tools` sub-table appears as `tools.<key>`.
+    pub keys: Vec<String>,
+}
+
+impl UnknownProfileKeys {
+    /// One warning diagnostic per ignored key, in the shape
+    /// [`crate::validate::validate_definition`] produces so hosts can merge
+    /// the two lists.
+    pub fn diagnostics(&self) -> impl Iterator<Item = Diagnostic> + '_ {
+        self.keys.iter().map(move |key| Diagnostic {
+            code: DiagnosticCode::UnknownProfileKey,
+            message: format!(
+                "profile '{}' declares '{key}', which is not a key the profile accepts and is ignored",
+                self.profile.as_str()
+            ),
+            location: Some(format!("profiles.{}.{key}", self.profile.as_str())),
+            severity: DiagnosticSeverity::Warning,
+        })
+    }
+}
+
+/// A parsed mob definition together with what the parse could not keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedMobDefinition {
+    /// The typed definition.
+    pub definition: MobDefinition,
+    /// Profiles whose tables declared keys their binding does not define, in
+    /// profile-name order; empty when every key was recognised.
+    pub unknown_profile_keys: Vec<UnknownProfileKeys>,
+}
+
+impl ParsedMobDefinition {
+    /// Warning diagnostics for every ignored profile key.
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        self.unknown_profile_keys
+            .iter()
+            .flat_map(UnknownProfileKeys::diagnostics)
+            .collect()
+    }
+}
+
+/// Compare each `[profiles.<name>]` table against the keys its binding
+/// declares: [`Profile::FIELD_NAMES`] (plus [`ToolConfig::FIELD_NAMES`] for the
+/// `tools` sub-table) for an inline profile, and
+/// [`ProfileBinding::REALM_REF_FIELD_NAMES`] for a realm reference, which the
+/// untagged derive otherwise lets absorb any extra key. A key from the closed
+/// [`UnsupportedProfileKey`] list refuses the parse; every other unknown key
+/// is collected for a warning.
+fn inspect_profile_keys(
+    profiles: &BTreeMap<ProfileName, ProfileBinding>,
+    tables: &toml::Table,
+) -> Result<Vec<UnknownProfileKeys>, MobError> {
+    let Some(raw_profiles) = tables.get("profiles").and_then(toml::Value::as_table) else {
+        return Ok(Vec::new());
+    };
+    let mut unknown_profile_keys = Vec::new();
+    for (name, binding) in profiles {
+        let Some(raw_profile) = raw_profiles
+            .get(name.as_str())
+            .and_then(toml::Value::as_table)
+        else {
+            continue;
+        };
+        let declared: &[&str] = match binding {
+            ProfileBinding::Inline(_) => Profile::FIELD_NAMES,
+            ProfileBinding::RealmRef { .. } => ProfileBinding::REALM_REF_FIELD_NAMES,
+        };
+        let mut keys = Vec::new();
+        for key in raw_profile.keys() {
+            if declared.contains(&key.as_str()) {
+                continue;
+            }
+            if let Some(refused) = UnsupportedProfileKey::from_key(key) {
+                return Err(MobError::UnsupportedProfileKey {
+                    profile: name.clone(),
+                    key: refused,
+                });
+            }
+            keys.push(key.clone());
+        }
+        // The `tools` sub-table of an inline profile has its own closed field
+        // set; a typo there (`comm = true`) silently leaves the category off.
+        if binding.as_inline().is_some() {
+            if let Some(raw_tools) = raw_profile.get("tools").and_then(toml::Value::as_table) {
+                keys.extend(
+                    raw_tools
+                        .keys()
+                        .filter(|key| !ToolConfig::FIELD_NAMES.contains(&key.as_str()))
+                        .map(|key| format!("tools.{key}")),
+                );
+            }
+        }
+        if !keys.is_empty() {
+            keys.sort();
+            unknown_profile_keys.push(UnknownProfileKeys {
+                profile: name.clone(),
+                keys,
+            });
+        }
+    }
+    Ok(unknown_profile_keys)
+}
+
 impl MobDefinition {
     /// Create a minimal explicit mob definition with manual cleanup semantics.
     pub fn explicit(id: impl Into<MobId>) -> Self {
@@ -803,15 +924,46 @@ impl MobDefinition {
     }
 
     /// Parse a mob definition from TOML content.
-    pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
+    ///
+    /// Refuses a `[profiles.<name>]` key that names a concept a profile cannot
+    /// honour ([`MobError::UnsupportedProfileKey`], see
+    /// [`UnsupportedProfileKey`]), on inline and realm-reference tables alike,
+    /// and logs one warning per profile whose table (or `tools` sub-table)
+    /// carries any other key its binding does not define; parsing continues
+    /// and those keys are ignored. Use [`Self::parse_toml`] to receive the
+    /// ignored keys as typed diagnostics instead of a log line. Only this TOML
+    /// path inspects keys: a `MobDefinition` deserialized from JSON is not
+    /// checked.
+    pub fn from_toml(content: &str) -> Result<Self, MobError> {
+        let parsed = Self::parse_toml(content)?;
+        for unknown in &parsed.unknown_profile_keys {
+            tracing::warn!(
+                mob_id = %parsed.definition.id,
+                profile = %unknown.profile,
+                keys = ?unknown.keys,
+                "mob profile declares keys the profile does not define; they are ignored"
+            );
+        }
+        Ok(parsed.definition)
+    }
+
+    /// Parse a mob definition from TOML content, returning the profile keys
+    /// the typed parse had to drop alongside the definition.
+    pub fn parse_toml(content: &str) -> Result<ParsedMobDefinition, MobError> {
         let raw: TomlDefinition = toml::from_str(content)?;
+        // Second, untyped read of the same text: the typed parse has already
+        // discarded every key `Profile` does not declare, and deserializing
+        // the typed struct out of a `toml::Table` instead would lose the span
+        // information the typed error messages carry.
+        let tables: toml::Table = toml::from_str(content)?;
+        let unknown_profile_keys = inspect_profile_keys(&raw.profiles, &tables)?;
         let orchestrator = raw.mob.orchestrator.map(|orchestrator| match orchestrator {
             TomlOrchestrator::Profile(profile) => OrchestratorConfig {
                 profile: ProfileName::from(profile),
             },
             TomlOrchestrator::Config(config) => config,
         });
-        Ok(Self {
+        let definition = Self {
             id: raw.mob.id,
             orchestrator,
             profiles: raw.profiles,
@@ -827,6 +979,10 @@ impl MobDefinition {
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
             source_identity: None,
+        };
+        Ok(ParsedMobDefinition {
+            definition,
+            unknown_profile_keys,
         })
     }
 
@@ -879,7 +1035,390 @@ impl MobDefinition {
 )]
 mod tests {
     use super::*;
-    use crate::profile::ToolConfig;
+
+    /// Shaped like HomeCore's production mob.toml: a host-private
+    /// `role_summary` under every profile table (plus one more private key on
+    /// `domain`). The host parses those keys itself; meerkat must warn about
+    /// them and keep parsing, never refuse.
+    const HOMECORE_SHAPED_TOML: &str = r#"
+[mob]
+id = "homecore-shaped"
+
+[profiles.identity]
+model = "gpt-5.5"
+provider = "openai"
+role_summary = "You are a personal household identity agent."
+skills = ["identity"]
+
+[profiles.identity.tools]
+comms = true
+
+[profiles.domain]
+model = "claude-sonnet-4-5"
+role_summary = "You are a household domain specialist."
+gating_tier = 2
+
+[profiles.domain.tools]
+comms = true
+
+[skills.identity]
+source = "inline"
+content = "You are the identity agent."
+"#;
+
+    fn profile_toml_with_extra_key(profile: &str, key: &str, value: &str) -> String {
+        format!(
+            r#"
+[mob]
+id = "extra-key"
+
+[profiles.{profile}]
+model = "claude-sonnet-4-5"
+{key} = {value}
+
+[profiles.{profile}.tools]
+comms = true
+"#
+        )
+    }
+
+    #[test]
+    fn from_toml_refuses_profile_system_prompt_and_names_the_remedy() {
+        let content = profile_toml_with_extra_key("worker", "system_prompt", "\"You write code.\"");
+        let err = MobDefinition::from_toml(&content).expect_err("system_prompt is refused");
+        match &err {
+            MobError::UnsupportedProfileKey { profile, key } => {
+                assert_eq!(profile.as_str(), "worker");
+                assert_eq!(*key, UnsupportedProfileKey::SystemPrompt);
+            }
+            other => panic!("expected UnsupportedProfileKey, got {other:?}"),
+        }
+        let message = err.to_string();
+        for needle in [
+            "profile 'worker'",
+            "'system_prompt'",
+            "a profile has no system_prompt",
+            "`profile.skills`",
+            "`[skills.<id>]`",
+            "`DurableAgentSpec.additional_instructions`",
+            "`draft.system_prompt`",
+        ] {
+            assert!(
+                message.contains(needle),
+                "refusal must mention {needle}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_toml_refuses_prompt_aliases_that_reach_for_the_member_prompt() {
+        for (key, expected) in [
+            ("prompt", UnsupportedProfileKey::Prompt),
+            ("instructions", UnsupportedProfileKey::Instructions),
+        ] {
+            let content = profile_toml_with_extra_key("worker", key, "\"You write code.\"");
+            let err = MobDefinition::from_toml(&content).expect_err("prompt aliases are refused");
+            assert!(
+                matches!(
+                    &err,
+                    MobError::UnsupportedProfileKey { profile, key: refused }
+                        if profile.as_str() == "worker" && *refused == expected
+                ),
+                "{key}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_toml_refusal_wins_over_unknown_key_warnings() {
+        let content = r#"
+[mob]
+id = "mixed"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+role_summary = "host-private, warns on its own"
+system_prompt = "You write code."
+
+[profiles.worker.tools]
+comms = true
+"#;
+        assert!(
+            matches!(
+                MobDefinition::parse_toml(content),
+                Err(MobError::UnsupportedProfileKey { .. })
+            ),
+            "a refused key must not be downgraded to a warning by its neighbours"
+        );
+    }
+
+    #[test]
+    fn parse_toml_warns_on_host_private_profile_keys_and_keeps_parsing() {
+        let parsed = MobDefinition::parse_toml(HOMECORE_SHAPED_TOML)
+            .expect("host-private keys do not refuse the parse");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![
+                UnknownProfileKeys {
+                    profile: ProfileName::from("domain"),
+                    keys: vec!["gating_tier".to_string(), "role_summary".to_string()],
+                },
+                UnknownProfileKeys {
+                    profile: ProfileName::from("identity"),
+                    keys: vec!["role_summary".to_string()],
+                },
+            ]
+        );
+
+        let diagnostics = parsed.diagnostics();
+        assert_eq!(diagnostics.len(), 3, "one diagnostic per ignored key");
+        let identity = diagnostics
+            .iter()
+            .find(|d| d.location.as_deref() == Some("profiles.identity.role_summary"))
+            .expect("identity role_summary diagnostic");
+        assert_eq!(identity.code, DiagnosticCode::UnknownProfileKey);
+        assert_eq!(identity.code.to_string(), "unknown_profile_key");
+        assert_eq!(identity.severity, DiagnosticSeverity::Warning);
+        assert!(
+            identity.message.contains("profile 'identity'")
+                && identity.message.contains("'role_summary'"),
+            "diagnostic names profile and key: {}",
+            identity.message
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.severity == DiagnosticSeverity::Warning),
+            "unknown keys never produce an error diagnostic"
+        );
+
+        // The typed definition kept everything it recognises.
+        let identity_profile = parsed.definition.profiles[&ProfileName::from("identity")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(identity_profile.skills, vec!["identity".to_string()]);
+        assert_eq!(
+            identity_profile.provider,
+            Some(meerkat_core::Provider::OpenAI)
+        );
+        assert!(identity_profile.tools.comms);
+        let domain_profile = parsed.definition.profiles[&ProfileName::from("domain")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(domain_profile.model, "claude-sonnet-4-5");
+
+        // The convenience path parses the same text; the keys only log there.
+        let definition = MobDefinition::from_toml(HOMECORE_SHAPED_TOML)
+            .expect("from_toml keeps parsing past host-private keys");
+        assert_eq!(definition, parsed.definition);
+    }
+
+    #[test]
+    fn from_toml_logs_one_warning_per_profile_with_unknown_keys() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = SharedBuf(Arc::clone(&buf));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        MobDefinition::from_toml(HOMECORE_SHAPED_TOML).expect("parses");
+
+        let logs = String::from_utf8(buf.lock().expect("log buffer lock").clone())
+            .expect("captured logs should be utf8");
+        let warn_lines: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("keys the profile does not define"))
+            .collect();
+        assert_eq!(
+            warn_lines.len(),
+            2,
+            "exactly one warning per profile with unknown keys: {logs}"
+        );
+        assert!(
+            warn_lines
+                .iter()
+                .any(|line| line.contains("profile=identity") && line.contains("role_summary")),
+            "identity warning names its ignored key: {logs}"
+        );
+        assert!(
+            warn_lines.iter().any(|line| {
+                line.contains("profile=domain")
+                    && line.contains("gating_tier")
+                    && line.contains("role_summary")
+            }),
+            "domain warning lists both ignored keys: {logs}"
+        );
+    }
+
+    #[test]
+    fn from_toml_reports_toml_syntax_errors_as_definition_parse() {
+        let err = MobDefinition::from_toml("[mob]\nid = ").expect_err("invalid toml");
+        assert!(matches!(err, MobError::DefinitionParse(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("mob definition parse error"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_toml_reports_no_unknown_keys_for_recognised_tables_and_realm_refs() {
+        let parsed = MobDefinition::parse_toml(example_toml()).expect("example parses");
+        assert!(parsed.unknown_profile_keys.is_empty(), "{parsed:?}");
+        assert!(parsed.diagnostics().is_empty());
+
+        let content = r#"
+[mob]
+id = "realm-ref"
+
+[profiles.shared]
+realm_profile = "org-reviewer"
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("realm ref parses");
+        assert_eq!(
+            parsed.definition.profiles[&ProfileName::from("shared")].realm_ref_name(),
+            Some("org-reviewer")
+        );
+        assert!(
+            parsed.unknown_profile_keys.is_empty(),
+            "realm_profile is the binding, not an unknown profile key: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_toml_refuses_system_prompt_on_a_realm_reference_table() {
+        // The untagged derive picks `RealmRef` for any table carrying
+        // `realm_profile` and, lacking `deny_unknown_fields`, would absorb the
+        // prompt key without a trace.
+        let content = r#"
+[mob]
+id = "realm-ref-prompt"
+
+[profiles.shared]
+realm_profile = "org-reviewer"
+system_prompt = "You review code."
+"#;
+        let err = MobDefinition::parse_toml(content).expect_err("system_prompt is refused");
+        match &err {
+            MobError::UnsupportedProfileKey { profile, key } => {
+                assert_eq!(profile.as_str(), "shared");
+                assert_eq!(*key, UnsupportedProfileKey::SystemPrompt);
+            }
+            other => panic!("expected UnsupportedProfileKey, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                MobDefinition::from_toml(content),
+                Err(MobError::UnsupportedProfileKey { .. })
+            ),
+            "from_toml refuses the same table"
+        );
+    }
+
+    #[test]
+    fn parse_toml_warns_on_extra_keys_in_a_realm_reference_table_and_keeps_the_binding() {
+        let content = r#"
+[mob]
+id = "realm-ref-extra"
+
+[profiles.shared]
+realm_profile = "org-reviewer"
+role_summary = "host-private"
+model = "claude-sonnet-4-5"
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("extra keys warn, not refuse");
+        assert_eq!(
+            parsed.definition.profiles[&ProfileName::from("shared")].realm_ref_name(),
+            Some("org-reviewer"),
+            "the binding stays a realm reference"
+        );
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("shared"),
+                keys: vec!["model".to_string(), "role_summary".to_string()],
+            }],
+            "a realm reference accepts only realm_profile; even a Profile field is extra"
+        );
+        let diagnostics = parsed.diagnostics();
+        let locations: Vec<Option<&str>> =
+            diagnostics.iter().map(|d| d.location.as_deref()).collect();
+        assert_eq!(
+            locations,
+            vec![
+                Some("profiles.shared.model"),
+                Some("profiles.shared.role_summary")
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_toml_warns_on_unknown_tools_keys_with_the_sub_table_location() {
+        // `comm = true` is the exact typo that yields the comms=false wiring
+        // rejection at spawn; the parse must name it.
+        let content = r#"
+[mob]
+id = "tools-typo"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[profiles.worker.tools]
+comm = true
+builtins = true
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("tools typos warn, not refuse");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("worker"),
+                keys: vec!["tools.comm".to_string()],
+            }]
+        );
+        let diagnostics = parsed.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::UnknownProfileKey);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            diagnostics[0].location.as_deref(),
+            Some("profiles.worker.tools.comm")
+        );
+        assert!(
+            diagnostics[0].message.contains("'tools.comm'"),
+            "{}",
+            diagnostics[0].message
+        );
+        let worker = parsed.definition.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .expect("inline profile");
+        assert!(worker.tools.builtins, "recognised tools keys are kept");
+        assert!(
+            !worker.tools.comms,
+            "the typo does not enable comms; the warning is what the author gets"
+        );
+    }
 
     fn example_toml() -> &'static str {
         r#"
@@ -990,6 +1529,109 @@ comms = true
         assert!(
             MobDefinition::from_toml(toml_str).is_err(),
             "unknown custom-model provider names must fail closed at mob load"
+        );
+    }
+
+    #[test]
+    fn from_toml_accepts_declared_profile_keys_and_bare_realm_refs() {
+        // Serialize a populated `Profile` instead of hand-writing the table so
+        // the accepted key set is the one the serializer emits; a rename on
+        // either side shows up here, not only in the derive probe.
+        let profile = Profile {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: Some(meerkat_core::Provider::Anthropic),
+            self_hosted_server_id: Some("local-a".to_string()),
+            image_generation_provider: Some(meerkat_core::Provider::Gemini),
+            auto_compact_threshold: std::num::NonZeroU64::new(120_000),
+            resume_overrides: vec![crate::profile::ResumeOverrideField::Model],
+            skills: vec!["worker-skill".to_string()],
+            tools: ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            },
+            peer_description: "Writes code".to_string(),
+            external_addressable: true,
+            backend: Some(MobBackendKind::External),
+            runtime_mode: crate::MobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: Some(4),
+            output_schema: Some(
+                MeerkatSchema::new(serde_json::json!({"type": "object"})).expect("object schema"),
+            ),
+            provider_params: None,
+        };
+        let worker = toml::Value::try_from(&profile).expect("profile serializes to TOML");
+        let emitted: Vec<&str> = worker
+            .as_table()
+            .expect("profile serializes as a table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            emitted.len() > 10,
+            "populated profile emits its keys: {emitted:?}"
+        );
+        for key in &emitted {
+            assert!(
+                Profile::FIELD_NAMES.contains(key),
+                "serializer emitted {key} which FIELD_NAMES does not declare"
+            );
+        }
+        let emitted_tools: Vec<&str> = worker
+            .get("tools")
+            .and_then(toml::Value::as_table)
+            .expect("tools serializes as a sub-table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            emitted_tools.len() > 5,
+            "populated tools emit their keys: {emitted_tools:?}"
+        );
+        for key in &emitted_tools {
+            assert!(
+                ToolConfig::FIELD_NAMES.contains(key),
+                "serializer emitted tools.{key} which ToolConfig::FIELD_NAMES does not declare"
+            );
+        }
+
+        let mut shared = toml::Table::new();
+        shared.insert(
+            "realm_profile".to_string(),
+            toml::Value::String("reviewer".to_string()),
+        );
+        let mut profiles = toml::Table::new();
+        profiles.insert("worker".to_string(), worker);
+        profiles.insert("shared".to_string(), toml::Value::Table(shared));
+        let mut mob = toml::Table::new();
+        mob.insert(
+            "id".to_string(),
+            toml::Value::String("full-profile".to_string()),
+        );
+        let mut skill = toml::Table::new();
+        skill.insert(
+            "source".to_string(),
+            toml::Value::String("inline".to_string()),
+        );
+        skill.insert(
+            "content".to_string(),
+            toml::Value::String("You write code.".to_string()),
+        );
+        let mut skills = toml::Table::new();
+        skills.insert("worker-skill".to_string(), toml::Value::Table(skill));
+        let mut document = toml::Table::new();
+        document.insert("mob".to_string(), toml::Value::Table(mob));
+        document.insert("profiles".to_string(), toml::Value::Table(profiles));
+        document.insert("skills".to_string(), toml::Value::Table(skills));
+        let content = toml::to_string(&document).expect("document serializes");
+
+        let def = MobDefinition::from_toml(&content).expect("declared keys parse");
+        assert_eq!(
+            def.profiles[&ProfileName::from("worker")].as_inline(),
+            Some(&profile)
+        );
+        assert_eq!(
+            def.profiles[&ProfileName::from("shared")].realm_ref_name(),
+            Some("reviewer")
         );
     }
 

@@ -673,6 +673,87 @@ rust_test(
 )
 
 rust_test(
+    name = "realm_config_ingress_test",
+    aliases = aliases(
+        package_name = "meerkat-rpc",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "realm_config_ingress",
+    crate_root = "tests/realm_config_ingress.rs",
+    crate_features = [
+        "comms",
+        "experimental-gpt-live",
+        "live-webrtc",
+        "mcp",
+        "mob",
+        "openai-realtime",
+        "schedule",
+        "workgraph",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//:live_smoke_support",
+    ],
+    srcs = [
+        "tests/realm_config_ingress.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.33",
+        "CARGO_BIN_NAME": "realm_config_ingress",
+        "CARGO_MANIFEST_DIR": "./meerkat-rpc",
+        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+        "//meerkat-rpc:rkat_rpc_bin",
+    ],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-rpc",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//meerkat:meerkat_anthropic_agent_factory_build",
+        "//meerkat:meerkat_atif_agent_factory_build",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+        "//meerkat:meerkat_mcp_agent_factory_build_test_support",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_providers_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-rpc",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "regression_rpc_test",
     aliases = aliases(
         package_name = "meerkat-rpc",
@@ -1115,6 +1196,7 @@ test_suite(
     tests = [
         ":atif_export_contract_test",
         ":meerkat_rpc_unit_test",
+        ":realm_config_ingress_test",
         ":regression_rpc_test",
         ":rpc_auth_methods_test",
         ":runtime_backed_ingress_test",

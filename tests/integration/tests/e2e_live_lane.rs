@@ -82,6 +82,10 @@ live_suite!(
 );
 live_suite!(e2e_live_cli_structured_output, "cli-structured-output");
 live_suite!(
+    e2e_live_provider_tool_schema_compat,
+    "provider-tool-schema-compat"
+);
+live_suite!(
     e2e_live_surface_build_fixtures,
     "surface-build-fixtures-live"
 );

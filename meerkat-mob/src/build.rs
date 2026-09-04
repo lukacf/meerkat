@@ -176,7 +176,11 @@ pub async fn build_agent_config(
 
     if !profile.tools.comms {
         return Err(MobError::WiringError(format!(
-            "profile '{profile_name}' has tools.comms=false; mob meerkats require comms=true"
+            "profile '{profile_name}' has tools.comms=false; mob meerkats require comms=true. \
+             The default is false, so a profile that omits the key counts as false: set \
+             `comms = true` under `[profiles.{profile_name}.tools]`. To keep a member from \
+             messaging peers, keep comms on and use `read_only = true` or a per-spawn \
+             `tool_access_policy` deny list."
         )));
     }
 
@@ -2549,10 +2553,28 @@ mod tests {
             system_prompt_override: None,
         })
         .await;
-        assert!(
-            matches!(result, Err(MobError::WiringError(_))),
-            "tools.comms=false must be rejected at build_agent_config"
-        );
+        let message = match result {
+            Err(MobError::WiringError(message)) => message,
+            Err(other) => panic!("tools.comms=false must be a WiringError, got {other:?}"),
+            Ok(_) => panic!("tools.comms=false must be rejected at build_agent_config"),
+        };
+        // The rejection keeps its historical prefix and now carries the remedy:
+        // the default is false, so omitting the key is the same as disabling
+        // it; the fix is `comms = true`; peer messaging is prevented with
+        // `read_only` or a per-spawn `tool_access_policy` deny list, never by
+        // disabling comms.
+        for needle in [
+            "profile 'worker' has tools.comms=false; mob meerkats require comms=true",
+            "The default is false, so a profile that omits the key counts as false",
+            "set `comms = true` under `[profiles.worker.tools]`",
+            "keep comms on and use `read_only = true`",
+            "per-spawn `tool_access_policy` deny list",
+        ] {
+            assert!(
+                message.contains(needle),
+                "wiring error must carry the remedy {needle:?}: {message}"
+            );
+        }
     }
 
     #[tokio::test]

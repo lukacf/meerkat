@@ -16,6 +16,7 @@ use meerkat_core::{
     Usage,
 };
 use meerkat_llm_core::LlmError;
+use meerkat_llm_core::error::ProviderErrorObject;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
@@ -44,8 +45,10 @@ pub struct AnthropicClient {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
-    /// Backend-owned fallback. This remains disabled unless an embedding host
-    /// deliberately overrides it; ordinary cache policy is profile-owned.
+    /// Backend-owned fallback cache policy: `Automatic` wherever the backend
+    /// supports Anthropic's request-wide automatic breakpoint (the builder
+    /// default), `Disabled` where it does not (Bedrock, Copilot). A typed
+    /// per-request or profile `cache_control` always wins over this default.
     default_cache_control: AnthropicCacheControlPolicy,
     /// Whether this backend accepts Anthropic's request-wide automatic cache
     /// policy. Amazon Bedrock supports manual breakpoints but not this mode.
@@ -77,7 +80,7 @@ impl AnthropicClientBuilder {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
-            default_cache_control: AnthropicCacheControlPolicy::Disabled,
+            default_cache_control: AnthropicCacheControlPolicy::Automatic,
             automatic_cache_control_supported: true,
             authorizer: None,
         }
@@ -102,9 +105,13 @@ impl AnthropicClientBuilder {
 
     /// Set the backend-owned default prompt-cache policy.
     ///
-    /// Per-request typed provider params still take precedence. Provider
-    /// runtimes use this to disable automatic caching for Amazon Bedrock while
-    /// keeping it enabled for Anthropic API, Vertex, and Foundry.
+    /// The builder starts from `Automatic`. Per-request typed provider params
+    /// still take precedence. Provider runtimes use this to disable automatic
+    /// caching for Amazon Bedrock and the Copilot route while keeping it
+    /// enabled for Anthropic API, Vertex, and Foundry; a direct builder user
+    /// targeting a custom backend without automatic support must pair a
+    /// non-automatic policy here with
+    /// [`automatic_cache_control_supported(false)`](Self::automatic_cache_control_supported).
     pub fn default_cache_control(mut self, policy: AnthropicCacheControlPolicy) -> Self {
         self.default_cache_control = policy;
         self
@@ -623,7 +630,7 @@ impl AnthropicClient {
     }
 
     /// Build request body for Anthropic API
-    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
         let mut leading_system_prefix = true;
@@ -1895,6 +1902,19 @@ impl LlmClient for AnthropicClient {
 
                             let error = match error_type {
                                 "overloaded_error" => LlmError::ServerOverloaded,
+                                // The monthly spend cap shares the
+                                // rate_limit_error type and is told apart by
+                                // details.error_code; no retry clears it.
+                                "rate_limit_error"
+                                    if $event.error.as_ref().is_some_and(|error| {
+                                        ProviderErrorObject::deserialize(error)
+                                            .is_ok_and(|error| error.signals_quota_exhausted())
+                                    }) =>
+                                {
+                                    LlmError::QuotaExhausted {
+                                        message: error_msg.to_string(),
+                                    }
+                                }
                                 "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
                                 // Anthropic's typed request-size rejection
                                 // (2026-07-29 incident: an over-cap transcript
@@ -3032,13 +3052,77 @@ mod tests {
         assert!(body.get("thinking").is_none());
         assert!(body.get("top_k").is_none());
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
-        assert!(
-            body.get("cache_control").is_none(),
-            "cache policy must remain disabled unless the profile or request opts in"
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "API-key clients default to Anthropic automatic prompt caching (docs/rust/advanced.mdx)"
         );
         assert!(
             body["messages"].to_string().find("cache_control").is_none(),
-            "disabled cache policy must not author conversation breakpoints"
+            "the automatic policy is request-wide and authors no conversation breakpoints"
+        );
+        Ok(())
+    }
+
+    /// The documented per-profile opt-out, `provider_params = { provider_tag =
+    /// { provider = "anthropic", cache_control = "disabled" } }`, reaches the
+    /// client as the request's provider tag and suppresses the automatic
+    /// default entirely.
+    #[test]
+    fn test_profile_cache_control_disabled_opts_out_of_automatic_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let messages = vec![
+            Message::System(SystemMessage::new("stable system prefix".to_string())),
+            Message::User(UserMessage::text("test".to_string())),
+        ];
+
+        let default_body =
+            client.build_request_body(&LlmRequest::new("claude-sonnet-4-6", messages.clone()))?;
+        assert_eq!(
+            default_body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "control: without the opt-out the same client caches automatically"
+        );
+
+        let profile: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
+            "provider_tag": { "provider": "anthropic", "cache_control": "disabled" }
+        }))?;
+        let tag = profile
+            .provider_tag
+            .ok_or("the profile must carry the anthropic tag")?;
+        let request = LlmRequest::new("claude-sonnet-4-6", messages).with_provider_params(tag);
+
+        let body = client.build_request_body(&request)?;
+
+        assert!(
+            !AnthropicClient::contains_cache_control(&body),
+            "the disabled opt-out must remove every cache_control marker: {body}"
+        );
+        assert_eq!(body["system"], "stable system prefix");
+        Ok(())
+    }
+
+    /// A profile that pins only `cache_ttl` rides the automatic default: the
+    /// lifetime is carried on the request-wide breakpoint instead of failing
+    /// the first call, which is what the 0.8.22 disabled default did.
+    #[test]
+    fn test_profile_cache_ttl_rides_the_automatic_default() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_anthropic_tag_merge(|tag| tag.cache_ttl = Some(AnthropicCacheTtl::OneHour));
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"})
         );
         Ok(())
     }
@@ -4184,6 +4268,58 @@ mod tests {
             server_blocks[1].2["content"][0]["url"],
             "https://example.com"
         );
+    }
+
+    /// A streamed rate_limit_error carrying the documented spend-cap code
+    /// terminalizes as exhausted quota; a plain rate_limit_error stays a
+    /// retryable rate limit.
+    #[tokio::test]
+    async fn test_stream_error_spend_cap_is_quota_exhaustion_and_rate_limit_retries() {
+        async fn first_error(payload: &str) -> LlmError {
+            let payload = [payload, ""].join("\n");
+            let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+            let client = AnthropicClient::builder("test-key".to_string())
+                .base_url(base_url)
+                .build()
+                .unwrap();
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello".to_string()))],
+            );
+            let mut stream = client.stream(&request);
+            let mut observed = None;
+            while let Some(event) = stream.next().await {
+                if let LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                } = event.expect("stream event")
+                {
+                    observed = Some(error);
+                    break;
+                }
+            }
+            server.abort();
+            observed.expect("expected Done with error outcome")
+        }
+
+        let spend_cap = first_error(
+            r#"data: {"type":"error","error":{"type":"rate_limit_error","message":"You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.","details":{"error_code":"enforced_spend_limit_reached"}}}"#,
+        )
+        .await;
+        assert!(
+            matches!(spend_cap, LlmError::QuotaExhausted { .. }),
+            "expected QuotaExhausted, got: {spend_cap:?}"
+        );
+        assert!(!spend_cap.is_retryable());
+
+        let rate_limit = first_error(
+            r#"data: {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed the rate limit for your organization of 50 requests per minute."}}"#,
+        )
+        .await;
+        assert!(
+            matches!(rate_limit, LlmError::RateLimited { .. }),
+            "expected RateLimited, got: {rate_limit:?}"
+        );
+        assert!(rate_limit.is_retryable());
     }
 
     /// Regression: Anthropic streaming error event must yield Done with error.

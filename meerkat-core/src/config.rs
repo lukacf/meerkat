@@ -264,6 +264,7 @@ impl Config {
     /// Merge configuration from a TOML string.
     pub fn merge_toml_str(&mut self, content: &str) -> Result<(), ConfigError> {
         let file_config: Config = toml::from_str(content).map_err(ConfigError::Parse)?;
+        file_config.reject_unwired_agent_provider_params()?;
         let tools_layer = file_config.tools.clone();
         let retry_layer = file_config.retry.clone();
         let self_hosted_layer = file_config.self_hosted.clone();
@@ -855,6 +856,31 @@ impl Config {
 }
 
 impl Config {
+    /// Refuse a realm-level `[agent] provider_params` table.
+    ///
+    /// [`AgentConfig::provider_params`] is the per-session carrier that
+    /// `AgentBuilder::provider_params` fills from a build's typed override. No
+    /// build path reads it off the realm `Config`, and `Config::merge` does
+    /// not carry it between layers, so a realm document that sets it would
+    /// parse fail-closed and then be silently ignored - the exact trap for an
+    /// operator hunting for a fleet-wide Anthropic cache policy. Until a realm
+    /// default is wired end to end, this is a typed configuration error that
+    /// names the carrier that does reach the request. Crate-private: it is an
+    /// ingress check on the three config load paths, not a host API.
+    pub(crate) fn reject_unwired_agent_provider_params(&self) -> Result<(), ConfigError> {
+        if self.agent.provider_params.serializes_empty() {
+            return Ok(());
+        }
+        Err(ConfigError::Validation(
+            "[agent] provider_params is not applied to any session: realm config carries no \
+             provider-params default. Set provider_params on the mob profile, the create-session \
+             request, or AgentBuildConfig instead, nesting provider knobs under provider_tag \
+             (for example provider_params = { provider_tag = { provider = \"anthropic\", \
+             cache_control = \"disabled\" } })"
+                .to_string(),
+        ))
+    }
+
     /// Return only caller-configured per-turn output limits.
     ///
     /// Embedded template defaults are intentionally excluded: factories use
@@ -889,6 +915,7 @@ impl Config {
     /// - The effective model registry (custom + self-hosted entries merged
     ///   over the injected catalog) constructs without conflicts
     pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
+        self.reject_unwired_agent_provider_params()?;
         if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0 when set".to_string(),
@@ -1032,6 +1059,13 @@ pub struct AgentConfig {
     /// changes (e.g. disabling web search) take effect immediately on resumed
     /// sessions. The per-turn effective params come from the carrier's typed
     /// field-wise merge ([`ProviderParamsCarrier::effective_params`]).
+    ///
+    /// On the realm [`Config`] (`[agent]` in `.rkat/config.toml`) this field
+    /// has no consumer, so a realm document that sets it is refused at ingress
+    /// by the crate-private `Config::reject_unwired_agent_provider_params`
+    /// instead of being silently ignored; per-profile / per-request
+    /// `provider_params` is the
+    /// carrier that reaches the request.
     ///
     /// [`ProviderParamsCarrier::effective_params`]: crate::lifecycle::run_primitive::ProviderParamsCarrier::effective_params
     #[serde(
@@ -4584,5 +4618,48 @@ model = "custom-model"
         let parsed: AgentConfig =
             serde_json::from_value(typed).expect("typed provider params parse");
         assert_eq!(parsed.provider_params.params.temperature, Some(0.2));
+    }
+
+    /// Realm `[agent] provider_params` has no consumer (the factory never reads
+    /// it and `Config::merge` does not carry it), so a fleet-wide cache policy
+    /// placed there would parse and then silently do nothing. It is refused at
+    /// config ingress with a typed error naming the carrier that does work.
+    #[test]
+    fn realm_agent_provider_params_is_rejected_as_unwired() {
+        let mut config = Config::default();
+        let err = config
+            .merge_toml_str(
+                r#"
+[agent]
+provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+"#,
+            )
+            .expect_err("realm-level provider_params must not be silently ignored");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::Validation(message)
+                    if message.contains("[agent] provider_params")
+                        && message.contains("provider_tag")
+            ),
+            "unexpected error: {err}"
+        );
+
+        // Ordinary `[agent]` keys keep merging.
+        config
+            .merge_toml_str("[agent]\nmodel = \"custom-model\"\n")
+            .expect("ordinary agent keys merge");
+        assert_eq!(config.agent.model, "custom-model");
+
+        // A programmatically constructed realm config is refused by validate() too.
+        let mut carried = Config::default();
+        carried.agent.provider_params.params.temperature = Some(0.2);
+        let err = carried
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("validate must refuse an unwired realm provider_params");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -590,180 +590,11 @@ impl MobOperatorToolDispatcher {
         enable_mob: bool,
         authority_context: MobToolAuthorityContext,
     ) -> Self {
-        let mut defs: Vec<Arc<ToolDef>> = Vec::new();
-        if enable_mob {
-            defs.push(tool_def(
-                TOOL_SPAWN_MEMBER,
-                "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "profile": {"type": "string"},
-                        "member_id": {"type": "string"},
-                        "initial_message": content_input_schema(),
-                        "resume_bridge_session_id": {"type": "string", "description": "Preferred compatibility field for resume bridge bindings when launch_mode is omitted"},
-                        "resume_session_id": {"type": "string", "description": "Deprecated: use resume_bridge_session_id or launch_mode.resume instead"},
-                        "backend": {"type": "string", "enum": ["session", "external"]},
-                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
-                        "launch_mode": {
-                            "type": "object",
-                            "description": "Launch mode: fresh (default), resume {session_id}, or fork {source_member_id, fork_context}",
-                        },
-                        "tool_access_policy": {
-                            "type": "object",
-                            "description": "Tool access policy: inherit (default), allow_list, or deny_list"
-                        },
-                        "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"},
-                        "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
-                    },
-                    "required": ["profile", "member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_SPAWN_MANY_MEMBERS,
-                "Spawn multiple mob members in one call. Returns per-item results in input order.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "specs": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "profile": {"type": "string"},
-                                    "member_id": {"type": "string"},
-                                    "initial_message": content_input_schema(),
-                                    "resume_bridge_session_id": {"type": "string"},
-                                    "resume_session_id": {"type": "string"},
-                                    "backend": {"type": "string", "enum": ["session", "external"]},
-                                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
-                                    "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
-                                },
-                                "required": ["profile", "member_id"]
-                            }
-                        }
-                    },
-                    "required": ["specs"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_RETIRE_MEMBER,
-                "Retire a member and archive its session.",
-                json!({
-                    "type": "object",
-                    "properties": {"member_id": {"type": "string"}},
-                    "required": ["member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_WIRE_MEMBERS,
-                "Wire two mob members with bidirectional trust.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "member_id": {"type": "string"},
-                        "peer_member_id": {"type": "string"}
-                    },
-                    "required": ["member_id", "peer_member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_UNWIRE_MEMBERS,
-                "Unwire two mob members and revoke bidirectional trust.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "member_id": {"type": "string"},
-                        "peer_member_id": {"type": "string"}
-                    },
-                    "required": ["member_id", "peer_member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_LIST_MEMBERS,
-                "List all active mob members. Response includes identity-native lifecycle and runtime fields.",
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_LIST_FLOWS,
-                "List all configured flow IDs for this mob.",
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_RUN_FLOW,
-                "Run a configured flow by ID with optional activation params. Returns run_id.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "flow_id": {"type": "string"},
-                        "params": {"type": "object"}
-                    },
-                    "required": ["flow_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_FLOW_STATUS,
-                "Get persisted status and ledgers for a flow run.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "run_id": {"type": "string"}
-                    },
-                    "required": ["run_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_CANCEL_FLOW,
-                "Cancel an in-flight flow run by run_id.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "run_id": {"type": "string"}
-                    },
-                    "required": ["run_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_FORCE_CANCEL_MEMBER,
-                "Force-cancel a member's in-flight turn. Does not retire the member.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "member_id": {"type": "string"}
-                    },
-                    "required": ["member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-            defs.push(tool_def(
-                TOOL_MEMBER_STATUS,
-                "Get a member's execution status snapshot including output preview and token usage.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "member_id": {"type": "string"}
-                    },
-                    "required": ["member_id"]
-                }),
-                ToolSourceKind::Mob,
-            ));
-        }
+        let defs: Vec<Arc<ToolDef>> = if enable_mob {
+            local_operator_tool_defs()
+        } else {
+            Vec::new()
+        };
         Self {
             handle,
             authority_context,
@@ -972,6 +803,187 @@ impl MobOperatorToolDispatcher {
             );
         }
     }
+}
+
+/// The member-session operator tool definitions, local flavor: exactly what
+/// `MobOperatorToolDispatcher` advertises to a member whose profile enables
+/// mob tools. The remote flavor a member reaches through the upcall surface
+/// is `member_upcall::remote_operator_tool_defs`; the two are separate
+/// literals and the provider schema matrix lowers both.
+pub(crate) fn local_operator_tool_defs() -> Vec<Arc<ToolDef>> {
+    let mut defs: Vec<Arc<ToolDef>> = Vec::new();
+    defs.push(tool_def(
+            TOOL_SPAWN_MEMBER,
+            "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string"},
+                    "member_id": {"type": "string"},
+                    "initial_message": content_input_schema(),
+                    "resume_bridge_session_id": {"type": "string", "description": "Preferred compatibility field for resume bridge bindings when launch_mode is omitted"},
+                    "resume_session_id": {"type": "string", "description": "Deprecated: use resume_bridge_session_id or launch_mode.resume instead"},
+                    "backend": {"type": "string", "enum": ["session", "external"]},
+                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                    "launch_mode": {
+                        "type": "object",
+                        "description": "Launch mode: fresh (default), resume {session_id}, or fork {source_member_id, fork_context}",
+                    },
+                    "tool_access_policy": {
+                        "type": "object",
+                        "description": "Tool access policy: inherit (default), allow_list, or deny_list"
+                    },
+                    "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"},
+                    "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
+                },
+                "required": ["profile", "member_id"]
+            }),
+            ToolSourceKind::Mob,
+        ));
+    defs.push(tool_def(
+            TOOL_SPAWN_MANY_MEMBERS,
+            "Spawn multiple mob members in one call. Returns per-item results in input order.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "specs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "profile": {"type": "string"},
+                                "member_id": {"type": "string"},
+                                "initial_message": content_input_schema(),
+                                "resume_bridge_session_id": {"type": "string"},
+                                "resume_session_id": {"type": "string"},
+                                "backend": {"type": "string", "enum": ["session", "external"]},
+                                "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                                "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
+                            },
+                            "required": ["profile", "member_id"]
+                        }
+                    }
+                },
+                "required": ["specs"]
+            }),
+            ToolSourceKind::Mob,
+        ));
+    defs.push(tool_def(
+        TOOL_RETIRE_MEMBER,
+        "Retire a member and archive its session.",
+        json!({
+            "type": "object",
+            "properties": {"member_id": {"type": "string"}},
+            "required": ["member_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_WIRE_MEMBERS,
+        "Wire two mob members with bidirectional trust.",
+        json!({
+            "type": "object",
+            "properties": {
+                "member_id": {"type": "string"},
+                "peer_member_id": {"type": "string"}
+            },
+            "required": ["member_id", "peer_member_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_UNWIRE_MEMBERS,
+        "Unwire two mob members and revoke bidirectional trust.",
+        json!({
+            "type": "object",
+            "properties": {
+                "member_id": {"type": "string"},
+                "peer_member_id": {"type": "string"}
+            },
+            "required": ["member_id", "peer_member_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+            TOOL_LIST_MEMBERS,
+            "List all active mob members. Response includes identity-native lifecycle and runtime fields.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            ToolSourceKind::Mob,
+        ));
+    defs.push(tool_def(
+        TOOL_MOB_LIST_FLOWS,
+        "List all configured flow IDs for this mob.",
+        json!({
+            "type": "object",
+            "properties": {}
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_MOB_RUN_FLOW,
+        "Run a configured flow by ID with optional activation params. Returns run_id.",
+        json!({
+            "type": "object",
+            "properties": {
+                "flow_id": {"type": "string"},
+                "params": {"type": "object"}
+            },
+            "required": ["flow_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_MOB_FLOW_STATUS,
+        "Get persisted status and ledgers for a flow run.",
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"}
+            },
+            "required": ["run_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_MOB_CANCEL_FLOW,
+        "Cancel an in-flight flow run by run_id.",
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"}
+            },
+            "required": ["run_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_FORCE_CANCEL_MEMBER,
+        "Force-cancel a member's in-flight turn. Does not retire the member.",
+        json!({
+            "type": "object",
+            "properties": {
+                "member_id": {"type": "string"}
+            },
+            "required": ["member_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs.push(tool_def(
+        TOOL_MEMBER_STATUS,
+        "Get a member's execution status snapshot including output preview and token usage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "member_id": {"type": "string"}
+            },
+            "required": ["member_id"]
+        }),
+        ToolSourceKind::Mob,
+    ));
+    defs
 }
 
 fn tool_def(

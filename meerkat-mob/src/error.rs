@@ -361,6 +361,24 @@ pub enum MobError {
     #[error("wiring error: {0}")]
     WiringError(String),
 
+    /// The definition text could not be parsed as a mob definition.
+    #[error("mob definition parse error: {0}")]
+    DefinitionParse(#[from] toml::de::Error),
+
+    /// A `[profiles.<name>]` table declares a key that names a platform
+    /// concept a mob profile cannot honour (`system_prompt` and its aliases).
+    /// Refused at definition load: `Profile` cannot use `deny_unknown_fields`,
+    /// so without this check the key would be dropped silently and the member
+    /// would run on the default prompt.
+    #[error(
+        "profile '{profile}' declares '{key}', which a mob profile cannot honour: {}",
+        crate::profile::UnsupportedProfileKey::HINT
+    )]
+    UnsupportedProfileKey {
+        profile: ProfileName,
+        key: crate::profile::UnsupportedProfileKey,
+    },
+
     /// An external provisioning attempt could not certify its compensation
     /// complete. The exact PeerId/operation reservation remains quarantined
     /// whenever possible; callers must keep cleanup authority open and fail

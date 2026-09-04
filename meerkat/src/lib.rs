@@ -422,6 +422,12 @@ pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
 // Memory store implementation, re-exported for maintenance verbs.
 #[cfg(feature = "memory-store-session")]
 pub use meerkat_memory::HnswMemoryStore;
+// The `memory_search` tool dispatcher the factory mounts for memory-backed
+// sessions, and the in-memory store, re-exported so hosts and the provider
+// schema matrix compose the exact tool definition without depending on
+// meerkat-memory directly.
+#[cfg(feature = "memory-store-session")]
+pub use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 // Durable stored-event row (typed envelope identity) for replay surfaces.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::event_store::StoredEvent;

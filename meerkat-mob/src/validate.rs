@@ -63,6 +63,11 @@ pub enum DiagnosticCode {
     /// `expected_schema_ref` (free-form JSON is legitimate but usually wants
     /// a schema, or `text`).
     JsonOutputWithoutSchema,
+    /// A `[profiles.<name>]` table declares a key `Profile` does not define;
+    /// the key is ignored. Emitted with warning severity by
+    /// `MobDefinition::parse_toml`, because the typed definition no longer
+    /// holds the key once parsed.
+    UnknownProfileKey,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -93,6 +98,7 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidCustomModel => "invalid_custom_model",
             Self::InvalidImageGenerationProvider => "invalid_image_generation_provider",
             Self::JsonOutputWithoutSchema => "json_output_without_schema",
+            Self::UnknownProfileKey => "unknown_profile_key",
         };
         f.write_str(s)
     }

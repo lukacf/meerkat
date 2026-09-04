@@ -1477,6 +1477,376 @@ from the stored predecessor role while keeping mob ID, member identity,
 session, and transcript fixed; live sessions and mismatched declarations fail
 closed.
 
+### workgraph/get
+
+Read one WorkGraph item by id. Requires the `workgraph` feature and a
+realm-scoped runtime; a runtime without a realm identity returns a typed fault
+instead of inventing a `default` scope.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "method": "workgraph/get",
+  "params": {
+    "id": "work_release_notes",
+    "namespace": "default"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "result": {
+    "id": "work_release_notes",
+    "realm_id": "home",
+    "namespace": "default",
+    "title": "Prepare release notes",
+    "status": "in_progress",
+    "priority": "high",
+    "labels": ["release", "docs"],
+    "revision": 4,
+    "evidence_refs": [
+      {
+        "kind": "pr",
+        "id": "1082",
+        "label": "Catalog PR",
+        "summary": "Adds the 0.8.33 catalog models"
+      }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+The response is abridged; the full `WorkItem` shape is in the
+[WorkGraph reference](/reference/workgraph-reference#workitem).
+
+<ParamField body="id" type="string" required>
+  The `WorkItemId`.
+</ParamField>
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm. Any other value is rejected: the service holds exactly one `WorkGraphNamespaceGrant`.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace (`default` on standard surfaces). Any other value is rejected.
+</ParamField>
+
+Every evidence entry, here and everywhere a `WorkEvidenceRef` appears (the
+`workgraph_add_evidence` tool argument, host mutation surfaces such as MobKit's
+`mobkit/workgraph/evidence/add`), has the shape
+`{"kind": string, "id": string, "label"?: string, "summary"?: string}`. `kind`
+is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
+`notification`, ...); the reserved confirmation kinds (`host_confirmation`,
+`principal_confirmation`, `supervisor_confirmation`, `reviewer_confirmation`)
+are refused from generic callers and stamped only by trusted goal-confirm
+authority.
+
+### workgraph/list
+
+List items in the granted realm and namespace. Params are a `WorkItemFilter`;
+all fields are optional and an empty object lists live work.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "workgraph/list",
+  "params": {
+    "namespace": "default",
+    "statuses": ["completed", "failed"],
+    "labels": ["release", "docs"],
+    "include_terminal": true,
+    "limit": 50
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "result": {
+    "items": [
+      {"id": "work_release_notes", "status": "completed", "labels": ["release", "docs"], "revision": 6}
+    ]
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm; must equal the granted realm.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace; must equal it.
+</ParamField>
+
+<ParamField body="all_namespaces" type="boolean" default="false">
+  Present in the wire shape, rejected by the standard single-grant services. A namespace grant never implies a multi-namespace capability.
+</ParamField>
+
+<ParamField body="statuses" type="WorkStatus[]">
+  Keep only items whose status is listed: `open`, `in_progress`, `blocked`, `completed`, `cancelled`, `failed`. Checked before the terminality rule below.
+</ParamField>
+
+<ParamField body="labels" type="string[]">
+  Every listed label must be present on the item (a conjunction). `["release", "docs"]` returns only items carrying both; filter on one label to widen the result.
+</ParamField>
+
+<ParamField body="include_terminal" type="boolean" default="false">
+  When false, `completed`, `cancelled`, and `failed` items are dropped even if `statuses` names them: `{"statuses": ["completed"]}` alone returns an empty list. Set it to true to read closed work.
+</ParamField>
+
+<ParamField body="limit" type="integer" default="100">
+  Maximum items returned. Omitted means 100; values above 1,000 fail with `INVALID_PARAMS` before the store is queried.
+</ParamField>
+
+Items and edges are never deleted. There is no unlink or delete method on any
+surface and no tool for it; the graph is an append-only ledger. To take an item
+out of live views, close it as `cancelled` (it then hides behind
+`include_terminal`); to replace it, create the successor and link a
+`supersedes` edge from the new item (`from_id`) to the old one (`to_id`).
+
+### workgraph/ready
+
+List items whose machine-derived readiness holds right now: live status, no
+unresolved `blocks` edge, parent join satisfied, and time gates passed. Params
+are a `ReadyWorkFilter`.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 32,
+  "method": "workgraph/ready",
+  "params": {
+    "namespace": "default",
+    "labels": ["release"],
+    "limit": 20
+  }
+}
+```
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm; must equal the granted realm.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace; must equal it.
+</ParamField>
+
+<ParamField body="labels" type="string[]">
+  Every listed label must be present (same conjunction as `workgraph/list`).
+</ParamField>
+
+<ParamField body="limit" type="integer" default="100">
+  Maximum items returned after sorting by priority (high first), then creation time, then id. Omitted means 100; above 1,000 is `INVALID_PARAMS`.
+</ParamField>
+
+There is no `include_terminal` here because a terminal item is never ready.
+Readiness is evaluated atomically over the namespace; a namespace with more
+than 1,000 items fails with `INVALID_PARAMS` and must be narrowed rather than
+truncated. The result is `{"items": [...]}`.
+
+### workgraph/snapshot
+
+Read one atomic observation of the namespace. Params are a
+`WorkGraphSnapshotFilter` with the same fields and semantics as
+`WorkItemFilter` (`realm_id`, `namespace`, `all_namespaces`, `statuses`,
+`labels`, `include_terminal`, `limit`).
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 33,
+  "method": "workgraph/snapshot",
+  "params": {
+    "namespace": "default",
+    "include_terminal": false,
+    "limit": 200
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 33,
+  "result": {
+    "realm_id": "home",
+    "namespace": "default",
+    "all_namespaces": false,
+    "captured_at": "2026-09-03T10:15:00Z",
+    "event_high_water_mark": 412,
+    "items": [],
+    "edges": [],
+    "attention": [],
+    "ready_item_ids": []
+  }
+}
+```
+</CodeGroup>
+
+`statuses`, `labels`, and `include_terminal` select the items exactly as in
+`workgraph/list`; `limit` then bounds them (default 100, maximum 1,000).
+`edges` contains only edges whose both endpoints are among the returned items,
+`attention` only bindings on those items, and `ready_item_ids` the subset of
+returned items that is ready at `captured_at`. A snapshot therefore omits an
+edge to a terminal item unless `include_terminal` is true. The atomic scan is
+bounded before filtering: a namespace with more than 1,000 items, 1,000 edges,
+or 1,000 attention bindings fails with `INVALID_PARAMS` and must be narrowed.
+
+### workgraph/events
+
+Read the public event history of the namespace. Params are a
+`WorkGraphEventFilter`.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 34,
+  "method": "workgraph/events",
+  "params": {
+    "namespace": "default",
+    "after_seq": 400,
+    "limit": 100
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 34,
+  "result": {
+    "events": [
+      {
+        "seq": 401,
+        "realm_id": "home",
+        "namespace": "default",
+        "item_id": "work_release_notes",
+        "kind": "closed",
+        "at": "2026-09-03T10:14:58Z",
+        "payload": {"status": "completed"},
+        "facts": [
+          {"kind": "namespace_terminal", "namespace": "default", "observed_at": "2026-09-03T10:14:58Z"}
+        ]
+      }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm; must equal the granted realm.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace; must equal it.
+</ParamField>
+
+<ParamField body="all_namespaces" type="boolean" default="false">
+  Rejected by the standard single-grant services.
+</ParamField>
+
+<ParamField body="after_seq" type="integer">
+  Return only events with `seq` strictly greater than this value. Use the last `seq` you saw, or a snapshot's `event_high_water_mark`, to page forward.
+</ParamField>
+
+<ParamField body="limit" type="integer" default="100">
+  Maximum events returned; above 1,000 is `INVALID_PARAMS`.
+</ParamField>
+
+Each event carries `seq`, `realm_id`, `namespace`, optional `item_id`, `kind`
+(`created`, `updated`, `readiness_observed`, `claimed`, `released`, `blocked`,
+`closed`, `linked`, `evidence_added`, `attention_created`,
+`attention_updated`), `at`, a kind-specific `payload`, and any typed `facts`
+committed with the mutation (`{"kind": "item_ready" | "lease_expired" |
+"namespace_terminal", ...}`). Flow execution-binding events are kept in the
+durable journal but omitted from this projection.
+
+### workgraph/goal/status
+
+Read one goal: the work item plus its attention binding. Params are a
+`GoalStatusRequest`.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 35,
+  "method": "workgraph/goal/status",
+  "params": {
+    "binding_id": "attn_release_notes",
+    "namespace": "default"
+  }
+}
+```
+
+<ParamField body="binding_id" type="string" required>
+  The `WorkAttentionBindingId`.
+</ParamField>
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm; must equal the granted realm.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace; must equal it.
+</ParamField>
+
+The result is `{"item": WorkItem, "attention": WorkAttentionBinding}`. An
+unknown binding is `INVALID_PARAMS` with the typed not-found message.
+
+### workgraph/attention/list
+
+List attention bindings in the granted namespace, optionally narrowed by
+target or status. Params are an `AttentionListRequest`; an empty object lists
+every binding.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 36,
+  "method": "workgraph/attention/list",
+  "params": {
+    "namespace": "default",
+    "target": {"kind": "session", "session_id": "01936f8a-..."},
+    "status": {"state": "active"}
+  }
+}
+```
+
+<ParamField body="realm_id" type="string">
+  Defaults to the runtime's realm; must equal the granted realm.
+</ParamField>
+
+<ParamField body="namespace" type="string">
+  Defaults to the granted namespace; must equal it.
+</ParamField>
+
+<ParamField body="target" type="WorkAttentionTarget">
+  `{"kind": "session", "session_id": ...}` or `{"kind": "lowered_owner", "owner_key": {...}}`.
+</ParamField>
+
+<ParamField body="status" type="WorkAttentionStatus">
+  Tagged by `state`: `{"state": "active"}`, `{"state": "paused", "until"?: timestamp}`, `{"state": "superseded"}`, or `{"state": "stopped"}`.
+</ParamField>
+
+The result is `{"attention": [WorkAttentionBinding, ...]}`. Attention
+reassignment and policy escalation are not RPC methods; they are
+authority-bearing tools injected into turns that carry an active attention
+projection.
+
 ## Live channel methods
 
 Live channels provide low-latency audio and text streaming plus model-gated still-image input on sessions that use a realtime-capable model. Create a session with a model like `gpt-realtime-2`, then call `live/open` to start the channel explicitly. Start `rkat-rpc` with `--live-ws <addr>` for WebSocket transport, or with the feature-gated `--live-webrtc` flag for WebRTC signaling. At least one live transport must be enabled for the `live/*` family to be advertised. See the [Live Channels guide](/guides/realtime) for the full flow.

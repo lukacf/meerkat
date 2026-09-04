@@ -978,6 +978,7 @@ impl ProviderTag {
                 fill(&mut target.compaction, &default.compaction);
                 fill(&mut target.context, &default.context);
                 fill(&mut target.cache_control, &default.cache_control);
+                fill(&mut target.cache_ttl, &default.cache_ttl);
                 fill(
                     &mut target.supports_temperature_override,
                     &default.supports_temperature_override,
@@ -2369,6 +2370,86 @@ mod tests {
             ))
         );
     }
+    /// A profile-carried Anthropic `cache_ttl` must survive a per-turn tag
+    /// merge exactly like `cache_control` does: the explicit side wins when
+    /// set, and an unset side is filled from the defaults.
+    #[test]
+    fn anthropic_tag_merge_fills_cache_ttl_from_defaults() {
+        let profile = ProviderTag::Anthropic(AnthropicProviderTag {
+            cache_control: Some(AnthropicCacheControlPolicy::SystemPrefix),
+            cache_ttl: Some(AnthropicCacheTtl::OneHour),
+            ..Default::default()
+        });
+
+        let mut turn = ProviderTag::Anthropic(AnthropicProviderTag {
+            effort: Some(AnthropicEffort::High),
+            ..Default::default()
+        });
+        turn.merge_missing_from(&profile)
+            .expect("same provider family merges");
+        let ProviderTag::Anthropic(merged) = turn else {
+            panic!("anthropic tag expected");
+        };
+        assert_eq!(merged.effort, Some(AnthropicEffort::High));
+        assert_eq!(
+            merged.cache_control,
+            Some(AnthropicCacheControlPolicy::SystemPrefix)
+        );
+        assert_eq!(
+            merged.cache_ttl,
+            Some(AnthropicCacheTtl::OneHour),
+            "an unset per-turn cache_ttl is filled from the profile"
+        );
+
+        let mut explicit = ProviderTag::Anthropic(AnthropicProviderTag {
+            cache_ttl: Some(AnthropicCacheTtl::FiveMinutes),
+            ..Default::default()
+        });
+        explicit
+            .merge_missing_from(&profile)
+            .expect("same provider family merges");
+        let ProviderTag::Anthropic(explicit) = explicit else {
+            panic!("anthropic tag expected");
+        };
+        assert_eq!(
+            explicit.cache_ttl,
+            Some(AnthropicCacheTtl::FiveMinutes),
+            "an explicit per-turn cache_ttl wins over the profile"
+        );
+    }
+
+    /// Anthropic cache knobs live on the typed provider tag. The nested form is
+    /// the documented profile / request shape; a flat `cache_control` key is
+    /// rejected by `deny_unknown_fields` before any agent boots.
+    #[test]
+    fn anthropic_cache_control_nests_under_provider_tag() {
+        let nested: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
+            "provider_tag": {
+                "provider": "anthropic",
+                "cache_control": "disabled",
+                "cache_ttl": "1h"
+            }
+        }))
+        .expect("nested provider_tag form parses");
+        let Some(ProviderTag::Anthropic(tag)) = nested.provider_tag else {
+            panic!("anthropic tag expected");
+        };
+        assert_eq!(
+            tag.cache_control,
+            Some(AnthropicCacheControlPolicy::Disabled)
+        );
+        assert_eq!(tag.cache_ttl, Some(AnthropicCacheTtl::OneHour));
+
+        let flat = serde_json::from_value::<ProviderParamsOverride>(serde_json::json!({
+            "cache_control": "disabled"
+        }))
+        .expect_err("a flat cache_control key must fail the parse");
+        assert!(
+            flat.to_string().contains("cache_control"),
+            "the rejection must name the misplaced key: {flat}"
+        );
+    }
+
     /// K2 invariant: a provider-family conflict between explicit params and
     /// tool defaults is a typed fault, never a silently-fabricated mixed bag.
     #[test]

@@ -56,19 +56,40 @@ use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 
 pub use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
 
-#[cfg(not(target_arch = "wasm32"))]
+/// The runtime's single authority for the Anthropic prompt-cache default.
+///
+/// The documented default (docs/rust/advanced.mdx): Anthropic's request-wide
+/// automatic breakpoint wherever the backend supports it, disabled where it
+/// does not. A profile or request opts out per agent with
+/// `provider_tag.cache_control = "disabled"`. 0.8.22 flipped this to a
+/// blanket disabled default while the docs kept promising automatic; the
+/// capability-derived default is the one hosts were told they had. Every
+/// client `build_anthropic_client` constructs, including the plain API-key
+/// path, takes its default from here; `AnthropicClientBuilder::new` carries
+/// the same value only for direct builder users.
 fn default_cache_control_for_backend(backend: AnthropicBackendKind) -> AnthropicCacheControlPolicy {
-    let _ = backend;
-    // Prompt caching is an agent/profile economic decision. A process-wide
-    // default makes low-frequency profiles pay cache-write cost without a
-    // realistic reuse window, so every backend starts disabled. Profiles opt
-    // into Automatic, SystemPrefix, or SystemAndConversation explicitly.
-    AnthropicCacheControlPolicy::Disabled
+    if backend_supports_automatic_cache_control(backend) {
+        AnthropicCacheControlPolicy::Automatic
+    } else {
+        AnthropicCacheControlPolicy::Disabled
+    }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Whether a backend accepts Anthropic's request-wide automatic cache policy.
+///
+/// Exhaustive on purpose: automatic caching is a billing-affecting default,
+/// so a new `AnthropicBackendKind` must be classified here explicitly (a
+/// compile error) instead of silently inheriting automatic cache writes.
 fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bool {
-    !matches!(backend, AnthropicBackendKind::Bedrock)
+    match backend {
+        AnthropicBackendKind::AnthropicApi
+        | AnthropicBackendKind::Vertex
+        | AnthropicBackendKind::Foundry => true,
+        // Amazon Bedrock's Anthropic Messages backend and the GitHub Copilot
+        // route accept manual breakpoints but reject the request-wide
+        // automatic policy.
+        AnthropicBackendKind::Bedrock | AnthropicBackendKind::Copilot => false,
+    }
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -536,170 +557,8 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         &self,
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        // ProviderRuntimeRegistry dispatches on Provider enum, so this
-        // runtime only receives Anthropic-backend connections. The match
-        // is defensive; the non-Anthropic arms are unreachable at runtime.
-        let backend_kind = match connection.backend {
-            NormalizedBackendKind::Anthropic(k) => k,
-            other => unreachable!(
-                "AnthropicProviderRuntime received non-Anthropic backend: {other:?} \
-                 — registry dispatch invariant violated"
-            ),
-        };
-        // Plan §6.11: derive credential material from the auth lease
-        // directly, directly from the lease. resolved_authorizer()
-        // returns Some when the lease is a DynamicAuthorizer (Bedrock
-        // SigV4 / Vertex GoogleAuth / Foundry AzureAd /
-        // ExternalAuthorizer-DynamicAuthorizer); resolved_secret()
-        // returns Some when the lease is a StaticHeaders with the
-        // the resolved inline secret (api_key / static_bearer /
-        // oauth_to_api_key / bedrock_bearer / pre-resolved Bearer).
-        let authorizer_opt = connection.resolved_authorizer();
-        let secret_opt = connection.resolved_secret();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(authorizer) = authorizer_opt {
-            // All authorizer-backed backends wire the same way:
-            // AnthropicClient with .authorizer(...) + .base_url(...).
-            // Bedrock / Vertex require a non-empty base URL; AnthropicApi
-            // falls back to its default.
-            let base_url = match backend_kind {
-                AnthropicBackendKind::Bedrock => connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .filter(|u| !u.is_empty())
-                    .ok_or_else(|| {
-                        ProviderClientError::InvalidBaseUrl(
-                            "bedrock backend requires BackendProfile.base_url".to_string(),
-                        )
-                    })?,
-                AnthropicBackendKind::Vertex | AnthropicBackendKind::Foundry => connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .unwrap_or_default(),
-                AnthropicBackendKind::AnthropicApi => connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| {
-                        AnthropicBackendKind::AnthropicApi.default_base_url().into()
-                    }),
-                AnthropicBackendKind::Copilot => {
-                    return Err(ProviderClientError::MissingFeature("copilot-text-target"));
-                }
-            };
-            let client = crate::AnthropicClient::builder(String::new())
-                .authorizer(authorizer)
-                .base_url(base_url)
-                .default_cache_control(default_cache_control_for_backend(backend_kind))
-                .automatic_cache_control_supported(backend_supports_automatic_cache_control(
-                    backend_kind,
-                ))
-                .build()
-                .map_err(ProviderClientError::from)?;
-            return Ok(Arc::new(client));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        if authorizer_opt.is_some() {
-            return Err(ProviderClientError::MissingFeature(
-                "authorizer-backed auth not available on wasm32",
-            ));
-        }
-
-        let secret = secret_opt.ok_or(ProviderClientError::NoCredentialMaterial)?;
-
-        match backend_kind {
-            // Native Anthropic API — plain x-api-key auth.
-            AnthropicBackendKind::AnthropicApi | AnthropicBackendKind::Foundry => {
-                let mut client =
-                    crate::AnthropicClient::new(secret).map_err(ProviderClientError::from)?;
-                if let Some(url) = &connection.backend_profile.base_url {
-                    client = client.with_base_url(url.clone());
-                }
-                Ok(Arc::new(client))
-            }
-            // Bedrock static bearer (AWS_BEARER_TOKEN_BEDROCK).
-            #[cfg(not(target_arch = "wasm32"))]
-            AnthropicBackendKind::Bedrock => {
-                let base_url = connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .filter(|u| !u.is_empty())
-                    .ok_or_else(|| {
-                        ProviderClientError::InvalidBaseUrl(
-                            "bedrock backend requires BackendProfile.base_url \
-                             (e.g. https://bedrock-runtime.us-east-1.amazonaws.com)"
-                                .to_string(),
-                        )
-                    })?;
-                let authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer> =
-                    std::sync::Arc::new(
-                        meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
-                            secret,
-                            "bedrock-bearer",
-                        ),
-                    );
-                let client = crate::AnthropicClient::builder(String::new())
-                    .authorizer(authorizer)
-                    .base_url(base_url)
-                    .default_cache_control(default_cache_control_for_backend(backend_kind))
-                    .automatic_cache_control_supported(backend_supports_automatic_cache_control(
-                        backend_kind,
-                    ))
-                    .build()
-                    .map_err(ProviderClientError::from)?;
-                Ok(Arc::new(client))
-            }
-            #[cfg(target_arch = "wasm32")]
-            AnthropicBackendKind::Bedrock => Err(ProviderClientError::MissingFeature(
-                "bedrock-backend not available on wasm32",
-            )),
-            // Vertex with a pre-resolved bearer secret (ExternalAuthorizer
-            // producing an InlineSecret envelope).
-            #[cfg(not(target_arch = "wasm32"))]
-            AnthropicBackendKind::Vertex => {
-                let base_url = connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .filter(|u| !u.is_empty())
-                    .ok_or_else(|| {
-                        ProviderClientError::InvalidBaseUrl(
-                            "vertex backend requires BackendProfile.base_url \
-                             (e.g. https://<region>-aiplatform.googleapis.com)"
-                                .to_string(),
-                        )
-                    })?;
-                let authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer> =
-                    std::sync::Arc::new(
-                        meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
-                            secret,
-                            "vertex-bearer",
-                        ),
-                    );
-                let client = crate::AnthropicClient::builder(String::new())
-                    .authorizer(authorizer)
-                    .base_url(base_url)
-                    .default_cache_control(default_cache_control_for_backend(backend_kind))
-                    .automatic_cache_control_supported(backend_supports_automatic_cache_control(
-                        backend_kind,
-                    ))
-                    .build()
-                    .map_err(ProviderClientError::from)?;
-                Ok(Arc::new(client))
-            }
-            #[cfg(target_arch = "wasm32")]
-            AnthropicBackendKind::Vertex => Err(ProviderClientError::MissingFeature(
-                "vertex-backend with authorizer-backed auth not available on wasm32",
-            )),
-            AnthropicBackendKind::Copilot => {
-                Err(ProviderClientError::MissingFeature("copilot-text-target"))
-            }
-        }
+        let client = build_anthropic_client(connection)?;
+        Ok(Arc::new(client))
     }
 
     fn build_text_client(
@@ -760,8 +619,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     let client = crate::AnthropicClient::builder(String::new())
                         .authorizer(authorizer)
                         .base_url(route.api_base.clone())
-                        .default_cache_control(AnthropicCacheControlPolicy::Disabled)
-                        .automatic_cache_control_supported(false)
+                        .default_cache_control(default_cache_control_for_backend(
+                            AnthropicBackendKind::Copilot,
+                        ))
+                        .automatic_cache_control_supported(
+                            backend_supports_automatic_cache_control(AnthropicBackendKind::Copilot),
+                        )
                         .build()
                         .map_err(ProviderClientError::from)?;
                     Ok(Arc::new(client) as Arc<dyn LlmClient>)
@@ -778,6 +641,184 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         {
             let _ = target;
             Err(ProviderClientError::MissingFeature("copilot"))
+        }
+    }
+}
+
+/// Build the concrete Anthropic client for a resolved connection.
+///
+/// Every arm routes through `AnthropicClientBuilder` with the cache defaults
+/// derived by [`default_cache_control_for_backend`] and
+/// [`backend_supports_automatic_cache_control`], so those two helpers are the
+/// single runtime authority for the Anthropic cache default. `build_client`
+/// erases the type at the `ProviderRuntime` seam; the runtime tests drive this
+/// function directly to read the request body a backend's default produces.
+fn build_anthropic_client(
+    connection: ResolvedConnection,
+) -> Result<crate::AnthropicClient, ProviderClientError> {
+    // ProviderRuntimeRegistry dispatches on Provider enum, so this
+    // runtime only receives Anthropic-backend connections. The match
+    // is defensive; the non-Anthropic arms are unreachable at runtime.
+    let backend_kind = match connection.backend {
+        NormalizedBackendKind::Anthropic(k) => k,
+        other => unreachable!(
+            "AnthropicProviderRuntime received non-Anthropic backend: {other:?} \
+             - registry dispatch invariant violated"
+        ),
+    };
+    // Plan §6.11: derive credential material from the auth lease
+    // directly, directly from the lease. resolved_authorizer()
+    // returns Some when the lease is a DynamicAuthorizer (Bedrock
+    // SigV4 / Vertex GoogleAuth / Foundry AzureAd /
+    // ExternalAuthorizer-DynamicAuthorizer); resolved_secret()
+    // returns Some when the lease is a StaticHeaders with the
+    // the resolved inline secret (api_key / static_bearer /
+    // oauth_to_api_key / bedrock_bearer / pre-resolved Bearer).
+    let authorizer_opt = connection.resolved_authorizer();
+    let secret_opt = connection.resolved_secret();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(authorizer) = authorizer_opt {
+        // All authorizer-backed backends wire the same way:
+        // AnthropicClient with .authorizer(...) + .base_url(...).
+        // Bedrock / Vertex require a non-empty base URL; AnthropicApi
+        // falls back to its default.
+        let base_url = match backend_kind {
+            AnthropicBackendKind::Bedrock => connection
+                .backend_profile
+                .base_url
+                .clone()
+                .filter(|u| !u.is_empty())
+                .ok_or_else(|| {
+                    ProviderClientError::InvalidBaseUrl(
+                        "bedrock backend requires BackendProfile.base_url".to_string(),
+                    )
+                })?,
+            AnthropicBackendKind::Vertex | AnthropicBackendKind::Foundry => connection
+                .backend_profile
+                .base_url
+                .clone()
+                .unwrap_or_default(),
+            AnthropicBackendKind::AnthropicApi => connection
+                .backend_profile
+                .base_url
+                .clone()
+                .unwrap_or_else(|| AnthropicBackendKind::AnthropicApi.default_base_url().into()),
+            AnthropicBackendKind::Copilot => {
+                return Err(ProviderClientError::MissingFeature("copilot-text-target"));
+            }
+        };
+        let client = crate::AnthropicClient::builder(String::new())
+            .authorizer(authorizer)
+            .base_url(base_url)
+            .default_cache_control(default_cache_control_for_backend(backend_kind))
+            .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                backend_kind,
+            ))
+            .build()
+            .map_err(ProviderClientError::from)?;
+        return Ok(client);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    if authorizer_opt.is_some() {
+        return Err(ProviderClientError::MissingFeature(
+            "authorizer-backed auth not available on wasm32",
+        ));
+    }
+
+    let secret = secret_opt.ok_or(ProviderClientError::NoCredentialMaterial)?;
+
+    match backend_kind {
+        // Native Anthropic API (and Foundry API-key auth): plain x-api-key
+        // auth through the same builder path as every other backend, so the
+        // cache default comes from `default_cache_control_for_backend`
+        // rather than from the builder's own constant.
+        AnthropicBackendKind::AnthropicApi | AnthropicBackendKind::Foundry => {
+            let mut builder = crate::AnthropicClient::builder(secret)
+                .default_cache_control(default_cache_control_for_backend(backend_kind))
+                .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ));
+            if let Some(url) = &connection.backend_profile.base_url {
+                builder = builder.base_url(url.clone());
+            }
+            let client = builder.build().map_err(ProviderClientError::from)?;
+            Ok(client)
+        }
+        // Bedrock static bearer (AWS_BEARER_TOKEN_BEDROCK).
+        #[cfg(not(target_arch = "wasm32"))]
+        AnthropicBackendKind::Bedrock => {
+            let base_url = connection
+                .backend_profile
+                .base_url
+                .clone()
+                .filter(|u| !u.is_empty())
+                .ok_or_else(|| {
+                    ProviderClientError::InvalidBaseUrl(
+                        "bedrock backend requires BackendProfile.base_url \
+                         (e.g. https://bedrock-runtime.us-east-1.amazonaws.com)"
+                            .to_string(),
+                    )
+                })?;
+            let authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer> =
+                std::sync::Arc::new(meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                    secret,
+                    "bedrock-bearer",
+                ));
+            let client = crate::AnthropicClient::builder(String::new())
+                .authorizer(authorizer)
+                .base_url(base_url)
+                .default_cache_control(default_cache_control_for_backend(backend_kind))
+                .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .build()
+                .map_err(ProviderClientError::from)?;
+            Ok(client)
+        }
+        #[cfg(target_arch = "wasm32")]
+        AnthropicBackendKind::Bedrock => Err(ProviderClientError::MissingFeature(
+            "bedrock-backend not available on wasm32",
+        )),
+        // Vertex with a pre-resolved bearer secret (ExternalAuthorizer
+        // producing an InlineSecret envelope).
+        #[cfg(not(target_arch = "wasm32"))]
+        AnthropicBackendKind::Vertex => {
+            let base_url = connection
+                .backend_profile
+                .base_url
+                .clone()
+                .filter(|u| !u.is_empty())
+                .ok_or_else(|| {
+                    ProviderClientError::InvalidBaseUrl(
+                        "vertex backend requires BackendProfile.base_url \
+                         (e.g. https://<region>-aiplatform.googleapis.com)"
+                            .to_string(),
+                    )
+                })?;
+            let authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer> =
+                std::sync::Arc::new(meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                    secret,
+                    "vertex-bearer",
+                ));
+            let client = crate::AnthropicClient::builder(String::new())
+                .authorizer(authorizer)
+                .base_url(base_url)
+                .default_cache_control(default_cache_control_for_backend(backend_kind))
+                .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .build()
+                .map_err(ProviderClientError::from)?;
+            Ok(client)
+        }
+        #[cfg(target_arch = "wasm32")]
+        AnthropicBackendKind::Vertex => Err(ProviderClientError::MissingFeature(
+            "vertex-backend with authorizer-backed auth not available on wasm32",
+        )),
+        AnthropicBackendKind::Copilot => {
+            Err(ProviderClientError::MissingFeature("copilot-text-target"))
         }
     }
 }
@@ -856,36 +897,126 @@ mod tests {
         assert_eq!(AnthropicProviderRuntime.provider_id(), Provider::Anthropic);
     }
 
+    /// The documented default: automatic prompt caching wherever the backend
+    /// supports Anthropic's request-wide breakpoint, disabled where it does not.
+    /// 0.8.22 inverted this test to pin a blanket disabled default; the docs
+    /// never followed, so the capability-derived default is restored. Every
+    /// variant in `AnthropicBackendKind::ALL` is classified, and the
+    /// automatic-unsupported set is exactly Bedrock and Copilot.
     #[test]
-    fn cache_control_is_profile_opt_in_on_every_backend() {
+    fn cache_control_defaults_to_automatic_where_the_backend_supports_it() {
+        let unsupported: Vec<AnthropicBackendKind> = AnthropicBackendKind::ALL
+            .iter()
+            .copied()
+            .filter(|backend| !backend_supports_automatic_cache_control(*backend))
+            .collect();
+        assert_eq!(
+            unsupported,
+            vec![AnthropicBackendKind::Bedrock, AnthropicBackendKind::Copilot],
+            "only Bedrock and Copilot reject the request-wide automatic policy"
+        );
+        for backend in AnthropicBackendKind::ALL.iter().copied() {
+            let expected = if backend_supports_automatic_cache_control(backend) {
+                AnthropicCacheControlPolicy::Automatic
+            } else {
+                AnthropicCacheControlPolicy::Disabled
+            };
+            assert_eq!(
+                default_cache_control_for_backend(backend),
+                expected,
+                "{backend:?} must default to {expected:?}"
+            );
+        }
         assert_eq!(
             default_cache_control_for_backend(AnthropicBackendKind::AnthropicApi),
-            AnthropicCacheControlPolicy::Disabled
-        );
-        assert_eq!(
-            default_cache_control_for_backend(AnthropicBackendKind::Vertex),
-            AnthropicCacheControlPolicy::Disabled
-        );
-        assert_eq!(
-            default_cache_control_for_backend(AnthropicBackendKind::Foundry),
-            AnthropicCacheControlPolicy::Disabled
+            AnthropicCacheControlPolicy::Automatic
         );
         assert_eq!(
             default_cache_control_for_backend(AnthropicBackendKind::Bedrock),
             AnthropicCacheControlPolicy::Disabled
         );
-        assert!(backend_supports_automatic_cache_control(
-            AnthropicBackendKind::AnthropicApi
-        ));
-        assert!(backend_supports_automatic_cache_control(
-            AnthropicBackendKind::Vertex
-        ));
-        assert!(backend_supports_automatic_cache_control(
-            AnthropicBackendKind::Foundry
-        ));
-        assert!(!backend_supports_automatic_cache_control(
-            AnthropicBackendKind::Bedrock
-        ));
+    }
+
+    /// A resolved connection whose lease is an inline secret, which is what the
+    /// API-key and Bedrock static-bearer paths receive from `resolve_binding`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn inline_secret_connection(
+        backend: AnthropicBackendKind,
+        base_url: Option<&str>,
+    ) -> ResolvedConnection {
+        use meerkat_core::{
+            AuthBindingRef, AuthCredentialIdentity, AuthMetadata, BackendProfile, BindingId,
+            BindingOrigin, RealmId,
+        };
+
+        ResolvedConnection {
+            provider: Provider::Anthropic,
+            backend: NormalizedBackendKind::Anthropic(backend),
+            backend_profile: Arc::new(BackendProfile {
+                id: format!("{}-backend", backend.as_str()),
+                provider: Provider::Anthropic,
+                backend_kind: backend.as_str().to_string(),
+                base_url: base_url.map(str::to_string),
+                options: serde_json::Value::Null,
+                server: None,
+            }),
+            credential_identity: AuthCredentialIdentity::Binding(AuthBindingRef {
+                realm: RealmId::parse("dev").unwrap(),
+                binding: BindingId::parse("primary").unwrap(),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            }),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "test-key".to_string(),
+                AuthMetadata::default(),
+                None,
+                "test-inline-secret",
+            )),
+        }
+    }
+
+    /// The runtime-selected defaults reach the wire through the real
+    /// `build_anthropic_client` seam: the API-key connection (the path most
+    /// hosts take, previously built through `AnthropicClient::new` and its
+    /// independent builder constant) emits the request-wide automatic
+    /// breakpoint and a Bedrock connection emits none.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn runtime_backend_defaults_drive_the_request_body() {
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+
+        let api_key_client = build_anthropic_client(inline_secret_connection(
+            AnthropicBackendKind::AnthropicApi,
+            None,
+        ))
+        .expect("api-key client");
+        let api_key_body = api_key_client
+            .build_request_body(&request)
+            .expect("api-key request body");
+        assert_eq!(
+            api_key_body["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "API-key backend defaults to the automatic breakpoint: {api_key_body}"
+        );
+
+        let bedrock_client = build_anthropic_client(inline_secret_connection(
+            AnthropicBackendKind::Bedrock,
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+        ))
+        .expect("bedrock client");
+        let bedrock_body = bedrock_client
+            .build_request_body(&request)
+            .expect("bedrock request body");
+        assert!(
+            bedrock_body.get("cache_control").is_none(),
+            "Bedrock stays disabled by default: {bedrock_body}"
+        );
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

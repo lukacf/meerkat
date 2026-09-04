@@ -284,7 +284,13 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+    /// Build the Chat Completions request body.
+    ///
+    /// Public but hidden: the integration matrix in `meerkat-integration-tests`
+    /// runs every built-in tool definition through this exact builder (the
+    /// `openai_compatible` transport path). It is not a supported host API.
+    #[doc(hidden)]
+    pub fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let tag = crate::client::openai_tag(request);
         let author_explicit_breakpoints = tag.is_some_and(|tag| {
             tag.prompt_cache_enabled != Some(false)
@@ -315,22 +321,25 @@ impl OpenAiCompatibleClient {
         }
 
         if !request.tools.is_empty() {
-            body["tools"] = Value::Array(
-                request
-                    .tools
-                    .iter()
-                    .map(|tool| {
-                        serde_json::json!({
-                            "type": "function",
-                            "function": {
-                                "name": tool.name,
-                                "description": tool.description,
-                                "parameters": tool.input_schema
-                            }
-                        })
-                    })
-                    .collect(),
-            );
+            let tools = request
+                .tools
+                .iter()
+                .map(|tool| -> Result<Value, LlmError> {
+                    let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
+                        &tool.name,
+                        &tool.input_schema,
+                    )?;
+                    Ok(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": parameters
+                        }
+                    }))
+                })
+                .collect::<Result<Vec<Value>, LlmError>>()?;
+            body["tools"] = Value::Array(tools);
         }
 
         if let Some(tag) = tag {
@@ -1387,6 +1396,57 @@ mod tests {
             supports_reasoning,
             supports_image_tool_results,
         }
+    }
+
+    /// Regression (A2): the Chat Completions path (the self-hosted
+    /// `openai_compatible` transport) is where a root-level `not` produced
+    /// `invalid_function_parameters`. The tools array must carry the
+    /// normalized `workgraph_claim` schema.
+    #[test]
+    fn chat_completions_drops_root_level_not_from_pre_fix_workgraph_claim_shape() {
+        use meerkat_core::ToolDef;
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "https://example.test".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        let request = LlmRequest::new(
+            "catalog-model",
+            vec![meerkat_core::Message::User(UserMessage::text(
+                "test".to_string(),
+            ))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "workgraph_claim".into(),
+            description: "Claim a ready WorkGraph item with CAS revision checking.".to_string(),
+            input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(),
+            provenance: None,
+        })]);
+
+        let body = client
+            .build_chat_completions_body(&request)
+            .expect("Chat Completions body");
+        let function = &body["tools"][0]["function"];
+        let parameters = &function["parameters"];
+
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(function["name"], "workgraph_claim");
+        assert!(
+            parameters.get("not").is_none(),
+            "root-level not must be dropped: {parameters}"
+        );
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["id", "expected_revision", "owner"])
+        );
+        assert_eq!(
+            parameters["properties"]["lease_expires_at"]["format"],
+            "date-time"
+        );
     }
 
     #[test]

@@ -122,7 +122,10 @@ pub use coordination::{
     ResourceClaimId, ResourceClaimKind, ResourceClaimStatus, WorkIntent, WorkIntentId,
     WorkIntentStatus,
 };
-pub use definition::{MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind};
+pub use definition::{
+    MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind, ParsedMobDefinition,
+    UnknownProfileKeys,
+};
 pub use error::{
     FlowStepDispatchRejectKind, ForkSourceUnavailableCause, ForkedParticipantLeaseOperation,
     ForkedParticipantOwnerHostRejection, ForkedParticipantSourceRejection,
@@ -229,6 +232,7 @@ pub use machines::mob_host_binding_authority::{
 
 pub use profile::{
     Profile, ProfileBinding, ProfileSource, ResumeOverrideField, SpawnTooling, ToolConfig,
+    UnsupportedProfileKey,
 };
 pub use roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
@@ -307,7 +311,10 @@ pub use runtime::{
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub use runtime::{IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test};
+pub use runtime::{
+    IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
+    member_operator_tool_defs_for_test, remote_member_operator_tool_defs_for_test,
+};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 pub use runtime_mode::MobRuntimeMode;

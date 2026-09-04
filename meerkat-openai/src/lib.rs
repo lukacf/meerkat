@@ -28,6 +28,7 @@ pub(crate) mod request_support;
 pub mod runtime;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
+pub mod tool_schema;
 pub mod web_search;
 
 pub use client::{AzureOpenAiWireConfig, OpenAiClient};
@@ -51,4 +52,5 @@ pub use runtime::OpenAiCopilotChatCompletionsClientFactory;
 pub use runtime::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use text_adapter::OpenAiRealtimeTextAdapter;
+pub use tool_schema::normalize_openai_tool_parameters_schema;
 pub use web_search::OpenAiWebSearchExecutor;

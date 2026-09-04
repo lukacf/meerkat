@@ -21,6 +21,15 @@ pub struct ToolConfig {
     #[serde(default)]
     pub shell: bool,
     /// Enable comms tools (peer messaging).
+    ///
+    /// Must be `true` for every profile that spawns a member. A member's
+    /// identity, roster entry, wiring, peer messaging, and supervisor bridge
+    /// are keyed on its comms name, and the facade composes comms tools
+    /// whenever that name is set, so `build_agent_config` rejects
+    /// `comms = false` instead of silently ignoring it. The serde default is
+    /// `false`, which means omitting the key is rejected too. A member that
+    /// must not message peers keeps comms on and uses [`Self::read_only`] or a
+    /// per-spawn `tool_access_policy` deny list.
     #[serde(default)]
     pub comms: bool,
     /// Enable memory/semantic search tools.
@@ -73,6 +82,33 @@ pub struct ToolConfig {
     pub rust_bundles: Vec<String>,
 }
 
+impl ToolConfig {
+    /// Every key a `[profiles.<name>.tools]` table may declare, in
+    /// declaration order, exactly as the serde derive reads them.
+    ///
+    /// `ToolConfig` has no `deny_unknown_fields` for the same reason
+    /// [`Profile`] has none (see [`Profile::FIELD_NAMES`]): it is the
+    /// persisted profile shape. `MobDefinition::from_toml` compares the
+    /// `tools` sub-table of each inline profile against this list so a typo
+    /// such as `comm = true` is reported instead of silently leaving the
+    /// category off. A serde-derived drift test keeps it equal to the
+    /// derive's own field list.
+    pub const FIELD_NAMES: &'static [&'static str] = &[
+        "builtins",
+        "shell",
+        "comms",
+        "memory",
+        "workgraph",
+        "mob",
+        "schedule",
+        "image_generation",
+        "read_only",
+        "mcp",
+        "mcp_servers",
+        "rust_bundles",
+    ];
+}
+
 /// Binding for a profile in a mob definition.
 ///
 /// Profiles can be defined inline (the existing behavior) or reference
@@ -117,6 +153,16 @@ impl ProfileBinding {
             Self::Inline(_) => None,
         }
     }
+
+    /// The only key a realm-reference profile table declares.
+    ///
+    /// The untagged derive tries `RealmRef` first and, having no
+    /// `deny_unknown_fields`, accepts a table that carries `realm_profile`
+    /// plus anything else, dropping the rest. `MobDefinition::from_toml`
+    /// therefore compares a realm-reference table against this list: a key
+    /// from the closed [`UnsupportedProfileKey`] list refuses the parse
+    /// exactly as for an inline profile, and any other extra key warns.
+    pub const REALM_REF_FIELD_NAMES: &'static [&'static str] = &["realm_profile"];
 }
 
 /// Agent-owned spawn tooling mode for child members.
@@ -218,7 +264,16 @@ pub struct Profile {
     /// Tool configuration.
     #[serde(default)]
     pub tools: ToolConfig,
-    /// Human-readable description of this member's role, visible to peers.
+    /// Human-readable description of this member's role, shown to peers in
+    /// discovery: it becomes the member's `PeerMeta.description`, which other
+    /// members read through the `peers` tool and the `mob.peer_added`
+    /// lifecycle notice.
+    ///
+    /// NOT this member's system prompt. The member's own prompt is assembled
+    /// from [`Self::skills`] resolved against the definition's `[skills.<id>]`
+    /// tables (inline or path content); see the mobs guide, "Member system
+    /// prompt". A profile has no prompt key, and `MobDefinition::from_toml`
+    /// refuses one (see [`UnsupportedProfileKey`]).
     #[serde(default)]
     pub peer_description: String,
     /// Whether this member can receive turns from external callers.
@@ -281,6 +336,34 @@ pub enum ResumeOverrideField {
 }
 
 impl Profile {
+    /// Every key a `[profiles.<name>]` table may declare, in declaration
+    /// order, exactly as the serde derive reads them.
+    ///
+    /// `Profile` cannot carry `deny_unknown_fields`: it sits under the
+    /// untagged [`ProfileBinding`], where a rejected key would surface as an
+    /// opaque "did not match any variant" error, and it is also the persisted
+    /// SQLite/JSON profile shape. `MobDefinition::from_toml` therefore
+    /// compares each inline profile table's keys against this list after
+    /// parsing. A serde-derived drift test keeps it equal to the derive's own
+    /// field list.
+    pub const FIELD_NAMES: &'static [&'static str] = &[
+        "model",
+        "provider",
+        "self_hosted_server_id",
+        "image_generation_provider",
+        "auto_compact_threshold",
+        "resume_overrides",
+        "skills",
+        "tools",
+        "peer_description",
+        "external_addressable",
+        "backend",
+        "runtime_mode",
+        "max_inline_peer_notifications",
+        "output_schema",
+        "provider_params",
+    ];
+
     /// Project the declared `resume_overrides` into the typed core mask.
     pub fn resume_override_mask(&self) -> meerkat_core::service::ResumeOverrideMask {
         let mut mask = meerkat_core::service::ResumeOverrideMask::default();
@@ -292,6 +375,61 @@ impl Profile {
             }
         }
         mask
+    }
+}
+
+/// Profile keys that name a platform concept a mob profile cannot honour.
+///
+/// Each of these is an author's attempt to give the member its own prompt
+/// text. A profile has no such field: the member prompt is `profile.skills`
+/// resolved against `[skills.<id>]` tables, and identity-first hosts add
+/// `DurableAgentSpec.additional_instructions` or a customizer's
+/// `draft.system_prompt`. Because `Profile` cannot use `deny_unknown_fields`
+/// (see [`Profile::FIELD_NAMES`]), such a key would otherwise be dropped
+/// silently and the member would run on the default prompt.
+/// `MobDefinition::from_toml` refuses these keys with
+/// `MobError::UnsupportedProfileKey`; every other unknown key only warns, so
+/// host-private keys keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedProfileKey {
+    /// `system_prompt = "..."` under `[profiles.<name>]`.
+    SystemPrompt,
+    /// `prompt = "..."` under `[profiles.<name>]`.
+    Prompt,
+    /// `instructions = "..."` under `[profiles.<name>]`.
+    Instructions,
+}
+
+impl UnsupportedProfileKey {
+    /// The closed list of refused keys.
+    pub const ALL: [Self; 3] = [Self::SystemPrompt, Self::Prompt, Self::Instructions];
+
+    /// Where the concept every refused key reaches for actually lives.
+    pub const HINT: &'static str = "a profile has no system_prompt; the member prompt is \
+        `profile.skills` resolved against an inline or path `[skills.<id>]` table, and \
+        identity-first hosts may set `DurableAgentSpec.additional_instructions` or a \
+        customizer's `draft.system_prompt`";
+
+    /// The refused key as it appears in TOML.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemPrompt => "system_prompt",
+            Self::Prompt => "prompt",
+            Self::Instructions => "instructions",
+        }
+    }
+
+    /// Classify a raw profile key; `None` for every key that is not refused.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == key)
+    }
+}
+
+impl std::fmt::Display for UnsupportedProfileKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -313,6 +451,153 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Capture the field list a struct's serde derive announces through
+    /// `deserialize_struct`, without producing a value. `None` means the
+    /// derive never entered `deserialize_struct`.
+    fn derive_field_names<'de, T: serde::Deserialize<'de>>() -> Option<&'static [&'static str]> {
+        use std::cell::Cell;
+
+        /// A deserializer that never produces a value: it only records the
+        /// field list the serde derive announces through `deserialize_struct`.
+        struct FieldNameProbe<'a> {
+            captured: &'a Cell<Option<&'static [&'static str]>>,
+        }
+
+        impl<'de> serde::Deserializer<'de> for FieldNameProbe<'_> {
+            type Error = serde::de::value::Error;
+
+            fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: serde::de::Visitor<'de>,
+            {
+                Err(serde::de::Error::custom(
+                    "field-name probe: derive did not enter deserialize_struct",
+                ))
+            }
+
+            fn deserialize_struct<V>(
+                self,
+                _name: &'static str,
+                fields: &'static [&'static str],
+                _visitor: V,
+            ) -> Result<V::Value, Self::Error>
+            where
+                V: serde::de::Visitor<'de>,
+            {
+                self.captured.set(Some(fields));
+                Err(serde::de::Error::custom(
+                    "field-name probe: fields captured",
+                ))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+
+        let captured = Cell::new(None);
+        let probe = FieldNameProbe {
+            captured: &captured,
+        };
+        assert!(
+            T::deserialize(probe).is_err(),
+            "the probe never yields a value"
+        );
+        captured.get()
+    }
+
+    #[test]
+    fn profile_field_names_match_serde_derive() {
+        assert_eq!(
+            derive_field_names::<Profile>(),
+            Some(Profile::FIELD_NAMES),
+            "Profile::FIELD_NAMES drifted from the serde derive's field list \
+             (None means the derive never entered deserialize_struct)"
+        );
+    }
+
+    #[test]
+    fn tool_config_field_names_match_serde_derive() {
+        assert_eq!(
+            derive_field_names::<ToolConfig>(),
+            Some(ToolConfig::FIELD_NAMES),
+            "ToolConfig::FIELD_NAMES drifted from the serde derive's field list \
+             (None means the derive never entered deserialize_struct)"
+        );
+    }
+
+    #[test]
+    fn realm_ref_field_names_match_the_serialized_binding() {
+        // The untagged enum never enters `deserialize_struct` for the variant,
+        // so the drift check runs serializer-side: the keys a `RealmRef`
+        // binding emits are exactly the keys a realm-reference table may
+        // declare.
+        let binding = ProfileBinding::RealmRef {
+            realm_profile: "reviewer".to_string(),
+        };
+        let table = toml::Value::try_from(&binding).expect("realm ref serializes to TOML");
+        let emitted: Vec<&str> = table
+            .as_table()
+            .expect("realm ref serializes as a table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(emitted, ProfileBinding::REALM_REF_FIELD_NAMES);
+        for key in UnsupportedProfileKey::ALL {
+            assert!(
+                !ProfileBinding::REALM_REF_FIELD_NAMES.contains(&key.as_str()),
+                "{key} must not be a realm-reference key"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_profile_keys_are_a_closed_list_with_a_prompt_hint() {
+        for key in UnsupportedProfileKey::ALL {
+            assert_eq!(UnsupportedProfileKey::from_key(key.as_str()), Some(key));
+            assert_eq!(key.to_string(), key.as_str());
+            assert!(
+                !Profile::FIELD_NAMES.contains(&key.as_str()),
+                "{key} must not be a real profile field"
+            );
+        }
+        assert_eq!(
+            UnsupportedProfileKey::from_key("system_prompt"),
+            Some(UnsupportedProfileKey::SystemPrompt)
+        );
+        assert_eq!(
+            UnsupportedProfileKey::from_key("prompt"),
+            Some(UnsupportedProfileKey::Prompt)
+        );
+        assert_eq!(
+            UnsupportedProfileKey::from_key("instructions"),
+            Some(UnsupportedProfileKey::Instructions)
+        );
+        // Host-private keys (HomeCore carries `role_summary` under every
+        // profile table) and real fields are never refused.
+        assert_eq!(UnsupportedProfileKey::from_key("role_summary"), None);
+        assert_eq!(UnsupportedProfileKey::from_key("peer_description"), None);
+        assert_eq!(
+            UnsupportedProfileKey::from_key("additional_instructions"),
+            None
+        );
+        for needle in [
+            "a profile has no system_prompt",
+            "`profile.skills`",
+            "`[skills.<id>]`",
+            "`DurableAgentSpec.additional_instructions`",
+            "`draft.system_prompt`",
+        ] {
+            assert!(
+                UnsupportedProfileKey::HINT.contains(needle),
+                "hint must mention {needle}: {}",
+                UnsupportedProfileKey::HINT
+            );
+        }
+    }
 
     #[test]
     fn test_tool_config_serde_roundtrip() {

@@ -174,24 +174,48 @@ the observed model-request rate. Cache reads consider only the latest 50
 breakpoints.
 Anthropic API, Vertex, and Foundry clients default to
 `cache_control: automatic`, which keeps a moving five-minute breakpoint on the
-growing conversation (`disabled` opts out and `system_prefix` narrows the
-breakpoint). Amazon Bedrock defaults to disabled because it does not support
-Anthropic automatic caching and rejects an explicit `automatic` override
-locally; manual `system_prefix` caching remains available. Automatic lookup
-scans backward at most 20 cacheable blocks. Direct `AnthropicClientBuilder`
-users targeting a custom backend must declare whether it supports automatic
-caching; the provider runtime handles this for configured backends. Gemini can
+growing conversation. `disabled` opts out, `system_prefix` narrows the
+breakpoint to the system prompt, and `system_and_conversation` marks the
+system prefix plus the three most recent conversation boundaries; `cache_ttl`
+(`5m`, the default, or `1h`) selects the breakpoint lifetime and rides the
+automatic default when set alone. Amazon Bedrock and the GitHub Copilot
+backend default to disabled because they do not support Anthropic automatic
+caching and reject an explicit `automatic` override locally; manual
+`system_prefix` caching remains available. Automatic lookup scans backward at
+most 20 cacheable blocks. `AnthropicClientBuilder` starts from `automatic`
+with automatic support assumed. A direct builder user targeting a backend
+without automatic caching must call `automatic_cache_control_supported(false)`;
+with that set and `default_cache_control` left at `automatic`, the first
+request fails locally with an `invalid_request` naming the fix, so also set a
+non-automatic `default_cache_control` (`disabled` or `system_prefix`). A
+builder user who sets neither sends the request-wide breakpoint to the
+backend, which rejects or ignores it remotely. The provider runtime does both
+for every configured backend, the plain API-key path included. Gemini can
 pass an explicit `cached_content_name`. When OpenAI `store` is explicitly
 enabled, stored response IDs may be reused as `previous_response_id` hints;
 Meerkat still keeps the local transcript as the canonical replay source and
 falls back to full replay if the provider rejects the hint.
 
 ```rust
-use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+use meerkat_core::lifecycle::run_primitive::{
+    AnthropicCacheControlPolicy, AnthropicProviderTag, ProviderParamsOverride, ProviderTag,
+};
 
 let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
 build_config.provider_params = Some(ProviderParamsOverride {
     thinking_budget_tokens: Some(10_000),
+    ..Default::default()
+});
+
+// Opt one agent out of the automatic Anthropic prompt cache. The same shape,
+// nested under `provider_tag`, is what a mob profile or create-session request
+// carries; a flat `cache_control` key fails the parse.
+let mut cache_free = AgentBuildConfig::new("claude-sonnet-4-6".into());
+cache_free.provider_params = Some(ProviderParamsOverride {
+    provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+        cache_control: Some(AnthropicCacheControlPolicy::Disabled),
+        ..Default::default()
+    })),
     ..Default::default()
 });
 ```

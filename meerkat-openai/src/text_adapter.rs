@@ -130,7 +130,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;
             let history_items = convert_messages(&request.messages)?;
-            let tools = build_tools(request);
+            let tools = build_tools(request)?;
 
             // Connect WS — GA protocol (no OpenAI-Beta header).
             let mut client = RealtimeClient::connect(
@@ -439,14 +439,22 @@ fn convert_messages(messages: &[Message]) -> Result<Vec<Item>, LlmError> {
     Ok(items)
 }
 
-fn build_tools(request: &LlmRequest) -> Vec<Tool> {
+fn build_tools(request: &LlmRequest) -> Result<Vec<Tool>, LlmError> {
     request
         .tools
         .iter()
-        .map(|tool| Tool::Function {
-            name: tool.name.clone().into(),
-            description: (!tool.description.trim().is_empty()).then(|| tool.description.clone()),
-            parameters: tool.input_schema.clone(),
+        .map(|tool| {
+            let parameters = crate::tool_schema::normalize_openai_tool_parameters_schema(
+                &tool.name,
+                &tool.input_schema,
+            )?
+            .into_owned();
+            Ok(Tool::Function {
+                name: tool.name.clone().into(),
+                description: (!tool.description.trim().is_empty())
+                    .then(|| tool.description.clone()),
+                parameters,
+            })
         })
         .collect()
 }
@@ -522,6 +530,12 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
     use oai_rt_rs::error::ApiErrorType;
     let message = err.message.clone();
     let code = err.code.as_deref().unwrap_or_default();
+    // Exhausted quota arrives under its own error type (which the realtime
+    // crate parses as `Unknown`) or under `rate_limit_error`; the structured
+    // code decides before the type so neither path retries a dead key.
+    if LlmError::code_signals_quota_exhausted(code) {
+        return LlmError::QuotaExhausted { message };
+    }
     match err.error_type {
         ApiErrorType::InvalidRequestError => {
             if code == "model_not_found" {
@@ -844,7 +858,7 @@ mod tests {
                     provenance: None,
                 }),
             ]);
-        let tools = build_tools(&request);
+        let tools = build_tools(&request).expect("object-root tool schemas");
         assert_eq!(tools.len(), 1);
         match &tools[0] {
             Tool::Function {
@@ -852,6 +866,44 @@ mod tests {
             } => {
                 assert_eq!(name, "read_file");
                 assert_eq!(description.as_deref(), Some("read a file"));
+            }
+            other => panic!("expected Tool::Function, got {other:?}"),
+        }
+    }
+
+    /// Regression (A2): the realtime text adapter emits the same normalized
+    /// parameters as the HTTP request builders; the pre-fix `workgraph_claim`
+    /// shape reaches the session without its root-level `not`.
+    #[test]
+    fn build_tools_drops_root_level_not_from_pre_fix_workgraph_claim_shape() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+        let request =
+            LlmRequest::new("gpt-realtime-1.5", vec![user("claim")]).with_tools(vec![Arc::new(
+                ToolDef {
+                    name: "workgraph_claim".into(),
+                    description: "Claim a ready WorkGraph item.".to_string(),
+                    input_schema: crate::tool_schema::test_fixtures::pre_fix_workgraph_claim_schema(
+                    ),
+                    provenance: None,
+                },
+            )]);
+        let tools = build_tools(&request).expect("object-root tool schema");
+        match &tools[0] {
+            Tool::Function {
+                name, parameters, ..
+            } => {
+                assert_eq!(name, "workgraph_claim");
+                assert!(
+                    parameters.get("not").is_none(),
+                    "root-level not must be dropped: {parameters}"
+                );
+                assert_eq!(parameters["type"], "object");
+                assert_eq!(
+                    parameters["properties"]["owner"]["additionalProperties"],
+                    serde_json::json!(false),
+                    "nested keywords OpenAI accepts are left alone"
+                );
             }
             other => panic!("expected Tool::Function, got {other:?}"),
         }
@@ -933,6 +985,31 @@ mod tests {
         );
 
         assert!(matches!(mapped, LlmError::NetworkTimeout { .. }));
+    }
+
+    #[test]
+    fn server_error_insufficient_quota_code_terminalizes_under_every_error_type() {
+        for error_type in [
+            oai_rt_rs::error::ApiErrorType::Unknown,
+            oai_rt_rs::error::ApiErrorType::RateLimitError,
+            oai_rt_rs::error::ApiErrorType::InvalidRequestError,
+        ] {
+            let mapped = map_server_error(oai_rt_rs::error::ServerError {
+                error_type,
+                code: Some("insufficient_quota".to_string()),
+                message:
+                    "You exceeded your current quota, please check your plan and billing details."
+                        .to_string(),
+                param: None,
+                event_id: None,
+            });
+
+            assert!(
+                matches!(mapped, LlmError::QuotaExhausted { .. }),
+                "{error_type:?} with insufficient_quota must be exhausted quota, got {mapped:?}"
+            );
+            assert!(!mapped.is_retryable());
+        }
     }
 
     #[test]

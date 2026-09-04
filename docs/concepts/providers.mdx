@@ -238,13 +238,26 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
   <Tab title="Anthropic">
     ```bash
     rkat run --model claude-sonnet-4-6 --params-json \
-      '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000,"cache_control":"automatic"}}' \
+      '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000,"cache_control":"disabled"}}' \
       "Solve this problem"
     ```
 
-    Anthropic also supports `top_k` and the cataloged cache policies
-    `automatic`, `system_prefix`, and `disabled`. Backend support differs;
-    for example, Bedrock does not accept automatic conversation caching.
+    Anthropic also supports `top_k` and the prompt-cache policies `automatic`
+    (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
+    `system_and_conversation`, and `disabled`, plus `cache_ttl` (`5m`, the
+    default, or `1h`). Bedrock and Copilot do not accept automatic caching:
+    they default to `disabled` and reject an explicit `automatic` locally. In a
+    mob profile or `AgentBuildConfig` the same knobs nest under
+    `provider_tag`:
+
+    ```toml
+    provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+    ```
+
+    A flat `provider_params = { cache_control = "disabled" }` fails the whole
+    definition parse: `ProviderParamsOverride` and `AnthropicProviderTag` are
+    both `deny_unknown_fields`, so the misplaced key is rejected before the
+    agent boots.
   </Tab>
   <Tab title="OpenAI">
     ```bash

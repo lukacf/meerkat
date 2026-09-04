@@ -1977,7 +1977,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::ReadyWaitTimedOut { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::ReadyWaitTimedOut
         }
-        MobError::DefinitionError(_) => {
+        MobError::DefinitionError(_)
+        | MobError::DefinitionParse(_)
+        | MobError::UnsupportedProfileKey { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::DefinitionError
         }
         MobError::FlowNotFound(_) => mob_dsl::MobSpawnManyFailureObservationKind::FlowNotFound,

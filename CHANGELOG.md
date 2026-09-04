@@ -28,6 +28,275 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`meerkat_llm_core::LlmError` gained the `QuotaExhausted { message }`
+  variant** (`LlmError::QuotaExhausted`, an `enum_variant_added` finding). The
+  enum is not `#[non_exhaustive]`, so exact-pinned Rust consumers that match
+  `LlmError` exhaustively must add an arm; every in-workspace match and
+  MobKit's `classify_llm_error` matches already carry a wildcard.
+  `LlmError::from_http_status` returns the new variant for a 429, 400 or 402
+  body whose provider code, documented message prefix, or Google
+  `QuotaFailure` detail names exhausted quota (see Fixed).
+
+### Billing-affecting default change
+
+- **Anthropic prompt caching is automatic by default again on the Anthropic
+  API, Vertex, and Foundry.** 0.8.22 (`3c7c8c1cb`) replaced the per-backend
+  default with a blanket `disabled` and inverted the test that pinned it,
+  while `docs/rust/advanced.mdx` kept promising `cache_control: automatic`; an
+  operator reading the docs believed caching was on and paid the full input
+  price on every turn. The provider runtime now derives the default from
+  backend capability: `automatic` wherever the backend supports Anthropic's
+  request-wide breakpoint, `disabled` on Amazon Bedrock and the GitHub Copilot
+  backend (both reject an explicit `automatic` locally; manual `system_prefix`
+  stays available), and `AnthropicClientBuilder` starts from `automatic` with
+  automatic support assumed; every configured backend, the plain API-key path
+  included, is built through the same two capability helpers, so the runtime
+  has one authority for this default. A direct `AnthropicClientBuilder` user
+  who declares `automatic_cache_control_supported(false)` for a custom backend
+  without also setting a non-automatic `default_cache_control` now fails the
+  first request locally with `invalid_request` naming the fix (the old
+  `disabled` default made that declaration inert). A profile that pins only
+  `cache_ttl` now rides the automatic default instead of failing its first
+  call. Behaviour change
+  for exact-pinned hosts upgrading from any release since 0.8.22: Anthropic
+  sessions that never set `cache_control` start paying five-minute cache
+  writes (1.25x the input rate) and reading cache hits (0.1x) again, visible
+  through `Usage.cache_creation_tokens` / `cache_read_tokens`. Opt out per
+  profile or request with the nested form; a flat `cache_control` key fails
+  the whole definition parse:
+
+  ```toml
+  provider_params = { provider_tag = { provider = "anthropic", cache_control = "disabled" } }
+  ```
+
+### Fixed
+
+- **An exhausted provider account fails in one round trip instead of after
+  the rate-limit retry window.** `LlmError::from_http_status` mapped every
+  429 to the retryable `RateLimited` class, so a key whose account had no
+  quota left (OpenAI `429` with `error.code = "insufficient_quota"`) was
+  retried three times behind the 30-second rate-limit floor and surfaced only
+  after roughly 90 seconds of `retrying` events, as `llm_rate_limited`. The
+  provider error mapping now reads the body: OpenAI `insufficient_quota`,
+  `credit_balance_exhausted`, the organization/project spend-limit and
+  usage-limit codes and the legacy `billing_hard_limit_reached`; Anthropic's
+  monthly spend cap (`rate_limit_error` with `details.error_code =
+  "enforced_spend_limit_reached"`), its self-set spend limit `400` and HTTP
+  `402 billing_error`; Gemini `quota_exceeded` and a `RESOURCE_EXHAUSTED`
+  `QuotaFailure` on a daily window or a zero entitlement all map to the new
+  non-retryable `LlmError::QuotaExhausted`. The OpenAI Responses stream
+  error, realtime text adapter and live adapter paths and the Anthropic
+  stream error path classify the same codes. Ordinary per-minute rate limits
+  are unchanged and keep their `Retry-After` hint. On the wire the failure is
+  `llm_provider_error` with `non_retryable` retryability and
+  `details.class = "quota_exhausted"` as the machine-readable discriminator
+  (`details.message` carries the provider body verbatim). Its
+  `provider_error_kind` is still `invalid_request`: the schema-emitted
+  provider error kind vocabulary is unchanged in this release, so for this
+  class the kind is a known misnomer until a dedicated `quota_exhausted` kind
+  lands with a schema regeneration (tracked follow-up). Consumers branch on
+  `details.class`, not on the kind and not on the message text. Behaviour
+  change for exact-pinned hosts: a quota-exhausted turn now emits `run_failed`
+  within one round trip with no `retrying` events, and its reason is
+  `llm_provider_error` rather than `llm_rate_limited`. The new `LlmError`
+  variant is declared under Breaking.
+- **Gemini and OpenAI-compatible requests now accept every built-in tool
+  schema.** Gemini's `FunctionDeclaration.parameters` is an OpenAPI-subset
+  `Schema` proto that rejects any undeclared field with `400 INVALID_ARGUMENT`,
+  and the client lowered tool schemas with a denylist that had been patched
+  keyword by keyword since 0.4.5 and still let `not`, object-variant `oneOf`
+  and `allOf` residue (`allOf: [{}]` after conditional stripping) through. A
+  Gemini session carrying `workgraph_claim` (root-level `not`, since 0.8.22),
+  `workgraph_attention_reassign` or `workgraph_policy_escalate` (object
+  `oneOf`), the default-on schedule tools (object `oneOf` plus
+  `allOf`/`if`/`then`), or the `council` agent tool (schemars `oneOf`, since
+  0.8.31, so every mob-enabled Gemini member) failed on its first LLM call with
+  a non-retryable `invalid_request`. The Gemini lowering now keeps the existing
+  `$ref` inlining and const/type-array/nullable passes, rewrites a surviving
+  `oneOf` as `anyOf`, folds `allOf` members into their parent (members emptied
+  by conditional stripping are dropped), and then reduces every node to a
+  positive allowlist of the Schema proto fields; `format` values pass through
+  untouched. JSON Schema booleans, which the proto cannot parse at all, are
+  lowered too: `true` (the shape schemars emits for `serde_json::Value` fields
+  such as the `council` merge arguments and `mob_wire` peers) becomes the
+  empty Schema, and `false` is expressed by dropping the property, union
+  branch or item shape it guarded. A tuple-form `items` list (or
+  `prefixItems`) collapses into one union item schema because `Schema.items`
+  is a single message, and `enum` members are stringified because
+  `Schema.enum` is `repeated string` (a `null` member becomes `nullable`). On
+  the OpenAI side every emission site (Responses tools, Chat
+  Completions tools behind the `openai_compatible` transport, the realtime
+  text adapter and live tools) now runs one shared normalizer
+  (`meerkat_openai::normalize_openai_tool_parameters_schema`) that inlines
+  local `$ref`s, drops a root-level `not` and a root-level `enum`, folds
+  root-level `oneOf`/`anyOf`/`allOf` object members into
+  `properties`/`required` (literal discriminators from several variants merge
+  into one `enum`), and declares an untyped root `object`; nothing below the
+  root is rewritten because OpenAI accepts nested combinators. A tool whose
+  root declares a non-object `type` (a bare-enum root, which no provider's
+  function-parameter validator accepts) is refused with a typed
+  `invalid_request` naming the tool instead of being sent.
+  `workgraph_claim` no longer expresses the `lease_seconds`/`lease_expires_at`
+  exclusivity as a schema-level `not`: both property descriptions state it and
+  the claim machine remains the only enforcement point. Behaviour change for
+  exact-pinned hosts: Gemini, OpenAI Responses (api.openai.com hosts
+  included) and OpenAI-compatible Chat Completions models receive a lowered
+  or normalized form of the schema they were sent before; on the OpenAI paths
+  local `$ref` inlining duplicates a definition referenced more than once, so
+  schemars-typed tools such as `council` and `delegate` cost more tool-schema
+  tokens per request; and Gemini members that failed on their first turn
+  start working. `GeminiClient::build_request_body`,
+  `OpenAiClient::build_request_body` and
+  `OpenAiCompatibleClient::build_chat_completions_body` are now public but
+  `#[doc(hidden)]` so the integration matrix can drive the real builders.
+- **A profile-carried Anthropic `cache_ttl` survives a per-turn tag merge.**
+  `ProviderTag::merge_missing_from` filled every Anthropic knob except
+  `cache_ttl`, so a turn or draft tag layered over a profile that pinned
+  `cache_ttl = "1h"` silently fell back to the five-minute lifetime while
+  keeping the profile's `cache_control`. The fill is now complete. Behaviour
+  change for exact-pinned hosts that merge draft tags over profile tags (the
+  MobKit bridge does): the profile TTL now reaches the request.
+- **Realm `[agent] provider_params` is refused instead of silently ignored.**
+  `.rkat/config.toml` accepted an `[agent] provider_params` table (parsed
+  fail-closed) that no build path read and that `Config::merge` did not carry,
+  so an operator placing a fleet-wide cache policy there saw a clean boot and
+  no effect. `Config::merge_toml_str`, `FileConfigStore::get`, and
+  `Config::validate` now return a typed `ConfigError::Validation` naming the
+  per-profile / per-request `provider_params` carrier and its `provider_tag`
+  nesting. Behaviour change for exact-pinned hosts whose realm config already
+  carries an inert `[agent] provider_params` table, whether in the head
+  `.rkat/config.toml`, a parent realm document, or the user-global
+  `~/.rkat/config.toml` tail: that config now fails to load on every
+  runtime-backed surface (CLI, rkat-rest, rkat-rpc, rkat-mcp; the last two
+  through the next entry) until the table is moved onto a profile or removed.
+- **rkat-rpc and rkat-mcp fail startup on a head realm config that does not
+  load.** Both binaries read the head realm document with
+  `unwrap_or_else(|_| Config::default())`, and rkat-mcp additionally turned a
+  `Config::validate` failure into a warn log plus `Config::default()`, so a
+  head `.rkat/config.toml` that failed to read, parse, or validate was
+  replaced wholesale by defaults (default model, limits, tool toggles,
+  `[mob_host]`, auth bindings all dropped) and the process served on a
+  configuration the operator never wrote: silently on rkat-rpc, behind a warn
+  line on rkat-mcp, while rkat-rest and the CLI refused. The `[agent]
+  provider_params` refusal above would have vanished the same way on those
+  two surfaces. Both now propagate the typed `ConfigError` and exit before
+  serving, matching rkat-rest; the head-document read on rkat-rpc and the
+  store open, head read, parent-chain compose, and effective `validate` on
+  rkat-mcp all fail closed. The compose step on rkat-mcp previously fell back
+  to the head document without inheritance behind a warn line when a parent
+  realm document or the user-global `~/.rkat/config.toml` tail failed to
+  load, dropping the `global`-owned credential binding, model defaults, and
+  every inherited field, after which each `create_session` re-composed the
+  same chain and failed with the same error: a live server that could create
+  no session. It now propagates the compose error as rkat-rpc and rkat-rest
+  do. Behaviour change for exact-pinned hosts whose head, parent, or global
+  config is malformed or carries `[agent] provider_params`: rkat-rpc and
+  rkat-mcp now refuse to start and print the error instead of booting on
+  defaults or on the head document alone. rkat-rest's
+  startup-log re-read of the head document carried the same
+  `unwrap_or_else(|_| Config::default())` behind its already fail-closed
+  bootstrap read; it now propagates the `ConfigError` too, so the binary has
+  one read path with one failure mode (no observable change: the bootstrap
+  read had already refused).
+- **`MobDefinition::from_toml` refuses a profile-level `system_prompt` and
+  returns `MobError`.** `Profile` cannot carry `deny_unknown_fields` (it sits
+  under the untagged `ProfileBinding`, where a rejected key surfaces as an
+  opaque "did not match any variant" error, and it is the persisted profile
+  shape), so a `system_prompt = "..."` line under `[profiles.<name>]` was
+  dropped silently and the member ran on the default prompt; MobKit's own
+  fixtures carried the inert key. `from_toml` now compares each inline profile
+  table against the new `Profile::FIELD_NAMES` (kept honest by a serde-derived
+  drift test) and refuses `system_prompt`, `prompt`, and `instructions`, the
+  closed `UnsupportedProfileKey` list, with `MobError::UnsupportedProfileKey`,
+  whose message names the profile, the key, and where the concept lives: a
+  profile has no system prompt, the member prompt is `profile.skills` resolved
+  against an inline or path `[skills.<id>]` table, and identity-first hosts
+  may set `DurableAgentSpec.additional_instructions` or a customizer's
+  `draft.system_prompt`. A realm-reference table (`realm_profile = "..."`) is
+  refused for the same keys, because the untagged binding otherwise absorbs
+  them silently. The check runs on the TOML path only (`from_toml`,
+  `parse_toml`); a `MobDefinition` deserialized from JSON is not inspected.
+  Behaviour change for exact-pinned hosts: a definition that booted with the
+  inert key now fails to load until the key moves into a `[skills.<id>]`
+  table. Signature changes named for the gate:
+  `MobDefinition::from_toml` returns `Result<MobDefinition, MobError>` instead
+  of `Result<MobDefinition, toml::de::Error>`; `MobError` gained the variants
+  `DefinitionParse(toml::de::Error)` (with `From<toml::de::Error>`) and
+  `UnsupportedProfileKey { profile, key }`; `DiagnosticCode` gained
+  `UnknownProfileKey`. New public items: `Profile::FIELD_NAMES`,
+  `ToolConfig::FIELD_NAMES`, `ProfileBinding::REALM_REF_FIELD_NAMES`,
+  `meerkat_mob::UnsupportedProfileKey`, `MobDefinition::parse_toml`,
+  `ParsedMobDefinition`, and `UnknownProfileKeys`.
+
+### Changed
+
+- **Mob-enabled sessions no longer render mob tool descriptions into the
+  system prompt.** The facade appended every tool's description under
+  `# Available Tools` even though each provider already receives the same text
+  through `ToolDef.description`, so a `tools.mob` member paid the mob family's
+  ~16.6 KB of descriptions twice on every request: the 19-tool agent-facing
+  mob surface (~15.8 KB) and the 12-tool operator family that meerkat-mob
+  composes into the member's external tools (~0.75 KB). The prompt inventory
+  now skips every tool whose provenance is `ToolSourceKind::Mob`, whichever
+  dispatcher mounts it, the convention exact deferred-catalog dispatchers
+  already follow; the tool definitions the model receives are unchanged and
+  every non-mob tool family still renders as before. Behaviour change for
+  exact-pinned hosts: the system prompt of every mob-enabled session shrinks
+  by roughly 16.6 KB, which moves the prompt-cache prefix once after upgrade.
+- **The preloaded `workgraph-workflow` skill now states the rules members
+  kept getting wrong.** Every mob member with `tools.workgraph` receives this
+  skill in its prompt, but the text never said which way a `parent` edge
+  points or when to add one, that `workgraph_close` records `completed` when
+  `status` is omitted, that `workgraph_list` and `workgraph_snapshot` hide
+  terminal items unless `include_terminal` is true, or that a `labels` filter
+  requires every listed label; it also said a `blocks` edge is satisfied by any
+  terminally resolved blocker when only `completed` satisfies it. The skill now
+  spells out the child (`from_id`) to parent (`to_id`) direction and the
+  parent join policies, that `status` must be passed explicitly with `failed`
+  for a refuted hypothesis and `cancelled` for dropped work, the
+  `include_terminal` and match-all `labels` filter semantics, and the
+  `completed`-only blocker rule. Tool descriptions and schemas are unchanged.
+  Behaviour change for exact-pinned hosts: the preloaded skill text grows by
+  about 1.5 KB, which moves the prompt-cache prefix of WorkGraph-capable
+  members once after upgrade.
+- **The `tools.comms=false` wiring error now carries its remedy.**
+  `build_agent_config` rejects a profile with comms disabled because the
+  member's identity, roster entry, wiring, and supervisor bridge are keyed on
+  its comms name, but `ToolConfig.comms` defaults to `false`, so a profile
+  that merely omitted the key was rejected with a message that named no fix.
+  The message keeps its `profile '<name>' has tools.comms=false; mob meerkats
+  require comms=true` prefix and adds that the default is false so omitting
+  the key counts as false, that the fix is `comms = true` under
+  `[profiles.<name>.tools]`, and that a member which must not message peers
+  keeps comms on and uses `read_only = true` or a per-spawn
+  `tool_access_policy` deny list. The default itself is unchanged. The
+  `Profile::peer_description` and `ToolConfig::comms` rustdoc now state that
+  the description is peer-facing discovery metadata (the `peers` tool and
+  `mob.peer_added`), not the member's system prompt, and that comms must be
+  true for every profile that spawns a member.
+- **Unknown `[profiles.<name>]` keys now warn instead of vanishing.** Every
+  key an inline profile table declares that `Profile` does not define (a
+  host-private key such as HomeCore's `role_summary`, or a typo) is reported
+  once per key as an `unknown_profile_key` warning diagnostic in the
+  `validate_definition` shape, and `MobDefinition::from_toml` logs one
+  `tracing::warn!` per affected profile naming the profile and its ignored
+  keys; parsing continues and the keys are ignored exactly as before. The new
+  `MobDefinition::parse_toml` returns the typed definition together with the
+  ignored keys and their diagnostics for hosts that surface diagnostics
+  structurally rather than through logs. The `tools` sub-table is compared
+  against the new `ToolConfig::FIELD_NAMES` the same way, so a typo such as
+  `comm = true` is reported as `profiles.<name>.tools.comm` instead of
+  silently leaving comms off, and a realm-reference table warns on every key
+  other than `realm_profile` (`ProfileBinding::REALM_REF_FIELD_NAMES`). The
+  diagnostic is produced by `parse_toml` only: no Meerkat surface emits
+  `unknown_profile_key` today, and `validate_definition` cannot, because the
+  typed definition it receives no longer holds the dropped keys. A host that
+  surfaces validate diagnostics structurally calls `parse_toml` and merges its
+  diagnostics with `validate_definition`'s; `from_toml` callers get the log
+  line.
+
 ## [0.8.33] - 2026-09-04
 
 ### Added

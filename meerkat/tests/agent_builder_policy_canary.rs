@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -1368,5 +1368,377 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
     assert!(
         !comms_agent.contains(".build(client, tools, store)"),
         "meerkat-comms must not construct core agents through the unqualified build seam"
+    );
+}
+
+/// Build scripts that resolve a `meerkat-core` bridge symbol suffix: the
+/// script path, the `cargo:rustc-env` variable it must emit, and the Cargo
+/// feature environment variables its lookup is gated behind.
+const BRIDGE_SUFFIX_BUILD_SCRIPTS: [(&str, &str, &[&str]); 5] = [
+    (
+        "meerkat/build.rs",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX",
+        &[],
+    ),
+    (
+        "meerkat-runtime/build.rs",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
+        &[],
+    ),
+    (
+        "meerkat-session/build.rs",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
+        &[],
+    ),
+    (
+        "meerkat-mob/build.rs",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
+        &[],
+    ),
+    (
+        "meerkat-live/build.rs",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
+        &["CARGO_FEATURE___MEERKAT_GENERATED_AUTHORITY_BRIDGE"],
+    ),
+];
+
+/// Feature environment that makes `meerkat-core/build.rs` emit both bridge
+/// suffixes it exports to the facade and the generated-authority dependents.
+const CORE_BRIDGE_FEATURE_ENVS: &[&str] = &[
+    "CARGO_FEATURE___MEERKAT_FACADE_AGENT_FACTORY_BUILD",
+    "CARGO_FEATURE___MEERKAT_GENERATED_AUTHORITY_BRIDGE",
+];
+
+/// Any fixed triple works: the suffix hashes the `TARGET` string, so every
+/// script in one comparison only has to see the same value.
+const BRIDGE_SUFFIX_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+fn rustc_path() -> OsString {
+    if let Some(rustc) = std::env::var_os("RUSTC") {
+        return rustc;
+    }
+    if let Some(runfiles_dir) = std::env::var_os("RUNFILES_DIR").map(PathBuf::from)
+        && let Some(rustc) = find_runfile_tool(&runfiles_dir, "bin/rustc")
+    {
+        return rustc.into_os_string();
+    }
+    OsString::from("rustc")
+}
+
+/// Compiles a workspace build script as a standalone binary so its lookup can
+/// be exercised under layouts and environments Cargo never produces locally
+/// (docs.rs, a missing metadata channel).
+fn compile_build_script(relative: &str, scratch: &Path) -> PathBuf {
+    let source = repo_root().join(relative);
+    let binary = scratch.join(relative.replace('/', "_").replace(".rs", ""));
+    let output = Command::new(rustc_path())
+        .arg("--edition=2024")
+        .arg("--crate-type=bin")
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to spawn rustc for {relative}: {err}"));
+    assert!(
+        output.status.success(),
+        "rustc failed to compile {relative}:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    binary
+}
+
+struct BuildScriptRun {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+impl BuildScriptRun {
+    fn rustc_env(&self, name: &str) -> Option<&str> {
+        let prefix = format!("cargo:rustc-env={name}=");
+        self.stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+    }
+}
+
+/// Runs a compiled build script with the minimal Cargo environment plus
+/// `extra_env` (for example the `DOCS_RS` marker docs.rs sets).
+fn run_build_script(
+    binary: &Path,
+    manifest_dir: &Path,
+    out_dir: &Path,
+    feature_envs: &[&str],
+    extra_env: &[(&str, &str)],
+) -> BuildScriptRun {
+    let mut command = Command::new(binary);
+    command
+        .env_clear()
+        .env("CARGO_MANIFEST_DIR", manifest_dir)
+        .env("OUT_DIR", out_dir)
+        .env("TARGET", BRIDGE_SUFFIX_TARGET)
+        .env("CARGO_PKG_VERSION", env!("CARGO_PKG_VERSION"));
+    for feature_env in feature_envs {
+        command.env(feature_env, "1");
+    }
+    for (name, value) in extra_env {
+        command.env(name, value);
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {}: {err}", binary.display()));
+    BuildScriptRun {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// docs.rs unpacks the crate under test into an isolated workdir with no
+/// sibling crates and runs build scripts under the `build/<pkg>/<hash>/out`
+/// target layout, so neither the sibling scan nor the dep-info scan can see a
+/// `meerkat-core` checkout. The only signal a build script has there is the
+/// `DOCS_RS` environment variable docs.rs sets.
+fn docs_rs_layout(scratch: &Path) -> (PathBuf, PathBuf) {
+    let workdir = scratch.join("rustwide/workdir");
+    let out_dir = scratch.join("rustwide/target/debug/build/meerkat/a1e1d8d83cbb9685/out");
+    fs::create_dir_all(&workdir).expect("create docs.rs workdir");
+    fs::create_dir_all(&out_dir).expect("create docs.rs OUT_DIR");
+    (workdir, out_dir)
+}
+
+/// A fresh target tree without `deps/`, so only the sibling checkout scan can
+/// resolve meerkat-core from a workspace manifest directory.
+fn workspace_layout(scratch: &Path) -> PathBuf {
+    let out_dir = scratch.join("target/debug/build/pkg-0123456789abcdef/out");
+    fs::create_dir_all(&out_dir).expect("create OUT_DIR");
+    out_dir
+}
+
+fn is_bridge_symbol_suffix(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// The placeholder is a fixed word, never sixteen hex digits, so a fallback
+/// suffix and a derived suffix can never be confused for one another.
+const DOCS_RS_UNLINKED_SUFFIX: &str = "docsrs_unlinked";
+
+/// The docs.rs case: `DOCS_RS` is set and no `meerkat-core` checkout is
+/// visible. Every dependent must keep the documentation build alive with the
+/// fixed unlinked placeholder, say so through `cargo:warning`, and declare the
+/// `DOCS_RS` dependency so Cargo reruns the script when the variable changes.
+#[test]
+fn bridge_suffix_build_scripts_fall_back_to_the_unlinked_suffix_under_docs_rs() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let (workdir, out_dir) = docs_rs_layout(scratch.path());
+
+    for (script, env_name, feature_envs) in BRIDGE_SUFFIX_BUILD_SCRIPTS {
+        let binary = compile_build_script(script, scratch.path());
+        let run = run_build_script(
+            &binary,
+            &workdir,
+            &out_dir,
+            feature_envs,
+            &[("DOCS_RS", "1")],
+        );
+        assert!(
+            run.status.success(),
+            "{script} must not abort a docs.rs build; status {}, stderr:\n{}",
+            run.status,
+            run.stderr
+        );
+        assert_eq!(
+            run.rustc_env(env_name),
+            Some(DOCS_RS_UNLINKED_SUFFIX),
+            "{script} must export the unlinked placeholder suffix under DOCS_RS; stdout:\n{}",
+            run.stdout
+        );
+        assert!(
+            run.stdout
+                .lines()
+                .any(|line| line.starts_with("cargo:warning=") && line.contains("DOCS_RS")),
+            "{script} must warn that the docs.rs fallback is in effect; stdout:\n{}",
+            run.stdout
+        );
+        assert!(
+            run.stdout
+                .lines()
+                .any(|line| line == "cargo:rerun-if-env-changed=DOCS_RS"),
+            "{script} must rerun when DOCS_RS changes; stdout:\n{}",
+            run.stdout
+        );
+    }
+}
+
+/// The fallback is only for a build that cannot see meerkat-core: with a
+/// sibling checkout in view, `DOCS_RS` changes nothing. The script derives the
+/// real suffix and emits no warning, so a docs.rs build of a workspace
+/// checkout documents the linked symbols.
+#[test]
+fn bridge_suffix_build_scripts_prefer_a_visible_checkout_over_the_docs_rs_fallback() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let out_dir = workspace_layout(scratch.path());
+
+    for (script, env_name, feature_envs) in BRIDGE_SUFFIX_BUILD_SCRIPTS {
+        let script_path = repo_root().join(script);
+        let manifest_dir = script_path
+            .parent()
+            .unwrap_or_else(|| panic!("{script} has no crate directory"));
+        let binary = compile_build_script(script, scratch.path());
+        let run = run_build_script(
+            &binary,
+            manifest_dir,
+            &out_dir,
+            feature_envs,
+            &[("DOCS_RS", "1")],
+        );
+        assert!(
+            run.status.success(),
+            "{script} failed with DOCS_RS set and a checkout visible; stderr:\n{}",
+            run.stderr
+        );
+        let suffix = run
+            .rustc_env(env_name)
+            .unwrap_or_else(|| panic!("{script} exported no {env_name}; stdout:\n{}", run.stdout));
+        assert!(
+            is_bridge_symbol_suffix(suffix),
+            "{script} must derive a 16-digit lowercase hex suffix from the visible checkout, \
+             got {suffix}"
+        );
+        assert!(
+            !run.stdout
+                .lines()
+                .any(|line| line.starts_with("cargo:warning=")),
+            "{script} must not warn when it resolved a checkout; stdout:\n{}",
+            run.stdout
+        );
+    }
+}
+
+/// Without `DOCS_RS` the fallback does not exist: a build that cannot see a
+/// `meerkat-core` checkout still fails closed and never exports a guessed
+/// suffix.
+#[test]
+fn bridge_suffix_build_scripts_fail_closed_without_docs_rs_or_a_core_checkout() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let (workdir, out_dir) = docs_rs_layout(scratch.path());
+
+    for (script, env_name, feature_envs) in BRIDGE_SUFFIX_BUILD_SCRIPTS {
+        let binary = compile_build_script(script, scratch.path());
+        let run = run_build_script(&binary, &workdir, &out_dir, feature_envs, &[]);
+        assert!(
+            !run.status.success(),
+            "{script} must keep failing closed when DOCS_RS is unset and no meerkat-core \
+             checkout is visible; stdout:\n{}",
+            run.stdout
+        );
+        assert!(
+            run.stderr.contains("could not locate"),
+            "{script} must name the unresolved bridge suffix; stderr:\n{}",
+            run.stderr
+        );
+        assert_eq!(
+            run.rustc_env(env_name),
+            None,
+            "{script} must not emit a bridge suffix it could not resolve; stdout:\n{}",
+            run.stdout
+        );
+        assert!(
+            !run.stdout
+                .lines()
+                .any(|line| line.starts_with("cargo:warning=")),
+            "{script} must not announce a fallback it did not take; stdout:\n{}",
+            run.stdout
+        );
+    }
+}
+
+/// The suffix each dependent derives from a visible checkout must be the
+/// suffix meerkat-core itself exports for the same checkout and `TARGET`.
+/// Byte-identity here is what keeps the bridge symbols linking, and it is
+/// reached without meerkat-core publishing anything through Cargo `links`
+/// metadata, which `authority_build_scripts_do_not_leak_factory_seal_metadata`
+/// forbids.
+#[test]
+fn dependent_build_scripts_derive_the_suffix_core_exports() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let out_dir = workspace_layout(scratch.path());
+    let core_manifest_dir = repo_root().join("meerkat-core");
+
+    let core_binary = compile_build_script("meerkat-core/build.rs", scratch.path());
+    let core = run_build_script(
+        &core_binary,
+        &core_manifest_dir,
+        &out_dir,
+        CORE_BRIDGE_FEATURE_ENVS,
+        &[],
+    );
+    assert!(
+        core.status.success(),
+        "meerkat-core/build.rs failed; stderr:\n{}",
+        core.stderr
+    );
+    let core_without_features =
+        run_build_script(&core_binary, &core_manifest_dir, &out_dir, &[], &[]);
+    assert!(
+        core_without_features.status.success(),
+        "meerkat-core/build.rs failed without bridge features; stderr:\n{}",
+        core_without_features.stderr
+    );
+    for run in [&core, &core_without_features] {
+        assert!(
+            !run.stdout.lines().any(|line| {
+                line.starts_with("cargo:agent_factory_policy_bridge_symbol_suffix=")
+                    || line.starts_with("cargo:generated_authority_bridge_symbol_suffix=")
+            }),
+            "meerkat-core must not publish bridge suffixes as links metadata; stdout:\n{}",
+            run.stdout
+        );
+    }
+
+    let mut checked = BTreeSet::new();
+    for (script, env_name, feature_envs) in BRIDGE_SUFFIX_BUILD_SCRIPTS {
+        let exported = core.rustc_env(env_name).unwrap_or_else(|| {
+            panic!(
+                "meerkat-core/build.rs did not export {env_name}; stdout:\n{}",
+                core.stdout
+            )
+        });
+        assert!(
+            is_bridge_symbol_suffix(exported),
+            "meerkat-core must export a 16-digit lowercase hex {env_name}, got {exported}"
+        );
+        assert_eq!(
+            core_without_features.rustc_env(env_name),
+            None,
+            "meerkat-core must keep the {env_name} export gated on its private feature"
+        );
+        checked.insert(env_name);
+
+        let script_path = repo_root().join(script);
+        let manifest_dir = script_path
+            .parent()
+            .unwrap_or_else(|| panic!("{script} has no crate directory"));
+        let binary = compile_build_script(script, scratch.path());
+        let derived = run_build_script(&binary, manifest_dir, &out_dir, feature_envs, &[]);
+        assert!(
+            derived.status.success(),
+            "{script} must resolve the sibling meerkat-core checkout; stderr:\n{}",
+            derived.stderr
+        );
+        assert_eq!(
+            derived.rustc_env(env_name),
+            Some(exported),
+            "{script} derived a different {env_name} than meerkat-core exports; the bridge \
+             symbols would not link"
+        );
+    }
+    assert_eq!(
+        checked.len(),
+        2,
+        "both bridge suffixes must be covered by the build-script table"
     );
 }

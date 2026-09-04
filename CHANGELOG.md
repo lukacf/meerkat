@@ -296,6 +296,29 @@ them.
   surfaces validate diagnostics structurally calls `parse_toml` and merges its
   diagnostics with `validate_definition`'s; `from_toml` callers get the log
   line.
+- **docs.rs builds of `meerkat`, `meerkat-runtime`, `meerkat-session`,
+  `meerkat-mob`, and `meerkat-live` no longer abort in their build scripts.**
+  Each script derives its `meerkat-core` bridge symbol suffix by locating the
+  core checkout next to its own manifest or through the target tree's dep-info
+  files, and exited the build when neither scan found one. docs.rs unpacks the
+  crate under test into an isolated workdir with no sibling crates and, since
+  its 2026-08 nightly, runs build scripts under a `build/<pkg>/<hash>/out`
+  layout that the dep-info scan never matched, so every `meerkat` release since
+  0.8.18 (and `meerkat-session` since 0.8.30) failed to document. The scripts
+  now declare `cargo:rerun-if-env-changed=DOCS_RS` and, when the lookup fails
+  while `DOCS_RS` is set, emit a `cargo:warning` and continue with the fixed
+  placeholder suffix `docsrs_unlinked`: rustdoc never links, so the placeholder
+  only has to keep the documentation build alive. Every other build still fails
+  closed exactly as before, and `meerkat-core` publishes nothing new. The
+  alternative of passing the suffix through Cargo `links` metadata
+  (`DEP_MEERKAT_CORE_*`) was rejected: the security canary
+  `authority_build_scripts_do_not_leak_factory_seal_metadata` forbids it
+  because any direct dependent can read that metadata and generate matching
+  validator/finalizer symbols. Canary tests compile each build script
+  standalone and drive it under a docs.rs-shaped layout: the fallback applies
+  only with `DOCS_RS` set and no checkout visible, a visible checkout still wins
+  and warns about nothing, the unset case still fails closed, and the suffix
+  every dependent derives is byte-identical to the one `meerkat-core` exports.
 
 ## [0.8.33] - 2026-09-04
 

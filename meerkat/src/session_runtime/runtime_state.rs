@@ -377,7 +377,29 @@ mod ops {
         }
 
         /// Discard a stale live session and unregister it from the
-        /// runtime adapter.
+        /// runtime adapter so the same `SessionId` can be rematerialized.
+        ///
+        /// Contract:
+        /// - The service-side live projection is discarded first; an absent
+        ///   projection (`Ok(())` or `NotFound`) is already clean.
+        /// - The exact current [`RuntimeSessionRegistrationWitness`] is
+        ///   captured and its owned unregister teardown saga is awaited to
+        ///   terminal completion via
+        ///   `unregister_session_registration_until_terminal_if_current`.
+        ///   There is deliberately no outer bound: the saga is
+        ///   coordinator-owned, so dropping this future never aborts
+        ///   teardown, and any bound shorter than the teardown latency would
+        ///   reintroduce `UnregisterInProgress` to the caller that is about to
+        ///   reoccupy the `SessionId`.
+        /// - An absent registration, or one already replaced by a
+        ///   same-`SessionId` successor before the unregister was admitted
+        ///   (`Ok(false)`), is treated as already clean; this call never joins
+        ///   teardown for a replacement registration.
+        /// - Discard and unregister failures are combined: a discard failure
+        ///   alone is returned as-is, an unregister failure alone is wrapped as
+        ///   an internal error, and both together are reported in one error.
+        ///
+        /// [`RuntimeSessionRegistrationWitness`]: meerkat_runtime::RuntimeSessionRegistrationWitness
         pub async fn discard_stale_live_session(
             &self,
             session_id: &SessionId,
@@ -391,12 +413,23 @@ mod ops {
                 .current_session_registration_witness(session_id)
                 .await
             {
-                Some(registration) => self
+                Some(registration) => match self
                     .runtime_adapter
                     .unregister_session_registration_until_terminal_if_current(&registration)
                     .await
-                    .map(|_| ())
-                    .err(),
+                {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        tracing::debug!(
+                            %session_id,
+                            epoch_id = %registration.epoch_id(),
+                            "stale live-session registration was replaced before unregister; \
+                             treating the captured registration as already clean"
+                        );
+                        None
+                    }
+                    Err(error) => Some(error),
+                },
                 None => None,
             };
             match (discard_error, unregister_error) {

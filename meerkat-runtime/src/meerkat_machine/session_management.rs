@@ -6206,9 +6206,19 @@ impl MeerkatMachine {
     }
 
     /// Unregister one exact current registration and await its owned teardown
-    /// saga to terminal completion. This is for process-lifecycle owners that
-    /// must not exit while cleanup remains in flight. The exact witness keeps
-    /// a later same-SessionId registration outside this teardown authority.
+    /// saga to terminal completion, past the ordinary caller grace that
+    /// [`Self::unregister_session_registration_if_current`] applies.
+    ///
+    /// This serves every caller that must observe terminal teardown of one
+    /// exact registration before acting on its absence: process-lifecycle
+    /// owners that must not exit while cleanup remains in flight, and
+    /// reoccupation callers (for example stale live-session discard ahead of
+    /// `turn/start`) that must not rematerialize the same `SessionId` until
+    /// the previous incarnation's teardown has reached terminal completion.
+    /// The saga is coordinator-owned, so a caller dropping this future never
+    /// cancels teardown. The exact witness keeps a later same-SessionId
+    /// registration outside this teardown authority: a stale or absent
+    /// registration is an idempotent `Ok(false)`.
     pub async fn unregister_session_registration_until_terminal_if_current(
         &self,
         registration: &RuntimeSessionRegistrationWitness,

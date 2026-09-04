@@ -440,6 +440,16 @@ them.
   `MEERKAT_PRE_PUSH_LANE_IDLE_SECS` (default 6 hours). Every decision is
   logged as one `kept:` or `pruned:` line with its reason. Exact-tree
   evidence reuse is unchanged.
+- `discard_stale_live_session` now documents its teardown contract (exact
+  registration witness, terminal-completion wait, absent or replaced
+  registration treated as already clean, preserved error combination) and
+  logs at debug level when the captured registration was replaced before
+  unregister instead of dropping that result silently. The
+  `unregister_session_registration_until_terminal_if_current` doc now covers
+  exact-registration reoccupation callers, not only process-lifecycle owners.
+  Facade tests pin that an absent registration returns `Ok(())` and that a
+  teardown outliving the ordinary 2-second caller grace completes instead of
+  surfacing `UnregisterInProgress`.
 
 ## [0.8.33] - 2026-09-04
 

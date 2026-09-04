@@ -640,6 +640,12 @@ jobs:
       - name: Verify release crate enumeration gate still fails closed
         run: scripts/test-crate-enumeration-gate.sh
 
+      # The release doctor asserts release.yml behaviour under concrete events.
+      # This proves equivalent rewordings pass and dropped behaviour fails, so
+      # the doctor and the workflow cannot drift apart silently again (#1091).
+      - name: Verify release doctor workflow assertions still bind
+        run: scripts/test-release-doctor-workflow-contract.sh
+
       - name: Verify parallel release packaging stays isolated and fails closed
         run: make check-rust-release-packaging-contract
 

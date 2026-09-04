@@ -376,6 +376,18 @@ them.
   that writes to stderr only, because stdout is the MCP JSON channel. Hosts
   that launch `rkat-mcp` observe new stderr output; stdout framing is
   unchanged.
+- `make release-doctor` no longer fails on a healthy main after the release
+  workflow is reworded. The "exact-tree pre-tag semver evidence" and "30
+  minute tag-to-public SLO" checks now evaluate `release.yml` job and step
+  conditions under concrete events (tag push, package recovery, explicit
+  historical evidence) through `scripts/check_release_workflow_contract.py`
+  instead of grepping literal lines, so folding an `if:` across lines or
+  passing `--slo-seconds` as a `${{ }}` expression passes while gating the
+  evidence step off tags, rerunning `make semver-breaks` on a tag, or relaxing
+  the 1800 second SLO still fails and names the defect.
+  `scripts/test-release-doctor-workflow-contract.sh` (pre-push, CI ratchets,
+  and `make release-doctor`) proves both halves on fixtures derived from the
+  committed workflow, so the doctor and the workflow cannot drift silently.
 
 ## [0.8.33] - 2026-09-04
 

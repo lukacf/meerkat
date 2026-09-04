@@ -386,11 +386,19 @@ mod ops {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
             };
-            let unregister_error = self
+            let unregister_error = match self
                 .runtime_adapter
-                .unregister_session(session_id)
+                .current_session_registration_witness(session_id)
                 .await
-                .err();
+            {
+                Some(registration) => self
+                    .runtime_adapter
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+                    .map(|_| ())
+                    .err(),
+                None => None,
+            };
             match (discard_error, unregister_error) {
                 (None, None) => Ok(()),
                 (Some(error), None) => Err(error),

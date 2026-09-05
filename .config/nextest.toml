@@ -173,6 +173,17 @@ threads-required = "num-cpus"
 filter = 'test(~test_resume_restores_missing_sessions_with_tool_wiring)'
 threads-required = "num-cpus"
 
+[[profile.fast.overrides]]
+# Issue #1104: these cases bound a FULL round trip on wall clock - a prompt
+# turn through accept_input_with_completion (10 s), or a MaterializeMember
+# bridge reply (REPLY_TIMEOUT) - and each failed only while a saturated gate
+# ran beside them (load 257 on 192 cores) and passed unchanged at low load.
+# The bound measures runner load, not the property, so raising it is not a
+# fix; reserve the lane instead, matching the treatment above. Each case keeps
+# every internal wait and its own bound.
+filter = 'binary(cold_restart_resume_after_compaction) or (binary(host_bind_ceremony) and test(=rebind_same_supervisor_identity_replaces_stale_address))'
+threads-required = "num-cpus"
+
 [[profile.default.overrides]]
 filter = 'test(~test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavailable) or test(~test_member_send_steer_queues_when_exact_boundary_is_unavailable)'
 threads-required = "num-cpus"

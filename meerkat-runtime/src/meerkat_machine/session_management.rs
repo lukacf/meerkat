@@ -5585,6 +5585,35 @@ impl MeerkatMachine {
         .require_completed()
     }
 
+    /// [`Self::unregister_terminal_session_registration_if_current`] without
+    /// the caller grace: await the exact registration's owned teardown saga to
+    /// terminal completion.
+    ///
+    /// Lifecycle owners that dispose a terminal (`Stopped`/`Retired`)
+    /// registration and then act on its absence, such as member retirement
+    /// before archive, must observe terminal teardown rather than a grace
+    /// return. The saga is coordinator-owned, so a caller dropping this future
+    /// never cancels teardown; the admission rules are unchanged, and a stale
+    /// witness is an idempotent `Ok(false)`.
+    pub async fn unregister_terminal_session_registration_until_terminal_if_current(
+        &self,
+        witness: &RuntimeSessionRegistrationWitness,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !witness.belongs_to(self) {
+            return Ok(false);
+        }
+        self.join_or_start_unregister_teardown_with_admission(
+            witness.session_id(),
+            Some(witness.epoch_id()),
+            UnregisterTeardownCaller::Explicit,
+            UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration,
+            Some(witness),
+            UnregisterTeardownWait::UntilTerminal,
+        )
+        .await?
+        .require_completed()
+    }
+
     /// Unregister only when `witness` still names this machine's exact current
     /// attachment. A stale attachment is an idempotent `Ok(false)` and can
     /// never open the drain window for a same-SessionId replacement.

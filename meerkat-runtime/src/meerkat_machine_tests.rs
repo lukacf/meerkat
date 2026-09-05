@@ -15937,6 +15937,119 @@ mod stop_teardown_coordinator_class {
         );
     }
 
+    /// Regression for #1104: member retirement disposes a terminal registration
+    /// through the exact-witness unregister API. Under load the
+    /// coordinator-owned teardown can outlive the 2 s caller grace; the
+    /// grace-bounded API then reports `UnregisterInProgress` although the saga
+    /// is still completing, and the archive path used to turn that into a hard
+    /// retirement failure. The until-terminal twin must keep waiting and
+    /// complete once the saga does. A parked post-stop cleanup is what holds
+    /// the saga here, exactly like a slow executor teardown under load.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn terminal_registration_disposal_until_terminal_outlasts_caller_grace() {
+        // Mirrors UNREGISTER_CALLER_WAIT_GRACE; the hold must exceed it so the
+        // grace-bounded API has already returned `UnregisterInProgress`.
+        const CALLER_GRACE: Duration = Duration::from_secs(2);
+        const PAST_GRACE_HOLD: Duration = Duration::from_millis(2600);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime exposes an exact registration witness");
+
+        // An ordinary caller opens the owned saga; its teardown parks in the
+        // executor's post-stop cleanup, so the caller sees only the grace.
+        let started = Instant::now();
+        let grace_result = machine.unregister_session(&session_id).await;
+        assert!(
+            matches!(
+                &grace_result,
+                Err(RuntimeDriverError::UnregisterInProgress { runtime_id })
+                    if runtime_id == &runtime_id_for_session(&session_id)
+            ),
+            "the grace-bounded caller must observe the in-flight saga: {grace_result:?}"
+        );
+        assert!(started.elapsed() >= CALLER_GRACE);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "cleanup is parked, not skipped"
+        );
+
+        // The grace-bounded terminal disposal (the retirement path before this
+        // change) joins the same saga and gives up at its grace too.
+        let grace_bounded_disposal = machine
+            .unregister_terminal_session_registration_if_current(&registration)
+            .await;
+        assert!(
+            matches!(
+                grace_bounded_disposal,
+                Err(RuntimeDriverError::UnregisterInProgress { .. })
+            ),
+            "the grace-bounded terminal disposal reports the saga as in progress: {grace_bounded_disposal:?}"
+        );
+
+        let until_terminal = {
+            let machine = Arc::clone(&machine);
+            let registration = registration.clone();
+            tokio::spawn(async move {
+                machine
+                    .unregister_terminal_session_registration_until_terminal_if_current(
+                        &registration,
+                    )
+                    .await
+            })
+        };
+        assert!(PAST_GRACE_HOLD > CALLER_GRACE);
+        tokio::time::sleep(PAST_GRACE_HOLD).await;
+        assert!(
+            !until_terminal.is_finished(),
+            "the until-terminal disposal must keep waiting on the exact saga past the caller grace"
+        );
+        assert!(
+            machine.contains_session(&session_id).await,
+            "the registration remains owned by the in-flight teardown"
+        );
+
+        release_cleanup.notify_one();
+        let removed = tokio::time::timeout(Duration::from_secs(10), until_terminal)
+            .await
+            .expect("the until-terminal disposal must finish once cleanup releases")
+            .expect("disposal task must not panic")
+            .expect("the joined saga must complete cleanly");
+        assert!(removed, "the exact registration must be the one removed");
+        assert!(
+            !machine.contains_session(&session_id).await,
+            "terminal completion removes the registration"
+        );
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "one saga ran cleanup once"
+        );
+    }
+
     #[tokio::test]
     async fn explicit_stop_waits_for_exact_cleanup_ack_after_loop_exit() {
         let machine = Arc::new(MeerkatMachine::ephemeral());

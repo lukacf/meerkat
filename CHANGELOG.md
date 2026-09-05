@@ -89,6 +89,17 @@ them.
 
 ### Fixed
 
+- **Member retirement no longer fails when a runtime teardown outlives the
+  2 s caller grace** (#1104). The retirement archive path disposed a terminal
+  runtime registration through the grace-bounded unregister API, so a
+  coordinator-owned teardown that was still completing under load surfaced as
+  `UnregisterInProgress` and `retire_member` returned a hard
+  `SharedRetirementFailure` although the saga finished moments later. The
+  disposal now awaits the exact registration's teardown to terminal completion
+  through the new
+  `MeerkatMachine::unregister_terminal_session_registration_until_terminal_if_current`
+  (same admission rules, no outer bound; dropping the caller never cancels the
+  saga). The grace-bounded API is unchanged for existing callers.
 - **`MeerkatMachine::stop_runtime_executor_until_terminal_if_current`** is the
   exact-witness variant of `stop_runtime_executor` for callers that must act
   on the STOPPED state (#1104): it awaits the owned stop cleanup coordinator

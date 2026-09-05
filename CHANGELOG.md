@@ -51,6 +51,20 @@ them.
   "quota_exhausted"` is still emitted alongside the kind for exactly one
   release so consumers that started branching on the class keep working;
   it is removed in the next release, so branch on the kind.
+- **`meerkat_mob::MobError` gained `MemberReloadRequired { member_id, reason }`,
+  `MemberAdmissionBacklogFull { member_id, depth }`,
+  `ActorCommandTimedOut { command_kind, stage }`,
+  `MemberReloadRefused { session_id, reason }` and
+  `MemberReloadTimedOut { session_id, stage }`** (five `enum_variant_added`
+  findings; the enum is not `#[non_exhaustive]`). Exact-pinned consumers that
+  match `MobError` exhaustively must add arms. `MemberReloadRequired` is the
+  typed fast rejection for a durability-degraded member (see Fixed and Added);
+  MobKit maps it to its typed reload-required admission error and must never
+  route it to member repair. `MemberAdmissionBacklogFull` is per-member
+  delivery backpressure (retryable). `ActorCommandTimedOut` reports a bounded
+  actor observation deadline, not an execution or retry-safety verdict. Its
+  structured detail carries no `executed` or `retryable` claim; those require
+  runtime-owned admission evidence.
 
 ### Billing-affecting default change
 
@@ -99,6 +113,53 @@ them.
   one Debian release in both stages so the glibc the binary links against is
   the glibc it runs on, and the release workflow's binary provenance and
   portability guarantees.
+
+### Added
+
+- **`MobHandle::reload_member_registration(&AgentIdentity) -> Result<MemberReloadOutcome, MobError>`:
+  non-destructive cold reload of one member's durability-degraded runtime
+  registration** (#1102 section 5). When a persistent runtime shell has
+  degraded to `ReloadRequired` (a durable commit failed after the live shell
+  moved, as OB3's continuity save did), every delivery to the member fails
+  fast with `MobError::MemberReloadRequired`. The new verb repairs that state
+  while keeping the member's session id and continuity generation: it
+  quiesces and discards the exact degraded registration (retaining the
+  member's bound operation identity and rebinding it to the cold successor
+  registry), re-registers the executor for the same session from durable
+  truth through the machine-authorized revival seam, and re-arms autonomous
+  readiness. `MemberReloadOutcome { disposition: MemberReloadDisposition,
+  session_id, generation }` reports `Discarded`, `NotDegraded` (success no-op)
+  or `NotCurrent`; placed members are rejected typed because their member host
+  owns the reload. The work runs detached from the actor loop; only the roster
+  read and the revival authority transition are serialized. It is bounded end
+  to end by `MEMBER_RELOAD_TOTAL_TIMEOUT` (`MemberReloadTimedOut` names the
+  stage that missed it), and before the live shell is discarded the durable
+  session authority is probed: when it is unreadable or not resumable the
+  reload is refused with `MemberReloadRefused` and the member stays degraded
+  and repairable instead of becoming Broken through a revival that could only
+  fail. Contrast `respawn_member`, which is a destructive continuity reset.
+  `MobProvisioner::reload_degraded_runtime_registration(member_ref, deadline)`
+  is the provisioner seam behind it (default: typed `UnsupportedForMode`).
+- **Deadline-bounded deliveries: `MobHandle::submit_work_with_mode_bounded` and
+  `MobHandle::submit_work_with_mode_and_delivery_identity_bounded`** take an
+  `Instant` deadline and bound the actor round trip end to end (channel
+  admission and reply), mirroring the explicit-Resume driver. A miss returns
+  the typed `MobError::ActorCommandTimedOut { command_kind, stage }`. The actor
+  skips deliveries still queued or parked when their reply receiver closes;
+  already-started readiness or runtime admission is not cancelled and may
+  complete after the deadline. Resolve uncertain fate through runtime-owned
+  admission evidence and preserve the caller-owned delivery identity on
+  redelivery; a timeout alone does not prove nonexecution or retry safety.
+- **`MeerkatMachine::durability_reload_required(&SessionId) -> Option<SessionDurabilityReloadRequired>`
+  and `MeerkatMachine::is_durability_ready(&SessionId) -> bool`** expose the
+  per-session fail-closed durability gate the ingress admission path consults
+  (`RecoveryRepairBlocked`), so surfaces that serialize deliveries across
+  sessions can reject work for a degraded session before dispatch.
+  `SessionDurabilityReloadRequired { operation, reason }` names the failed
+  durable operation.
+- **`MobHandle::member_admission_backlog() -> MemberAdmissionBacklogSnapshot`**
+  reports parked deliveries per member and the peak lane depth observed
+  (`MemberAdmissionBacklogGauge`, `MEMBER_ADMISSION_LANE_CAPACITY`).
 
 ### Fixed
 
@@ -174,6 +235,46 @@ them.
   as the vanished-child outcome it is, waits for the child after `kill()`
   instead of abandoning it, and is idempotent. The original error reaches the
   caller.
+- **One member's blocking work no longer stalls every member's delivery and
+  the mob liveness probe** (#1102, the OB3 fleet-wide delivery stall). The
+  mob actor is one serialized command loop, and `SubmitWork` ran member-local
+  I/O-bearing steps inline before deferring its reply: the #37 live-session
+  probe (and its revival), `ensure_autonomous_runtime_ready` (comms drain and
+  injector readiness), and the placed event-pump replacement join. One
+  member's wedged step queued every other member's `SubmitWork`, every
+  `QueryPhase` probe and every lifecycle command behind it; MobKit's 600 s
+  admission budget only abandoned the caller while the command stayed queued
+  and later ran as a ghost turn. Now only the roster read, the broken and
+  durability checks and the MobMachine DSL admission stay on the loop. The
+  readiness steps run inside a detached per-member admission task (revival
+  re-enters the actor as `ReviveMemberLiveMaterialization` when it needs
+  machine authority), each member has a single-flight admission lane so a
+  second delivery to the same member parks in that member's FIFO instead of
+  the loop (per-member order preserved for both ack modes, IngressAccepted
+  and TurnCompleted, which share the lane; only the spawn kickoff turn
+  dispatched during activation stays inline; lane depth bounded at
+  `MEMBER_ADMISSION_LANE_CAPACITY` with typed `MemberAdmissionBacklogFull`
+  decided before the MobMachine admission, so a refused delivery records no
+  ingress),
+  a delivery whose caller dropped its reply receiver is skipped before
+  execution, a durability-degraded member is rejected typed
+  (`MemberReloadRequired`) before any dispatch work (direct deliveries and
+  wired peer hand-offs alike), and the event-pump
+  replacement join no longer holds the mob-wide `pump_transition` barrier and
+  is bounded at 2 s (detached with a warning past that). An inline-step
+  watchdog now warns when any single loop step exceeds 2 s, naming the command
+  kind and step, and the lane gauge logs parked depth.
+- **Explicit mob Resume no longer holds the actor loop for up to 10 s per
+  member while re-arming runtime readiness** (the HomeCore boot stall). The
+  two serial per-member readiness loops in `ensure_autonomous_runtimes_from_roster`
+  now run every member concurrently with the same 5 s per-member bound, and
+  the explicit-Resume arm hands the fan-out to a detached task whose outcomes
+  re-enter the actor as `ResumeLifecycleReadinessResolved`; the loop keeps
+  draining `QueryPhase` and every other command meanwhile. `StartupMarkReady`
+  and the first typed readiness error are applied on the actor when the
+  outcomes arrive; an outcome for a member retired or respawned during the
+  fan-out is dropped instead of failing the Resume. Actor startup (`prepare_actor_run`) uses the same concurrent
+  fan-out inline, since no command loop exists yet.
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

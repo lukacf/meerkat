@@ -120,6 +120,10 @@ impl MobCommand {
             Self::Retire { .. }
             | Self::RetireAll { .. }
             | Self::Respawn { .. }
+            // Reload replaces the member's runtime registration in place; it
+            // quiesces the live shell like retirement without touching
+            // continuity, so it carries the same destructive-class scope.
+            | Self::ReloadMemberRegistration { .. }
             | Self::Stop { .. }
             | Self::ResumeLifecycle { .. }
             | Self::Complete { .. }
@@ -173,6 +177,12 @@ impl MobCommand {
             // ── Internal / machine-authority plumbing (enumerated so the
             //    closed world stays reviewable) ──
             Self::SpawnProvisioned { .. }
+            // Detached-admission completions and the actor-authority revival
+            // re-entry are actor self-sends; the delivery they belong to was
+            // admitted on SubmitWork.
+            | Self::MemberTurnAdmissionSettled { .. }
+            | Self::ReviveMemberLiveMaterialization { .. }
+            | Self::ResumeLifecycleReadinessResolved { .. }
             // The attached-spawn completion is a pure forward of an ordinary
             // spawn outcome back onto the actor task; its principal-class
             // admission already happened on SpawnAttachedForkedParticipant.
@@ -276,6 +286,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SubmitWork { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ReviveMemberLiveMaterialization { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(feature = "experimental-gpt-live")]
@@ -519,6 +535,8 @@ impl MobCommand {
             // Internal-class / non-Result-channel arms have no typed error
             // carrier; log-drop honestly if a fenced handle reaches one.
             Self::SpawnProvisioned { .. }
+            | Self::MemberTurnAdmissionSettled { .. }
+            | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::RevivePlacedMember { .. }
             | Self::HostStatusPollCompleted { .. }
             | Self::HostOrphanReleaseCompleted { .. }

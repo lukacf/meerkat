@@ -1938,6 +1938,34 @@ pub enum ReloadRequiredRegistrationDisposition {
     Discarded,
 }
 
+/// Public projection of one registered session's fail-closed durability gate.
+///
+/// `MeerkatMachine::durability_reload_required` returns this when a persistent
+/// runtime shell has degraded to `ReloadRequired`: every ordinary input
+/// admission for that session fails closed with
+/// `RuntimeDriverError::RecoveryRepairBlocked` until a registration-authorized
+/// cold reload replaces the registration. Surfaces that serialize deliveries
+/// across many sessions (the mob actor) use it to reject work for the degraded
+/// session before dispatch instead of discovering the refusal downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionDurabilityReloadRequired {
+    /// The durable operation whose failure degraded the shell.
+    pub operation: String,
+    /// Display detail retained from the first degradation.
+    pub reason: String,
+}
+
+impl std::fmt::Display for SessionDurabilityReloadRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "durability reload required after `{}`: {}",
+            self.operation, self.reason
+        )
+    }
+}
+
 /// Exact durable lifecycle observation for one session registration target.
 ///
 /// Construction is owned by MeerkatMachine so a raw-content version observed
@@ -5630,6 +5658,31 @@ impl MeerkatMachine {
                 }
                 .to_string()
             })
+    }
+
+    /// Report whether `session_id`'s registration is durability-degraded.
+    ///
+    /// Reads the same per-session gate the ingress admission path consults
+    /// (`RuntimeSessionEntry::require_durability_ready`) without taking the
+    /// session's mutation gate. `None` means the session is either ready,
+    /// ephemeral (no durability gate), or not registered on this machine: an
+    /// absent registration is not a durability verdict and is reported by the
+    /// registration seams instead.
+    pub async fn durability_reload_required(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<SessionDurabilityReloadRequired> {
+        let sessions = self.sessions.read().await;
+        let required = sessions.get(session_id)?.require_durability_ready().err()?;
+        Some(SessionDurabilityReloadRequired {
+            operation: required.operation().to_string(),
+            reason: required.reason().to_string(),
+        })
+    }
+
+    /// `true` unless `session_id` is registered here and durability-degraded.
+    pub async fn is_durability_ready(&self, session_id: &SessionId) -> bool {
+        self.durability_reload_required(session_id).await.is_none()
     }
 
     /// Test-support: install the session's generated peer-comms handle (and its

@@ -3404,7 +3404,10 @@ mod tests {
         // The bridge outlives this helper, so hold the reservation for the
         // process (nextest runs one test per process).
         let (fixed_port, port_reservation) = super::super::tests::reserve_fixed_loopback_port();
+        #[cfg(target_os = "linux")]
         std::mem::forget(port_reservation);
+        #[cfg(not(target_os = "linux"))]
+        let _ = port_reservation;
         let advertised = PeerAddress::parse(format!("tcp://127.0.0.1:{fixed_port}"))
             .expect("fixed supervisor address");
         let authority = SupervisorAuthorityRecord::generate(

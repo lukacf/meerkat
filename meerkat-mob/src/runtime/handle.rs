@@ -1962,6 +1962,20 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberRestoreFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
         }
+        // A degraded runtime registration is a session-durability fault of the
+        // existing member; the spawn row records it as its session cause.
+        MobError::MemberReloadRequired { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
+        }
+        // Delivery-lane backpressure, bounded actor sends and reload verdicts
+        // are conditions of the spawn's follow-on operations, never a spawn
+        // verdict.
+        MobError::MemberAdmissionBacklogFull { .. }
+        | MobError::ActorCommandTimedOut { .. }
+        | MobError::MemberReloadRefused { .. }
+        | MobError::MemberReloadTimedOut { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::RuntimeEffectRefused { kind, .. } => match kind {
             crate::error::RuntimeEffectKind::RuntimeBinding => {
                 mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
@@ -2639,6 +2653,162 @@ pub struct PeerMessageReceipt {
     pub delivery: meerkat_core::comms::PeerDeliveryOutcome,
     /// How the recipient should handle the peer message.
     pub handling_mode: HandlingMode,
+}
+
+/// Lower the shell-level submit-work command into the actor payload. Shared
+/// by the unbounded machine-command path and the bounded delivery variants so
+/// WorkSpec causality is merged into the typed turn-metadata carrier in
+/// exactly one place.
+fn submit_work_payload(
+    cmd: Box<crate::mob_machine::SubmitWorkCommand>,
+) -> Result<Box<super::state::SubmitWorkPayload>, MobError> {
+    let crate::mob_machine::SubmitWorkCommand {
+        runtime_id,
+        fence_token,
+        work_ref,
+        spec,
+        handling_mode,
+        external_delivery_identity,
+        mut turn_metadata,
+        event_tx,
+        completion_tx,
+        bounded_result_spec,
+        llm_identity_applied_tx,
+        ack_mode,
+    } = *cmd;
+    if let Some(context) = spec.transient_turn_context {
+        let mut metadata = turn_metadata.unwrap_or_default();
+        metadata
+            .merge(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    transient_turn_context: Some(context),
+                    ..Default::default()
+                },
+            )
+            .map_err(|conflict| {
+                MobError::Internal(format!(
+                    "work-spec turn metadata conflict on `{}`: {}",
+                    conflict.field, conflict.reason
+                ))
+            })?;
+        turn_metadata = Some(metadata);
+    }
+    Ok(Box::new(super::state::SubmitWorkPayload {
+        runtime_id,
+        fence_token,
+        work_ref,
+        content: spec.content,
+        origin: spec.origin,
+        system_prompt: spec.system_prompt,
+        injected_context: spec.injected_context,
+        interaction_id: spec.interaction_id,
+        objective_id: spec.objective_id,
+        handling_mode,
+        external_delivery_identity,
+        turn_metadata,
+        event_tx,
+        completion_tx,
+        bounded_result_spec,
+        llm_identity_applied_tx,
+        ack_mode,
+    }))
+}
+
+/// What `MobHandle::reload_member_registration` did to the member's runtime
+/// registration. Mirrors the runtime's registration-incarnation-scoped
+/// `ReloadRequiredRegistrationDisposition` in mob vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberReloadDisposition {
+    /// The durability-degraded registration was quiesced, discarded, and
+    /// replaced by a fresh executor registration for the same session.
+    Discarded,
+    /// The registration was durability-ready; nothing was replaced. A
+    /// success no-op.
+    NotDegraded,
+    /// The member's session has no current registration on this runtime, or
+    /// the registration changed under the reload. Nothing was replaced.
+    NotCurrent,
+}
+
+/// Outcome of one non-destructive member registration reload.
+///
+/// The reload keeps the member's session id and continuity generation: it
+/// replaces only the process-local runtime shell that a failed durable commit
+/// left in `ReloadRequired`. Contrast `respawn`, which advances the
+/// generation and starts fresh continuity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MemberReloadOutcome {
+    pub disposition: MemberReloadDisposition,
+    pub session_id: SessionId,
+    pub generation: crate::ids::Generation,
+}
+
+/// Point-in-time view of the per-member admission lanes (#1102).
+///
+/// `parked` counts deliveries waiting behind a member's in-flight admission;
+/// `peak_parked` is the largest depth any lane reached since the actor
+/// started. Both are observability only: the actor owns the lanes and bounds
+/// each one at [`MEMBER_ADMISSION_LANE_CAPACITY`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberAdmissionBacklogSnapshot {
+    pub parked: BTreeMap<AgentIdentity, usize>,
+    pub peak_parked: usize,
+}
+
+/// Maximum deliveries parked behind one member's in-flight admission before
+/// the actor rejects further deliveries for that member with
+/// [`MobError::MemberAdmissionBacklogFull`]. Generous by design: parking is
+/// per member and costs the loop nothing, so this exists to bound memory on a
+/// member whose admission is wedged, not to throttle healthy traffic.
+#[cfg(not(test))]
+pub const MEMBER_ADMISSION_LANE_CAPACITY: usize = 256;
+/// Small in-crate test bound so the full-lane path is reachable cheaply.
+#[cfg(test)]
+pub const MEMBER_ADMISSION_LANE_CAPACITY: usize = 8;
+
+/// End-to-end bound for [`MobHandle::reload_member_registration`]: the durable
+/// authority probe, the registration discard, the machine-authorized revival
+/// and the readiness re-arm must all land within it, else the typed
+/// [`MobError::MemberReloadTimedOut`] names the stage that did not. Distinct
+/// from the member retirement bound: a reload keeps the member.
+#[cfg(not(test))]
+pub const MEMBER_RELOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(test)]
+pub const MEMBER_RELOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Extra time the handle waits for the reload worker's reply past its own
+/// deadline before giving up on the actor round trip itself.
+const MEMBER_RELOAD_REPLY_GRACE: Duration = Duration::from_secs(2);
+
+/// Actor-written, handle-readable gauge of parked deliveries per member.
+#[derive(Debug, Default)]
+pub struct MemberAdmissionBacklogGauge {
+    snapshot: StdMutex<MemberAdmissionBacklogSnapshot>,
+}
+
+impl MemberAdmissionBacklogGauge {
+    pub(super) fn record(&self, agent_identity: &AgentIdentity, depth: usize) {
+        let mut snapshot = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if depth == 0 {
+            snapshot.parked.remove(agent_identity);
+        } else {
+            snapshot.parked.insert(agent_identity.clone(), depth);
+            snapshot.peak_parked = snapshot.peak_parked.max(depth);
+        }
+    }
+
+    pub fn snapshot(&self) -> MemberAdmissionBacklogSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// Receipt confirming that a unit of work was accepted by the work lane.
@@ -4185,6 +4355,8 @@ pub struct MobHandle {
     pub(super) realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     pub(super) flow_target_provisioner: Arc<StdRwLock<Option<FlowTargetProvisioner>>>,
     pub(super) explicit_resume_operations: Arc<ResumeOperationRegistry>,
+    /// Read-only view of the actor's per-member admission lanes (#1102).
+    pub(super) member_admission_backlog: Arc<MemberAdmissionBacklogGauge>,
 }
 
 impl MobHandle {
@@ -5145,6 +5317,56 @@ impl MobHandle {
             .map_err(|_| MobError::ActorReplyChannelClosed)
     }
 
+    /// Deadline-bounded actor round trip (#1102). Mirrors
+    /// `drive_resume_actor_operation`: channel capacity is reserved under the
+    /// deadline so a saturated actor queue cannot swallow the command, and the
+    /// reply is awaited under the same deadline. A deadline miss drops the
+    /// reply receiver, which closes the command's reply channel; the actor
+    /// skips a still-queued delivery whose receiver is closed instead of
+    /// executing it after its caller left.
+    async fn send_actor_command_until<R>(
+        &self,
+        deadline: Instant,
+        build: impl FnOnce(oneshot::Sender<R>) -> MobCommand,
+    ) -> Result<R, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let command = build(reply_tx);
+        let command_kind = command.kind();
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(MobError::ActorCommandTimedOut {
+                command_kind,
+                stage: "actor_command_admission",
+            });
+        };
+        let permit = match tokio::time::timeout(remaining, self.command_tx.reserve()).await {
+            Err(_) => {
+                return Err(MobError::ActorCommandTimedOut {
+                    command_kind,
+                    stage: "actor_command_admission",
+                });
+            }
+            Ok(Err(_)) => return Err(MobError::ActorCommandChannelClosed),
+            Ok(Ok(permit)) => permit,
+        };
+        permit.send(super::scope_gate::RoutedMobCommand {
+            authority: self.command_authority.clone(),
+            cmd: command,
+        });
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(MobError::ActorCommandTimedOut {
+                command_kind,
+                stage: "actor_command_reply",
+            });
+        };
+        match tokio::time::timeout(remaining, reply_rx).await {
+            Ok(reply) => reply.map_err(|_| MobError::ActorReplyChannelClosed),
+            Err(_) => Err(MobError::ActorCommandTimedOut {
+                command_kind,
+                stage: "actor_command_reply",
+            }),
+        }
+    }
+
     #[cfg(test)]
     pub(super) async fn enqueue_actor_command_for_test<R>(
         &self,
@@ -5762,57 +5984,8 @@ impl MobHandle {
                 // work-origin legality via the MobMachine DSL. There is no
                 // origin re-decision here — `spec.origin` is forwarded
                 // verbatim and the DSL accepts or rejects.
-                let crate::mob_machine::SubmitWorkCommand {
-                    runtime_id,
-                    fence_token,
-                    work_ref,
-                    spec,
-                    handling_mode,
-                    external_delivery_identity,
-                    mut turn_metadata,
-                    event_tx,
-                    completion_tx,
-                    bounded_result_spec,
-                    llm_identity_applied_tx,
-                    ack_mode,
-                } = *cmd;
-                let receipt_work_ref = work_ref.clone();
-                if let Some(context) = spec.transient_turn_context {
-                    let mut metadata = turn_metadata.unwrap_or_default();
-                    metadata
-                        .merge(
-                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                                transient_turn_context: Some(context),
-                                ..Default::default()
-                            },
-                        )
-                        .map_err(|conflict| {
-                            MobError::Internal(format!(
-                                "work-spec turn metadata conflict on `{}`: {}",
-                                conflict.field, conflict.reason
-                            ))
-                        })?;
-                    turn_metadata = Some(metadata);
-                }
-                let payload = Box::new(super::state::SubmitWorkPayload {
-                    runtime_id,
-                    fence_token,
-                    work_ref,
-                    content: spec.content,
-                    origin: spec.origin,
-                    system_prompt: spec.system_prompt,
-                    injected_context: spec.injected_context,
-                    interaction_id: spec.interaction_id,
-                    objective_id: spec.objective_id,
-                    handling_mode,
-                    external_delivery_identity,
-                    turn_metadata,
-                    event_tx,
-                    completion_tx,
-                    bounded_result_spec,
-                    llm_identity_applied_tx,
-                    ack_mode,
-                });
+                let receipt_work_ref = cmd.work_ref.clone();
+                let payload = submit_work_payload(cmd)?;
                 self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
                     .await??;
                 Ok(MobMachineCommandResult::WorkReceipt {
@@ -10920,6 +11093,147 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// [`Self::submit_work_with_mode`] with a caller deadline (#1102).
+    ///
+    /// The actor round trip is bounded end to end: channel admission and the
+    /// admission reply must both land before `deadline`, else the typed
+    /// [`MobError::ActorCommandTimedOut`] is returned. A delivery still queued
+    /// on the actor or parked in a member lane is skipped when its caller
+    /// leaves. Already-started readiness or runtime admission is not cancelled
+    /// and may complete after the reply deadline.
+    ///
+    /// A timeout alone does not establish execution fate or make retry safe.
+    /// Callers needing redelivery should use
+    /// [`Self::submit_work_with_mode_and_delivery_identity_bounded`], preserve
+    /// that identity, and resolve uncertain fate through runtime-owned
+    /// admission evidence rather than assuming the work never executed.
+    pub async fn submit_work_with_mode_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        work_ref: WorkRef,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            work_ref: work_ref.clone(),
+            spec,
+            handling_mode,
+            external_delivery_identity: None,
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: None,
+            bounded_result_spec: None,
+            llm_identity_applied_tx: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+        });
+        self.submit_work_command_bounded(cmd, deadline).await
+    }
+
+    /// [`Self::submit_work_with_mode_and_delivery_identity`] with a caller
+    /// deadline; see [`Self::submit_work_with_mode_bounded`].
+    pub async fn submit_work_with_mode_and_delivery_identity_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        delivery_identity.validate()?;
+        let work_ref = WorkRef::for_delivery(
+            &self.definition.id,
+            &runtime_id.identity,
+            &delivery_identity.idempotency_key,
+        );
+        let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            work_ref: work_ref.clone(),
+            spec,
+            handling_mode,
+            external_delivery_identity: Some(delivery_identity),
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: None,
+            bounded_result_spec: None,
+            llm_identity_applied_tx: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+        });
+        self.submit_work_command_bounded(cmd, deadline).await
+    }
+
+    async fn submit_work_command_bounded(
+        &self,
+        cmd: Box<crate::mob_machine::SubmitWorkCommand>,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        let runtime_id = cmd.runtime_id.clone();
+        let work_ref = cmd.work_ref.clone();
+        let payload = submit_work_payload(cmd)?;
+        self.send_actor_command_until(deadline, |reply_tx| MobCommand::SubmitWork {
+            payload,
+            reply_tx,
+        })
+        .await??;
+        Ok(WorkDeliveryReceipt {
+            work_ref,
+            runtime_id,
+        })
+    }
+
+    /// Non-destructive cold reload of one member's runtime registration
+    /// (#1102 section 5).
+    ///
+    /// When a member's persistent runtime shell has degraded to
+    /// `ReloadRequired` (a durable commit failed after the live shell moved),
+    /// every delivery to it fails fast with
+    /// [`MobError::MemberReloadRequired`]. This verb repairs that state while
+    /// keeping the member's session id and continuity generation: it quiesces
+    /// and discards the exact degraded registration (retaining the member's
+    /// bound operation identity), re-registers the executor for the same
+    /// session from durable truth through the machine-authorized revival
+    /// seam, and re-arms autonomous readiness. `NotDegraded` is a success
+    /// no-op. Placed members are reloaded by their member host and are
+    /// rejected typed.
+    ///
+    /// The work runs detached from the actor loop; only the roster and
+    /// placement reads and the revival authority transition are serialized.
+    /// It is bounded end to end by [`MEMBER_RELOAD_TOTAL_TIMEOUT`]
+    /// (`MemberReloadTimedOut` names the stage that missed it). Before the
+    /// live shell is discarded the durable session authority is probed; when
+    /// it is unreadable the reload is refused typed (`MemberReloadRefused`)
+    /// and the member stays degraded rather than becoming Broken. If the
+    /// actor round trip itself misses the deadline (`ActorCommandTimedOut`
+    /// with stage `actor_command_reply`), the worker may still be finishing;
+    /// a repeat call observes its result.
+    pub async fn reload_member_registration(
+        &self,
+        member: &AgentIdentity,
+    ) -> Result<MemberReloadOutcome, MobError> {
+        let agent_identity = member.clone();
+        let deadline = Instant::now() + MEMBER_RELOAD_TOTAL_TIMEOUT;
+        self.send_actor_command_until(deadline + MEMBER_RELOAD_REPLY_GRACE, |reply_tx| {
+            MobCommand::ReloadMemberRegistration {
+                agent_identity,
+                deadline,
+                reply_tx,
+            }
+        })
+        .await?
+    }
+
+    /// Current per-member admission backlog (parked deliveries per member and
+    /// the peak depth observed). Observability only; see
+    /// [`MemberAdmissionBacklogSnapshot`].
+    pub fn member_admission_backlog(&self) -> MemberAdmissionBacklogSnapshot {
+        self.member_admission_backlog.snapshot()
     }
 
     /// Cancel a previously submitted unit of work.

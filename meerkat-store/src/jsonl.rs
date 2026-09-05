@@ -12,14 +12,20 @@ use std::collections::HashMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::task::spawn_blocking;
 
-const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const SESSION_WRITE_LOCK_POLL: Duration = Duration::from_millis(10);
+/// Liveness bound on acquiring the per-session write lock.
+///
+/// The lock is taken with a blocking, kernel-queued `lock_exclusive` (issue
+/// #1104): a crashed holder's lock is released by the kernel, so this bound
+/// only guards against a LIVE holder that never releases, and it is deliberately
+/// generous. Every hold is a full rewrite plus `sync_all`, and the realm write
+/// admission above this lock already bounds how many writers can queue.
+const SESSION_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const PROJECTION_READ_VERIFICATION_ATTEMPTS: usize = 3;
 
 struct SessionWriteLock {
@@ -401,8 +407,9 @@ impl JsonlStore {
     ) -> Result<SessionWriteLock, StoreError> {
         self.init().await?;
         let path = self.session_lock_path(id);
+        let lock_id = id.clone();
         let id = id.clone();
-        spawn_blocking(move || -> Result<SessionWriteLock, StoreError> {
+        let acquire = spawn_blocking(move || -> Result<SessionWriteLock, StoreError> {
             // The file path is only a rendezvous point; the kernel lock is the
             // authority, so a stale file left by a crashed process is harmless.
             let mut file = std::fs::OpenOptions::new()
@@ -411,35 +418,29 @@ impl JsonlStore {
                 .create(true)
                 .truncate(false)
                 .open(&path)?;
-            let start = Instant::now();
-
-            loop {
-                match file.try_lock_exclusive() {
-                    Ok(()) => {
-                        file.seek(SeekFrom::Start(0))?;
-                        file.set_len(0)?;
-                        writeln!(file, "pid={}", std::process::id())?;
-                        file.sync_all()?;
-                        return Ok(SessionWriteLock { file });
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        if start.elapsed() >= SESSION_WRITE_LOCK_TIMEOUT {
-                            return Err(StoreError::Internal(format!(
-                                "timed out acquiring JSONL session write lock for {id}"
-                            )));
-                        }
-                        std::thread::sleep(SESSION_WRITE_LOCK_POLL);
-                    }
-                    Err(err) => {
-                        return Err(StoreError::Internal(format!(
-                            "failed to acquire JSONL session write lock for {id}: {err}"
-                        )));
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(StoreError::Join)?
+            // Block on the kernel's lock queue instead of polling
+            // `try_lock_exclusive`: a polled wait has no fairness, so under a
+            // saturated machine one waiter can starve while every other writer's
+            // hold is a full rewrite plus `sync_all` (issue #1104).
+            file.lock_exclusive().map_err(|err| {
+                StoreError::Internal(format!(
+                    "failed to acquire JSONL session write lock for {id}: {err}"
+                ))
+            })?;
+            file.seek(SeekFrom::Start(0))?;
+            file.set_len(0)?;
+            writeln!(file, "pid={}", std::process::id())?;
+            file.sync_all()?;
+            Ok(SessionWriteLock { file })
+        });
+        match tokio::time::timeout(SESSION_WRITE_LOCK_TIMEOUT, acquire).await {
+            Ok(joined) => joined.map_err(StoreError::Join)?,
+            // The abandoned blocking acquire finishes on its own and drops the
+            // lock it may still obtain; only this caller gives up.
+            Err(_elapsed) => Err(StoreError::Internal(format!(
+                "timed out acquiring JSONL session write lock for {lock_id}"
+            ))),
+        }
     }
 }
 

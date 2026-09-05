@@ -117,6 +117,15 @@ them.
   runtime turn finalization guard, and surface the conflict unchanged only
   once the budget is spent. A conflict here was never a torn snapshot, only
   writer progress between two reads.
+- **`JsonlStore` writers no longer time out after 5 s of polling for the
+  per-session write lock under contention** (#1104). The lock was acquired by
+  polling `try_lock_exclusive` every 10 ms with a 5 s deadline; a polled wait
+  has no fairness, so with several writers each holding the lock for a full
+  rewrite plus `sync_all`, one waiter could starve past the deadline on a
+  saturated machine and fail its save with an internal error. The lock is now
+  taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
+  behind a 60 s liveness bound that only a live holder that never releases
+  can hit (a crashed holder's lock is released by the kernel).
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

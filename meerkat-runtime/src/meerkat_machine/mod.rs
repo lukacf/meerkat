@@ -9525,6 +9525,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::SetSilentIntents { .. }
                 | MeerkatMachineCommand::CancelAfterBoundary { .. }
                 | MeerkatMachineCommand::StopRuntimeExecutor { .. }
+                | MeerkatMachineCommand::StopRuntimeExecutorUntilTerminal { .. }
                 | MeerkatMachineCommand::ContainsSession { .. }
                 | MeerkatMachineCommand::SessionHasExecutor { .. }
                 | MeerkatMachineCommand::SessionHasComms { .. }

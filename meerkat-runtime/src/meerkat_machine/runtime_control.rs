@@ -9824,6 +9824,66 @@ impl MeerkatMachine {
         self.request_runtime_stop(session_id, reason).await
     }
 
+    /// [`Self::stop_runtime_executor`] for one exact current registration,
+    /// awaiting the owned stop cleanup coordinator to terminal completion.
+    ///
+    /// `stop_runtime_executor` returns typed `RuntimeStopInProgress` once the
+    /// caller grace elapses while the coordinator keeps running. Callers that
+    /// must act on the STOPPED state (health probes, retirement, tests reading
+    /// registration state right after the stop) observe terminal completion
+    /// here instead. The coordinator is machine-owned, so dropping this future
+    /// never cancels cleanup. The witness keeps a same-`SessionId` replacement
+    /// outside this authority: a stale or absent registration is an idempotent
+    /// `Ok(false)` and no stop is requested against the replacement.
+    pub async fn stop_runtime_executor_until_terminal_if_current(
+        &self,
+        registration: &super::RuntimeSessionRegistrationWitness,
+        reason: impl Into<String>,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !registration.belongs_to(self) {
+            return Ok(false);
+        }
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::StopRuntimeExecutorUntilTerminal {
+                    session_id: registration.session_id().clone(),
+                    epoch_id: registration.epoch_id().clone(),
+                    reason: reason.into(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Bool(stopped) => Ok(stopped),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "stop_runtime_executor_until_terminal_if_current: unexpected command result variant: {other:?}"
+            ))),
+        }
+    }
+
+    pub(super) async fn stop_runtime_executor_until_terminal_inner(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        reason: String,
+    ) -> Result<bool, RuntimeDriverError> {
+        let current_epoch = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).map(|entry| entry.epoch_id.clone())
+        };
+        if current_epoch.as_ref() != Some(epoch_id) {
+            return Ok(false);
+        }
+        self.request_runtime_stop_with_wait(
+            session_id,
+            reason,
+            super::session_management::RuntimeStopCallerWait::UntilTerminal,
+        )
+        .await
+        .map(|()| true)
+    }
+
     /// Accept an input and return a completion handle that resolves when the
     /// input reaches a terminal state (Consumed or Abandoned).
     ///

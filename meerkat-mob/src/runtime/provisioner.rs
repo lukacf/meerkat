@@ -1735,8 +1735,14 @@ impl MemberSessionDisposalArc {
                     // coordinator acquires its exact registration transaction
                     // and mutation gates.
                     drop(boundary);
+                    // Retirement is a lifecycle owner: it must observe the
+                    // exact registration's terminal teardown, not the 2 s
+                    // caller grace that surfaces `UnregisterInProgress` while
+                    // the coordinator-owned saga is still completing (#1104).
                     let removed = adapter
-                        .unregister_terminal_session_registration_if_current(registration)
+                        .unregister_terminal_session_registration_until_terminal_if_current(
+                            registration,
+                        )
                         .await
                         .map_err(|error| {
                             Self::runtime_archive_error(format!(
@@ -1830,7 +1836,7 @@ impl MemberSessionDisposalArc {
                                 None => {}
                                 Some(current) if &current == registration => {
                                     let removed = adapter
-                                        .unregister_terminal_session_registration_if_current(
+                                        .unregister_terminal_session_registration_until_terminal_if_current(
                                             registration,
                                         )
                                         .await

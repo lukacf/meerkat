@@ -27,7 +27,7 @@ use support::{
     member_descriptor_from_ack, member_incarnation_from_ack, placed_spawn_spec,
     raw_deliver_member_input_command, raw_poll_member_events_command,
     scripted_member_client_completing, scripted_member_client_stalling, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint, wait_until,
+    spawn_peer_comms_endpoint, unregister_session_until_terminal, wait_until,
 };
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -296,10 +296,13 @@ async fn empty_same_session_resume_page_advances_real_pump_to_resolved_floor() {
     )
     .await
     .expect("seed resumable member-host session through machine commit authority");
-    runtime_adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("quiesce generic seed attachment before host-owned explicit resume");
+    // Join the seed registration's owned teardown to terminal completion:
+    // the explicit resume below reoccupies this SessionId and must not race
+    // a saga that merely outlived the caller grace (issue #1104).
+    assert!(
+        unregister_session_until_terminal(runtime_adapter, &session_id).await,
+        "generic seed attachment must hold an exact registration to quiesce"
+    );
     member_service
         .event_log_await_projection_drain(&session_id)
         .await

@@ -89,6 +89,43 @@ them.
 
 ### Fixed
 
+- **Member retirement no longer fails when a runtime teardown outlives the
+  2 s caller grace** (#1104). The retirement archive path disposed a terminal
+  runtime registration through the grace-bounded unregister API, so a
+  coordinator-owned teardown that was still completing under load surfaced as
+  `UnregisterInProgress` and `retire_member` returned a hard
+  `SharedRetirementFailure` although the saga finished moments later. The
+  disposal now awaits the exact registration's teardown to terminal completion
+  through the new
+  `MeerkatMachine::unregister_terminal_session_registration_until_terminal_if_current`
+  (same admission rules, no outer bound; dropping the caller never cancels the
+  saga). The grace-bounded API is unchanged for existing callers.
+- **`MeerkatMachine::stop_runtime_executor_until_terminal_if_current`** is the
+  exact-witness variant of `stop_runtime_executor` for callers that must act
+  on the STOPPED state (#1104): it awaits the owned stop cleanup coordinator
+  to terminal completion instead of returning `RuntimeStopInProgress` at the
+  2 s caller grace, and a stale registration witness is an idempotent
+  `Ok(false)` that never reaches a same-`SessionId` replacement.
+  `stop_runtime_executor` keeps its grace for existing callers.
+- **Session history and transcript-revision reads no longer fail when a
+  head-canonical writer commits twice while a reader is looking** (#1104).
+  `PersistentSessionService` retried a `TranscriptRevisionConflict` on an
+  observation load exactly once; a second commit between the reads surfaced
+  the typed conflict to `read_history` callers, which under a saturated
+  machine happened to a poller reading a session mid-resume. Observation
+  loads now re-read up to 8 attempts (counted, not timed), each under the
+  runtime turn finalization guard, and surface the conflict unchanged only
+  once the budget is spent. A conflict here was never a torn snapshot, only
+  writer progress between two reads.
+- **`JsonlStore` writers no longer time out after 5 s of polling for the
+  per-session write lock under contention** (#1104). The lock was acquired by
+  polling `try_lock_exclusive` every 10 ms with a 5 s deadline; a polled wait
+  has no fairness, so with several writers each holding the lock for a full
+  rewrite plus `sync_all`, one waiter could starve past the deadline on a
+  saturated machine and fail its save with an internal error. The lock is now
+  taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
+  behind a 60 s liveness bound that only a live holder that never releases
+  can hit (a crashed holder's lock is released by the kernel).
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

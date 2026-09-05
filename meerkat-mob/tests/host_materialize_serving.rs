@@ -44,7 +44,7 @@ use support::{
     raw_bind_host_command, raw_deliver_member_input_command, raw_host_status_command,
     raw_poll_member_events_command, raw_release_member_command, sample_materialize_payload,
     sample_portable_member_spec, scripted_member_client_stalling, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint,
+    spawn_peer_comms_endpoint, unregister_session_until_terminal, wait_until,
 };
 use tokio::sync::oneshot;
 
@@ -1825,6 +1825,16 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
                 .expect("read live service actor census"),
             "{label} mismatch identity must not retain a live service actor"
         );
+        // The Rejected reply proves the volatile cleanup was ADMITTED, not
+        // that its coordinator-owned unregister saga has reached terminal
+        // completion. Wait for the release instead of sampling it: a saga
+        // still in flight converges here, while a registration the cleanup
+        // truly leaked never does and still fails the bound (#1104).
+        wait_until(
+            &format!("{label} mismatch identity releases its runtime registration"),
+            || async { !adapter.contains_session(session_id).await },
+        )
+        .await;
         assert!(
             !adapter.contains_session(session_id).await,
             "{label} mismatch identity must not retain runtime registration"
@@ -1891,16 +1901,21 @@ async fn executor_stop_between_ensure_and_attach_return_cleans_preinstalled_side
         MaterializeLaunchMode::Fresh {},
     );
     let command = BridgeCommand::MaterializeMember(payload);
-    let reply = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT),
-    )
-    .await
-    .expect("failed attachment cleanup must not wait for the 30s reconciliation grace")
-    .expect("typed post-ensure stop reply");
+    let reply = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
+        .await
+        .expect("typed post-ensure stop reply");
+    // Structural proof that the failed attachment took the exact cleanup
+    // path: the 30 s non-serving reconciliation grace names itself in its
+    // rejection reason ("did not quiesce within"), so a reply that carries any
+    // other reason cannot have waited it out. This replaces a 5 s wall-clock
+    // bound that measured runner load under a saturated gate (#1104).
+    let BridgeReply::Rejected { reason, .. } = &reply else {
+        panic!("the stopped startup incarnation cannot be acknowledged: {reply:?}");
+    };
     assert!(
-        matches!(reply, BridgeReply::Rejected { .. }),
-        "the stopped startup incarnation cannot be acknowledged: {reply:?}"
+        !reason.contains("did not quiesce within"),
+        "failed attachment cleanup must take the exact path, not the reconciliation grace: {reason}"
     );
     assert!(
         fixture
@@ -1923,13 +1938,14 @@ async fn executor_stop_between_ensure_and_attach_return_cleans_preinstalled_side
         },
     ));
 
-    let reply = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.send_bridge_command_raw(&fixture.host_peer_descriptor(), &resume, REPLY_TIMEOUT),
-    )
-    .await
-    .expect("same-tuple retry must not encounter a stale cleanup sidecar")
-    .expect("retry materialize reply");
+    // A stale cleanup sidecar would surface as a typed rejection (or as the
+    // reconciliation-grace reason above), never as a materialized ack, so the
+    // ack itself is the proof; no wall-clock bound is needed beyond the
+    // fixture's reply timeout.
+    let reply = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &resume, REPLY_TIMEOUT)
+        .await
+        .expect("retry materialize reply");
     let BridgeReply::MemberMaterialized(ack) = reply else {
         panic!("explicit resume must rebuild the preserved session cleanly, got {reply:?}");
     };
@@ -2426,10 +2442,23 @@ async fn host_status_marks_stopped_member_unhealthy_and_replay_repairs_it() {
         .as_ref()
         .expect("member-build fixture has runtime adapter");
 
-    adapter
-        .stop_runtime_executor(&session_id, "host health stopped-state regression")
+    // Observe the stop's terminal completion, not the 2 s caller grace that
+    // surfaces RuntimeStopInProgress while the owned coordinator is still
+    // cleaning up (#1104); the health probe below reads the STOPPED state.
+    let registration = adapter
+        .current_session_registration_witness(&session_id)
         .await
-        .expect("stop materialized runtime executor");
+        .expect("materialized runtime must expose an exact registration");
+    assert!(
+        adapter
+            .stop_runtime_executor_until_terminal_if_current(
+                &registration,
+                "host health stopped-state regression",
+            )
+            .await
+            .expect("stop materialized runtime executor"),
+        "the materialized registration must still be current when stopped"
+    );
     assert!(
         matches!(
             adapter.runtime_state(&session_id).await,
@@ -2514,10 +2543,10 @@ async fn host_status_marks_retired_registered_member_unhealthy() {
         "retired exact replay must tell the controller to replace, not retry, got: {reason}"
     );
 
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("unregister retired runtime before replay repair");
+    assert!(
+        unregister_session_until_terminal(adapter, &session_id).await,
+        "retired runtime must hold an exact registration to unregister before replay repair"
+    );
     assert!(!adapter.contains_session(&session_id).await);
     let replay_after_unregister = sample_materialize_payload(
         &probe,
@@ -2821,10 +2850,10 @@ async fn host_status_marks_stale_idle_registration_without_executor_unhealthy() 
     // executor attachment. The materializer still owns its old concrete
     // runtime and sidecar entries, while the newly registered machine is only
     // Idle; registry membership alone must never report this as healthy.
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("unregister serving runtime before idle-registration probe");
+    assert!(
+        unregister_session_until_terminal(adapter, &session_id).await,
+        "serving runtime must hold an exact registration to unregister before the idle probe"
+    );
     assert!(!adapter.contains_session(&session_id).await);
     adapter
         .register_session(session_id.clone())

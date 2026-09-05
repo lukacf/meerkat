@@ -44,7 +44,7 @@ use support::{
     raw_bind_host_command, raw_deliver_member_input_command, raw_host_status_command,
     raw_poll_member_events_command, raw_release_member_command, sample_materialize_payload,
     sample_portable_member_spec, scripted_member_client_stalling, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint,
+    spawn_peer_comms_endpoint, unregister_session_until_terminal, wait_until,
 };
 use tokio::sync::oneshot;
 
@@ -1825,6 +1825,16 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
                 .expect("read live service actor census"),
             "{label} mismatch identity must not retain a live service actor"
         );
+        // The Rejected reply proves the volatile cleanup was ADMITTED, not
+        // that its coordinator-owned unregister saga has reached terminal
+        // completion. Wait for the release instead of sampling it: a saga
+        // still in flight converges here, while a registration the cleanup
+        // truly leaked never does and still fails the bound (#1104).
+        wait_until(
+            &format!("{label} mismatch identity releases its runtime registration"),
+            || async { !adapter.contains_session(session_id).await },
+        )
+        .await;
         assert!(
             !adapter.contains_session(session_id).await,
             "{label} mismatch identity must not retain runtime registration"
@@ -2514,10 +2524,10 @@ async fn host_status_marks_retired_registered_member_unhealthy() {
         "retired exact replay must tell the controller to replace, not retry, got: {reason}"
     );
 
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("unregister retired runtime before replay repair");
+    assert!(
+        unregister_session_until_terminal(adapter, &session_id).await,
+        "retired runtime must hold an exact registration to unregister before replay repair"
+    );
     assert!(!adapter.contains_session(&session_id).await);
     let replay_after_unregister = sample_materialize_payload(
         &probe,
@@ -2821,10 +2831,10 @@ async fn host_status_marks_stale_idle_registration_without_executor_unhealthy() 
     // executor attachment. The materializer still owns its old concrete
     // runtime and sidecar entries, while the newly registered machine is only
     // Idle; registry membership alone must never report this as healthy.
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("unregister serving runtime before idle-registration probe");
+    assert!(
+        unregister_session_until_terminal(adapter, &session_id).await,
+        "serving runtime must hold an exact registration to unregister before the idle probe"
+    );
     assert!(!adapter.contains_session(&session_id).await);
     adapter
         .register_session(session_id.clone())

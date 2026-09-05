@@ -93,6 +93,33 @@ use tokio::sync::watch;
 pub static REAL_COMMS_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Unregister `session_id`'s exact current runtime registration and await its
+/// owned teardown saga to terminal completion.
+///
+/// `MeerkatMachine::unregister_session` returns to its caller after a fixed
+/// 2 s grace (`UnregisterInProgress`) while the coordinator-owned saga keeps
+/// running; a test that reads registration state right after it therefore
+/// measures scheduler latency, not the property under test (issue #1104).
+/// Tests that need "the registration is gone" capture the exact
+/// `RuntimeSessionRegistrationWitness` and join the saga until terminal, the
+/// same pattern the stale live-session discard uses. Returns `false` when no
+/// registration (or no longer the captured one) occupied `session_id`.
+pub async fn unregister_session_until_terminal(
+    adapter: &MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+) -> bool {
+    let Some(registration) = adapter
+        .current_session_registration_witness(session_id)
+        .await
+    else {
+        return false;
+    };
+    adapter
+        .unregister_session_registration_until_terminal_if_current(&registration)
+        .await
+        .expect("exact registration teardown must reach terminal completion")
+}
+
 /// Reserve a loopback TCP port for a fixed-port supervisor bridge and hold the
 /// reservation for the rest of the process.
 ///

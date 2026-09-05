@@ -222,6 +222,11 @@ them.
 
 ### Fixed
 
+- **WASM test-support compilation:** the remote member operator schema helper
+  and its re-export now share the native `runtime-adapter` guard of
+  `member_upcall`, preserving the native schema matrix without referencing an
+  unavailable module in browser all-target or adapter-free builds.
+
 - **Responses transcript continuity:** assistant-item `commentary` /
   `final_answer` phase, multiple assistant messages, mixed reasoning/tool
   ordering, and terminal-only encrypted reasoning now survive session

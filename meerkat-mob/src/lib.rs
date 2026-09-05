@@ -257,6 +257,13 @@ pub use runtime::bridge_protocol::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
+#[cfg(all(
+    any(test, feature = "test-support"),
+    feature = "runtime-adapter",
+    not(target_arch = "wasm32")
+))]
+#[doc(hidden)]
+pub use runtime::remote_member_operator_tool_defs_for_test;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::run_mobpack_callable;
 pub use runtime::{
@@ -315,7 +322,7 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
-    member_operator_tool_defs_for_test, remote_member_operator_tool_defs_for_test,
+    member_operator_tool_defs_for_test,
 };
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

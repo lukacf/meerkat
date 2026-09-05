@@ -245,7 +245,11 @@ pub fn member_operator_tool_defs_for_test() -> Vec<Arc<ToolDef>> {
 
 /// Test-support seam: the remote-flavor operator tool definitions the member
 /// upcall surface advertises (`member_upcall::remote_operator_tool_defs`).
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(
+    any(test, feature = "test-support"),
+    feature = "runtime-adapter",
+    not(target_arch = "wasm32")
+))]
 #[doc(hidden)]
 pub fn remote_member_operator_tool_defs_for_test() -> Vec<Arc<ToolDef>> {
     member_upcall::remote_operator_tool_defs()

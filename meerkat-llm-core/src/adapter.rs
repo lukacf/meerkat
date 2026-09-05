@@ -797,6 +797,28 @@ mod tests {
     }
 
     #[test]
+    fn openai_generic_top_p_preserves_existing_omission() -> Result<(), String> {
+        for model in ["gpt-6-astra", "gpt-5.5"] {
+            let adapter = LlmClientAdapter::try_for_provider_identity(
+                Arc::new(crate::TestClient::for_provider(Provider::OpenAI)),
+                model.to_string(),
+                Provider::OpenAI,
+            )
+            .map_err(|error| error.to_string())?;
+            let params = ProviderParamsOverride {
+                top_p: Some(0.8),
+                ..Default::default()
+            };
+            let prepared = adapter
+                .build_request(&[], &[], 1024, None, Some(&params))
+                .map_err(|error| error.to_string())?;
+            assert!(prepared.request().provider_params.is_none());
+            assert_eq!(params.top_p, Some(0.8));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn identity_bound_adapter_rejects_conflicting_fixed_provider() -> Result<(), String> {
         let error = match LlmClientAdapter::try_for_provider_identity(
             Arc::new(crate::TestClient::for_provider(Provider::OpenAI)),

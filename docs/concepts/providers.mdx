@@ -152,6 +152,10 @@ estimated context pressure is not exact provider token accounting.
 Supported reasoning efforts are `low`, `medium`, `high`, `xhigh`, and `max`.
 `none`, `temperature`, `top_p`, and log-probability controls are unsupported.
 Astra does not support the Realtime endpoint; it cannot back `live/*`.
+For compatibility, existing OpenAI `temperature` and generic `top_p` settings
+remain omitted from provider requests rather than gaining a new rejection
+policy. Unsupported reasoning efforts and log-probability fields fail the
+existing typed validation.
 
 `store: false` remains the default. Assistant-item `commentary` and
 `final_answer` phases, supported output order, and terminal encrypted

@@ -6109,6 +6109,17 @@ mod tests {
     }
 
     #[test]
+    fn test_astra_preserves_unsupported_sampling_omission() {
+        let client = OpenAiClient::new("unused".to_string());
+        let request = LlmRequest::new("gpt-6-astra", vec![]).with_temperature(0.2);
+        let body = client.build_request_body(&request).expect("build request");
+        for field in ["temperature", "top_p", "logprobs", "top_logprobs"] {
+            assert!(body.get(field).is_none(), "{field} must not reach Astra");
+        }
+        assert_eq!(request.temperature, Some(0.2));
+    }
+
+    #[test]
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(

@@ -107,6 +107,16 @@ them.
   2 s caller grace, and a stale registration witness is an idempotent
   `Ok(false)` that never reaches a same-`SessionId` replacement.
   `stop_runtime_executor` keeps its grace for existing callers.
+- **Session history and transcript-revision reads no longer fail when a
+  head-canonical writer commits twice while a reader is looking** (#1104).
+  `PersistentSessionService` retried a `TranscriptRevisionConflict` on an
+  observation load exactly once; a second commit between the reads surfaced
+  the typed conflict to `read_history` callers, which under a saturated
+  machine happened to a poller reading a session mid-resume. Observation
+  loads now re-read up to 8 attempts (counted, not timed), each under the
+  runtime turn finalization guard, and surface the conflict unchanged only
+  once the budget is spent. A conflict here was never a torn snapshot, only
+  writer progress between two reads.
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

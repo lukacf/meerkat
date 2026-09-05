@@ -118,6 +118,10 @@ fn activation_store_error_to_session_error(error: RuntimeStoreError) -> SessionE
     }
 }
 
+/// Re-read budget for observation loads racing a head-canonical writer:
+/// counted attempts, never wall clock (issue #1104).
+const OBSERVATION_LOAD_ATTEMPTS: usize = 8;
+
 #[cfg(not(test))]
 const ARCHIVE_RUNTIME_RETIRE_TIMEOUT: meerkat_core::time_compat::Duration =
     meerkat_core::time_compat::Duration::from_secs(30);
@@ -3246,24 +3250,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// turn boundary and retry exactly once. A mismatch with no completing
     /// turn behind it is returned unchanged, preserving fail-closed behavior
     /// for stale or contradictory authority.
+    /// Observation loads (history, transcript revision) re-read a session
+    /// whose canonical head advanced between the two reads of one load.
+    ///
+    /// A `TranscriptRevisionConflict` here means a writer committed between
+    /// the reads: legitimate progress, never a torn snapshot. The budget counts
+    /// attempts, not wall clock, so a saturated runner cannot turn progress
+    /// into an error; after the last attempt the typed conflict surfaces
+    /// unchanged (issue #1104). Every re-read holds the runtime turn
+    /// finalization guard so it cannot interleave with a finalizer's write.
     async fn load_authoritative_session_base_for_observation(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        match self.load_authoritative_session_base(id).await {
+        let mut result = self.load_authoritative_session_base(id).await;
+        for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
+            if !Self::is_transcript_revision_conflict(&result) {
+                break;
+            }
+            let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+            result = self.load_authoritative_session_base(id).await;
+        }
+        result
+    }
+
+    fn is_transcript_revision_conflict(result: &Result<Option<Session>, SessionError>) -> bool {
+        matches!(
+            result,
             Err(SessionError::Store(error))
                 if error
                     .downcast_ref::<SessionStoreError>()
                     .is_some_and(|error| {
                         matches!(error, SessionStoreError::TranscriptRevisionConflict { .. })
-                    }) =>
-            {
-                let _turn_finalization_guard =
-                    self.acquire_runtime_turn_finalization_guard(id).await;
-                self.load_authoritative_session_base(id).await
-            }
-            result => result,
-        }
+                    })
+        )
     }
 
     async fn load_authoritative_session_base_with_replay_info(
@@ -33849,5 +33869,487 @@ mod tests {
             .await
             .expect("parent body must remain addressable out of line");
         assert_eq!(parent_rows.len(), 2, "parent body served out-of-line");
+    }
+
+    /// Runtime store double for the observation re-read budget (#1104).
+    ///
+    /// Serves a captured, since-superseded HeadCanonical authority for the
+    /// first N `load_session_boundary_authority` reads, so the follow-up
+    /// `materialize_head` raises `TranscriptRevisionConflict` exactly as a
+    /// reader racing a head-canonical writer sees it; every later read reaches
+    /// the real store. Everything else delegates.
+    struct StaleAuthorityRuntimeStore {
+        inner: meerkat_runtime::SqliteRuntimeStore,
+        stale: std::sync::Mutex<Option<meerkat_runtime::store::RuntimeSessionAuthority>>,
+        stale_reads_remaining: AtomicUsize,
+        stale_reads_served: AtomicUsize,
+    }
+    impl StaleAuthorityRuntimeStore {
+        fn new(inner: meerkat_runtime::SqliteRuntimeStore) -> Self {
+            Self {
+                inner,
+                stale: std::sync::Mutex::new(None),
+                stale_reads_remaining: AtomicUsize::new(0),
+                stale_reads_served: AtomicUsize::new(0),
+            }
+        }
+        fn serve_stale_authority(
+            &self,
+            authority: meerkat_runtime::store::RuntimeSessionAuthority,
+            reads: usize,
+        ) {
+            *self
+                .stale
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(authority);
+            self.stale_reads_remaining.store(reads, Ordering::SeqCst);
+        }
+        fn stale_reads_served(&self) -> usize {
+            self.stale_reads_served.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl RuntimeStore for StaleAuthorityRuntimeStore {
+        async fn load_session_boundary_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::RuntimeSessionAuthority>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            let stale = self
+                .stale
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(stale) = stale
+                && self
+                    .stale_reads_remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                self.stale_reads_served.fetch_add(1, Ordering::SeqCst);
+                return Ok(Some(stale));
+            }
+            self.inner.load_session_boundary_authority(runtime_id).await
+        }
+        fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+            self.inner.session_authority_ops()
+        }
+        fn input_state_batch_cas_implementation_profile(
+            &self,
+        ) -> meerkat_runtime::store::InputStateBatchCasImplementationProfile {
+            self.inner.input_state_batch_cas_implementation_profile()
+        }
+        async fn commit_prepared_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            request: meerkat_runtime::PreparedRuntimeSessionCommit,
+        ) -> Result<
+            meerkat_runtime::store::PreparedRuntimeSessionCommitResult,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .commit_prepared_session_boundary(runtime_id, request)
+                .await
+        }
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SerializedSessionSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+        async fn commit_prepared_whole_blob_rewrite_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<WholeBlobStoreAuthority, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                .await
+        }
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<SerializedSessionSnapshot>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+        async fn load_input_states_with_versions(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::PreparedRecoveryInputSnapshot,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.load_input_states_with_versions(runtime_id).await
+        }
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Arc<Vec<u8>>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &InputStatePersistenceRecord,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+        async fn compare_and_swap_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[StoredInputState],
+            replacements: &[InputStatePersistenceRecord],
+        ) -> Result<
+            meerkat_runtime::store::InputStateBatchCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+                .await
+        }
+        async fn compare_and_swap_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[StoredInputState],
+            replacements: &[InputStatePersistenceRecord],
+            write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+        ) -> Result<
+            meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected,
+                    replacements,
+                    write_fence,
+                )
+                .await
+        }
+        async fn compare_and_swap_recovery_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+            mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+        ) -> Result<
+            meerkat_runtime::store::InputStateBatchCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                )
+                .await
+        }
+        async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+            mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+            write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+        ) -> Result<
+            meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                    write_fence,
+                )
+                .await
+        }
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+        async fn load_pending_terminal_owner_ids_page(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            after: Option<&InputId>,
+            limit: usize,
+        ) -> Result<Vec<InputId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+                .await
+        }
+        async fn load_machine_lifecycle_record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
+        }
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
+        }
+        async fn compare_and_swap_machine_lifecycle_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+            write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+        ) -> Result<
+            meerkat_runtime::store::FencedMachineLifecycleCasOutcome,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_machine_lifecycle_with_fence(
+                    runtime_id,
+                    expected,
+                    replacement,
+                    write_fence,
+                )
+                .await
+        }
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<
+            meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                .await
+        }
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.load_ops_lifecycle(runtime_id).await
+        }
+    }
+
+    /// Fixture for the observation re-read budget: a co-located HeadCanonical
+    /// runtime/session store pair behind [`StaleAuthorityRuntimeStore`], one
+    /// session with two committed turns, and the authority captured after the
+    /// FIRST turn (superseded by the second).
+    async fn stale_authority_observation_fixture() -> (
+        Arc<StaleAuthorityRuntimeStore>,
+        PersistentSessionService<DummyBuilder>,
+        SessionId,
+        meerkat_runtime::store::RuntimeSessionAuthority,
+        tempfile::TempDir,
+    ) {
+        let storage_dir = tempfile::tempdir_in(".").expect("observation re-read test directory");
+        let database_path = storage_dir.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(StaleAuthorityRuntimeStore::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                .expect("head-canonical runtime store"),
+        ));
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            meerkat_store::SqliteSessionStore::open(&database_path)
+                .expect("co-located head-canonical session store"),
+        );
+        let runtime_store_dyn: Arc<dyn RuntimeStore> =
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>;
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            session_store,
+            Arc::clone(&runtime_store_dyn),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        committed_content_turn(
+            &service,
+            runtime_store_dyn.as_ref(),
+            &session_id,
+            "first turn",
+        )
+        .await;
+        let superseded = runtime_store
+            .inner
+            .load_session_boundary_authority(&LogicalRuntimeId::for_session(&session_id))
+            .await
+            .expect("load first-turn authority")
+            .expect("first-turn authority present");
+        committed_content_turn(
+            &service,
+            runtime_store_dyn.as_ref(),
+            &session_id,
+            "second turn",
+        )
+        .await;
+        (runtime_store, service, session_id, superseded, storage_dir)
+    }
+
+    /// #1104: a reader whose authority read is superseded by a writer's commit
+    /// between the two reads of one load must re-read, not fail, as long as
+    /// the counted budget lasts.
+    #[tokio::test]
+    async fn observation_read_converges_after_repeated_head_advances_within_budget() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        let conflicts = OBSERVATION_LOAD_ATTEMPTS - 1;
+        runtime_store.serve_stale_authority(superseded, conflicts);
+        let page = service
+            .read_history(
+                &session_id,
+                meerkat_core::service::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("history read converges once the writer's head is observed");
+        let rendered = serde_json::to_string(&page.messages).expect("render history");
+        assert!(
+            rendered.contains("second turn"),
+            "the converged read must observe the advanced head: {rendered}"
+        );
+        assert_eq!(
+            runtime_store.stale_reads_served(),
+            conflicts,
+            "every conflicting read within the budget must be retried"
+        );
+    }
+
+    /// #1104: the budget is counted, not timed, and it is finite: once spent,
+    /// the typed conflict surfaces unchanged instead of looping.
+    #[tokio::test]
+    async fn observation_read_surfaces_conflict_once_budget_is_spent() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        runtime_store.serve_stale_authority(superseded, OBSERVATION_LOAD_ATTEMPTS + 4);
+        let error = service
+            .read_history(
+                &session_id,
+                meerkat_core::service::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect_err("a conflict on every attempt must surface after the budget");
+        match &error {
+            SessionError::Store(store_error) => assert!(
+                matches!(
+                    store_error.downcast_ref::<SessionStoreError>(),
+                    Some(SessionStoreError::TranscriptRevisionConflict { .. })
+                ),
+                "the typed conflict must surface unchanged: {store_error}"
+            ),
+            other => panic!("expected the typed store conflict, got {other:?}"),
+        }
+        assert_eq!(
+            runtime_store.stale_reads_served(),
+            OBSERVATION_LOAD_ATTEMPTS,
+            "the read must stop at the counted budget"
+        );
     }
 }

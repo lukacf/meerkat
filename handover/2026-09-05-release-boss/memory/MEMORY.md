@@ -1,0 +1,8 @@
+- [Release train 0.8.33/0.8.31 roles](release-train-0833-0831-roles.md) - I am Meerkat release boss and MobKit lead on the Linux VM; HomeCore agent lives on Luka's Mac
+- [Six feedback PRs handover](six-feedback-prs-handover.md) - M1-M3 meerkat, K1-K3 MobKit; make green and rebased, never merge
+- [Tag after semver readiness](meerkat-release-tag-after-semver-readiness.md) - push main, wait for CI + semver readiness, then push the tag; never a combined push
+- [Release train PR inventory](release-train-pr-inventory.md) - every branch/PR/head in the 0.8.33->0.8.34 and MobKit 0.8.31->0.8.32 train, merge order, gotchas
+- [VM disk pressure from build caches](vm-disk-pressure-build-caches.md) - what fills the 968 GB disk, what is safe to delete, check df before parallel gates
+- [Never pattern-kill pre-commit on the VM](never-pkill-pre-commit-on-release-vm.md) - it aborts running pre-push gates; kill by pid/cwd only
+- [Agent bus on meerkat-dev](agentbus-on-meerkat-dev.md) - ~/.agentbus/bus, BUS_ID=claude-gcp-lead, watch monitor pattern, peers (homecore, copilot boss, ob3)
+- [Harness low-memory watchdog reads MemFree](harness-low-memory-watchdog-memfree.md) - page-cache keeper loop at /tmp/rb/memfree-keeper.sh; kills are not real OOM

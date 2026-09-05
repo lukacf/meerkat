@@ -1,0 +1,7 @@
+Two contract fixes for 0.8.34.
+
+**Dedicated `quota_exhausted` provider error kind.** #1092 introduced `LlmError::QuotaExhausted` but, lacking a wire kind, projected it as `llm_provider_error` with `provider_error_kind = invalid_request` and `details.class = "quota_exhausted"`. This adds `LlmProviderErrorKind::QuotaExhausted`, maps the `LlmError` variant to it, and keeps `details.class` for exactly one release so consumers already branching on the class keep working while they move to the kind. The enum is not `#[non_exhaustive]`, so the new variant is declared under CHANGELOG Breaking; the three exhaustive matches in the provider `web_search` adapters map the kind back. Schemas and the Python, TypeScript and web SDK generated types are regenerated.
+
+**wasm32 build of `meerkat-anthropic` repaired.** #1087 imported `AnthropicCacheControlPolicy` under `#[cfg(not(target_arch = "wasm32"))]` while `default_cache_control_for_backend` uses it unconditionally, so `wasm-pack build` of the web SDK (and therefore the `@rkat/web` release lane) has failed since ba6644317; nothing on the PR path builds that crate for wasm32 (#1108). The import is now unconditional (the type is not cfg-gated in `meerkat-core`). This branch is the first since #1087 whose gate ran `make test-sdk-web` (it regenerates `sdks/web/src/generated/events.ts`), which is how the break surfaced.
+
+Pre-push gate passed on the release VM, including the full web SDK build.

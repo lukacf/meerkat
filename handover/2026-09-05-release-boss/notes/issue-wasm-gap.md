@@ -1,0 +1,7 @@
+Main was broken for the `wasm32-unknown-unknown` build of `meerkat-anthropic` from ba6644317 (#1087) until the fix folded into the quota-exhausted PR, and nothing on the pull_request path caught it:
+
+- `meerkat-anthropic/src/runtime/mod.rs` imported `AnthropicCacheControlPolicy` under `#[cfg(not(target_arch = "wasm32"))]` while `default_cache_control_for_backend` (unconditional) uses it, so `wasm-pack build` of the web SDK failed with E0425/E0433.
+- The local pre-push gate only runs `make test-sdk-web` when `sdks/web/**` changes, so the gates for #1087, #1095, #1096, #1106, #1107, #1099 and #1098 never built wasm; the gate for the quota branch did (it regenerates `sdks/web/src/generated/events.ts`) and failed.
+- Hosted CI: the BuildBuddy "WASM check submitter" does not build `meerkat-anthropic` for wasm32; the full `make test-sdk-web` lives in the nightly workflow, path-gated to wasm contract surfaces.
+
+Ask: add a cheap `cargo check --target wasm32-unknown-unknown` for every crate the web SDK links (at least `meerkat-anthropic`, `meerkat-openai`, `meerkat-gemini`, `meerkat-llm-core`, `meerkat-core`, `meerkat-web-runtime`) to the pull_request CI (BuildBuddy WASM check or a GitHub-hosted job) and to the pre-push gate's changed-crate lane whenever one of those crates changes, so a cfg-gated import cannot break `@rkat/web` unnoticed again. The release lane builds `@rkat/web`, so this class of break would otherwise surface only at tag time.

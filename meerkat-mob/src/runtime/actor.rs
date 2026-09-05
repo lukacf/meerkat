@@ -1926,6 +1926,10 @@ enum SubmitWorkDispatchCompletion {
     Completed,
     AwaitTurnAdmission {
         operation_id: Option<meerkat_core::ops::OperationId>,
+        /// Lane key: every admission for one member is single-flight.
+        agent_identity: AgentIdentity,
+        /// Member-local readiness executed in the lane before admission.
+        readiness: Option<LocalTurnAdmissionReadiness>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
@@ -1942,7 +1946,19 @@ enum SubmitWorkDispatchCompletion {
         /// from the optional caller transcript identity.
         placed_input_id: Option<String>,
     },
+    /// Local AutonomousHost delivery: readiness, the steer admission-barrier
+    /// probe, and the runtime-admit-or-inbox-inject decision all run in the
+    /// member's admission lane (#1102). Only the DSL admission stays inline.
+    AwaitAutonomousDispatch {
+        agent_identity: AgentIdentity,
+        readiness: Option<LocalTurnAdmissionReadiness>,
+        material: Box<AutonomousDispatchMaterial>,
+    },
     AwaitTurnCompletion {
+        agent_identity: AgentIdentity,
+        /// Member-local readiness executed by the detached sender before the
+        /// tracked turn starts (same #37 probe as the admission lane).
+        readiness: Option<LocalTurnAdmissionReadiness>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
@@ -1970,8 +1986,571 @@ impl SubmitWorkDispatchCompletion {
         match self {
             Self::Completed => "Completed",
             Self::AwaitTurnAdmission { .. } => "AwaitTurnAdmission",
+            Self::AwaitAutonomousDispatch { .. } => "AwaitAutonomousDispatch",
             Self::AwaitTurnCompletion { .. } => "AwaitTurnCompletion",
         }
+    }
+}
+
+/// Member-local readiness that ran inline on the actor loop before turn
+/// admission until #1102 (OB3 fleet-wide delivery stall). It now runs inside
+/// the member's detached admission lane, after the DSL SubmitWork transition
+/// and before the runtime admission, so one member's slow or wedged step
+/// cannot delay another member's dispatch or the liveness probe.
+#[derive(Debug, Clone)]
+struct LocalTurnAdmissionReadiness {
+    bridge_session_id: SessionId,
+    /// #37: probe the live session actor; when it is gone, re-enter the actor
+    /// for the machine-authorized revival and continue once it replies.
+    check_live_session: bool,
+    /// AutonomousHost members: mob comms drain + injector capability.
+    autonomous_runtime: bool,
+}
+
+/// Off-loop autonomous dispatch material. After readiness the lane probes the
+/// steer admission barrier and either admits a runtime turn or injects the
+/// inbox event; neither step touches actor authority.
+struct AutonomousDispatchMaterial {
+    member_ref: MemberRef,
+    bridge_session_id: SessionId,
+    content: ContentInput,
+    system_prompt: Option<String>,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    handling_mode: meerkat_core::types::HandlingMode,
+    external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
+    interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    event_tx:
+        Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
+    completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+    llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ack_mode: crate::mob_machine::SubmitWorkAckMode,
+}
+
+/// One member turn admission owned by that member's admission lane.
+struct PendingMemberTurnAdmission {
+    agent_identity: AgentIdentity,
+    readiness: Option<LocalTurnAdmissionReadiness>,
+    dispatch: PendingTurnDispatch,
+}
+
+enum PendingTurnDispatch {
+    Admission {
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+        placed_identity: Option<AgentIdentity>,
+        placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+        placed_input_id: Option<String>,
+    },
+    Autonomous(Box<AutonomousDispatchMaterial>),
+    /// TurnCompleted-ack delivery (local tracked completion or placed
+    /// completion with its actor-registered waiter). Routed through the same
+    /// lane as IngressAccepted deliveries so a completion-bearing send cannot
+    /// overtake parked ordinary deliveries to the same member. The
+    /// completed-delivery body owns the reply channel because its placed
+    /// branches reply at several distinct custody points.
+    Completion {
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+        bounded_result_spec: Option<super::handle::BoundedResultSpec>,
+        placed_identity: Option<AgentIdentity>,
+        remote: Option<PreparedPlacedCompletionWait>,
+    },
+}
+
+struct ParkedMemberTurnAdmission {
+    pending: Box<PendingMemberTurnAdmission>,
+    reply_tx: oneshot::Sender<Result<(), MobError>>,
+}
+
+/// Single-flight admission lane for one member (#1102). The actor runs one
+/// detached admission per member at a time; later deliveries for the same
+/// member park here in FIFO order and never occupy the actor loop. Ordering
+/// per member is therefore DSL admission order; cross-member order is
+/// unconstrained by construction.
+#[derive(Default)]
+pub(super) struct MemberAdmissionLane {
+    inflight: Option<u64>,
+    parked: VecDeque<ParkedMemberTurnAdmission>,
+}
+
+/// Read-only actor material for member-local readiness executed off the loop:
+/// comms drain, injector capability, and the steer admission-barrier probe.
+/// Placement is decided by the caller on the loop (placed members never
+/// reach these), so this context carries no MobMachine state.
+#[derive(Clone)]
+pub(super) struct DetachedMemberReadinessContext {
+    provisioner: Arc<dyn MobProvisioner>,
+    #[cfg(feature = "runtime-adapter")]
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    mob_id: MobId,
+}
+
+/// One member's bounded readiness result from the concurrent explicit-Resume
+/// fan-out. Applied on the actor (StartupMarkReady is machine authority).
+pub(super) struct MemberReadinessOutcome {
+    pub(super) entry: RosterEntry,
+    pub(super) stage: super::state::LifecycleProgressStage,
+    pub(super) result: Result<(), MobError>,
+}
+
+struct PreparedMemberRegistrationReload {
+    entry: RosterEntry,
+    member_ref: MemberRef,
+    bridge_session_id: SessionId,
+}
+
+/// Explicit Resume parked between its detached per-member readiness fan-out
+/// and the actor-side continuation (#1102). Everything the continuation needs
+/// to reply, commit, roll back, or finish is carried here; the loop is free
+/// while the fan-out runs.
+pub(super) struct PendingResumeLifecycle {
+    ticket: u64,
+    phase: ResumeLifecyclePhase,
+    admission: super::state::LifecycleAdmissionSignal,
+    progress: super::state::LifecycleProgressSignal,
+    reply_tx: oneshot::Sender<Result<(), MobError>>,
+}
+
+enum ResumeLifecyclePhase {
+    /// Same-handle resume: readiness runs before the durable Resume commit.
+    PreCommitReadiness,
+    /// Rebuilt attachments: readiness runs after the commit and the rebuild.
+    PostCommitReadiness { post_commit_error: Option<MobError> },
+}
+
+/// Per-member bound for one readiness step in the explicit-Resume fan-out.
+/// The steps run concurrently, so the fan-out as a whole is bounded by this
+/// value rather than by member count.
+const RESUME_MEMBER_READINESS_BOUND: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct MemberReadinessTarget {
+    entry: RosterEntry,
+    stage: super::state::LifecycleProgressStage,
+}
+
+/// Drain a readiness fan-out. A task that cannot be joined (the readiness
+/// tasks catch their own panics, so this means the fan-out itself was torn
+/// down) still yields a typed failed outcome for its member instead of a
+/// silently missing one, so an absent observation can never read as success.
+async fn collect_member_readiness_outcomes(
+    mut readiness: tokio::task::JoinSet<MemberReadinessOutcome>,
+    mut expected: BTreeMap<AgentIdentity, MemberReadinessTarget>,
+    mob_id: &MobId,
+) -> Vec<MemberReadinessOutcome> {
+    let mut outcomes = Vec::with_capacity(expected.len());
+    while let Some(joined) = readiness.join_next().await {
+        match joined {
+            Ok(outcome) => {
+                expected.remove(&outcome.entry.agent_identity);
+                outcomes.push(outcome);
+            }
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %mob_id,
+                    error = %error,
+                    "member readiness task could not be joined"
+                );
+            }
+        }
+    }
+    for (agent_identity, MemberReadinessTarget { entry, stage }) in expected {
+        outcomes.push(MemberReadinessOutcome {
+            entry,
+            stage,
+            result: Err(MobError::Internal(format!(
+                "member readiness task for '{agent_identity}' produced no outcome"
+            ))),
+        });
+    }
+    outcomes
+}
+
+fn member_readiness_expectations(
+    targets: &[MemberReadinessTarget],
+) -> BTreeMap<AgentIdentity, MemberReadinessTarget> {
+    targets
+        .iter()
+        .map(|target| (target.entry.agent_identity.clone(), target.clone()))
+        .collect()
+}
+
+impl DetachedMemberReadinessContext {
+    /// Bind (or re-bind) the member's mob comms drain onto its runtime
+    /// session. Idempotent; a placed member must never reach this.
+    pub(super) async fn ensure_mob_comms_drain(
+        &self,
+        agent_identity: &AgentIdentity,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
+        {
+            let Some(bridge_session_id) = member_ref.bridge_session_id() else {
+                return Ok(());
+            };
+
+            let adapter =
+                self.runtime_adapter
+                    .clone()
+                    .ok_or_else(|| MobError::MissingMemberCapability {
+                        member_id: agent_identity.clone(),
+                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                        context: "local member comms-drain runtime adapter",
+                    })?;
+            let comms_runtime = self
+                .provisioner
+                .comms_runtime(member_ref)
+                .await
+                .ok_or_else(|| MobError::MissingMemberCapability {
+                    member_id: agent_identity.clone(),
+                    capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                    context: "local member comms-drain startup",
+                })?;
+            let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(self.mob_id.as_ref());
+            let spawned = adapter
+                .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
+                .await
+                .map_err(|err| {
+                    MobError::Internal(format!(
+                        "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                    ))
+                })?;
+            if spawned {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    session_id = %bridge_session_id,
+                    "updated peer ingress for mob member"
+                );
+            }
+        }
+
+        #[cfg(any(target_arch = "wasm32", not(feature = "runtime-adapter")))]
+        {
+            let _ = (agent_identity, member_ref);
+        }
+
+        Ok(())
+    }
+
+    /// Whether the runtime holds no committed executor attachment for
+    /// `session_id` (a cold successor registration awaiting materialization,
+    /// or no registration at all).
+    async fn session_has_no_executor_registration(&self, session_id: &SessionId) -> bool {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = self.runtime_adapter.as_ref() {
+            return adapter
+                .current_executor_attachment_witness(session_id)
+                .await
+                .is_none();
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = session_id;
+        false
+    }
+
+    /// Comms drain plus injector capability for a local AutonomousHost member.
+    /// Session registration + RuntimeLoop attachment is owned by the
+    /// provisioner's lazy `runtime_session_state()` init (called during
+    /// provision_member); stop preserves registration, so resume just needs
+    /// the drain re-spawned and the injector re-checked.
+    pub(super) async fn ensure_autonomous_runtime_ready(
+        &self,
+        agent_identity: &AgentIdentity,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        self.ensure_mob_comms_drain(agent_identity, member_ref)
+            .await?;
+        MobActor::ensure_autonomous_dispatch_capability_for_provisioner(
+            &self.provisioner,
+            agent_identity,
+            member_ref,
+        )
+        .await
+    }
+
+    /// Whether a local autonomous Steer must route through real runtime
+    /// admission instead of a direct inbox inject. Fails closed: an
+    /// indeterminate runtime state requires the admission barrier, because a
+    /// direct inject would ack Completed before the machine admitted the turn.
+    async fn autonomous_steer_requires_admission_barrier(
+        &self,
+        agent_identity: &AgentIdentity,
+        member_ref: &MemberRef,
+        handling_mode: meerkat_core::types::HandlingMode,
+        ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    ) -> Result<bool, MobError> {
+        if handling_mode != meerkat_core::types::HandlingMode::Steer
+            || ack_mode != crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+        {
+            return Ok(false);
+        }
+
+        #[cfg(feature = "runtime-adapter")]
+        if let (Some(adapter), Some(session_id)) =
+            (&self.runtime_adapter, member_ref.bridge_session_id())
+        {
+            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+            match adapter.runtime_state(session_id).await {
+                Ok(meerkat_runtime::RuntimeState::Running) => {
+                    tracing::debug!(
+                        agent_identity = %agent_identity,
+                        session_id = %session_id,
+                        "active steer admission barrier enabled by running runtime state"
+                    );
+                    return Ok(true);
+                }
+                Ok(state) => {
+                    let session_active = self
+                        .provisioner
+                        .is_member_active(member_ref)
+                        .await?
+                        .unwrap_or(false);
+                    tracing::debug!(
+                        agent_identity = %agent_identity,
+                        session_id = %session_id,
+                        runtime_state = ?state,
+                        session_active,
+                        "active steer admission barrier checked non-running runtime state"
+                    );
+                    return Ok(session_active);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        agent_identity = %agent_identity,
+                        session_id = %session_id,
+                        error = %error,
+                        "runtime state unavailable; requiring autonomous steer admission barrier (fail closed)"
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = (agent_identity, member_ref);
+        Ok(false)
+    }
+
+    /// Off-loop half of local autonomous dispatch: admit a runtime turn when
+    /// the steer barrier demands it, otherwise inject the inbox event.
+    async fn dispatch_autonomous(
+        &self,
+        agent_identity: &AgentIdentity,
+        material: AutonomousDispatchMaterial,
+    ) -> Result<(), MobError> {
+        let AutonomousDispatchMaterial {
+            member_ref,
+            bridge_session_id,
+            content,
+            system_prompt,
+            turn_metadata,
+            handling_mode,
+            external_delivery_identity,
+            interaction_id,
+            objective_id,
+            event_tx,
+            completion_tx,
+            llm_identity_applied_tx,
+            ack_mode,
+        } = material;
+        let render_metadata = turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.render_metadata.clone());
+        if self
+            .autonomous_steer_requires_admission_barrier(
+                agent_identity,
+                &member_ref,
+                handling_mode,
+                ack_mode,
+            )
+            .await?
+        {
+            let req = meerkat_core::service::StartTurnRequest {
+                // The admission barrier is steer-only; steer dispatch with
+                // injected context was rejected before the mode fork, so this
+                // carrier is invariantly empty here.
+                injected_context: Vec::new(),
+                prompt: content,
+                system_prompt,
+                event_tx,
+                runtime: submit_work_runtime_semantics(
+                    handling_mode,
+                    turn_metadata,
+                    external_delivery_identity.as_ref(),
+                ),
+            };
+            return if let Some(completion_tx) = completion_tx {
+                self.provisioner
+                    .admit_tracked_turn(&member_ref, req, completion_tx, llm_identity_applied_tx)
+                    .await
+            } else {
+                self.provisioner.admit_turn(&member_ref, req).await
+            };
+        }
+        let injector = self
+            .provisioner
+            .interaction_event_injector(&bridge_session_id)
+            .await
+            .ok_or_else(|| MobError::MissingMemberCapability {
+                member_id: agent_identity.clone(),
+                capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                context: "autonomous direct turn delivery",
+            })?;
+        // A host-supplied interaction id rides the injected inbox event so the
+        // comms classification (and therefore the runtime transcript identity)
+        // carries the SAME id as the host's live interaction frames instead
+        // of minting a fresh unrelated one.
+        let inject_result = match external_delivery_identity {
+            Some(identity) => injector.inject_with_delivery_identity(
+                meerkat_core::service::StartTurnInputIdentity {
+                    idempotency_key: identity.idempotency_key,
+                    correlation_id: identity.correlation_id,
+                },
+                objective_id,
+                content,
+                meerkat_core::PlainEventSource::Rpc,
+                handling_mode,
+                render_metadata,
+            ),
+            None => injector.inject_with_turn_identity(
+                interaction_id,
+                objective_id,
+                content,
+                meerkat_core::PlainEventSource::Rpc,
+                handling_mode,
+                render_metadata,
+            ),
+        };
+        inject_result.map_err(|error| {
+            MobError::Internal(format!(
+                "autonomous dispatch inject failed for '{agent_identity}': {error}"
+            ))
+        })
+    }
+}
+
+/// Budget after which one inline actor-loop step is reported as a stall
+/// suspect. Any step that legitimately needs longer belongs off the loop.
+const ACTOR_INLINE_STEP_BUDGET: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone)]
+struct ActorInlineStep {
+    command_kind: &'static str,
+    step: &'static str,
+    started: Instant,
+    warned: bool,
+}
+
+/// Inline-step watchdog (#1102 observability). The loop marks the start of
+/// every command dispatch and the arms refine the current step name; a
+/// checker task warns once when the running step exceeds
+/// [`ACTOR_INLINE_STEP_BUDGET`], naming the command kind and step, and the
+/// loop warns again at completion with the total elapsed time. A wedged step
+/// is therefore visible while it is wedged, not only after it returns.
+pub(super) struct ActorInlineStepWatchdog {
+    current: Arc<std::sync::Mutex<Option<ActorInlineStep>>>,
+    checker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ActorInlineStepWatchdog {
+    pub(super) fn new() -> Self {
+        Self {
+            current: Arc::new(std::sync::Mutex::new(None)),
+            checker: None,
+        }
+    }
+
+    fn start_checker(&mut self, mob_id: MobId) {
+        if self.checker.is_some() {
+            return;
+        }
+        let current = Arc::clone(&self.current);
+        self.checker = Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(ACTOR_INLINE_STEP_BUDGET / 4);
+            loop {
+                tick.tick().await;
+                let mut guard = current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(step) = guard.as_mut()
+                    && !step.warned
+                    && step.started.elapsed() >= ACTOR_INLINE_STEP_BUDGET
+                {
+                    step.warned = true;
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        command_kind = step.command_kind,
+                        step = step.step,
+                        elapsed_ms = step.started.elapsed().as_millis() as u64,
+                        budget_ms = ACTOR_INLINE_STEP_BUDGET.as_millis() as u64,
+                        "actor inline step exceeded its budget; every later command is queued behind it"
+                    );
+                }
+            }
+        }));
+    }
+
+    fn begin(&self, command_kind: &'static str, step: &'static str) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActorInlineStep {
+            command_kind,
+            step,
+            started: Instant::now(),
+            warned: false,
+        });
+    }
+
+    /// Refine the step name of the running command (the command kind and
+    /// start time are retained).
+    pub(super) fn set_step(&self, step: &'static str) {
+        if let Some(current) = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            current.step = step;
+        }
+    }
+
+    fn end(&self, mob_id: &MobId) {
+        let finished = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(step) = finished
+            && step.started.elapsed() >= ACTOR_INLINE_STEP_BUDGET
+        {
+            tracing::warn!(
+                mob_id = %mob_id,
+                command_kind = step.command_kind,
+                step = step.step,
+                elapsed_ms = step.started.elapsed().as_millis() as u64,
+                "actor inline step completed after exceeding its budget"
+            );
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(checker) = self.checker.take() {
+            checker.abort();
+        }
+    }
+}
+
+impl Drop for ActorInlineStepWatchdog {
+    /// `run` stops the checker on every ordinary exit; an unwinding actor
+    /// task must not leak it either.
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -5638,6 +6217,18 @@ pub(super) struct MobActor {
     /// MobMachine.
     pub(super) member_revival_locks:
         Arc<tokio::sync::Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Per-member single-flight admission lanes (#1102). Execution custody
+    /// only: the DSL SubmitWork transition already admitted every entry.
+    pub(super) member_admission_lanes: HashMap<AgentIdentity, MemberAdmissionLane>,
+    pub(super) next_member_admission_ticket: u64,
+    /// Handle-readable gauge of parked deliveries per member.
+    pub(super) member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
+    /// Warns when one inline loop step exceeds its budget (#1102).
+    pub(super) inline_step_watchdog: ActorInlineStepWatchdog,
+    /// Explicit Resume whose per-member readiness fan-out is running detached;
+    /// the loop keeps draining commands until the outcomes re-enter.
+    pub(super) pending_resume_lifecycle: Option<PendingResumeLifecycle>,
+    pub(super) next_resume_lifecycle_ticket: u64,
     pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     /// Sole desired-state authority for identity intents, leases, and custody.
     pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
@@ -6024,8 +6615,8 @@ pub(super) async fn enqueue_member_status_observation(
 }
 
 impl MobActor {
-    fn abandoned_observation_control(cmd: &MobCommand) -> Option<ActorLoopControl> {
-        cmd.is_abandoned_observation()
+    fn abandoned_command_control(cmd: &MobCommand) -> Option<ActorLoopControl> {
+        (cmd.is_abandoned_observation() || cmd.is_abandoned_delivery())
             .then_some(ActorLoopControl::ProceedBoundary)
     }
 
@@ -9729,6 +10320,41 @@ impl MobActor {
             .cloned()
     }
 
+    /// #1102 fast rejection: a local runtime-backed member whose persistent
+    /// runtime shell is `ReloadRequired` refuses every input at admission
+    /// (`RecoveryRepairBlocked`), so deliveries to it must not be dispatched.
+    /// Reads the same per-session gate the runtime ingress path consults and
+    /// returns the typed `MemberReloadRequired` before any dispatch work.
+    async fn ensure_member_runtime_durability_ready(
+        &self,
+        entry: &RosterEntry,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(adapter) = self.runtime_adapter.as_ref()
+            && !super::member_runtime_is_host_owned(
+                self.dsl_authority.state(),
+                &entry.agent_identity,
+            )
+            && let Some(bridge_session_id) = entry.member_ref.bridge_session_id()
+            && let Some(required) = adapter.durability_reload_required(bridge_session_id).await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %entry.agent_identity,
+                session_id = %bridge_session_id,
+                operation = %required.operation,
+                "rejecting delivery: member runtime registration requires a cold reload"
+            );
+            return Err(MobError::MemberReloadRequired {
+                member_id: entry.agent_identity.clone(),
+                reason: required.to_string(),
+            });
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = entry;
+        Ok(())
+    }
+
     async fn ensure_member_not_broken(
         &self,
         agent_identity: &AgentIdentity,
@@ -12837,6 +13463,7 @@ impl MobActor {
             realtime_session_factory: None,
             flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
             explicit_resume_operations: Arc::clone(&self.explicit_resume_operations),
+            member_admission_backlog: Arc::clone(&self.member_admission_backlog),
         }
     }
 
@@ -14983,54 +15610,21 @@ impl MobActor {
             // never a controller-local runtime key.
             return Ok(());
         }
-        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
-        {
-            let Some(bridge_session_id) = member_ref.bridge_session_id() else {
-                return Ok(());
-            };
+        self.detached_member_readiness_context()
+            .ensure_mob_comms_drain(agent_identity, member_ref)
+            .await
+    }
 
-            let adapter =
-                self.runtime_adapter
-                    .clone()
-                    .ok_or_else(|| MobError::MissingMemberCapability {
-                        member_id: agent_identity.clone(),
-                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
-                        context: "local member comms-drain runtime adapter",
-                    })?;
-            let comms_runtime = self
-                .provisioner
-                .comms_runtime(member_ref)
-                .await
-                .ok_or_else(|| MobError::MissingMemberCapability {
-                    member_id: agent_identity.clone(),
-                    capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
-                    context: "local member comms-drain startup",
-                })?;
-            let mob_id =
-                meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
-            let spawned = adapter
-                .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                .await
-                .map_err(|err| {
-                    MobError::Internal(format!(
-                        "mob comms drain spawn failed for session {bridge_session_id}: {err}"
-                    ))
-                })?;
-            if spawned {
-                tracing::debug!(
-                    agent_identity = %agent_identity,
-                    session_id = %bridge_session_id,
-                    "updated peer ingress for mob member"
-                );
-            }
+    /// Snapshot the actor material that member-local readiness needs so it
+    /// can run on a detached task (#1102). Placement must already have been
+    /// decided on the loop: this context serves local members only.
+    pub(super) fn detached_member_readiness_context(&self) -> DetachedMemberReadinessContext {
+        DetachedMemberReadinessContext {
+            provisioner: Arc::clone(&self.provisioner),
+            #[cfg(feature = "runtime-adapter")]
+            runtime_adapter: self.runtime_adapter.clone(),
+            mob_id: self.definition.id.clone(),
         }
-
-        #[cfg(any(target_arch = "wasm32", not(feature = "runtime-adapter")))]
-        {
-            let _ = (agent_identity, member_ref);
-        }
-
-        Ok(())
     }
 
     async fn teardown_session_runtime_bindings_from_machine(&mut self) -> Result<(), MobError> {
@@ -15254,6 +15848,481 @@ impl MobActor {
             member_ref,
         )
         .await
+    }
+
+    // ------------------------------------------------------------------
+    // #1102: per-member single-flight admission lanes.
+    // ------------------------------------------------------------------
+
+    /// Depth of `agent_identity`'s admission lane when it can accept no
+    /// further delivery: one admission in flight and
+    /// [`super::handle::MEMBER_ADMISSION_LANE_CAPACITY`] parked behind it.
+    /// Pure read; the SubmitWork arm consults it before the DSL apply.
+    fn member_admission_lane_full_depth(&self, agent_identity: &AgentIdentity) -> Option<usize> {
+        let lane = self.member_admission_lanes.get(agent_identity)?;
+        (lane.inflight.is_some()
+            && lane.parked.len() >= super::handle::MEMBER_ADMISSION_LANE_CAPACITY)
+            .then_some(lane.parked.len())
+    }
+
+    /// Hand one DSL-admitted delivery to its member's admission lane. The
+    /// first delivery for an idle member starts immediately on a detached
+    /// task; later deliveries park in FIFO order behind it. The loop never
+    /// awaits any of them. Capacity was refused before the DSL apply
+    /// (`member_admission_lane_full_depth`), so an admitted delivery is always
+    /// parked; the over-capacity branch below is a wiring-fault witness, not
+    /// a rejection path.
+    fn enqueue_member_turn_admission(
+        &mut self,
+        pending: Box<PendingMemberTurnAdmission>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        let agent_identity = pending.agent_identity.clone();
+        let lane = self
+            .member_admission_lanes
+            .entry(agent_identity.clone())
+            .or_default();
+        if lane.inflight.is_none() {
+            self.spawn_member_turn_admission(pending, reply_tx);
+            return;
+        }
+        if lane.parked.len() >= super::handle::MEMBER_ADMISSION_LANE_CAPACITY {
+            debug_assert!(
+                false,
+                "member admission lane for '{agent_identity}' filled between the pre-admission capacity check and the park"
+            );
+            tracing::error!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                depth = lane.parked.len(),
+                "member admission lane over capacity after machine admission; parking anyway (wiring fault)"
+            );
+        }
+        lane.parked
+            .push_back(ParkedMemberTurnAdmission { pending, reply_tx });
+        let depth = lane.parked.len();
+        self.member_admission_backlog.record(&agent_identity, depth);
+        tracing::debug!(
+            mob_id = %self.definition.id,
+            agent_identity = %agent_identity,
+            depth,
+            "parked member delivery behind the member's in-flight admission"
+        );
+    }
+
+    fn spawn_member_turn_admission(
+        &mut self,
+        pending: Box<PendingMemberTurnAdmission>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        let agent_identity = pending.agent_identity.clone();
+        self.next_member_admission_ticket = self.next_member_admission_ticket.wrapping_add(1);
+        let ticket = self.next_member_admission_ticket;
+        self.member_admission_lanes
+            .entry(agent_identity.clone())
+            .or_default()
+            .inflight = Some(ticket);
+        let context = self.detached_member_readiness_context();
+        let session_service = Arc::clone(&self.session_service);
+        let command_tx = self.command_tx.clone();
+        self.actor_io_tasks.spawn(async move {
+            Self::run_member_turn_admission(
+                &context,
+                &session_service,
+                &command_tx,
+                *pending,
+                reply_tx,
+            )
+            .await;
+            // Release the lane on the actor. A closed channel means the actor
+            // exited; its lanes died with it.
+            let _ = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::MemberTurnAdmissionSettled {
+                        agent_identity,
+                        ticket,
+                    },
+                ))
+                .await;
+        });
+    }
+
+    /// Release a member's admission lane and start its next parked delivery,
+    /// skipping any whose caller has already gone.
+    fn settle_member_turn_admission(&mut self, agent_identity: &AgentIdentity, ticket: u64) {
+        let Some(lane) = self.member_admission_lanes.get_mut(agent_identity) else {
+            return;
+        };
+        if lane.inflight != Some(ticket) {
+            tracing::debug!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                ticket,
+                "ignoring stale member admission settlement"
+            );
+            return;
+        }
+        lane.inflight = None;
+        let mut next = None;
+        while let Some(parked) = lane.parked.pop_front() {
+            if parked.reply_tx.is_closed() {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    "skipping parked delivery whose caller dropped its reply receiver"
+                );
+                continue;
+            }
+            next = Some(parked);
+            break;
+        }
+        let depth = lane.parked.len();
+        let lane_idle = next.is_none() && depth == 0;
+        self.member_admission_backlog.record(agent_identity, depth);
+        if lane_idle {
+            self.member_admission_lanes.remove(agent_identity);
+            return;
+        }
+        if let Some(ParkedMemberTurnAdmission { pending, reply_tx }) = next {
+            self.spawn_member_turn_admission(pending, reply_tx);
+        }
+    }
+
+    /// Body of one detached member turn admission: caller liveness, then the
+    /// member-local readiness steps that used to run inline, then the
+    /// runtime admission, autonomous dispatch, or completion-bearing
+    /// delivery. A caller already gone at the initial liveness check is
+    /// skipped; departure after that check does not cancel readiness or
+    /// admission. The completion body replies at its own custody points.
+    async fn run_member_turn_admission(
+        context: &DetachedMemberReadinessContext,
+        session_service: &Arc<dyn MobSessionService>,
+        command_tx: &mpsc::Sender<RoutedMobCommand>,
+        pending: PendingMemberTurnAdmission,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        let PendingMemberTurnAdmission {
+            agent_identity,
+            readiness,
+            dispatch,
+        } = pending;
+        if reply_tx.is_closed() {
+            // Parked long enough for the caller to leave: never run a ghost
+            // turn. Equivalent to a runtime admission failing after the DSL
+            // admission, which the machine already tolerates (an ingress
+            // effect has no compensating transition).
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                "member delivery abandoned before its lane admission; not executed"
+            );
+            return;
+        }
+        if let Some(readiness) = readiness {
+            let member_ref = match &dispatch {
+                PendingTurnDispatch::Admission { member_ref, .. }
+                | PendingTurnDispatch::Completion { member_ref, .. } => member_ref,
+                PendingTurnDispatch::Autonomous(material) => &material.member_ref,
+            };
+            if let Err(error) = Self::run_local_turn_readiness(
+                context,
+                session_service,
+                command_tx,
+                &agent_identity,
+                &readiness,
+                member_ref,
+            )
+            .await
+            {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        }
+        match dispatch {
+            PendingTurnDispatch::Admission {
+                member_ref,
+                req,
+                completion_tx,
+                llm_identity_applied_tx,
+                placed_identity,
+                placed_incarnation,
+                placed_input_id,
+            } => {
+                let result = Self::execute_turn_admission(
+                    &context.provisioner,
+                    member_ref,
+                    req,
+                    completion_tx,
+                    llm_identity_applied_tx,
+                    placed_identity.map(|identity| (command_tx.clone(), identity)),
+                    placed_incarnation,
+                    placed_input_id,
+                )
+                .await;
+                let _ = reply_tx.send(result);
+            }
+            PendingTurnDispatch::Autonomous(material) => {
+                let result = context
+                    .dispatch_autonomous(&agent_identity, *material)
+                    .await;
+                let _ = reply_tx.send(result);
+            }
+            PendingTurnDispatch::Completion {
+                member_ref,
+                req,
+                completion_tx,
+                bounded_result_spec,
+                placed_identity,
+                remote,
+            } => {
+                Self::execute_turn_completed_delivery(
+                    Arc::clone(&context.provisioner),
+                    member_ref,
+                    req,
+                    completion_tx,
+                    bounded_result_spec,
+                    reply_tx,
+                    placed_identity.map(|identity| (command_tx.clone(), identity)),
+                    remote,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// The member-local readiness steps that ran inline on the loop before
+    /// #1102: the #37 live-session probe (revival re-enters the actor) and,
+    /// for AutonomousHost members, comms-drain plus injector readiness.
+    async fn run_local_turn_readiness(
+        context: &DetachedMemberReadinessContext,
+        session_service: &Arc<dyn MobSessionService>,
+        command_tx: &mpsc::Sender<RoutedMobCommand>,
+        agent_identity: &AgentIdentity,
+        readiness: &LocalTurnAdmissionReadiness,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        if readiness.check_live_session {
+            match session_service
+                .live_session_actor_registered(&readiness.bridge_session_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                    // #37: the live materialization is gone while MobMachine
+                    // still owns the member as Active. Revival is machine
+                    // authority, so it re-enters the actor and this task waits
+                    // for its typed verdict.
+                    Self::request_member_live_revival(
+                        command_tx,
+                        agent_identity,
+                        &readiness.bridge_session_id,
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(MobError::SessionError(error)),
+            }
+        }
+        if readiness.autonomous_runtime {
+            context
+                .ensure_autonomous_runtime_ready(agent_identity, member_ref)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn request_member_live_revival(
+        command_tx: &mpsc::Sender<RoutedMobCommand>,
+        agent_identity: &AgentIdentity,
+        bridge_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(RoutedMobCommand::internal(
+                MobCommand::ReviveMemberLiveMaterialization {
+                    agent_identity: agent_identity.clone(),
+                    bridge_session_id: bridge_session_id.clone(),
+                    reply_tx,
+                },
+            ))
+            .await
+            .map_err(|_| MobError::ActorCommandChannelClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::ActorReplyChannelClosed)?
+    }
+
+    /// Actor-side half of the #37 revival requested by a detached admission
+    /// task. Re-resolves the member against current machine state so a stale
+    /// request (retired, respawned, or rebound member) fails typed instead of
+    /// reviving the wrong incarnation.
+    async fn revive_member_live_materialization_for_delivery(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        bridge_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(agent_identity)
+            .cloned()
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        self.ensure_member_not_broken(agent_identity).await?;
+        let member_ref = self.machine_member_ref_for_behavior(&entry, "member turn delivery")?;
+        if member_ref.bridge_session_id() != Some(bridge_session_id) {
+            return Err(MobError::Internal(format!(
+                "member '{agent_identity}' session binding changed before delivery revival of '{bridge_session_id}'"
+            )));
+        }
+        self.revive_member_live_materialization(
+            &entry,
+            &member_ref,
+            bridge_session_id,
+            None,
+            false,
+            true,
+        )
+        .await
+    }
+
+    // ------------------------------------------------------------------
+    // #1102 section 5: non-destructive member registration reload.
+    // ------------------------------------------------------------------
+
+    async fn prepare_member_registration_reload(
+        &mut self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<PreparedMemberRegistrationReload, MobError> {
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(agent_identity)
+            .cloned()
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), agent_identity) {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "placed members are reloaded by their member host".to_string(),
+            });
+        }
+        let member_ref =
+            self.machine_member_ref_for_behavior(&entry, "member registration reload")?;
+        let bridge_session_id = member_ref.bridge_session_id().cloned().ok_or_else(|| {
+            MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "registration reload requires a session-backed member".to_string(),
+            }
+        })?;
+        Ok(PreparedMemberRegistrationReload {
+            entry,
+            member_ref,
+            bridge_session_id,
+        })
+    }
+
+    fn spawn_member_registration_reload(
+        &mut self,
+        prepared: PreparedMemberRegistrationReload,
+        deadline: Instant,
+        reply_tx: oneshot::Sender<Result<super::handle::MemberReloadOutcome, MobError>>,
+    ) {
+        let PreparedMemberRegistrationReload {
+            entry,
+            member_ref,
+            bridge_session_id,
+        } = prepared;
+        let context = self.detached_member_readiness_context();
+        let session_service = Arc::clone(&self.session_service);
+        let command_tx = self.command_tx.clone();
+        self.actor_io_tasks.spawn(async move {
+            // One end-to-end bound (`MEMBER_RELOAD_TOTAL_TIMEOUT`, set by the
+            // handle) across probe, discard, revival and readiness; the stage
+            // that misses it is named in the typed timeout.
+            let stage = Arc::new(std::sync::Mutex::new("durability_reload_discard"));
+            let set_stage = |next: &'static str| {
+                *stage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            };
+            let body = async {
+                let disposition = context
+                    .provisioner
+                    .reload_degraded_runtime_registration(&member_ref, deadline)
+                    .await?;
+                if disposition == super::handle::MemberReloadDisposition::Discarded {
+                    set_stage("live_session_revival");
+                    // The degraded shell is gone. Its live session actor is
+                    // normally discarded by the same saga; when the actor
+                    // outlived it (no machine-owned materialization claim to
+                    // fence), drop the now executor-less actor here so the
+                    // revival below re-materializes instead of adopting it.
+                    if context
+                        .session_has_no_executor_registration(&bridge_session_id)
+                        .await
+                        && matches!(
+                            session_service.has_live_session(&bridge_session_id).await,
+                            Ok(true)
+                        )
+                    {
+                        session_service
+                            .discard_live_session(&bridge_session_id)
+                            .await
+                            .map_err(MobError::SessionError)?;
+                    }
+                    // Rebuild the live session for the same session id
+                    // through the machine-authorized revival seam (executor
+                    // re-registration from durable truth), then re-arm the
+                    // member's runtime readiness.
+                    Self::request_member_live_revival(
+                        &command_tx,
+                        &entry.agent_identity,
+                        &bridge_session_id,
+                    )
+                    .await?;
+                    set_stage("runtime_readiness");
+                    if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+                        context
+                            .ensure_autonomous_runtime_ready(&entry.agent_identity, &member_ref)
+                            .await?;
+                    } else {
+                        context
+                            .ensure_mob_comms_drain(&entry.agent_identity, &member_ref)
+                            .await?;
+                    }
+                }
+                Ok(super::handle::MemberReloadOutcome {
+                    disposition,
+                    session_id: bridge_session_id.clone(),
+                    generation: entry.agent_runtime_id.generation,
+                })
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let result = match tokio::time::timeout(remaining, body).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(MobError::MemberReloadTimedOut {
+                    session_id: bridge_session_id.clone(),
+                    stage: *stage
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                }),
+            };
+            if let Err(error) = &result {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    session_id = %bridge_session_id,
+                    error = %error,
+                    "member registration reload failed"
+                );
+            } else {
+                tracing::info!(
+                    agent_identity = %entry.agent_identity,
+                    session_id = %bridge_session_id,
+                    disposition = ?result.as_ref().map(|outcome| outcome.disposition),
+                    "member registration reload completed"
+                );
+            }
+            let _ = reply_tx.send(result);
+        });
     }
 
     /// Phase one of every autonomous stop: durably close kickoff origin, then
@@ -16353,11 +17422,39 @@ impl MobActor {
     /// local autonomous member's drain and injector have both been observed,
     /// publish that exact runtime/fence through MobMachine's existing startup
     /// readiness transition. Durable membership alone is not readiness.
+    /// Actor-startup form of the member readiness fan-out (`prepare_actor_run`,
+    /// before the command loop exists): every member's bounded readiness step
+    /// runs concurrently and the outcomes are applied here, so the whole pass
+    /// is bounded by one `RESUME_MEMBER_READINESS_BOUND` rather than by member
+    /// count. This form awaits inline; commands sent during it queue in the
+    /// channel until `run` starts draining. Explicit Resume uses the split
+    /// form (`spawn_resume_readiness_fanout` + `resume_lifecycle_readiness_resolved`)
+    /// whose outcomes re-enter as a command so the loop keeps draining (#1102).
     async fn ensure_autonomous_runtimes_from_roster(
         &mut self,
         allow_stopped_resume_reopen: bool,
         progress: Option<&super::state::LifecycleProgressSignal>,
     ) -> Result<(), MobError> {
+        let Some(targets) = self
+            .collect_member_readiness_targets(allow_stopped_resume_reopen)
+            .await?
+        else {
+            return Ok(());
+        };
+        let expected = member_readiness_expectations(&targets);
+        let readiness = self.spawn_member_readiness_tasks(targets, progress.cloned());
+        let outcomes =
+            collect_member_readiness_outcomes(readiness, expected, &self.definition.id).await;
+        self.apply_member_readiness_outcomes(outcomes).await
+    }
+
+    /// Resolve which local members need a readiness step and which step.
+    /// `Ok(None)` means readiness is fenced by durable lifecycle intent and
+    /// nothing must run.
+    async fn collect_member_readiness_targets(
+        &self,
+        allow_stopped_resume_reopen: bool,
+    ) -> Result<Option<Vec<MemberReadinessTarget>>, MobError> {
         let lifecycle = self.dsl_authority.state();
         if lifecycle_origin_fenced(lifecycle) {
             if !allow_stopped_resume_reopen {
@@ -16366,7 +17463,7 @@ impl MobActor {
                     intent = ?lifecycle.placed_completion_lifecycle_intent,
                     "autonomous runtime startup remains fenced by durable lifecycle intent"
                 );
-                return Ok(());
+                return Ok(None);
             }
             if self.state() != MobState::Stopped
                 || lifecycle.placed_completion_lifecycle_intent
@@ -16391,196 +17488,603 @@ impl MobActor {
             .keys()
             .map(|identity| AgentIdentity::from(identity.0.as_str()))
             .collect::<HashSet<_>>();
-        let entries = {
-            let roster = self.roster.read().await;
-            roster
-                .list()
-                .filter(|entry| {
-                    entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                        && !broken_members.contains(&entry.agent_identity)
-                        && !placed_members.contains(&entry.agent_identity)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        if entries.is_empty() {
-            // Turn-driven resumed members still need their mob-owned comms
-            // drain rebound even though they do not need autonomous dispatch.
-        }
-
-        let mut first_error: Option<MobError> = None;
-        let all_entries = {
-            let roster = self.roster.read().await;
-            roster
-                .list()
-                .filter(|entry| {
-                    entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost
-                        && !broken_members.contains(&entry.agent_identity)
-                        && !placed_members.contains(&entry.agent_identity)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        for entry in &all_entries {
-            if let Some(progress) = progress {
-                progress.awaiting_member(
-                    &entry.agent_identity,
-                    super::state::LifecycleProgressStage::MemberCommsReadiness,
-                );
-            }
-            let ensure_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                self.provisioner
-                    .ensure_runtime_session_state(&entry.member_ref)
-                    .await?;
-                self.ensure_mob_comms_drain(&entry.agent_identity, &entry.member_ref)
-                    .await
+        let roster = self.roster.read().await;
+        let targets = roster
+            .list()
+            .filter(|entry| {
+                !broken_members.contains(&entry.agent_identity)
+                    && !placed_members.contains(&entry.agent_identity)
             })
-            .await;
-            let result = match ensure_result {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    tracing::warn!(
-                        agent_identity = %entry.agent_identity,
-                        "timed out ensuring mob comms drain ready"
-                    );
-                    // A readiness timeout is a confirmed-never fault, not a
-                    // resumable no-op: surface it so Resume cannot report
-                    // success when comms-drain readiness was never observed.
-                    if first_error.is_none() {
-                        first_error = Some(MobError::ReadyWaitTimedOut {
-                            pending_member_ids: vec![AgentIdentity::from(
-                                entry.agent_identity.as_str(),
-                            )],
-                        });
+            .map(|entry| MemberReadinessTarget {
+                entry: entry.clone(),
+                // Turn-driven resumed members still need their mob-owned comms
+                // drain rebound even though they do not need autonomous
+                // dispatch; autonomous members need both, through one step.
+                stage: if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+                    super::state::LifecycleProgressStage::AutonomousRuntimeReadiness
+                } else {
+                    super::state::LifecycleProgressStage::MemberCommsReadiness
+                },
+            })
+            .collect::<Vec<_>>();
+        Ok(Some(targets))
+    }
+
+    /// Run every target's readiness step concurrently, each bounded by
+    /// [`RESUME_MEMBER_READINESS_BOUND`]. A timeout is a confirmed-never
+    /// fault (`ReadyWaitTimedOut`), not a resumable no-op, so Resume cannot
+    /// report success when readiness was never observed. Readiness steps are
+    /// idempotent ensures with no durable effect, so a panicking step is
+    /// converted into that member's typed failure instead of taking the
+    /// actor down.
+    fn spawn_member_readiness_tasks(
+        &self,
+        targets: Vec<MemberReadinessTarget>,
+        progress: Option<super::state::LifecycleProgressSignal>,
+    ) -> tokio::task::JoinSet<MemberReadinessOutcome> {
+        let mut readiness = tokio::task::JoinSet::new();
+        let context = self.detached_member_readiness_context();
+        for MemberReadinessTarget { entry, stage } in targets {
+            let context = context.clone();
+            let progress = progress.clone();
+            readiness.spawn(async move {
+                if let Some(progress) = &progress {
+                    progress.awaiting_member(&entry.agent_identity, stage);
+                }
+                let agent_identity = entry.agent_identity.clone();
+                let member_ref = entry.member_ref.clone();
+                let work = async {
+                    match stage {
+                        super::state::LifecycleProgressStage::AutonomousRuntimeReadiness => {
+                            context
+                                .ensure_autonomous_runtime_ready(&agent_identity, &member_ref)
+                                .await
+                        }
+                        _ => {
+                            context
+                                .provisioner
+                                .ensure_runtime_session_state(&member_ref)
+                                .await?;
+                            context
+                                .ensure_mob_comms_drain(&agent_identity, &member_ref)
+                                .await
+                        }
                     }
-                    if let Some(progress) = progress {
-                        progress.member_progress(
-                            &entry.agent_identity,
-                            super::state::LifecycleProgressStage::MemberCommsReadiness,
+                };
+                let result = match tokio::time::timeout(
+                    RESUME_MEMBER_READINESS_BOUND,
+                    std::panic::AssertUnwindSafe(work).catch_unwind(),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_panic)) => Err(MobError::Internal(format!(
+                        "member readiness step panicked for '{agent_identity}'"
+                    ))),
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            agent_identity = %agent_identity,
+                            stage = stage.as_str(),
+                            bound_ms = RESUME_MEMBER_READINESS_BOUND.as_millis() as u64,
+                            "timed out ensuring member runtime readiness"
                         );
+                        Err(MobError::ReadyWaitTimedOut {
+                            pending_member_ids: vec![AgentIdentity::from(agent_identity.as_str())],
+                        })
                     }
-                    continue;
+                };
+                if let Some(progress) = &progress {
+                    progress.member_progress(&agent_identity, stage);
                 }
-            };
-            if let Err(error) = result {
-                tracing::warn!(
-                    agent_identity = %entry.agent_identity,
-                    error = %error,
-                    "failed ensuring mob comms drain ready"
-                );
-                if first_error.is_none() {
-                    first_error = Some(error);
+                MemberReadinessOutcome {
+                    entry,
+                    stage,
+                    result,
                 }
-            }
-            if let Some(progress) = progress {
-                progress.member_progress(
-                    &entry.agent_identity,
-                    super::state::LifecycleProgressStage::MemberCommsReadiness,
-                );
-            }
+            });
         }
-        for entry in &entries {
-            if let Some(progress) = progress {
-                progress.awaiting_member(
-                    &entry.agent_identity,
-                    super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
-                );
-            }
-            let ensure_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref),
-            )
-            .await;
-            let result = match ensure_result {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    tracing::warn!(
+        readiness
+    }
+
+    /// Apply concurrent readiness outcomes on the actor: log failures, keep
+    /// the first typed error, and publish `StartupMarkReady` for every
+    /// autonomous member whose readiness was observed while Running.
+    ///
+    /// Cold Running recovery rebuilds session runtime mechanics before the
+    /// actor starts, then reaches this shared check without the volatile
+    /// startup marker created by the original process. The successful
+    /// observation feeds the same exact-runtime/fence machine transition used
+    /// by fresh spawn. It is never inferred from the durable roster and never
+    /// applied while the mob is Stopped: same-handle resume performs these
+    /// checks before its durable Resume commit, while a rebuilt attachment
+    /// checks again after it.
+    ///
+    /// The fan-out runs off the loop, so a member may be retired or respawned
+    /// while its readiness step is in flight. Its outcome then describes an
+    /// incarnation the roster no longer holds: it is logged and dropped, never
+    /// folded into the Resume verdict, and never published as readiness for
+    /// the successor incarnation.
+    async fn apply_member_readiness_outcomes(
+        &mut self,
+        outcomes: Vec<MemberReadinessOutcome>,
+    ) -> Result<(), MobError> {
+        let current_incarnations = {
+            let roster = self.roster.read().await;
+            roster
+                .list()
+                .map(|entry| {
+                    (
+                        entry.agent_identity.clone(),
+                        (entry.agent_runtime_id.clone(), entry.fence_token),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let mut first_error: Option<MobError> = None;
+        for MemberReadinessOutcome {
+            entry,
+            stage,
+            result,
+        } in outcomes
+        {
+            match current_incarnations.get(&entry.agent_identity) {
+                None => {
+                    tracing::info!(
                         agent_identity = %entry.agent_identity,
-                        "timed out ensuring autonomous runtime ready"
+                        stage = stage.as_str(),
+                        outcome_ok = result.is_ok(),
+                        "member left the roster during the readiness fan-out; ignoring its outcome"
                     );
-                    // A readiness timeout is a confirmed-never fault, not a
-                    // resumable no-op: surface it so Resume cannot report
-                    // success when autonomous-runtime readiness was never
-                    // observed.
-                    if first_error.is_none() {
-                        first_error = Some(MobError::ReadyWaitTimedOut {
-                            pending_member_ids: vec![AgentIdentity::from(
-                                entry.agent_identity.as_str(),
-                            )],
-                        });
-                    }
-                    if let Some(progress) = progress {
-                        progress.member_progress(
-                            &entry.agent_identity,
-                            super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
-                        );
-                    }
                     continue;
                 }
-            };
+                Some((runtime_id, fence_token))
+                    if runtime_id != &entry.agent_runtime_id
+                        || *fence_token != entry.fence_token =>
+                {
+                    tracing::info!(
+                        agent_identity = %entry.agent_identity,
+                        stage = stage.as_str(),
+                        observed_runtime_id = %entry.agent_runtime_id,
+                        current_runtime_id = %runtime_id,
+                        "member incarnation changed during the readiness fan-out; ignoring the stale outcome"
+                    );
+                    continue;
+                }
+                Some(_) => {}
+            }
             if let Err(error) = result {
                 tracing::warn!(
                     agent_identity = %entry.agent_identity,
+                    stage = stage.as_str(),
                     error = %error,
-                    "failed ensuring autonomous runtime ready"
+                    "failed ensuring member runtime readiness"
                 );
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-                if let Some(progress) = progress {
-                    progress.member_progress(
-                        &entry.agent_identity,
-                        super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
-                    );
-                }
+                first_error.get_or_insert(error);
                 continue;
             }
-
-            // Cold Running recovery rebuilds session runtime mechanics before
-            // the actor starts, then reaches this shared check without the
-            // volatile startup marker created by the original process. Feed
-            // the successful observation through the same exact-runtime/fence
-            // machine transition used by fresh spawn. Never infer this from
-            // the durable roster, and never apply it while the mob is Stopped:
-            // same-handle resume performs these checks before its durable
-            // Resume commit, while a rebuilt attachment checks again after it.
-            if self.state() == MobState::Running {
-                let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-                if !self
-                    .dsl_authority
-                    .state()
-                    .member_startup_ready
-                    .contains(&runtime_id)
-                    && let Err(error) = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::StartupMarkReady {
-                            agent_runtime_id: runtime_id,
-                            fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
-                        },
-                        "ensure_autonomous_runtimes_from_roster/startup_mark_ready",
-                    )
-                {
-                    tracing::warn!(
-                        agent_identity = %entry.agent_identity,
-                        error = %error,
-                        "failed publishing autonomous runtime startup readiness"
-                    );
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
+            if stage != super::state::LifecycleProgressStage::AutonomousRuntimeReadiness
+                || self.state() != MobState::Running
+            {
+                continue;
             }
-            if let Some(progress) = progress {
-                progress.member_progress(
-                    &entry.agent_identity,
-                    super::state::LifecycleProgressStage::AutonomousRuntimeReadiness,
+            let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+            if !self
+                .dsl_authority
+                .state()
+                .member_startup_ready
+                .contains(&runtime_id)
+                && let Err(error) = self.apply_dsl_input(
+                    mob_dsl::MobMachineInput::StartupMarkReady {
+                        agent_runtime_id: runtime_id,
+                        fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                    },
+                    "ensure_autonomous_runtimes_from_roster/startup_mark_ready",
+                )
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    error = %error,
+                    "failed publishing autonomous runtime startup readiness"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    // ------------------------------------------------------------------
+    // #1102: explicit Resume with the readiness fan-out off the loop.
+    // ------------------------------------------------------------------
+
+    async fn begin_resume_lifecycle(
+        &mut self,
+        deadline: Instant,
+        admission: super::state::LifecycleAdmissionSignal,
+        progress: super::state::LifecycleProgressSignal,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        if self.pending_resume_lifecycle.is_some() {
+            let _ = reply_tx.send(Err(MobError::LifecycleOperationPending {
+                intent: "explicit_resume".to_string(),
+            }));
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = reply_tx.send(Err(MobError::LifecycleOperationAdmissionPending {
+                intent: "explicit_resume".to_string(),
+                stage: "actor_command_execution",
+            }));
+            return;
+        }
+        if let Err(error) = self.probe_command_admission(
+            mob_dsl::MobMachineInput::Resume,
+            MobState::Running,
+            "resume_command_admission",
+        ) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        // Re-enable checkpointers cancelled during stop.
+        self.provisioner.rearm_all_checkpointers().await;
+
+        let rebuild = match self
+            .prepare_explicit_resume_member_sessions(admission.clone(), &progress)
+            .await
+        {
+            Ok(rebuild) => rebuild,
+            Err(error) => {
+                self.provisioner.cancel_all_checkpointers().await;
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+        if !rebuild.is_empty() {
+            // A reconstructed handle cannot become ready until its foreign
+            // attachments have been retired and the durable Resume transition
+            // authorizes the existing machine-owned revival seam.
+            self.commit_resume_lifecycle(admission, progress, reply_tx, rebuild)
+                .await;
+            return;
+        }
+        // Same-handle resume preserves the prior pre-commit readiness
+        // contract: every member's readiness is observed before the durable
+        // Resume commit. The observations run concurrently off the loop.
+        match self.collect_member_readiness_targets(true).await {
+            Err(error) => {
+                self.rollback_resume_lifecycle_pre_commit(error, reply_tx)
+                    .await;
+            }
+            Ok(None) => {
+                self.commit_resume_lifecycle(admission, progress, reply_tx, Vec::new())
+                    .await;
+            }
+            Ok(Some(targets)) => {
+                self.spawn_resume_readiness_fanout(
+                    targets,
+                    None,
+                    PendingResumeLifecycle {
+                        ticket: 0,
+                        phase: ResumeLifecyclePhase::PreCommitReadiness,
+                        admission,
+                        progress,
+                        reply_tx,
+                    },
                 );
             }
         }
+    }
 
-        if let Some(error) = first_error {
-            return Err(error);
+    async fn rollback_resume_lifecycle_pre_commit(
+        &mut self,
+        error: MobError,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    ) {
+        if let Err(stop_error) = self.stop_all_autonomous_members_for_rollback().await {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %stop_error,
+                "resume cleanup failed while stopping autonomous loops"
+            );
         }
-        Ok(())
+        self.provisioner.cancel_all_checkpointers().await;
+        let _ = reply_tx.send(Err(error));
+    }
+
+    fn spawn_resume_readiness_fanout(
+        &mut self,
+        targets: Vec<MemberReadinessTarget>,
+        progress: Option<super::state::LifecycleProgressSignal>,
+        mut pending: PendingResumeLifecycle,
+    ) {
+        self.next_resume_lifecycle_ticket = self.next_resume_lifecycle_ticket.wrapping_add(1);
+        let ticket = self.next_resume_lifecycle_ticket;
+        pending.ticket = ticket;
+        self.pending_resume_lifecycle = Some(pending);
+        let expected = member_readiness_expectations(&targets);
+        let readiness = self.spawn_member_readiness_tasks(targets, progress);
+        let command_tx = self.command_tx.clone();
+        let mob_id = self.definition.id.clone();
+        self.actor_io_tasks.spawn(async move {
+            let outcomes = collect_member_readiness_outcomes(readiness, expected, &mob_id).await;
+            let _ = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::ResumeLifecycleReadinessResolved { ticket, outcomes },
+                ))
+                .await;
+        });
+    }
+
+    async fn resume_lifecycle_readiness_resolved(
+        &mut self,
+        ticket: u64,
+        outcomes: Vec<MemberReadinessOutcome>,
+    ) {
+        let Some(pending) = self
+            .pending_resume_lifecycle
+            .take_if(|pending| pending.ticket == ticket)
+        else {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                ticket,
+                "ignoring stale explicit resume readiness resolution"
+            );
+            return;
+        };
+        let PendingResumeLifecycle {
+            ticket: _,
+            phase,
+            admission,
+            progress,
+            reply_tx,
+        } = pending;
+        let readiness_result = self.apply_member_readiness_outcomes(outcomes).await;
+        // Other commands ran while the fan-out was in flight. Re-probe the
+        // lifecycle before continuing so a Stop/Complete/Reset/Destroy that
+        // interleaved wins: pre-commit, the durable Resume must still be
+        // admissible; post-commit, the topology/orchestrator reconciliation
+        // must not run against a mob that has since left Running.
+        match phase {
+            ResumeLifecyclePhase::PreCommitReadiness => {
+                if let Err(error) = readiness_result {
+                    self.rollback_resume_lifecycle_pre_commit(error, reply_tx)
+                        .await;
+                    return;
+                }
+                if let Err(error) = self.probe_command_admission(
+                    mob_dsl::MobMachineInput::Resume,
+                    MobState::Running,
+                    "resume_readiness_resolved_admission",
+                ) {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %error,
+                        "lifecycle changed during the explicit resume readiness fan-out; resume not committed"
+                    );
+                    self.rollback_resume_lifecycle_pre_commit(error, reply_tx)
+                        .await;
+                    return;
+                }
+                self.commit_resume_lifecycle(admission, progress, reply_tx, Vec::new())
+                    .await;
+            }
+            ResumeLifecyclePhase::PostCommitReadiness { post_commit_error } => {
+                let current_phase = self.state();
+                if current_phase != MobState::Running {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        phase = ?current_phase,
+                        "lifecycle left Running during the explicit resume readiness fan-out; post-commit reconciliation skipped"
+                    );
+                    let _ = reply_tx.send(Err(MobError::LifecycleOperationPending {
+                        intent: format!("explicit_resume superseded by {current_phase:?}"),
+                    }));
+                    return;
+                }
+                let post_commit_error = post_commit_error.or(readiness_result.err());
+                let result = self
+                    .finish_resume_lifecycle_post_commit(&progress, post_commit_error)
+                    .await;
+                let _ = reply_tx.send(result);
+            }
+        }
+    }
+
+    /// Resume's durable End{Stop}/Resumed carrier is the commit point. The
+    /// external coordinator notification is not enqueued before it: an
+    /// absent/failed carrier must leave both the mob and coordinator stopped.
+    /// Same-handle pre-commit failures still roll back freshly restarted
+    /// loops. A reconstructed handle may already have retired foreign
+    /// attachments; failure remains a stopped, discoverable session set that
+    /// an explicit retry can rebuild.
+    async fn commit_resume_lifecycle(
+        &mut self,
+        admission: super::state::LifecycleAdmissionSignal,
+        progress: super::state::LifecycleProgressSignal,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        rebuild: Vec<ExplicitResumeMemberRebuild>,
+    ) {
+        let rebuilt_attachment = !rebuild.is_empty();
+        admission.admit();
+        progress.awaiting_stage(super::state::LifecycleProgressStage::DurableResumeTransition);
+        if let Err(error) = self.resume_lifecycle_after_quiesce().await {
+            if !rebuilt_attachment
+                && let Err(stop_error) = self.stop_all_autonomous_members_for_rollback().await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %stop_error,
+                    "resume transition rollback failed while stopping autonomous loops"
+                );
+            }
+            self.provisioner.cancel_all_checkpointers().await;
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+
+        if rebuilt_attachment {
+            let post_commit_error = self
+                .rebuild_explicit_resume_member_sessions(rebuild, &progress)
+                .await
+                .err();
+            progress.awaiting_stage(super::state::LifecycleProgressStage::PostRebuildReadiness);
+            match self.collect_member_readiness_targets(false).await {
+                Err(error) => {
+                    let result = self
+                        .finish_resume_lifecycle_post_commit(
+                            &progress,
+                            post_commit_error.or(Some(error)),
+                        )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                Ok(None) => {
+                    let result = self
+                        .finish_resume_lifecycle_post_commit(&progress, post_commit_error)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                Ok(Some(targets)) => {
+                    self.spawn_resume_readiness_fanout(
+                        targets,
+                        Some(progress.clone()),
+                        PendingResumeLifecycle {
+                            ticket: 0,
+                            phase: ResumeLifecyclePhase::PostCommitReadiness { post_commit_error },
+                            admission,
+                            progress,
+                            reply_tx,
+                        },
+                    );
+                }
+            }
+            return;
+        }
+
+        let result = self
+            .finish_resume_lifecycle_post_commit(&progress, None)
+            .await;
+        let _ = reply_tx.send(result);
+    }
+
+    async fn finish_resume_lifecycle_post_commit(
+        &mut self,
+        progress: &super::state::LifecycleProgressSignal,
+        mut post_commit_error: Option<MobError>,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            progress
+                .awaiting_stage(super::state::LifecycleProgressStage::ResumeTopologyReconciliation);
+            // All exact session attachments are settled before topology
+            // repair. The shared reconciler consumes its generated trust
+            // handoffs directly; routing the same effects again here would
+            // duplicate live mutations.
+            let mut topology_roster = self.roster.read().await.snapshot();
+            let topology_result = super::builder::reconcile_resume_topology(
+                &self.definition,
+                &mut topology_roster,
+                self.provisioner.as_ref(),
+                &self.supervisor_bridge,
+                &self.runtime_metadata,
+                &mut self.dsl_authority,
+                &self.dsl_topology_epoch,
+            )
+            .await;
+            *self.roster.write().await = RosterAuthority::from_roster(topology_roster);
+            self.publish_machine_state_projection();
+            if let Err(error) = topology_result
+                && post_commit_error.is_none()
+            {
+                post_commit_error = Some(error);
+            }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = progress;
+
+        // A cold actor reconstructed while Stopped skips the startup-time
+        // operation-binding restore. Once explicit Resume has settled every
+        // attachment and the shared topology seam has recovered the exact
+        // current peer endpoint, rebuild those generated owner bindings
+        // through the same seam used by a cold Running actor. Peer-only
+        // members have no local bridge session of their own, so this is their
+        // only durable route back to the owner bridge's operation registry
+        // before respawn/retire. Binding after topology also avoids anchoring
+        // a legacy pre-rebind address.
+        if let Err(error) = self.restore_generated_member_operation_bindings().await
+            && post_commit_error.is_none()
+        {
+            post_commit_error = Some(error);
+        }
+
+        if self.has_orchestrator {
+            let orchestrator_transition_succeeded = match self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::ResumeOrchestrator,
+                "resume_orchestrator_after_durable_resume",
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    if post_commit_error.is_none() {
+                        // The mob is durably Running; surface the local
+                        // transition failure without pretending Resume rolled
+                        // back.
+                        post_commit_error = Some(MobError::Internal(format!(
+                            "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
+                        )));
+                    }
+                    false
+                }
+            };
+            if orchestrator_transition_succeeded && self.notify_orchestrator_on_resume {
+                let orchestrator_entries = if let Some(orchestrator) =
+                    self.definition.orchestrator.as_ref()
+                {
+                    let orchestrator_identities = self
+                        .dsl_authority
+                        .state()
+                        .active_member_identities_for_profile(&orchestrator.profile);
+                    let roster = self.roster.read().await;
+                    orchestrator_identities
+                        .into_iter()
+                        .map(|orchestrator_identity| {
+                            roster
+                                .get(&orchestrator_identity)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    MobError::Internal(format!(
+                                        "active MobMachine orchestrator '{orchestrator_identity}' has no mechanical roster entry during explicit resume"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, MobError>>()
+                } else {
+                    Ok(Vec::new())
+                };
+                match orchestrator_entries {
+                    Ok(orchestrator_entries) => {
+                        for orchestrator_entry in orchestrator_entries {
+                            if let Err(error) =
+                                super::builder::realize_orchestrator_resume_notification(
+                                    self.definition.as_ref(),
+                                    &orchestrator_entry,
+                                    self.session_service.as_ref(),
+                                    self.provisioner.as_ref(),
+                                    &self.dsl_authority,
+                                )
+                                .await
+                                && post_commit_error.is_none()
+                            {
+                                post_commit_error = Some(error);
+                            }
+                        }
+                    }
+                    Err(error) if post_commit_error.is_none() => {
+                        post_commit_error = Some(error);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        post_commit_error.map_or(Ok(()), Err)
     }
 
     /// Chokepoint (a) — MobCommand admission (DEC-P5E-4, ADJ-P5-12/15).
@@ -21340,6 +22844,47 @@ impl MobActor {
                     // reshaping the handler.
                     Box::pin(self.handle_spawn_provisioned_batch(completions)).await;
                 }
+                MobCommand::MemberTurnAdmissionSettled {
+                    agent_identity,
+                    ticket,
+                } => {
+                    self.settle_member_turn_admission(&agent_identity, ticket);
+                }
+                MobCommand::ReviveMemberLiveMaterialization {
+                    agent_identity,
+                    bridge_session_id,
+                    reply_tx,
+                } => {
+                    self.inline_step_watchdog
+                        .set_step("revive_member_live_materialization");
+                    let result = Box::pin(
+                        self.revive_member_live_materialization_for_delivery(
+                            &agent_identity,
+                            &bridge_session_id,
+                        ),
+                    )
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ReloadMemberRegistration {
+                    agent_identity,
+                    deadline,
+                    reply_tx,
+                } => {
+                    match self.prepare_member_registration_reload(&agent_identity).await {
+                        Ok(prepared) => {
+                            self.spawn_member_registration_reload(prepared, deadline, reply_tx);
+                        }
+                        Err(error) => {
+                            let _ = reply_tx.send(Err(error));
+                        }
+                    }
+                }
+                MobCommand::ResumeLifecycleReadinessResolved { ticket, outcomes } => {
+                    self.inline_step_watchdog
+                        .set_step("resume_lifecycle_readiness_resolved");
+                    Box::pin(self.resume_lifecycle_readiness_resolved(ticket, outcomes)).await;
+                }
                 MobCommand::RevivePlacedMember {
                     agent_identity,
                     reason,
@@ -21813,6 +23358,33 @@ impl MobActor {
                                 member_id: payload.runtime_id.identity.clone(),
                             },
                         ));
+                    } else if reply_tx.is_closed() {
+                        // The caller left between dequeue and dispatch. Skip
+                        // before any MobMachine transition so no ingress is
+                        // recorded for a delivery nobody can observe.
+                        tracing::debug!(
+                            agent_identity = %payload.runtime_id.identity,
+                            work_ref = %payload.work_ref,
+                            "MobActor skipped abandoned SubmitWork before admission"
+                        );
+                    } else if let Some(depth) =
+                        self.member_admission_lane_full_depth(&payload.runtime_id.identity)
+                    {
+                        // Per-member backpressure is decided BEFORE the DSL
+                        // SubmitWork apply: a full lane refuses the delivery
+                        // without recording an ingress the lane would then
+                        // have to drop. Lanes only change on this loop, so the
+                        // post-admission park below can never find it full.
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            agent_identity = %payload.runtime_id.identity,
+                            depth,
+                            "member admission lane is full; rejecting delivery typed before admission"
+                        );
+                        let _ = reply_tx.send(Err(MobError::MemberAdmissionBacklogFull {
+                            member_id: payload.runtime_id.identity.clone(),
+                            depth,
+                        }));
                     } else {
                         tracing::debug!(
                         agent_identity = %payload.runtime_id.identity,
@@ -21823,6 +23395,7 @@ impl MobActor {
                         ack_mode = ?payload.ack_mode,
                         "MobActor handling SubmitWork command"
                     );
+                        self.inline_step_watchdog.set_step("handle_submit_work");
                         match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             if !self.respawn_topology_reply_withheld {
@@ -21831,6 +23404,8 @@ impl MobActor {
                         }
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                             operation_id: _,
+                            agent_identity,
+                            readiness,
                             member_ref,
                             req,
                             completion_tx,
@@ -21840,21 +23415,43 @@ impl MobActor {
                             placed_input_id,
                         }) => {
                             if !self.respawn_topology_reply_withheld {
-                                self.spawn_turn_admission_reply(
-                                    self.provisioner.clone(),
-                                    member_ref,
-                                    req,
-                                    completion_tx,
-                                    llm_identity_applied_tx,
+                                self.enqueue_member_turn_admission(
+                                    Box::new(PendingMemberTurnAdmission {
+                                        agent_identity,
+                                        readiness,
+                                        dispatch: PendingTurnDispatch::Admission {
+                                            member_ref,
+                                            req,
+                                            completion_tx,
+                                            llm_identity_applied_tx,
+                                            placed_identity,
+                                            placed_incarnation,
+                                            placed_input_id,
+                                        },
+                                    }),
                                     reply_tx,
-                                    placed_identity
-                                        .map(|identity| (self.command_tx.clone(), identity)),
-                                    placed_incarnation,
-                                    placed_input_id,
+                                );
+                            }
+                        }
+                        Ok(SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
+                            agent_identity,
+                            readiness,
+                            material,
+                        }) => {
+                            if !self.respawn_topology_reply_withheld {
+                                self.enqueue_member_turn_admission(
+                                    Box::new(PendingMemberTurnAdmission {
+                                        agent_identity,
+                                        readiness,
+                                        dispatch: PendingTurnDispatch::Autonomous(material),
+                                    }),
+                                    reply_tx,
                                 );
                             }
                         }
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                            agent_identity,
+                            readiness,
                             member_ref,
                             req,
                             completion_tx,
@@ -21955,15 +23552,20 @@ impl MobActor {
                                     return ActorLoopControl::SkipBoundary;
                                 }
                             };
-                            self.spawn_turn_completed_reply(
-                                self.provisioner.clone(),
-                                member_ref,
-                                req,
-                                completion_tx,
-                                bounded_result_spec,
+                            self.enqueue_member_turn_admission(
+                                Box::new(PendingMemberTurnAdmission {
+                                    agent_identity,
+                                    readiness,
+                                    dispatch: PendingTurnDispatch::Completion {
+                                        member_ref,
+                                        req,
+                                        completion_tx,
+                                        bounded_result_spec,
+                                        placed_identity,
+                                        remote,
+                                    },
+                                }),
                                 reply_tx,
-                                placed_identity.map(|identity| (self.command_tx.clone(), identity)),
-                                remote,
                             );
                         }
                         Err(error) => {
@@ -23369,243 +24971,11 @@ impl MobActor {
                     progress,
                     reply_tx,
                 } => {
-                    let result = if Instant::now() >= deadline {
-                        Err(
-                            MobError::LifecycleOperationAdmissionPending {
-                                intent: "explicit_resume".to_string(),
-                                stage: "actor_command_execution",
-                            },
-                        )
-                    } else {
-                        match self.probe_command_admission(
-                        mob_dsl::MobMachineInput::Resume,
-                        MobState::Running,
-                        "resume_command_admission",
-                    ) {
-                        Ok(()) => async {
-                            // Re-enable checkpointers cancelled during stop.
-                            self.provisioner.rearm_all_checkpointers().await;
-
-                            let rebuild = match self
-                                .prepare_explicit_resume_member_sessions(
-                                    admission.clone(),
-                                    &progress,
-                                )
-                                .await
-                            {
-                                Ok(rebuild) => rebuild,
-                                Err(error) => {
-                                    self.provisioner.cancel_all_checkpointers().await;
-                                    return Err(error);
-                                }
-                            };
-                            let rebuilt_attachment = !rebuild.is_empty();
-
-                            // Same-handle resume preserves the prior
-                            // pre-commit readiness contract. A reconstructed
-                            // handle cannot become ready until its foreign
-                            // attachments have been retired and the durable
-                            // Resume transition authorizes the existing
-                            // machine-owned revival seam.
-                            if !rebuilt_attachment
-                                && let Err(error) =
-                                    self.ensure_autonomous_runtimes_from_roster(true, None).await
-                            {
-                                if let Err(stop_error) =
-                                    self.stop_all_autonomous_members_for_rollback().await
-                                {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        error = %stop_error,
-                                        "resume cleanup failed while stopping autonomous loops"
-                                    );
-                                }
-                                self.provisioner.cancel_all_checkpointers().await;
-                                return Err(error);
-                            }
-
-                            // Resume's durable End{Stop}/Resumed carrier is
-                            // the commit point. Do not enqueue the external
-                            // coordinator notification before it: an
-                            // absent/failed carrier must leave both the mob
-                            // and coordinator stopped. Same-handle pre-commit
-                            // failures still roll back freshly restarted
-                            // loops. A reconstructed handle may already have
-                            // retired foreign attachments; failure remains a
-                            // stopped, discoverable session set that an
-                            // explicit retry can rebuild.
-                            admission.admit();
-                            progress.awaiting_stage(
-                                super::state::LifecycleProgressStage::DurableResumeTransition,
-                            );
-                            if let Err(error) = self.resume_lifecycle_after_quiesce().await {
-                                if !rebuilt_attachment
-                                    && let Err(stop_error) =
-                                        self.stop_all_autonomous_members_for_rollback().await
-                                {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        error = %stop_error,
-                                        "resume transition rollback failed while stopping autonomous loops"
-                                    );
-                                }
-                                self.provisioner.cancel_all_checkpointers().await;
-                                return Err(error);
-                            }
-
-                            let mut post_commit_error = None;
-                            if rebuilt_attachment {
-                                let rebuild_result = self
-                                    .rebuild_explicit_resume_member_sessions(rebuild, &progress)
-                                    .await;
-                                progress.awaiting_stage(
-                                    super::state::LifecycleProgressStage::PostRebuildReadiness,
-                                );
-                                let readiness_result =
-                                    self.ensure_autonomous_runtimes_from_roster(
-                                        false,
-                                        Some(&progress),
-                                    )
-                                    .await;
-                                if let Err(error) = rebuild_result {
-                                    post_commit_error = Some(error);
-                                }
-                                if let Err(error) = readiness_result
-                                    && post_commit_error.is_none()
-                                {
-                                    post_commit_error = Some(error);
-                                }
-                            }
-
-                            #[cfg(feature = "runtime-adapter")]
-                            {
-                                progress.awaiting_stage(
-                                    super::state::LifecycleProgressStage::ResumeTopologyReconciliation,
-                                );
-                                // All exact session attachments are settled before
-                                // topology repair. The shared reconciler consumes its
-                                // generated trust handoffs directly; routing the same
-                                // effects again here would duplicate live mutations.
-                                let mut topology_roster = self.roster.read().await.snapshot();
-                                let topology_result = super::builder::reconcile_resume_topology(
-                                    &self.definition,
-                                    &mut topology_roster,
-                                    self.provisioner.as_ref(),
-                                    &self.supervisor_bridge,
-                                    &self.runtime_metadata,
-                                    &mut self.dsl_authority,
-                                    &self.dsl_topology_epoch,
-                                )
-                                .await;
-                                *self.roster.write().await =
-                                    RosterAuthority::from_roster(topology_roster);
-                                self.publish_machine_state_projection();
-                                if let Err(error) = topology_result
-                                    && post_commit_error.is_none()
-                                {
-                                    post_commit_error = Some(error);
-                                }
-                            }
-
-                            // A cold actor reconstructed while Stopped skips
-                            // the startup-time operation-binding restore. Once
-                            // explicit Resume has settled every attachment and
-                            // the shared topology seam has recovered the exact
-                            // current peer endpoint, rebuild those generated
-                            // owner bindings through the same seam used by a
-                            // cold Running actor. Peer-only members have no
-                            // local bridge session of their own, so this is
-                            // their only durable route back to the owner
-                            // bridge's operation registry before
-                            // respawn/retire. Binding after topology also
-                            // avoids anchoring a legacy pre-rebind address.
-                            if let Err(error) =
-                                self.restore_generated_member_operation_bindings().await
-                                && post_commit_error.is_none()
-                            {
-                                post_commit_error = Some(error);
-                            }
-
-                            if self.has_orchestrator {
-                                let orchestrator_transition_succeeded = match self
-                                    .apply_dsl_signal(
-                                        mob_dsl::MobMachineSignal::ResumeOrchestrator,
-                                        "resume_orchestrator_after_durable_resume",
-                                    ) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        if post_commit_error.is_none() {
-                                            // The mob is durably Running;
-                                            // surface the local transition
-                                            // failure without pretending
-                                            // Resume rolled back.
-                                            post_commit_error = Some(MobError::Internal(format!(
-                                                "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
-                                            )));
-                                        }
-                                        false
-                                    }
-                                };
-                                if orchestrator_transition_succeeded
-                                    && self.notify_orchestrator_on_resume
-                                {
-                                    let orchestrator_entries = if let Some(orchestrator) =
-                                        self.definition.orchestrator.as_ref()
-                                    {
-                                        let orchestrator_identities = self
-                                            .dsl_authority
-                                            .state()
-                                            .active_member_identities_for_profile(
-                                                &orchestrator.profile,
-                                            );
-                                        let roster = self.roster.read().await;
-                                        orchestrator_identities
-                                            .into_iter()
-                                            .map(|orchestrator_identity| {
-                                                roster
-                                                    .get(&orchestrator_identity)
-                                                    .cloned()
-                                                    .ok_or_else(|| {
-                                                        MobError::Internal(format!(
-                                                            "active MobMachine orchestrator '{orchestrator_identity}' has no mechanical roster entry during explicit resume"
-                                                        ))
-                                                    })
-                                            })
-                                            .collect::<Result<Vec<_>, MobError>>()
-                                    } else {
-                                        Ok(Vec::new())
-                                    };
-                                    match orchestrator_entries {
-                                        Ok(orchestrator_entries) => {
-                                            for orchestrator_entry in orchestrator_entries {
-                                                if let Err(error) = super::builder::realize_orchestrator_resume_notification(
-                                                    self.definition.as_ref(),
-                                                    &orchestrator_entry,
-                                                    self.session_service.as_ref(),
-                                                    self.provisioner.as_ref(),
-                                                    &self.dsl_authority,
-                                                )
-                                                .await
-                                                && post_commit_error.is_none()
-                                                {
-                                                    post_commit_error = Some(error);
-                                                }
-                                            }
-                                        }
-                                        Err(error) if post_commit_error.is_none() => {
-                                            post_commit_error = Some(error);
-                                        }
-                                        Err(_) => {}
-                                    }
-                                }
-                            }
-                            post_commit_error.map_or(Ok(()), Err)
-                        }
-                        .await,
-                        Err(error) => Err(error),
-                    }
-                    };
-                    let _ = reply_tx.send(result);
+                    self.inline_step_watchdog.set_step("resume_lifecycle");
+                    // #1102: the per-member readiness fan-out runs detached;
+                    // the reply is sent by whichever phase finishes the resume.
+                    Box::pin(self.begin_resume_lifecycle(deadline, admission, progress, reply_tx))
+                        .await;
                 }
                 MobCommand::Complete { reply_tx } => {
                     let result = async {
@@ -24329,7 +25699,10 @@ impl MobActor {
 
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
+        self.inline_step_watchdog
+            .start_checker(self.definition.id.clone());
         if !boxed_arm_future(|| self.prepare_actor_run()).await {
+            self.inline_step_watchdog.stop();
             return;
         }
         // Desired-state recovery is independent from the legacy roster
@@ -24400,13 +25773,15 @@ impl MobActor {
                 // reply channel by `reject_scope_denied`.
                 ScopeAdmission::Denied => continue,
             };
-            let control = if let Some(control) = Self::abandoned_observation_control(&cmd) {
+            let control = if let Some(control) = Self::abandoned_command_control(&cmd) {
                 tracing::debug!(
                     command_kind = cmd.kind(),
-                    "MobActor skipped abandoned observation"
+                    "MobActor skipped abandoned command (caller dropped its reply receiver)"
                 );
                 control
             } else {
+                self.inline_step_watchdog
+                    .begin(cmd.kind(), "dispatch_command");
                 // Only actor-admitted lifecycle authority can invalidate a
                 // retained explicit-Resume terminal. A caller that merely fails
                 // mailbox/scope admission must not erase the still-authoritative
@@ -24423,14 +25798,17 @@ impl MobActor {
                     self.explicit_resume_operations
                         .invalidate_after_lifecycle_admission();
                 }
-                self.dispatch_command_boxed(
-                    &authority,
-                    cmd,
-                    &mut command_rx,
-                    &mut deferred_commands,
-                    &mut host_status_polls_in_flight,
-                )
-                .await
+                let control = self
+                    .dispatch_command_boxed(
+                        &authority,
+                        cmd,
+                        &mut command_rx,
+                        &mut deferred_commands,
+                        &mut host_status_polls_in_flight,
+                    )
+                    .await;
+                self.inline_step_watchdog.end(&self.definition.id);
+                control
             };
             match control {
                 ActorLoopControl::ProceedBoundary => {}
@@ -24492,6 +25870,7 @@ impl MobActor {
                 }
             }
         }
+        self.inline_step_watchdog.stop();
         // Unconditional crash-style epilogue: command-channel EOF, explicit
         // shutdown, fail-stop, and internal dispatch failure all share the
         // same join barrier. Graceful paths have already drained their keyed
@@ -37272,6 +38651,11 @@ impl MobActor {
                     .ok_or_else(|| MobError::MemberNotFound(to.clone()))?,
             )
         };
+        // #1102: a hand-off to a durability-degraded recipient would only be
+        // refused inside the recipient's comms drain, invisibly to the sender.
+        // Reject it typed here, exactly like a direct delivery.
+        self.ensure_member_runtime_durability_ready(&recipient_entry)
+            .await?;
 
         let edge = mob_dsl::WiringEdge::new(
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(from.as_str())),
@@ -50187,6 +51571,7 @@ impl MobActor {
         let entry = match initial_entry {
             Some(e) => {
                 self.ensure_member_not_broken(&e.agent_identity).await?;
+                self.ensure_member_runtime_durability_ready(&e).await?;
                 e
             }
             None => {
@@ -50779,8 +52164,12 @@ impl MobActor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_turn_completed_reply(
-        &mut self,
+    /// Lane body of a TurnCompleted-ack delivery (formerly the detached
+    /// `spawn_turn_completed_reply` task). Readiness has already run in the
+    /// member's lane; this owns `reply_tx` because its placed branches reply
+    /// at distinct custody points and may outlive the caller's interest.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn_completed_delivery(
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
@@ -50790,7 +52179,7 @@ impl MobActor {
         revival: Option<(mpsc::Sender<RoutedMobCommand>, AgentIdentity)>,
         remote: Option<PreparedPlacedCompletionWait>,
     ) {
-        self.actor_io_tasks.spawn(async move {
+        {
             // Placed completion arrives with Record committed and its exact
             // waiter already registered by the actor. The detached task may
             // realize that authority, but never derive/mint custody itself.
@@ -50821,13 +52210,7 @@ impl MobActor {
                                 }
                             }),
                         }),
-                        Some((
-                            handle,
-                            identity,
-                            obligation,
-                            input_id,
-                            waiter,
-                        )),
+                        Some((handle, identity, obligation, input_id, waiter)),
                     )
                 }
                 None => (None, None),
@@ -51019,95 +52402,12 @@ impl MobActor {
                 }
             };
             let _ = reply_tx.send(result);
-        });
+        }
     }
 
     // The detached reply task receives the complete admitted turn tuple; keep
     // those independent carriers visible at the spawn boundary.
     #[allow(clippy::too_many_arguments)]
-    fn spawn_turn_admission_reply(
-        &mut self,
-        provisioner: Arc<dyn MobProvisioner>,
-        member_ref: MemberRef,
-        req: Box<meerkat_core::service::StartTurnRequest>,
-        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
-        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-        revival: Option<(mpsc::Sender<RoutedMobCommand>, AgentIdentity)>,
-        placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
-        placed_input_id: Option<String>,
-    ) {
-        debug_assert_eq!(revival.is_some(), placed_incarnation.is_some());
-        self.actor_io_tasks.spawn(async move {
-            let result = match (placed_incarnation, placed_input_id) {
-                (Some(expected_member), Some(input_id)) => {
-                    if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
-                        Err(MobError::UnsupportedForMode {
-                            mode: crate::MobRuntimeMode::TurnDriven,
-                            reason: "tracked completion is not supported for remotely hosted members"
-                                .to_string(),
-                        })
-                    } else {
-                        match placed_turn_supplied_interaction_id(&req) {
-                        Ok(transcript_interaction_id) => {
-                            let expected_receipt = input_id.clone();
-                            match provisioner
-                                .start_turn_with_correlation(
-                                    &member_ref,
-                                    *req,
-                                    Some(super::provisioner::PlacedTurnDeliveryContext {
-                                        input_id,
-                                        transcript_interaction_id: transcript_interaction_id
-                                            .map(|interaction_id| interaction_id.0.to_string()),
-                                        expected_member,
-                                        // IngressAccepted carries no retained
-                                        // terminal-publication custody.
-                                        outcome_tracking: None,
-                                        bounded_result_spec: None,
-                                    }),
-                                )
-                                .await
-                            {
-                                Ok(receipt)
-                                    if receipt.as_deref() == Some(expected_receipt.as_str()) =>
-                                {
-                                    Ok(())
-                                }
-                                Ok(receipt) => Err(MobError::Internal(format!(
-                                    "placed admission returned transport receipt {receipt:?}, expected '{expected_receipt}'"
-                                ))),
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Err(error) => Err(error),
-                        }
-                    }
-                }
-                (None, None) => {
-                    if let Some(completion_tx) = completion_tx {
-                        provisioner
-                            .admit_tracked_turn(
-                                &member_ref,
-                                *req,
-                                completion_tx,
-                                llm_identity_applied_tx,
-                            )
-                            .await
-                    } else {
-                        provisioner.admit_turn(&member_ref, *req).await
-                    }
-                }
-                _ => Err(MobError::Internal(
-                    "turn admission placement/transport fields drifted".to_string(),
-                )),
-            };
-            if let Err(error) = &result {
-                Self::fire_placed_revival_trigger(revival, error).await;
-            }
-            let _ = reply_tx.send(result);
-        });
-    }
-
     async fn dispatch_turn_driven_spawn_initial_turn(
         &mut self,
         agent_identity: &AgentIdentity,
@@ -51285,8 +52585,12 @@ impl MobActor {
             .await
     }
 
+    /// Inline (actor-task) realization of a dispatch completion, used by the
+    /// turn-driven spawn kickoff whose activation still runs on the loop. The
+    /// member-local readiness that the admission lane runs detached is run
+    /// here inline, exactly as it was before #1102.
     async fn finish_submit_work_dispatch(
-        &self,
+        &mut self,
         completion: SubmitWorkDispatchCompletion,
     ) -> Result<(), MobError> {
         match completion {
@@ -51294,8 +52598,27 @@ impl MobActor {
                 tracing::debug!("finish_submit_work_dispatch completed without runtime call");
                 Ok(())
             }
+            SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
+                agent_identity,
+                readiness,
+                material,
+            } => {
+                if let Some(readiness) = readiness {
+                    self.run_local_turn_readiness_inline(
+                        &agent_identity,
+                        &readiness,
+                        &material.member_ref,
+                    )
+                    .await?;
+                }
+                self.detached_member_readiness_context()
+                    .dispatch_autonomous(&agent_identity, *material)
+                    .await
+            }
             SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                 operation_id,
+                agent_identity,
+                readiness,
                 member_ref,
                 req,
                 completion_tx,
@@ -51309,6 +52632,10 @@ impl MobActor {
                     operation_id = ?operation_id,
                     "finish_submit_work_dispatch admitting turn"
                 );
+                if let Some(readiness) = readiness {
+                    self.run_local_turn_readiness_inline(&agent_identity, &readiness, &member_ref)
+                        .await?;
+                }
                 debug_assert_eq!(placed_identity.is_some(), placed_incarnation.is_some());
                 let result = if let Some(expected_member) = placed_incarnation {
                     if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
@@ -51370,6 +52697,8 @@ impl MobActor {
                 result
             }
             SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                agent_identity,
+                readiness,
                 member_ref,
                 req,
                 placed_identity,
@@ -51383,6 +52712,10 @@ impl MobActor {
                     member_ref = ?member_ref,
                     "finish_submit_work_dispatch starting turn"
                 );
+                if let Some(readiness) = readiness {
+                    self.run_local_turn_readiness_inline(&agent_identity, &readiness, &member_ref)
+                        .await?;
+                }
                 let result = match (placed_identity.as_ref(), placed_incarnation) {
                     (Some(_), Some(_)) => Err(MobError::UnsupportedForMode {
                         mode: crate::MobRuntimeMode::TurnDriven,
@@ -51405,6 +52738,39 @@ impl MobActor {
                 result
             }
         }
+    }
+
+    /// Inline (actor-task) flavor of `run_local_turn_readiness`: the #37
+    /// live-session probe with direct machine-authorized revival, then
+    /// autonomous readiness. Only the on-loop spawn kickoff path uses it.
+    async fn run_local_turn_readiness_inline(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        readiness: &LocalTurnAdmissionReadiness,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        if readiness.check_live_session {
+            match self
+                .session_service
+                .live_session_actor_registered(&readiness.bridge_session_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
+                    self.revive_member_live_materialization_for_delivery(
+                        agent_identity,
+                        &readiness.bridge_session_id,
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(MobError::SessionError(error)),
+            }
+        }
+        if readiness.autonomous_runtime {
+            self.ensure_autonomous_runtime_ready(agent_identity, member_ref)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Inline (actor-task) flavor of the revival trigger: `try_send` because
@@ -51539,56 +52905,27 @@ impl MobActor {
         }
         let effective_interaction_id = interaction_id;
         // §19.L5/W-D.2: the member HOST owns a placed member's liveness — the
-        // controlling realm never holds its session, so the local ensure
-        // below would mint a dishonest DurableSnapshotMissing. Placed
-        // revival is delivery-failure-triggered (fire_placed_revival_trigger)
-        // and host-observed instead.
-        if placed_identity.is_none()
-            && !live_steer_admission
+        // controlling realm never holds its session, so a local ensure would
+        // mint a dishonest DurableSnapshotMissing. Placed revival is
+        // delivery-failure-triggered (fire_placed_revival_trigger) and
+        // host-observed instead.
+        //
+        // #1102: for local members the #37 live-session probe (and the
+        // machine-authorized revival it may request) plus autonomous runtime
+        // readiness run in the member's detached admission lane, not here.
+        // Only the placement/mode decision and the machine-owned material are
+        // resolved on the loop.
+        let readiness = if placed_identity.is_none()
             && let Some(bridge_session_id) = machine_member_ref.bridge_session_id()
         {
-            tracing::debug!(
-                agent_identity = %entry.agent_identity,
-                session_id = %bridge_session_id,
-                "dispatch_member_turn_after_machine_admission checking live session actor"
-            );
-            match self
-                .session_service
-                .live_session_actor_registered(bridge_session_id)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(
-                        agent_identity = %entry.agent_identity,
-                        session_id = %bridge_session_id,
-                        "dispatch_member_turn_after_machine_admission live session actor exists"
-                    );
-                }
-                Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                    // #37: the live materialization is gone while MobMachine
-                    // still owns the member as Active. Machine-authorized
-                    // revival rebuilds the live session from the durable
-                    // snapshot through the existing resume materialization
-                    // path; an unrecoverable or failed revival resolves into
-                    // the typed terminal `MemberRestoreFailed`.
-                    self.revive_member_live_materialization(
-                        entry,
-                        &machine_member_ref,
-                        bridge_session_id,
-                        None,
-                        false,
-                        true,
-                    )
-                    .await?;
-                    tracing::debug!(
-                        agent_identity = %entry.agent_identity,
-                        session_id = %bridge_session_id,
-                        "dispatch_member_turn_after_machine_admission revived live session"
-                    );
-                }
-                Err(error) => return Err(MobError::SessionError(error)),
-            }
-        }
+            Some(LocalTurnAdmissionReadiness {
+                bridge_session_id: bridge_session_id.clone(),
+                check_live_session: !live_steer_admission,
+                autonomous_runtime: entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost,
+            })
+        } else {
+            None
+        };
         tracing::debug!(
             agent_identity = %entry.agent_identity,
             runtime_mode = ?entry.runtime_mode,
@@ -51619,6 +52956,8 @@ impl MobActor {
                 crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
                     Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                         operation_id,
+                        agent_identity: entry.agent_identity.clone(),
+                        readiness: None,
                         member_ref: machine_member_ref,
                         req: Box::new(req),
                         completion_tx,
@@ -51630,6 +52969,8 @@ impl MobActor {
                 }
                 crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
                     Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                        agent_identity: entry.agent_identity.clone(),
+                        readiness: None,
                         member_ref: machine_member_ref,
                         req: Box::new(req),
                         completion_tx,
@@ -51662,93 +53003,31 @@ impl MobActor {
                         ))
                     })?;
 
-                self.ensure_autonomous_runtime_ready(&entry.agent_identity, &machine_member_ref)
-                    .await?;
-
-                let render_metadata = turn_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.render_metadata.clone());
-
-                if self
-                    .autonomous_steer_requires_admission_barrier(
-                        entry,
-                        &machine_member_ref,
-                        handling_mode,
-                        ack_mode,
-                    )
-                    .await?
-                {
-                    let req = meerkat_core::service::StartTurnRequest {
-                        // The admission barrier is steer-only; steer dispatch
-                        // with injected context was rejected before the mode
-                        // fork, so this carrier is invariantly empty here.
-                        injected_context: Vec::new(),
-                        prompt: content,
-                        system_prompt,
-                        event_tx,
-                        runtime: submit_work_runtime_semantics(
-                            handling_mode,
-                            turn_metadata,
-                            external_delivery_identity.as_ref(),
-                        ),
-                    };
-                    return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
-                        operation_id,
+                // Runtime readiness, the steer admission-barrier probe, and
+                // the admit-or-inject decision are member-local and run in
+                // the member's admission lane (#1102). Injected context on the
+                // autonomous inbox path was rejected pre-admission in
+                // `handle_submit_work`, so the carrier is invariantly empty.
+                debug_assert!(injected_context.is_empty());
+                Ok(SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
+                    agent_identity: entry.agent_identity.clone(),
+                    readiness,
+                    material: Box::new(AutonomousDispatchMaterial {
                         member_ref: machine_member_ref,
-                        req: Box::new(req),
-                        completion_tx,
-                        llm_identity_applied_tx,
-                        placed_identity,
-                        placed_incarnation,
-                        placed_input_id,
-                    });
-                }
-                // Injected context on the autonomous inbox path was rejected
-                // pre-admission in `handle_submit_work` (the plain-event path
-                // has no user-channel work boundary); the carrier is
-                // invariantly empty here.
-                let injector = self
-                    .provisioner
-                    .interaction_event_injector(&bridge_session_id)
-                    .await
-                    .ok_or_else(|| MobError::MissingMemberCapability {
-                        member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
-                        capability: crate::error::MobMemberCapability::InteractionEventInjector,
-                        context: "autonomous direct turn delivery",
-                    })?;
-                // A host-supplied interaction id rides the injected inbox
-                // event so the comms classification (and therefore the
-                // runtime transcript identity) carries the SAME id as the
-                // host's live interaction frames instead of minting a fresh
-                // unrelated one.
-                let inject_result = match external_delivery_identity {
-                    Some(identity) => injector.inject_with_delivery_identity(
-                        meerkat_core::service::StartTurnInputIdentity {
-                            idempotency_key: identity.idempotency_key,
-                            correlation_id: identity.correlation_id,
-                        },
-                        objective_id,
+                        bridge_session_id,
                         content,
-                        meerkat_core::PlainEventSource::Rpc,
+                        system_prompt,
+                        turn_metadata,
                         handling_mode,
-                        render_metadata,
-                    ),
-                    None => injector.inject_with_turn_identity(
+                        external_delivery_identity,
                         interaction_id,
                         objective_id,
-                        content,
-                        meerkat_core::PlainEventSource::Rpc,
-                        handling_mode,
-                        render_metadata,
-                    ),
-                };
-                inject_result.map_err(|error| {
-                    MobError::Internal(format!(
-                        "autonomous dispatch inject failed for '{}': {}",
-                        entry.agent_identity, error
-                    ))
-                })?;
-                Ok(SubmitWorkDispatchCompletion::Completed)
+                        event_tx,
+                        completion_tx,
+                        llm_identity_applied_tx,
+                        ack_mode,
+                    }),
+                })
             }
             crate::MobRuntimeMode::TurnDriven => {
                 tracing::debug!(
@@ -51821,6 +53100,8 @@ impl MobActor {
                         );
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                             operation_id,
+                            agent_identity: entry.agent_identity.clone(),
+                            readiness,
                             member_ref: machine_member_ref,
                             req,
                             completion_tx,
@@ -51841,6 +53122,8 @@ impl MobActor {
                             "dispatch_member_turn_after_machine_admission boxed turn completion request"
                         );
                         Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                            agent_identity: entry.agent_identity.clone(),
+                            readiness,
                             member_ref: machine_member_ref,
                             req,
                             completion_tx,
@@ -51857,78 +53140,87 @@ impl MobActor {
         }
     }
 
-    async fn autonomous_steer_requires_admission_barrier(
-        &self,
-        entry: &RosterEntry,
-        member_ref: &MemberRef,
-        handling_mode: meerkat_core::types::HandlingMode,
-        ack_mode: crate::mob_machine::SubmitWorkAckMode,
-    ) -> Result<bool, MobError> {
-        if handling_mode != meerkat_core::types::HandlingMode::Steer
-            || ack_mode != crate::mob_machine::SubmitWorkAckMode::IngressAccepted
-        {
-            return Ok(false);
-        }
-
-        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
-            // A placed autonomous runtime has no controller-local state to
-            // probe. If this helper is reached independently, require the
-            // admission path; start_turn_with_correlation owns the remote send.
-            return Ok(true);
-        }
-
-        #[cfg(feature = "runtime-adapter")]
-        if let (Some(adapter), Some(session_id)) =
-            (&self.runtime_adapter, member_ref.bridge_session_id())
-        {
-            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
-
-            match adapter.runtime_state(session_id).await {
-                Ok(meerkat_runtime::RuntimeState::Running) => {
-                    tracing::debug!(
-                        agent_identity = %entry.agent_identity,
-                        session_id = %session_id,
-                        "active steer admission barrier enabled by running runtime state"
-                    );
-                    return Ok(true);
-                }
-                Ok(state) => {
-                    let session_active = self
-                        .provisioner
-                        .is_member_active(member_ref)
-                        .await?
-                        .unwrap_or(false);
-                    tracing::debug!(
-                        agent_identity = %entry.agent_identity,
-                        session_id = %session_id,
-                        runtime_state = ?state,
-                        session_active,
-                        "active steer admission barrier checked non-running runtime state"
-                    );
-                    if session_active {
-                        return Ok(true);
+    /// Detached admission-task version of the former inline
+    /// `spawn_turn_admission_reply` body: the runtime (or placed transport)
+    /// admission for one already machine-admitted turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn_admission(
+        provisioner: &Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+        revival: Option<(mpsc::Sender<RoutedMobCommand>, AgentIdentity)>,
+        placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
+        placed_input_id: Option<String>,
+    ) -> Result<(), MobError> {
+        debug_assert_eq!(revival.is_some(), placed_incarnation.is_some());
+        let result = match (placed_incarnation, placed_input_id) {
+            (Some(expected_member), Some(input_id)) => {
+                if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
+                    Err(MobError::UnsupportedForMode {
+                        mode: crate::MobRuntimeMode::TurnDriven,
+                        reason: "tracked completion is not supported for remotely hosted members"
+                            .to_string(),
+                    })
+                } else {
+                    match placed_turn_supplied_interaction_id(&req) {
+                        Ok(transcript_interaction_id) => {
+                            let expected_receipt = input_id.clone();
+                            match provisioner
+                                .start_turn_with_correlation(
+                                    &member_ref,
+                                    *req,
+                                    Some(super::provisioner::PlacedTurnDeliveryContext {
+                                        input_id,
+                                        transcript_interaction_id: transcript_interaction_id
+                                            .map(|interaction_id| interaction_id.0.to_string()),
+                                        expected_member,
+                                        // IngressAccepted carries no retained
+                                        // terminal-publication custody.
+                                        outcome_tracking: None,
+                                        bounded_result_spec: None,
+                                    }),
+                                )
+                                .await
+                            {
+                                Ok(receipt)
+                                    if receipt.as_deref() == Some(expected_receipt.as_str()) =>
+                                {
+                                    Ok(())
+                                }
+                                Ok(receipt) => Err(MobError::Internal(format!(
+                                    "placed admission returned transport receipt {receipt:?}, expected '{expected_receipt}'"
+                                ))),
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error),
                     }
-                    return Ok(false);
-                }
-                Err(error) => {
-                    // Fail closed: an indeterminate runtime state must REQUIRE the
-                    // admission barrier so the steer routes through real machine
-                    // admission instead of bypassing it with a direct event inject.
-                    // Bypassing on an unknown state would ack Completed before the
-                    // machine admits the turn, so we demand admission whenever the
-                    // runtime state cannot be determined.
-                    tracing::debug!(
-                        agent_identity = %entry.agent_identity,
-                        session_id = %session_id,
-                        error = %error,
-                        "runtime state unavailable; requiring autonomous steer admission barrier (fail closed)"
-                    );
-                    return Ok(true);
                 }
             }
+            (None, None) => {
+                if let Some(completion_tx) = completion_tx {
+                    provisioner
+                        .admit_tracked_turn(
+                            &member_ref,
+                            *req,
+                            completion_tx,
+                            llm_identity_applied_tx,
+                        )
+                        .await
+                } else {
+                    provisioner.admit_turn(&member_ref, *req).await
+                }
+            }
+            _ => Err(MobError::Internal(
+                "turn admission placement/transport fields drifted".to_string(),
+            )),
+        };
+        if let Err(error) = &result {
+            Self::fire_placed_revival_trigger(revival, error).await;
         }
-
-        Ok(false)
+        result
     }
 
     async fn commit_remote_turn_receipt_in_actor(
@@ -57630,9 +58922,56 @@ mod routed_effect_containment_tests {
         };
 
         assert_eq!(
-            MobActor::abandoned_observation_control(&command),
+            MobActor::abandoned_command_control(&command),
             Some(ActorLoopControl::ProceedBoundary),
             "abandonment must skip only handler execution, not fail-stop and routed-effect housekeeping"
+        );
+    }
+
+    #[test]
+    fn abandoned_delivery_proceeds_through_actor_boundary_while_live_delivery_runs() {
+        let payload = || {
+            Box::new(super::super::state::SubmitWorkPayload {
+                runtime_id: AgentRuntimeId::initial(AgentIdentity::from("w")),
+                fence_token: FenceToken::new(1),
+                work_ref: WorkRef::new(),
+                content: ContentInput::from("hello".to_string()),
+                origin: crate::ids::WorkOrigin::External,
+                system_prompt: None,
+                injected_context: Vec::new(),
+                interaction_id: None,
+                objective_id: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                external_delivery_identity: None,
+                turn_metadata: None,
+                event_tx: None,
+                completion_tx: None,
+                bounded_result_spec: None,
+                llm_identity_applied_tx: None,
+                ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            })
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        let abandoned = MobCommand::SubmitWork {
+            payload: payload(),
+            reply_tx,
+        };
+        assert_eq!(
+            MobActor::abandoned_command_control(&abandoned),
+            Some(ActorLoopControl::ProceedBoundary),
+            "a delivery whose caller left must be skipped, never run as a ghost turn"
+        );
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let live = MobCommand::SubmitWork {
+            payload: payload(),
+            reply_tx,
+        };
+        assert_eq!(
+            MobActor::abandoned_command_control(&live),
+            None,
+            "a delivery with a live caller must run"
         );
     }
 

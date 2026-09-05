@@ -699,6 +699,42 @@ pub(super) enum MobCommand {
         payload: Box<SubmitWorkPayload>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Internal completion of one detached member turn admission. The actor
+    /// releases the member's single-flight admission lane and starts the next
+    /// parked delivery for that member (skipping abandoned callers). `ticket`
+    /// fences a late completion from a superseded lane occupant.
+    MemberTurnAdmissionSettled {
+        agent_identity: AgentIdentity,
+        ticket: u64,
+    },
+    /// Internal re-entry from a detached admission task that observed the
+    /// member's live session materialization missing (#37). Revival needs
+    /// MobMachine authority, so it runs on the actor; the detached task awaits
+    /// the typed reply and then continues with runtime admission.
+    ReviveMemberLiveMaterialization {
+        agent_identity: AgentIdentity,
+        bridge_session_id: SessionId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Non-destructive cold reload of one member's durability-degraded
+    /// runtime registration (same session id, same continuity generation).
+    /// The actor performs only the authority reads inline; the quiesce,
+    /// discard, re-registration, and readiness run detached.
+    ReloadMemberRegistration {
+        agent_identity: AgentIdentity,
+        /// End-to-end bound for the detached reload worker (probe, discard,
+        /// revival, readiness). Set by the handle from
+        /// `MEMBER_RELOAD_TOTAL_TIMEOUT`.
+        deadline: meerkat_core::time_compat::Instant,
+        reply_tx: oneshot::Sender<Result<super::handle::MemberReloadOutcome, MobError>>,
+    },
+    /// Internal re-entry carrying the concurrent per-member readiness outcomes
+    /// of one explicit Resume phase. `ticket` fences a stale fan-out from a
+    /// superseded resume.
+    ResumeLifecycleReadinessResolved {
+        ticket: u64,
+        outcomes: Vec<super::actor::MemberReadinessOutcome>,
+    },
     #[cfg(feature = "experimental-gpt-live")]
     StartLiveBridgeOperation {
         agent_identity: AgentIdentity,
@@ -1440,6 +1476,21 @@ impl MobCommand {
         }
     }
 
+    /// Whether this is a work delivery whose caller has already gone away.
+    ///
+    /// A `SubmitWork` whose reply receiver is closed must not run: its caller
+    /// abandoned the delivery (deadline, cancellation, or process exit) and a
+    /// later execution would be a ghost turn nobody asked for and nobody can
+    /// observe (#1102). Unlike lifecycle mutations, a delivery has no durable
+    /// intent of its own before MobMachine admission, so skipping it is
+    /// exactly equivalent to the caller never having sent it.
+    pub(super) fn is_abandoned_delivery(&self) -> bool {
+        match self {
+            Self::SubmitWork { reply_tx, .. } => reply_tx.is_closed(),
+            _ => false,
+        }
+    }
+
     pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Spawn { .. } => "Spawn",
@@ -1453,6 +1504,10 @@ impl MobCommand {
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
+            Self::MemberTurnAdmissionSettled { .. } => "MemberTurnAdmissionSettled",
+            Self::ReviveMemberLiveMaterialization { .. } => "ReviveMemberLiveMaterialization",
+            Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
+            Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
             #[cfg(feature = "experimental-gpt-live")]
             Self::StartLiveBridgeOperation { .. } => "StartLiveBridgeOperation",
             #[cfg(feature = "experimental-gpt-live")]

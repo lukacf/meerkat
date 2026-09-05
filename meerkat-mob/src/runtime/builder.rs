@@ -8199,6 +8199,8 @@ impl MobBuilder {
             // deadlines never own its terminal result.
             let explicit_resume_operations =
                 Arc::new(super::handle::ResumeOperationRegistry::default());
+            let member_admission_backlog =
+                Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
             let mut wiring = RuntimeWiring {
                 roster: roster_state.clone(),
                 dsl_authority: initial_dsl_authority,
@@ -8238,6 +8240,7 @@ impl MobBuilder {
                 realtime_session_factory: realtime_session_factory.clone(),
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
+                member_admission_backlog: Arc::clone(&member_admission_backlog),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -8447,6 +8450,7 @@ impl MobBuilder {
                 !destroy_storage_finalizing,
                 flow_target_provisioner,
                 explicit_resume_operations,
+                member_admission_backlog,
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
@@ -9917,6 +9921,8 @@ impl MobBuilder {
             let flow_target_provisioner = Arc::new(std::sync::RwLock::new(None));
             let explicit_resume_operations =
                 Arc::new(super::handle::ResumeOperationRegistry::default());
+            let member_admission_backlog =
+                Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
 
             Self::start_runtime_with_components(
                 definition,
@@ -9949,6 +9955,7 @@ impl MobBuilder {
                 true,
                 flow_target_provisioner,
                 explicit_resume_operations,
+                member_admission_backlog,
                 realtime_session_factory,
                 controlling_acceptor,
                 member_live_host,
@@ -9995,6 +10002,7 @@ impl MobBuilder {
             std::sync::RwLock<Option<super::handle::FlowTargetProvisioner>>,
         >,
         explicit_resume_operations: Arc<super::handle::ResumeOperationRegistry>,
+        member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
@@ -10060,6 +10068,7 @@ impl MobBuilder {
                 realtime_session_factory,
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
+                member_admission_backlog: Arc::clone(&member_admission_backlog),
             };
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the
@@ -10277,6 +10286,12 @@ impl MobBuilder {
                 shutdown_runtime_unregister_observers: HashMap::new(),
                 restore_diagnostics,
                 member_revival_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                member_admission_lanes: HashMap::new(),
+                next_member_admission_ticket: 0,
+                member_admission_backlog,
+                inline_step_watchdog: super::actor::ActorInlineStepWatchdog::new(),
+                pending_resume_lifecycle: None,
+                next_resume_lifecycle_ticket: 0,
                 runtime_metadata,
                 identity,
                 identity_member,

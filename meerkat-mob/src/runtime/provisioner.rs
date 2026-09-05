@@ -1021,6 +1021,24 @@ pub trait MobProvisioner: Send + Sync {
         let _ = member_ref;
         Ok(())
     }
+    /// Quiesce and discard the member's durability-degraded runtime
+    /// registration in place (#1102 section 5), retaining its bound operation
+    /// identity for the cold successor. Returns `NotDegraded` without touching
+    /// a healthy registration and `NotCurrent` when the session has none. The
+    /// caller re-registers the executor for the same session afterwards.
+    /// Default = typed reject: only runtime-backed provisioners own
+    /// registrations.
+    async fn reload_degraded_runtime_registration(
+        &self,
+        member_ref: &MemberRef,
+        deadline: Instant,
+    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+        let _ = (member_ref, deadline);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "runtime registration reload is not supported by this provisioner".to_string(),
+        })
+    }
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
     async fn trusted_peer_spec(
         &self,
@@ -9405,6 +9423,150 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
+    async fn reload_degraded_runtime_registration(
+        &self,
+        member_ref: &MemberRef,
+        deadline: Instant,
+    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+        let session_id = Self::require_session(member_ref, "reload runtime registration for")?;
+        let Some(adapter) = self.runtime_adapter.as_ref() else {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "runtime registration reload requires a runtime-backed member".to_string(),
+            });
+        };
+        let Some(registration) = adapter
+            .current_session_registration_witness(&session_id)
+            .await
+        else {
+            return Ok(super::handle::MemberReloadDisposition::NotCurrent);
+        };
+        if adapter.is_durability_ready(&session_id).await {
+            // Never quiesce a healthy shell: reload is repair, not retirement.
+            return Ok(super::handle::MemberReloadDisposition::NotDegraded);
+        }
+        // The discard is in-process and succeeds whatever the store's state;
+        // the revival that follows can only rebuild from durable authority.
+        // Probe it first so a store that is still failing refuses the reload
+        // typed instead of turning a repairable degraded member into a Broken
+        // one through a revival that was bound to fail.
+        if !self.session_service.supports_persistent_sessions() {
+            return Err(MobError::MemberReloadRefused {
+                session_id: session_id.clone(),
+                reason: "session service holds no durable session authority to reload from"
+                    .to_string(),
+            });
+        }
+        let authority = self
+            .session_service
+            .observe_session_resume_authority(&session_id)
+            .await
+            .map_err(|error| MobError::MemberReloadRefused {
+                session_id: session_id.clone(),
+                reason: format!("durable session authority is not readable: {error}"),
+            })?;
+        match authority.lifecycle() {
+            super::session_service::SessionResumeLifecycle::Active { .. } => {}
+            lifecycle => {
+                return Err(MobError::MemberReloadRefused {
+                    session_id: session_id.clone(),
+                    reason: format!(
+                        "durable session authority is not resumable ({lifecycle:?}); the live shell is retained"
+                    ),
+                });
+            }
+        }
+        // The exact bound operation identity must ride the replacement as a
+        // durable retention request so the later finalization-boundary
+        // rebind finds it in the successor registry (same contract as the
+        // pre-retire quiesce path).
+        let prior_ops_binding = MemberSessionDisposalArc::recoverable_ops_binding_witness(
+            Some(&self.ops_adapter),
+            &session_id,
+        )
+        .map_err(|error| session_turn_error_to_mob_error(&session_id, error))?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MobError::MemberReloadTimedOut {
+                session_id: session_id.clone(),
+                stage: "durability_reload_discard",
+            });
+        }
+        let disposition = tokio::time::timeout(
+            remaining,
+            adapter.recover_or_discard_reload_required_registration_with_operation_if_current(
+                &registration,
+                prior_ops_binding
+                    .as_ref()
+                    .map(|witness| witness.retention_request()),
+            ),
+        )
+        .await
+        .map_err(|_| MobError::MemberReloadTimedOut {
+            session_id: session_id.clone(),
+            stage: "durability_reload_discard",
+        })?
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "durability-reload disposal failed for {session_id}: {error}"
+            ))
+        })?;
+        let disposition = match disposition {
+            meerkat_runtime::ReloadRequiredRegistrationDisposition::Discarded => {
+                super::handle::MemberReloadDisposition::Discarded
+            }
+            meerkat_runtime::ReloadRequiredRegistrationDisposition::NotDegraded => {
+                return Ok(super::handle::MemberReloadDisposition::NotDegraded);
+            }
+            meerkat_runtime::ReloadRequiredRegistrationDisposition::NotCurrent => {
+                return Ok(super::handle::MemberReloadDisposition::NotCurrent);
+            }
+        };
+        // The member keeps its adapter-local operation binding across the
+        // reload (same binding incarnation, same operation identity); only
+        // its machine-owned registry follows the exact cold successor, into
+        // which the retention request reloaded the operation. Without this
+        // rebind the re-materialization would find a binding pinned to the
+        // discarded registry and refuse it as a different incarnation.
+        if let Some(prior_ops_binding) = prior_ops_binding.as_ref() {
+            let successor = adapter
+                .current_session_registration_witness(&session_id)
+                .await
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "durability-reload replacement for {session_id} published no exact successor witness"
+                    ))
+                })?;
+            let successor_registry = adapter
+                .ops_lifecycle_registry_if_current_registration(&successor)
+                .await
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "durability-reload cold successor registration for {session_id} changed before its operation registry could be rebound"
+                    ))
+                })?;
+            let prepared_ops_rebind = self
+                .ops_adapter
+                .prepare_session_registry_rebind_after_reload_discard(
+                    &session_id,
+                    prior_ops_binding,
+                    successor_registry as Arc<dyn OpsLifecycleRegistry>,
+                )?;
+            if adapter
+                .current_session_registration_witness(&session_id)
+                .await
+                .as_ref()
+                != Some(&successor)
+            {
+                return Err(MobError::Internal(format!(
+                    "durability-reload cold successor registration for {session_id} changed during operation-registry rebinding"
+                )));
+            }
+            prepared_ops_rebind.commit();
+        }
+        Ok(disposition)
+    }
+
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
         let bridge_session_id = member_ref.bridge_session_id()?;
         self.session_service.comms_runtime(bridge_session_id).await
@@ -12742,6 +12904,16 @@ impl MobProvisioner for MultiBackendProvisioner {
             } => Ok(()),
             _ => self.session.ensure_runtime_session_state(member_ref).await,
         }
+    }
+
+    async fn reload_degraded_runtime_registration(
+        &self,
+        member_ref: &MemberRef,
+        deadline: Instant,
+    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+        self.session
+            .reload_degraded_runtime_registration(member_ref, deadline)
+            .await
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {

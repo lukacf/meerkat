@@ -192,6 +192,14 @@ repos:
         always_run: true
         stages: [pre-push]
 
+      - id: pre-push-lane-retention-contract
+        name: pre-push lane retention keeps the newest lanes and only exact lane names
+        entry: scripts/test-pre-push-lane-retention.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       - id: pre-push-machine-status-contract
         name: pre-push machine gate preserves classifier and codegen failures
         entry: scripts/test-pre-push-machines.sh

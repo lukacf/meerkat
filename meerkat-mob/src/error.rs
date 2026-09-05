@@ -543,11 +543,11 @@ pub enum MobError {
         stage: &'static str,
     },
 
-    /// A bounded actor command did not reach `stage` before its caller
-    /// deadline. The command was NOT executed: a bounded send either reserves
-    /// actor channel capacity within the deadline or never enters the queue,
-    /// and a reply that misses the deadline closes the reply channel so the
-    /// actor skips the command instead of running it as a ghost.
+    /// A bounded actor command did not complete `stage` before its caller
+    /// deadline. Closing the reply channel skips a delivery still queued on
+    /// the actor or parked in a member lane, but does not cancel work already
+    /// started. This observation alone proves neither execution fate nor
+    /// retry safety; those require runtime-owned admission evidence.
     #[error("actor command {command_kind} exceeded its deadline at {stage}")]
     ActorCommandTimedOut {
         command_kind: &'static str,
@@ -1360,8 +1360,6 @@ impl MobError {
                 "command_kind": command_kind,
                 "stage": stage,
                 "deadline_reached": true,
-                "retryable": true,
-                "executed": false,
             })),
             Self::MemberReloadRefused { session_id, reason } => Some(serde_json::json!({
                 "kind": "mob_member_reload_refused",
@@ -1857,6 +1855,25 @@ mod tests {
             "disk full",
         )));
         assert!(format!("{err}").contains("disk full"));
+    }
+
+    #[test]
+    fn actor_command_timeout_projects_observation_without_execution_or_retry_verdict() {
+        for stage in ["actor_command_admission", "actor_command_reply"] {
+            let error = MobError::ActorCommandTimedOut {
+                command_kind: "SubmitWork",
+                stage,
+            };
+            assert_eq!(
+                error.structured_data(),
+                Some(serde_json::json!({
+                    "kind": "mob_actor_command_timed_out",
+                    "command_kind": "SubmitWork",
+                    "stage": stage,
+                    "deadline_reached": true,
+                }))
+            );
+        }
     }
 
     #[test]

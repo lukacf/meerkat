@@ -15991,9 +15991,9 @@ impl MobActor {
     /// Body of one detached member turn admission: caller liveness, then the
     /// member-local readiness steps that used to run inline, then the
     /// runtime admission, autonomous dispatch, or completion-bearing
-    /// delivery. Owns the reply channel: a delivery whose caller is gone is
-    /// never executed, and the completion body replies at its own custody
-    /// points.
+    /// delivery. A caller already gone at the initial liveness check is
+    /// skipped; departure after that check does not cancel readiness or
+    /// admission. The completion body replies at its own custody points.
     async fn run_member_turn_admission(
         context: &DetachedMemberReadinessContext,
         session_service: &Arc<dyn MobSessionService>,

@@ -61,9 +61,10 @@ them.
   typed fast rejection for a durability-degraded member (see Fixed and Added);
   MobKit maps it to its typed reload-required admission error and must never
   route it to member repair. `MemberAdmissionBacklogFull` is per-member
-  delivery backpressure (retryable). `ActorCommandTimedOut` is returned only by
-  the new bounded delivery variants and guarantees the command was not
-  executed.
+  delivery backpressure (retryable). `ActorCommandTimedOut` reports a bounded
+  actor observation deadline, not an execution or retry-safety verdict. Its
+  structured detail carries no `executed` or `retryable` claim; those require
+  runtime-owned admission evidence.
 
 ### Billing-affecting default change
 
@@ -143,11 +144,12 @@ them.
   `MobHandle::submit_work_with_mode_and_delivery_identity_bounded`** take an
   `Instant` deadline and bound the actor round trip end to end (channel
   admission and reply), mirroring the explicit-Resume driver. A miss returns
-  the typed `MobError::ActorCommandTimedOut { command_kind, stage }` and the
-  delivery is guaranteed never to execute later: the actor skips a queued
-  `SubmitWork` whose reply receiver is closed. Prefer these over an outer
-  `timeout` around `submit_work_with_mode`, which abandons the caller but
-  leaves the command queued as a future ghost turn.
+  the typed `MobError::ActorCommandTimedOut { command_kind, stage }`. The actor
+  skips deliveries still queued or parked when their reply receiver closes;
+  already-started readiness or runtime admission is not cancelled and may
+  complete after the deadline. Resolve uncertain fate through runtime-owned
+  admission evidence and preserve the caller-owned delivery identity on
+  redelivery; a timeout alone does not prove nonexecution or retry safety.
 - **`MeerkatMachine::durability_reload_required(&SessionId) -> Option<SessionDurabilityReloadRequired>`
   and `MeerkatMachine::is_durability_ready(&SessionId) -> bool`** expose the
   per-session fail-closed durability gate the ingress admission path consults

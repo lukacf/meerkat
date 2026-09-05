@@ -1722,12 +1722,13 @@ async fn reload_member_registration_replaces_the_degraded_registration_in_place(
     assert_eq!(again.generation, generation_before);
 }
 
-/// The bounded delivery variant returns the typed deadline error and never
-/// runs the delivery once its deadline passed.
+/// A reply timeout does not cancel admission already in flight. Only the
+/// second delivery, still parked in the member lane when its caller leaves,
+/// is skipped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn bounded_submit_work_times_out_typed_and_is_not_executed() {
+async fn bounded_submit_timeout_does_not_cancel_inflight_admission_but_skips_parked_delivery() {
     let mob = create_isolation_mob(2).await;
-    mob.service.park_live_session_lookups(mob.session(1)).await;
+    mob.store.park_admissions(mob.session(1));
     let status = mob
         .handle
         .member_status(mob.member(1))
@@ -1735,48 +1736,110 @@ async fn bounded_submit_work_times_out_typed_and_is_not_executed() {
         .expect("member status");
     let runtime_id = status.agent_runtime_id.expect("runtime id");
     let fence_token = status.fence_token.expect("fence token");
-    let result = mob
-        .handle
-        .submit_work_with_mode_bounded(
-            runtime_id.clone(),
-            fence_token,
-            WorkRef::new(),
-            WorkSpec::new("bounded delivery", WorkOrigin::External),
-            HandlingMode::Queue,
-            Instant::now() + Duration::from_millis(300),
-        )
-        .await;
-    match result {
-        Err(MobError::ActorCommandTimedOut {
+    let first_deadline = Instant::now() + Duration::from_secs(2);
+    let first = tokio::spawn({
+        let handle = mob.handle.clone();
+        let runtime_id = runtime_id.clone();
+        async move {
+            handle
+                .submit_work_with_mode_bounded(
+                    runtime_id,
+                    fence_token,
+                    WorkRef::new(),
+                    WorkSpec::new("bounded delivery", WorkOrigin::External),
+                    HandlingMode::Queue,
+                    first_deadline,
+                )
+                .await
+        }
+    });
+    wait_until(
+        "bounded delivery admission entered the store",
+        Duration::from_secs(2),
+        || async { mob.store.parked_admission_arrivals(mob.session(1)) == 1 },
+    )
+    .await;
+    assert!(
+        Instant::now() < first_deadline,
+        "runtime admission must be in flight before the caller deadline"
+    );
+    let error = first
+        .await
+        .expect("bounded delivery task")
+        .expect_err("in-flight admission outlives the observation deadline");
+    let data = error.structured_data().expect("typed timeout data");
+    assert!(data.get("executed").is_none());
+    assert!(data.get("retryable").is_none());
+    match error {
+        MobError::ActorCommandTimedOut {
             command_kind,
             stage,
-        }) => {
+        } => {
             assert_eq!(command_kind, "SubmitWork");
             assert_eq!(stage, "actor_command_reply");
         }
         other => panic!("expected ActorCommandTimedOut, got {other:?}"),
     }
-    // The first bounded delivery was already DSL-admitted and is waiting in
-    // its lane on the parked lookup; a second one parks behind it and its
-    // caller leaves before the lane reaches it.
-    let second = mob
-        .handle
-        .submit_work_with_mode_bounded(
-            runtime_id,
-            fence_token,
-            WorkRef::new(),
-            WorkSpec::new("second bounded delivery", WorkOrigin::External),
-            HandlingMode::Queue,
-            Instant::now() + Duration::from_millis(300),
-        )
-        .await;
-    assert!(matches!(second, Err(MobError::ActorCommandTimedOut { .. })));
-    mob.service.release_live_session_lookups().await;
-    mob.wait_for_executed_prompts(1, 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The first admission is still in the store; the second delivery parks
+    // behind it and its caller leaves before the lane reaches it.
+    let second_deadline = Instant::now() + Duration::from_secs(2);
+    let second = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move {
+            handle
+                .submit_work_with_mode_bounded(
+                    runtime_id,
+                    fence_token,
+                    WorkRef::new(),
+                    WorkSpec::new("second bounded delivery", WorkOrigin::External),
+                    HandlingMode::Queue,
+                    second_deadline,
+                )
+                .await
+        }
+    });
+    wait_until(
+        "second bounded delivery parked in the member lane",
+        Duration::from_secs(2),
+        || async {
+            mob.handle
+                .member_admission_backlog()
+                .parked
+                .get(mob.member(1))
+                .copied()
+                == Some(1)
+        },
+    )
+    .await;
+    assert!(
+        Instant::now() < second_deadline,
+        "second delivery must park before its caller deadline"
+    );
+    assert!(matches!(
+        second.await.expect("second bounded delivery task"),
+        Err(MobError::ActorCommandTimedOut {
+            command_kind: "SubmitWork",
+            stage: "actor_command_reply",
+        })
+    ));
+    mob.store.release_admissions();
+    // Completing later work in this same FIFO proves the abandoned entry has
+    // been consumed, rather than merely waiting a fixed time for a ghost.
+    let settled = internal_turn_task(&mob.handle, mob.member(1), "settlement witness".to_string());
+    tokio::time::timeout(Duration::from_secs(5), settled)
+        .await
+        .expect("later turn completes")
+        .expect("later turn task")
+        .expect("later turn receipt");
+    wait_until(
+        "member admission backlog drained",
+        Duration::from_secs(2),
+        || async { mob.handle.member_admission_backlog().parked.is_empty() },
+    )
+    .await;
     assert_eq!(
         mob.executed_prompts(1).await,
-        vec!["bounded delivery".to_string()],
-        "the abandoned second delivery must not execute"
+        vec!["bounded delivery", "settlement witness"],
+        "the in-flight first delivery executes exactly once; the parked second never executes"
     );
 }

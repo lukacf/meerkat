@@ -11099,11 +11099,16 @@ impl MobHandle {
     ///
     /// The actor round trip is bounded end to end: channel admission and the
     /// admission reply must both land before `deadline`, else the typed
-    /// [`MobError::ActorCommandTimedOut`] is returned and the delivery is
-    /// guaranteed not to execute later (a still-queued command whose caller
-    /// left is skipped by the actor). Prefer this over an outer `timeout`
-    /// around `submit_work_with_mode`, which abandons the caller but leaves
-    /// the command queued.
+    /// [`MobError::ActorCommandTimedOut`] is returned. A delivery still queued
+    /// on the actor or parked in a member lane is skipped when its caller
+    /// leaves. Already-started readiness or runtime admission is not cancelled
+    /// and may complete after the reply deadline.
+    ///
+    /// A timeout alone does not establish execution fate or make retry safe.
+    /// Callers needing redelivery should use
+    /// [`Self::submit_work_with_mode_and_delivery_identity_bounded`], preserve
+    /// that identity, and resolve uncertain fate through runtime-owned
+    /// admission evidence rather than assuming the work never executed.
     pub async fn submit_work_with_mode_bounded(
         &self,
         runtime_id: AgentRuntimeId,

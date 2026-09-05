@@ -308,13 +308,14 @@ mod tests {
     use meerkat_core::{AgentLlmClient, Message, Session, ToolResult, UserMessage};
     use meerkat_llm_core::{LlmClient, LlmClientAdapter, LlmDoneOutcome, LlmEvent, LlmRequest};
     use serde_json::json;
+    use std::fmt::Write as _;
     use std::sync::Arc;
 
     async fn stub(events: Vec<Value>) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
-        let payload = events
-            .iter()
-            .map(|event| format!("data: {event}\n\n"))
-            .collect::<String>();
+        let mut payload = String::new();
+        for event in events {
+            write!(payload, "data: {event}\n\n").expect("formatting into a String cannot fail");
+        }
         async fn respond(State(payload): State<String>) -> impl axum::response::IntoResponse {
             ([("content-type", "text/event-stream")], payload)
         }

@@ -3,6 +3,8 @@
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
 mod embedded;
+#[cfg(not(target_arch = "wasm32"))]
+mod fatal_error;
 #[cfg(all(
     feature = "session-store",
     feature = "live",
@@ -35,6 +37,8 @@ pub use embedded::{
     build_embedded_service, build_embedded_service_from_builder, set_default_schedule_tools,
     set_default_workgraph_namespace_grant, set_default_workgraph_tools,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use fatal_error::{FatalErrorReport, report_fatal_error};
 #[cfg(all(
     feature = "session-store",
     feature = "live-webrtc",

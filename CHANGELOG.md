@@ -139,6 +139,18 @@ them.
   taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
   behind a 60 s liveness bound that only a live holder that never releases
   can hit (a crashed holder's lock is released by the kernel).
+- **`rkat-rpc`, `rkat-rest`, and `rkat-mcp` print fatal startup errors in
+  their `Display` form.** All three binaries had `fn main() -> Result<(),
+  Box<dyn Error>>`, which makes Rust print a returned error with `Debug`, so a
+  storage refusal read `Error: Store(UnledgeredDomainObjects { domain:
+  "session-store", objects: [...], bridgeable: CatalogAuthenticated })` and
+  the remedy sentence naming `rkat storage migrate --apply
+  --bridge-pre-0-8-10`, which only the `Display` form carries, was never shown
+  to the operator (#1103). The binaries now render a fatal error through the
+  shared `meerkat::surface::report_fatal_error`: the `Display` chain (the
+  error, then each `source()` as a `caused by:` line), every line prefixed
+  with the binary name (`rkat-rpc: ...`), and exit status 1 as before. Other
+  exit paths are unchanged.
 - **The Python SDK reports why rkat-rpc exited.** `MeerkatClient` spawned the
   child with `stderr=PIPE` and never read it, so a child that refused to
   start (for example `Store(UnledgeredDomainObjects ...)` on a pre-0.8.10

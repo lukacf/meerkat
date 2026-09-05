@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
     RequestAdmissionError, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
-    SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
+    SurfaceRequestSemantics, noop_request_action, report_fatal_error, spawn_stdio_json_writer,
 };
 use meerkat_contracts::ErrorCode;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -11,6 +11,7 @@ use meerkat_mcp_server::mcp_tool_request_lifecycle;
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -117,8 +118,17 @@ fn init_tracing() {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
     init_tracing();
+    // Render the Display chain, not `Result`'s Debug: a storage refusal's
+    // remedy sentence lives only in Display.
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => report_fatal_error("rkat-mcp", err.as_ref()),
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let selection =
         RealmConfig::selection_from_inputs(args.realm, args.isolated, RealmSelection::Isolated)?;

@@ -234,6 +234,76 @@ rust_binary(
 )
 
 rust_test(
+    name = "binary_fatal_error_display_test",
+    aliases = aliases(
+        package_name = "meerkat-mcp-server",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "binary_fatal_error_display",
+    crate_root = "tests/binary_fatal_error_display.rs",
+    crate_features = [
+        "comms",
+        "mob",
+        "schedule",
+        "workgraph",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//:live_smoke_support",
+    ],
+    srcs = [
+        "tests/binary_fatal_error_display.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.33",
+        "CARGO_BIN_NAME": "binary_fatal_error_display",
+        "CARGO_MANIFEST_DIR": "./meerkat-mcp-server",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        "//meerkat-mcp-server:rkat_mcp_bin",
+    ],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+        "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mcp-server",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mcp-server:meerkat_mcp_server_with_runtime_test_support",
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_mcp_agent_factory_build_test_support",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-mcp-server",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "binary_stdio_e2e_test",
     aliases = aliases(
         package_name = "meerkat-mcp-server",
@@ -844,6 +914,7 @@ rust_binary(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":binary_fatal_error_display_test",
         ":binary_tracing_stderr_test",
         ":mcp_binding_input_test",
         ":meerkat_mcp_server_unit_test",

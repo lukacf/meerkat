@@ -7,9 +7,11 @@
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
 
 use clap::{Parser, ValueEnum};
+use meerkat::surface::report_fatal_error;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_rest::{AppState, router};
 use meerkat_store::RealmBackend;
+use std::process::ExitCode;
 use std::{net::SocketAddr, path::PathBuf};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -61,7 +63,16 @@ impl From<RealmBackendArg> for RealmBackend {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
+    // Render the Display chain, not `Result`'s Debug: a storage refusal's
+    // remedy sentence lives only in Display.
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => report_fatal_error("rkat-rest", err.as_ref()),
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let selection = RealmConfig::selection_from_inputs(
         args.realm.clone(),

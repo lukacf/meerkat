@@ -139,6 +139,41 @@ them.
   taken with a blocking, kernel-queued `lock_exclusive` on a blocking thread,
   behind a 60 s liveness bound that only a live holder that never releases
   can hit (a crashed holder's lock is released by the kernel).
+- **`rkat-rpc`, `rkat-rest`, and `rkat-mcp` print fatal startup errors in
+  their `Display` form.** All three binaries had `fn main() -> Result<(),
+  Box<dyn Error>>`, which makes Rust print a returned error with `Debug`, so a
+  storage refusal read `Error: Store(UnledgeredDomainObjects { domain:
+  "session-store", objects: [...], bridgeable: CatalogAuthenticated })` and
+  the remedy sentence naming `rkat storage migrate --apply
+  --bridge-pre-0-8-10`, which only the `Display` form carries, was never shown
+  to the operator (#1103). The binaries now render a fatal error through the
+  shared `meerkat::surface::report_fatal_error`: the `Display` chain (the
+  error, then each `source()` as a `caused by:` line), every line prefixed
+  with the binary name (`rkat-rpc: ...`), and exit status 1 as before. Other
+  exit paths are unchanged.
+- **The Python SDK reports why rkat-rpc exited.** `MeerkatClient` spawned the
+  child with `stderr=PIPE` and never read it, so a child that refused to
+  start (for example `Store(UnledgeredDomainObjects ...)` on a pre-0.8.10
+  realm) surfaced only as `MeerkatError CONNECTION_CLOSED 'rkat-rpc process
+  closed'` and the operator never saw the reason; a chatty child under
+  `RUST_LOG` could also block on the full 64 KB pipe (#1103). The client now
+  drains stderr for the child's whole lifetime into a bounded
+  tail (the last 16 KB) and, when the transport closes unexpectedly, the
+  `CONNECTION_CLOSED` error carries that tail both in its message
+  (`rkat-rpc process closed; stderr tail:\n...`) and as
+  `details["stderr_tail"]`; requests made after the close carry the same
+  recorded fault. The drain task is cancelled and awaited by `close()`.
+- **The Python SDK's `MeerkatClient.close()` treats a child that already
+  exited as already closed.** `close()` called `terminate()` on the rkat-rpc
+  child unguarded, so when the child had exited on its own (a startup
+  refusal, a crash) the call raised `ProcessLookupError` out of the caller's
+  `finally`, replacing the `MeerkatError` that explained the failure; a host
+  logged `ProcessLookupError()` for a day of jobs whose real cause was a
+  storage refusal at startup (#1103). `close()` now checks `returncode`
+  before signalling, treats `ProcessLookupError` from `terminate()`/`kill()`
+  as the vanished-child outcome it is, waits for the child after `kill()`
+  instead of abandoning it, and is idempotent. The original error reaches the
+  caller.
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

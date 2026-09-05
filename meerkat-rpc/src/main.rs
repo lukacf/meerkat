@@ -2,14 +2,18 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::AgentFactory;
+use meerkat::surface::report_fatal_error;
 use meerkat_core::{
     ConfigResolvedPaths, ConfigRuntime, ConfigStore, FileConfigStore, RealmConfig, RealmSelection,
     TaggedConfigStore,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+const BINARY_NAME: &str = "rkat-rpc";
 
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"))]
@@ -162,16 +166,25 @@ fn worker_stack_bytes() -> usize {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
     let stack_bytes = worker_stack_bytes();
     if stack_bytes != DEFAULT_WORKER_STACK_BYTES {
         eprintln!("rkat-rpc: worker stack overridden to {stack_bytes} bytes");
     }
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(stack_bytes)
-        .build()?
-        .block_on(async_main())
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => return report_fatal_error(BINARY_NAME, &err),
+    };
+    // Render the Display chain, not `Result`'s Debug: a storage refusal's
+    // remedy sentence lives only in Display.
+    match runtime.block_on(async_main()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => report_fatal_error(BINARY_NAME, err.as_ref()),
+    }
 }
 
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {

@@ -22,12 +22,89 @@ if TYPE_CHECKING:
 
 RPC_STDOUT_LIMIT_BYTES = 64 * 1024 * 1024
 
+# Bytes of the child's most recent stderr kept for the CONNECTION_CLOSED error.
+STDERR_TAIL_LIMIT_BYTES = 16 * 1024
+
+# How long the stdout read loop waits for the stderr pipe to reach EOF after
+# stdout closed, so a startup refusal written just before exit lands in the
+# tail. Both pipes close when the child exits, so this is normally instant.
+STDERR_TAIL_SETTLE_SECS = 1.0
+
+_STDERR_READ_CHUNK_BYTES = 4096
+
+
+class _StderrTail:
+    """Continuously drain a child's stderr into a bounded tail buffer.
+
+    rkat-rpc is spawned with ``stderr=PIPE``. A pipe nobody reads fills at the
+    OS limit (64 KB on Linux) and a chatty child under ``RUST_LOG`` then blocks
+    on its next ``eprintln!``, so the drain must run for the child's whole
+    lifetime. Only the last ``limit`` bytes are retained: enough for the
+    startup refusal or panic that explains an unexpected exit, never unbounded.
+    """
+
+    def __init__(
+        self,
+        stderr: asyncio.StreamReader,
+        limit: int = STDERR_TAIL_LIMIT_BYTES,
+    ):
+        self._stderr = stderr
+        self._limit = limit
+        self._buffer = bytearray()
+        self._task: asyncio.Task[None] | None = None
+        self._eof = asyncio.Event()
+
+    def start(self) -> None:
+        self._task = asyncio.get_running_loop().create_task(self._drain())
+
+    async def stop(self) -> None:
+        """Cancel and await the drain task so it never outlives the client."""
+        if self._task is None:
+            return
+        task = self._task
+        self._task = None
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def wait_closed(self, timeout: float) -> None:
+        """Wait up to ``timeout`` seconds for stderr to reach EOF."""
+        try:
+            await asyncio.wait_for(self._eof.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    def text(self) -> str:
+        """The retained tail, decoded leniently (a chunk boundary may split a
+        multi-byte character)."""
+        return self._buffer.decode("utf-8", errors="replace")
+
+    def _append(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+        overflow = len(self._buffer) - self._limit
+        if overflow > 0:
+            del self._buffer[:overflow]
+
+    async def _drain(self) -> None:
+        try:
+            while True:
+                chunk = await self._stderr.read(_STDERR_READ_CHUNK_BYTES)
+                if not chunk:
+                    return
+                self._append(chunk)
+        finally:
+            self._eof.set()
+
 
 class _StdoutDispatcher:
     """Background reader that multiplexes stdout lines to response futures and event queues."""
 
     def __init__(self, stdout: asyncio.StreamReader):
         self._stdout = stdout
+        self._stderr_tail: _StderrTail | None = None
         self._pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._stream_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
@@ -108,11 +185,29 @@ class _StdoutDispatcher:
         """Set the process for writing callback responses."""
         self._stdin_writer = process
 
+    def set_stderr_tail(self, tail: _StderrTail | None) -> None:
+        """Attach the child's stderr drain so an unexpected transport close
+        can report why the child exited."""
+        self._stderr_tail = tail
+
+    async def _fail_connection_closed(self) -> None:
+        """Fail every waiter with CONNECTION_CLOSED, carrying the child's
+        stderr tail in both the message and ``details["stderr_tail"]``."""
+        message = "rkat-rpc process closed"
+        details: dict[str, Any] | None = None
+        if self._stderr_tail is not None:
+            await self._stderr_tail.wait_closed(STDERR_TAIL_SETTLE_SECS)
+            tail = self._stderr_tail.text().strip()
+            if tail:
+                message = f"{message}; stderr tail:\n{tail}"
+                details = {"stderr_tail": tail}
+        self._fail_all("CONNECTION_CLOSED", message, details)
+
     async def _read_loop(self) -> None:
         while not self._closed:
             line = await self._stdout.readline()
             if not line:
-                self._fail_all("CONNECTION_CLOSED", "rkat-rpc process closed")
+                await self._fail_connection_closed()
                 return
             try:
                 data = json.loads(line)
@@ -270,12 +365,17 @@ class _StdoutDispatcher:
             except Exception:
                 pass  # Best-effort — process may have died.
 
-    def _fail_all(self, code: str, message: str) -> None:
+    def _fail_all(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         if self.transport_fault is None:
-            self.transport_fault = MeerkatError(code, message)
+            self.transport_fault = MeerkatError(code, message, details)
         for future in self._pending_responses.values():
             if not future.done():
-                future.set_exception(MeerkatError(code, message))
+                future.set_exception(MeerkatError(code, message, details))
         self._pending_responses.clear()
         for queue in self._event_queues.values():
             queue.put_nowait(None)

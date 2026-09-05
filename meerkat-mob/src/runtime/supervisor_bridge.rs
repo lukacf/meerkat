@@ -3399,13 +3399,12 @@ mod tests {
         PeerAddress,
     ) {
         let suffix = uuid::Uuid::new_v4();
-        let port_reservation =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("reserve fixed loopback port");
-        let fixed_port = port_reservation
-            .local_addr()
-            .expect("reserved port address")
-            .port();
-        drop(port_reservation);
+        // The fixed port must survive the close-and-rebind of every rotation
+        // without another process being handed it in between (issue #1097).
+        // The bridge outlives this helper, so hold the reservation for the
+        // process (nextest runs one test per process).
+        let (fixed_port, port_reservation) = super::super::tests::reserve_fixed_loopback_port();
+        std::mem::forget(port_reservation);
         let advertised = PeerAddress::parse(format!("tcp://127.0.0.1:{fixed_port}"))
             .expect("fixed supervisor address");
         let authority = SupervisorAuthorityRecord::generate(

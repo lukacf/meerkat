@@ -16482,7 +16482,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
         "rotate-supervisor-cross-authority-rejection",
     );
     let mob_id = definition.id.clone();
-    let supervisor_port = unused_loopback_port();
+    let (supervisor_port, _supervisor_port_reservation) = reserve_fixed_loopback_port();
     let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
     definition
         .backend
@@ -16578,7 +16578,7 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         "rotate-supervisor-legacy-operation-migration",
     );
     let mob_id = definition.id.clone();
-    let supervisor_port = unused_loopback_port();
+    let (supervisor_port, _supervisor_port_reservation) = reserve_fixed_loopback_port();
     let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
     definition
         .backend
@@ -58455,24 +58455,58 @@ async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
     );
 }
 
+/// A loopback port reserved for a fixed-port supervisor bridge.
+///
+/// Dropping the reservation releases the port, so a test keeps it in a named
+/// local (`_supervisor_port_reservation`) for as long as the bridge may bind,
+/// rebuild (rotation) or rebind (restart) that port.
 #[cfg(not(target_arch = "wasm32"))]
-fn unused_loopback_port() -> u16 {
-    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("reserved listener local addr")
-        .port()
+pub(crate) struct LoopbackPortReservation {
+    #[cfg(target_os = "linux")]
+    _socket: tokio::net::TcpSocket,
 }
 
+/// Reserve a loopback TCP port that a supervisor bridge can still bind.
+///
+/// Fixed-port rotation needs a nonzero port, so these tests cannot let the
+/// bridge bind `:0`. Probing `:0` and dropping the probe hands the port back
+/// to the kernel, and any other process (a second nextest lane on the same
+/// box, or any ephemeral `connect()`) may be given it before the bridge binds
+/// (issue #1097).
+///
+/// On Linux the reservation is therefore a bound, never-listening socket with
+/// `SO_REUSEADDR`. While it lives, the kernel excludes the port from every
+/// other process's ephemeral `bind(:0)` and `connect()` selection, yet a
+/// listener that also sets `SO_REUSEADDR` (tokio/mio always do) may bind,
+/// listen, close and rebind the exact port - the rotation and restart shape
+/// exercised here. Other platforms have no non-listening reuse semantics and
+/// keep the probe-then-drop shape; `.config/nextest.toml` serializes and
+/// retries that macOS cohort.
 #[cfg(not(target_arch = "wasm32"))]
-fn reserve_supervisor_bridge_port() -> (u16, std::net::TcpListener) {
-    let reservation = std::net::TcpListener::bind(std::net::SocketAddr::from(([0, 0, 0, 0], 0)))
-        .expect("reserve wildcard supervisor bridge port");
-    let port = reservation
-        .local_addr()
-        .expect("reserved supervisor bridge listener local addr")
-        .port();
-    (port, reservation)
+pub(crate) fn reserve_fixed_loopback_port() -> (u16, LoopbackPortReservation) {
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    #[cfg(target_os = "linux")]
+    {
+        let socket = tokio::net::TcpSocket::new_v4().expect("create loopback reservation socket");
+        socket
+            .set_reuseaddr(true)
+            .expect("set SO_REUSEADDR on loopback reservation");
+        socket.bind(loopback).expect("reserve loopback port");
+        let port = socket
+            .local_addr()
+            .expect("reserved loopback socket local addr")
+            .port();
+        (port, LoopbackPortReservation { _socket: socket })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let port = std::net::TcpListener::bind(loopback)
+            .expect("reserve loopback port")
+            .local_addr()
+            .expect("reserved listener local addr")
+            .port();
+        (port, LoopbackPortReservation {})
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -58484,7 +58518,7 @@ async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() 
         "external-tcp-advertised-supervisor",
     );
     let mob_id = definition.id.clone();
-    let (port, port_reservation) = reserve_supervisor_bridge_port();
+    let (port, _supervisor_port_reservation) = reserve_fixed_loopback_port();
     let advertised_address = format!("tcp://127.0.0.1:{port}");
     definition
         .backend
@@ -58495,7 +58529,6 @@ async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() 
         bind_address: Some(format!("0.0.0.0:{port}")),
         advertised_address: Some(advertised_address.clone()),
     });
-    drop(port_reservation);
     let (handle, service) = create_test_mob(definition).await;
     let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp-advertised");
     let external = spawn_live_external_tcp_peer(&external_name).await;
@@ -58581,7 +58614,7 @@ async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses
         "external-tcp-fixed-supervisor-pending-retry",
     );
     let mob_id = definition.id.clone();
-    let (port, port_reservation) = reserve_supervisor_bridge_port();
+    let (port, _supervisor_port_reservation) = reserve_fixed_loopback_port();
     let advertised_address = format!("tcp://127.0.0.1:{port}");
     definition
         .backend
@@ -58603,7 +58636,6 @@ async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses
     let runtime_metadata = storage.runtime_metadata.clone();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    drop(port_reservation);
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         // External peer-only members are owned by the MobMachine owner bridge
@@ -58747,7 +58779,7 @@ async fn test_fixed_port_activation_rebuild_failure_retries_same_durable_operati
         "fixed-port-activation-rebuild-retry-anchor",
     );
     let mob_id = definition.id.clone();
-    let port = unused_loopback_port();
+    let (port, _supervisor_port_reservation) = reserve_fixed_loopback_port();
     let advertised_address = format!("tcp://127.0.0.1:{port}");
     definition
         .backend

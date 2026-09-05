@@ -232,6 +232,14 @@ repos:
         always_run: true
         stages: [pre-push]
 
+      - id: release-doctor-workflow-contract
+        name: release doctor workflow assertions survive rewording and reject removal
+        entry: scripts/test-release-doctor-workflow-contract.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       - id: release-packaging-isolation-contract
         name: parallel release packaging isolates outputs and preserves failures
         entry: scripts/test-release-packaging-isolation.sh

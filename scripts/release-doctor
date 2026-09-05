@@ -4,6 +4,9 @@ set -euo pipefail
 workspace_root="$(git rev-parse --show-toplevel)"
 cd "${workspace_root}"
 
+# Contract tests point the doctor at a mutated copy of the release workflow.
+release_workflow="${RELEASE_WORKFLOW_FILE:-.github/workflows/release.yml}"
+
 ok=0
 warn=0
 fail=0
@@ -40,7 +43,7 @@ workflow_job() {
     $0 == header { in_job = 1 }
     in_job && $0 != header && /^  [[:alnum:]_-]+:/ { exit }
     in_job { print }
-  ' .github/workflows/release.yml
+  ' "${release_workflow}"
 }
 
 if command -v gh >/dev/null 2>&1; then
@@ -124,16 +127,16 @@ if command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/n
   done
 fi
 
-if grep -Fq 'github.com/wasm-bindgen/wasm-pack/releases/download' .github/workflows/release.yml; then
+if grep -Fq 'github.com/wasm-bindgen/wasm-pack/releases/download' "${release_workflow}"; then
   pass "Release workflow installs wasm-pack from maintained wasm-bindgen releases"
 else
   bad "Release workflow does not use the maintained wasm-bindgen wasm-pack release URL"
 fi
 
-if grep -Fq 'build_web_sdk_package:' .github/workflows/release.yml &&
-  grep -Fq 'scripts/release-build-web-sdk-package.sh' .github/workflows/release.yml &&
-  grep -Fq 'name: rkat-web-package' .github/workflows/release.yml &&
-  grep -Fq 'scripts/release-publish-web-sdk-package.sh' .github/workflows/release.yml; then
+if grep -Fq 'build_web_sdk_package:' "${release_workflow}" &&
+  grep -Fq 'scripts/release-build-web-sdk-package.sh' "${release_workflow}" &&
+  grep -Fq 'name: rkat-web-package' "${release_workflow}" &&
+  grep -Fq 'scripts/release-publish-web-sdk-package.sh' "${release_workflow}"; then
   pass "Release workflow builds @rkat/web once as an artifact before npm publishing"
 else
   bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
@@ -164,7 +167,7 @@ web_release_ref_jobs="$(
         pinned[job] = 1
       }
     END { print pinned["build"] + pinned["publish"] }
-  ' .github/workflows/release.yml
+  ' "${release_workflow}"
 )"
 if [[ "${web_release_ref_jobs}" == "2" ]]; then
   pass "Web SDK build and publish recovery jobs are pinned to the selected release tag"
@@ -178,7 +181,7 @@ if awk '
     in_job && /release-build-(linux|macos)/ { found = 1 }
     in_job && /release-build-windows/ { windows = 1 }
     END { exit (found && !windows) ? 0 : 1 }
-  ' .github/workflows/release.yml; then
+  ' "${release_workflow}"; then
   pass "Release workflow builds Linux/macOS assets on BuildBuddy for owner releases (no Windows BuildBuddy lane)"
 else
   bad "Release workflow should build Linux/macOS assets on BuildBuddy and keep Windows off the BuildBuddy lane (no self-hosted Windows RBE executors are registered)"
@@ -187,10 +190,10 @@ fi
 # Windows release binaries always build on a GitHub-hosted runner: under the
 # BuildBuddy lane split the hosted job runs with a Windows-only matrix, and
 # the binary gate requires BOTH lanes to succeed.
-if grep -Fq '"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc"' .github/workflows/release.yml &&
-  grep -Fq 'GitHub-hosted release binary build (Windows) selected' .github/workflows/release.yml &&
-  grep -Fq '[[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]' .github/workflows/release.yml &&
-  ! grep -Fq 'king.europe.buildbuddy.io' .github/workflows/release.yml; then
+if grep -Fq '"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc"' "${release_workflow}" &&
+  grep -Fq 'GitHub-hosted release binary build (Windows) selected' "${release_workflow}" &&
+  grep -Fq '[[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]' "${release_workflow}" &&
+  ! grep -Fq 'king.europe.buildbuddy.io' "${release_workflow}"; then
   pass "Release workflow routes Windows builds to a GitHub-hosted runner alongside the BuildBuddy Linux/macOS lanes"
 else
   bad "Release workflow should build Windows on a GitHub-hosted runner (Windows-only matrix under the BuildBuddy lane split) with a gate requiring both lanes"
@@ -205,7 +208,7 @@ web_build_timeout="$(
       print $0
       exit
     }
-  ' .github/workflows/release.yml
+  ' "${release_workflow}"
 )"
 if [[ "${web_build_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_build_timeout >= 120)); then
   pass "Web SDK package build job has a long timeout (${web_build_timeout} minutes)"
@@ -222,7 +225,7 @@ web_publish_timeout="$(
       print $0
       exit
     }
-  ' .github/workflows/release.yml
+  ' "${release_workflow}"
 )"
 if [[ "${web_publish_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_publish_timeout <= 30)); then
   pass "Web SDK publish job is artifact-only (${web_publish_timeout} minute timeout)"
@@ -237,13 +240,17 @@ else
   bad "Rust crate publish script is missing crates.io rate-limit retry handling"
 fi
 
-semver_job="$(workflow_job release_semver_gate)"
-if grep -Fq 'Verify exact-tree pre-tag semver evidence' <<<"${semver_job}" &&
-  grep -Fq "github.event_name != 'workflow_dispatch'" <<<"${semver_job}" &&
-  grep -Fq "github.event_name == 'workflow_dispatch' && github.event.inputs.semver_evidence_job_id == ''" <<<"${semver_job}"; then
+# The semver-gate and SLO assertions evaluate workflow behaviour under concrete
+# events instead of grepping literal lines, so reflowing a condition cannot
+# fail the doctor while removing the behaviour still does (#1091).
+workflow_contract() {
+  "${release_python:-python3}" scripts/check_release_workflow_contract.py \
+    --workflow "${release_workflow}" "$@" 2>&1
+}
+if semver_contract="$(workflow_contract semver-evidence)"; then
   pass "Tag releases reuse exact-tree pre-tag semver evidence"
 else
-  bad "Tag releases must reuse exact-tree pre-tag semver evidence instead of rerunning the long semver measurement"
+  bad "Tag releases must reuse exact-tree pre-tag semver evidence instead of rerunning the long semver measurement (${semver_contract//$'\n'/; })"
 fi
 
 registry_job="$(workflow_job publish_registries)"
@@ -258,11 +265,10 @@ else
   bad "Rust registry publication has an invalid critical-path dependency: ${registry_needs:-missing needs}"
 fi
 
-if grep -Fq 'scripts/verify-rust-release-public.py' <<<"${registry_job}" &&
-  grep -Fq -- '--slo-seconds 1800' <<<"${registry_job}"; then
+if slo_contract="$(workflow_contract registry-slo)"; then
   pass "Rust registry publication enforces the 30 minute tag-to-public SLO"
 else
-  bad "Rust registry publication does not enforce the 30 minute tag-to-public SLO"
+  bad "Rust registry publication does not enforce the 30 minute tag-to-public SLO (${slo_contract//$'\n'/; })"
 fi
 
 if [[ -n "${VERSION:-${RELEASE_TAG:-}}" ]]; then

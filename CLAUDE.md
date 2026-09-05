@@ -411,7 +411,7 @@ Installed via `make install-hooks`. Two stages:
 - `scripts/pre-push-audit-generated-headers.sh`
 - `scripts/pre-push-bridge-no-responsestatus.sh` (thin wrapper over `xtask bridge-classifier`)
 - `scripts/pre-push-bazel-locks.sh` (generated BUILD freshness, offline MODULE.bazel.lock recorded-input check, `bb mod deps --lockfile_mode=error` when the pinned CLI is present; `--require-bb` makes that last gate mandatory and the release preflight passes it)
-- `scripts/test-lock-consistency-gate.sh`, `scripts/test-bazel-module-lock-gate.sh`, `scripts/test-crate-enumeration-gate.sh` (contract tests: each new release-infra gate must still fail on the defect it was written for)
+- `scripts/test-lock-consistency-gate.sh`, `scripts/test-bazel-module-lock-gate.sh`, `scripts/test-crate-enumeration-gate.sh`, `scripts/test-release-doctor-workflow-contract.sh` (contract tests: each new release-infra gate must still fail on the defect it was written for; the last one also proves the release doctor's `release.yml` assertions survive rewording)
 - `scripts/pre-push-unit.sh` (deterministic local gate: Cargo `unit` plus `e2e-fast` by default, or matching BuildBuddy lanes when `MEERKAT_BUILDBUDDY=1`; includes per-tree cache, serialized runs, and timeout retry)
 
 **Manual local preflight**:

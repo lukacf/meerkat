@@ -824,7 +824,20 @@ impl RpcEventPump {
         timeout_secs: u64,
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let id = self.send_request(process, method, params).await?;
-        self.wait_for_response(process, id, timeout_secs).await
+        match self.wait_for_response(process, id, timeout_secs).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                // Embed the drained server stderr so a failed request (error
+                // response or timeout) carries the rkat-rpc trace lines that
+                // explain it, the same way the recovery-delivery timeout does.
+                let rpc_stderr = read_available_stderr(process, 500).await;
+                Err(format!(
+                    "rpc {method} failed: {error}\nrkat-rpc stderr at failure:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into())
+            }
+        }
     }
 
     /// Send an RPC request and require that the response carries a JSON-RPC

@@ -662,3 +662,365 @@ async fn archive_runtime_cleanup_preserves_downstream_anchors_when_unregister_fa
     assert!(mcp_ran.load(Ordering::SeqCst));
     assert!(mob_ran.load(Ordering::SeqCst));
 }
+
+/// Fixtures shared by the stale-discard tests below: a `CoreExecutor` whose
+/// post-stop cleanup parks on a deterministic gate so the owned unregister
+/// teardown saga can be held past the ordinary 2-second caller grace, and a
+/// mock LLM so the persistent service can materialize a real live actor.
+mod stale_discard {
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use meerkat::session_runtime::runtime_state::RuntimeStateOps;
+    use meerkat::{AgentFactory, Config, FactoryAgentBuilder, PersistentSessionService};
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
+    use meerkat_core::service::{
+        CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
+        SessionService as _,
+    };
+    use meerkat_core::types::SessionId;
+    use meerkat_runtime::MeerkatMachine;
+    use tokio::sync::Notify;
+
+    struct MockLlmClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for MockLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(futures::stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "mock".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct GatedCleanupExecutor {
+        cleanup_started: Arc<Notify>,
+        release_cleanup: Arc<Notify>,
+        cleanup_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedCleanupExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            self.cleanup_started.notify_one();
+            self.release_cleanup.notified().await;
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        staged_sessions: Arc<meerkat::StagedSessionRegistry>,
+        staged_capacity_admissions: meerkat::session_runtime::admission::StagedCapacityAdmissions,
+        runtime_adapter: Arc<MeerkatMachine>,
+    }
+
+    struct GatedTeardown {
+        cleanup_started: Arc<Notify>,
+        release_cleanup: Arc<Notify>,
+        cleanup_calls: Arc<AtomicUsize>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
+            builder.default_llm_client = Some(Arc::new(MockLlmClient));
+            let service = Arc::new(PersistentSessionService::new(
+                builder,
+                4,
+                Arc::new(meerkat_store::MemoryStore::new()),
+                Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new()),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            ));
+            Self {
+                service,
+                staged_sessions: Arc::new(meerkat::StagedSessionRegistry::new()),
+                staged_capacity_admissions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                runtime_adapter: Arc::new(MeerkatMachine::ephemeral()),
+            }
+        }
+
+        fn ops(&self) -> RuntimeStateOps<'_> {
+            RuntimeStateOps {
+                service: &self.service,
+                staged_sessions: &self.staged_sessions,
+                staged_capacity_admissions: &self.staged_capacity_admissions,
+                runtime_adapter: &self.runtime_adapter,
+            }
+        }
+
+        /// Create a persisted session whose live actor is materialized.
+        async fn create_live_session(&self) -> SessionId {
+            let created = self
+                .service
+                .create_session(CreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: "gpt-5.4".to_string(),
+                    prompt: "stale discard fixture".to_string().into(),
+                    system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+                    max_tokens: None,
+                    event_tx: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions::default()),
+                    labels: None,
+                })
+                .await
+                .expect("persistent service must create a live session");
+            assert!(
+                self.service
+                    .live_session_actor_registered(&created.session_id)
+                    .await,
+                "fixture must start with a registered live actor"
+            );
+            created.session_id
+        }
+
+        async fn register_gated_runtime(&self, session_id: &SessionId) -> GatedTeardown {
+            let gate = GatedTeardown {
+                cleanup_started: Arc::new(Notify::new()),
+                release_cleanup: Arc::new(Notify::new()),
+                cleanup_calls: Arc::new(AtomicUsize::new(0)),
+            };
+            self.runtime_adapter
+                .register_session_with_executor(
+                    session_id.clone(),
+                    Box::new(GatedCleanupExecutor {
+                        cleanup_started: Arc::clone(&gate.cleanup_started),
+                        release_cleanup: Arc::clone(&gate.release_cleanup),
+                        cleanup_calls: Arc::clone(&gate.cleanup_calls),
+                    }),
+                )
+                .await
+                .expect("runtime executor registration should succeed");
+            gate
+        }
+    }
+
+    /// (a) No live projection and no runtime registration: nothing to tear
+    /// down, so the discard is already clean.
+    #[tokio::test]
+    async fn discard_stale_live_session_with_absent_registration_is_clean() {
+        let fixture = Fixture::new();
+        let session_id = SessionId::new();
+        assert!(
+            fixture
+                .runtime_adapter
+                .current_session_registration_witness(&session_id)
+                .await
+                .is_none()
+        );
+
+        fixture
+            .ops()
+            .discard_stale_live_session(&session_id)
+            .await
+            .expect("absent registration must be treated as already clean");
+        assert!(!fixture.runtime_adapter.contains_session(&session_id).await);
+    }
+
+    /// Persisted session, runtime registered with an executor, but no live
+    /// actor (the reopened `monitors/start` shape): the registration is
+    /// healthy and must be kept, so no teardown is started and nothing waits
+    /// on the runtime loop.
+    #[tokio::test]
+    async fn discard_stale_live_session_keeps_registration_without_live_actor() {
+        let fixture = Fixture::new();
+        let session_id = fixture.create_live_session().await;
+        fixture
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("live actor discard should succeed");
+        assert!(
+            !fixture
+                .service
+                .live_session_actor_registered(&session_id)
+                .await
+        );
+        assert!(
+            fixture
+                .service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("authoritative load should succeed")
+                .is_some(),
+            "durable record must survive the live actor discard"
+        );
+        let gate = fixture.register_gated_runtime(&session_id).await;
+        let before = fixture
+            .runtime_adapter
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime must expose an exact registration witness");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture.ops().discard_stale_live_session(&session_id),
+        )
+        .await
+        .expect("discard without a live actor must not wait on any teardown")
+        .expect("discard without a live actor must be clean");
+
+        let after = fixture
+            .runtime_adapter
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registration must survive a discard that found no live actor");
+        assert_eq!(
+            after.epoch_id(),
+            before.epoch_id(),
+            "the exact registration must be untouched"
+        );
+        assert_eq!(
+            fixture
+                .runtime_adapter
+                .unregister_runtime_loop_handoff_wait_reports(&session_id)
+                .await,
+            Some(0),
+            "no unregister teardown may have started"
+        );
+        assert_eq!(gate.cleanup_calls.load(Ordering::SeqCst), 0);
+        gate.release_cleanup.notify_one();
+    }
+
+    /// (b) A live actor exists (behind durable authority): it is discarded and
+    /// the exact registration is torn down. A teardown that outlives the
+    /// ordinary 2-second caller grace must complete with `Ok(())` instead of
+    /// surfacing `UnregisterInProgress` to the caller about to reoccupy the
+    /// `SessionId`.
+    #[tokio::test]
+    async fn discard_stale_live_session_with_live_actor_awaits_teardown_past_caller_grace() {
+        // Mirrors UNREGISTER_CALLER_WAIT_GRACE in meerkat-runtime; the hold
+        // must exceed it so the old `unregister_session` path would already
+        // have returned `UnregisterInProgress`.
+        const OLD_CALLER_GRACE: Duration = Duration::from_secs(2);
+        const PAST_GRACE_HOLD: Duration = Duration::from_millis(2600);
+
+        let fixture = Arc::new(Fixture::new());
+        let session_id = fixture.create_live_session().await;
+        let gate = fixture.register_gated_runtime(&session_id).await;
+        let registration = fixture
+            .runtime_adapter
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime must expose an exact registration witness");
+
+        let discard = {
+            let fixture = Arc::clone(&fixture);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { fixture.ops().discard_stale_live_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), gate.cleanup_started.notified())
+            .await
+            .expect("owned teardown must reach the deterministic cleanup gate");
+        assert!(
+            !fixture
+                .service
+                .live_session_actor_registered(&session_id)
+                .await,
+            "the behind live actor must be discarded before teardown"
+        );
+
+        // Hold the teardown gate strictly longer than the old caller grace.
+        assert!(PAST_GRACE_HOLD > OLD_CALLER_GRACE);
+        tokio::time::sleep(PAST_GRACE_HOLD).await;
+        assert!(
+            !discard.is_finished(),
+            "stale discard must keep waiting on the exact teardown instead of \
+             erroring at the ordinary caller grace"
+        );
+        assert!(
+            fixture.runtime_adapter.contains_session(&session_id).await,
+            "registration must remain owned by the in-flight teardown"
+        );
+
+        gate.release_cleanup.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), discard)
+            .await
+            .expect("stale discard must finish once teardown reaches terminal completion")
+            .expect("stale discard task should not panic")
+            .expect("stale discard must complete with Ok(()) past the old caller grace");
+        assert!(!fixture.runtime_adapter.contains_session(&session_id).await);
+        assert_eq!(gate.cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            fixture
+                .runtime_adapter
+                .current_session_registration_witness(&session_id)
+                .await
+                .is_none(),
+            "the exact registration {} must be gone after terminal teardown",
+            registration.epoch_id()
+        );
+    }
+}

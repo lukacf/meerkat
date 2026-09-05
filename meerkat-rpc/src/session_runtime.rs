@@ -14714,6 +14714,127 @@ mod tests {
         );
     }
 
+    /// Regression for the `durable_jobs_workgraph_recovery` handoff stall
+    /// (refs #1093): in a reopened process, `monitors/start` attaches a
+    /// runtime executor before any turn, leaving a registration with no live
+    /// actor. `turn/start` then classifies the absent live projection as stale
+    /// and must NOT tear that healthy registration down; the in-loop recovery
+    /// tail materializes the actor from durable authority instead.
+    #[tokio::test]
+    async fn turn_start_keeps_registered_runtime_that_has_no_live_actor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(base_runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "Hello".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first turn must persist the session");
+
+        // Reopened-process shape: no live actor, no runtime registration.
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard_live_session");
+        runtime
+            .runtime_adapter()
+            .unregister_session(&session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
+
+        // monitors/start reaches the ops registry through ensure_runtime_executor,
+        // which registers a runtime loop + executor without a live actor.
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+        assert!(
+            !runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await,
+            "fixture must reach a registered runtime without a live actor"
+        );
+        let before = runtime
+            .runtime_adapter()
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime must expose an exact registration witness");
+
+        // Job-completion wake (jobs/cancel completing the monitor op): the
+        // idle loop applies a continuation with no prompt, which the in-loop
+        // recovery tail turns into a NoPendingBoundary terminal. That must
+        // not retire the registration while the prompt below is queued.
+        let (wake_outcome, _wake_completion) = runtime
+            .runtime_adapter()
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Continuation(
+                    meerkat_runtime::ContinuationInput::detached_background_op_completed(),
+                ),
+            )
+            .await
+            .expect("detached-op completion wake should be admitted");
+        assert!(wake_outcome.is_accepted());
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "Recover".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("turn/start must succeed against a registered runtime without a live actor");
+
+        let after = runtime
+            .runtime_adapter()
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registration must survive turn/start");
+        assert_eq!(
+            after.epoch_id(),
+            before.epoch_id(),
+            "turn/start must not tear down a registered runtime that merely has no live actor"
+        );
+        assert_eq!(
+            runtime
+                .runtime_adapter()
+                .unregister_runtime_loop_handoff_wait_reports(&session_id)
+                .await,
+            Some(0),
+            "no unregister teardown may have waited on the runtime loop"
+        );
+        assert!(
+            runtime
+                .service
+                .live_session_actor_registered(&session_id)
+                .await,
+            "the recovery tail must have materialized the live actor in place"
+        );
+    }
+
     #[tokio::test]
     async fn realtime_open_config_carries_runtime_owned_terminal_peer_response_as_typed_context() {
         let _projection_guard = realtime_open_projection_test_guard().await;

@@ -376,12 +376,55 @@ mod ops {
             result
         }
 
-        /// Discard a stale live session and unregister it from the
-        /// runtime adapter.
+        /// Discard a stale live session so the same `SessionId` can be
+        /// rematerialized, and unregister its runtime registration only when a
+        /// live actor was actually torn down.
+        ///
+        /// Contract:
+        /// - Absent live projection: nothing is stale, so the runtime
+        ///   registration is kept as-is and `Ok(())` is returned. A
+        ///   registration without a live actor is a healthy state (for example
+        ///   `monitors/start` attaching an executor before any turn): the
+        ///   runtime loop's recovery tail materializes the actor from durable
+        ///   authority on the next accepted input. Tearing that registration
+        ///   down here would wait on a loop that may be inside a
+        ///   continuation turn, which is the `durable_jobs_workgraph_recovery`
+        ///   handoff stall.
+        /// - Behind live projection: the live actor is discarded first (a
+        ///   `NotFound` race is already clean), then the exact current
+        ///   [`RuntimeSessionRegistrationWitness`] is captured and its owned
+        ///   unregister teardown saga is awaited to terminal completion via
+        ///   `unregister_session_registration_until_terminal_if_current`.
+        ///   There is deliberately no outer bound: the saga is
+        ///   coordinator-owned, so dropping this future never aborts
+        ///   teardown, and any bound shorter than the teardown latency would
+        ///   reintroduce `UnregisterInProgress` to the caller that is about to
+        ///   reoccupy the `SessionId`.
+        /// - An absent registration, or one already replaced by a
+        ///   same-`SessionId` successor before the unregister was admitted
+        ///   (`Ok(false)`), is treated as already clean; this call never joins
+        ///   teardown for a replacement registration.
+        /// - Discard and unregister failures are combined: a discard failure
+        ///   alone is returned as-is, an unregister failure alone is wrapped as
+        ///   an internal error, and both together are reported in one error.
+        ///
+        /// [`RuntimeSessionRegistrationWitness`]: meerkat_runtime::RuntimeSessionRegistrationWitness
         pub async fn discard_stale_live_session(
             &self,
             session_id: &SessionId,
         ) -> Result<(), SessionError> {
+            // Mechanical registry probe: no actor RPC, no durable arbitration,
+            // so a turn parked inside the actor cannot stall this check.
+            let live_actor_registered =
+                self.service.live_session_actor_registered(session_id).await;
+            if !live_actor_registered {
+                tracing::debug!(
+                    %session_id,
+                    "stale live-session discard found no live actor; keeping the runtime \
+                     registration for in-loop rematerialization from durable authority"
+                );
+                return Ok(());
+            }
             let discard_error = match self.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
@@ -391,12 +434,23 @@ mod ops {
                 .current_session_registration_witness(session_id)
                 .await
             {
-                Some(registration) => self
+                Some(registration) => match self
                     .runtime_adapter
                     .unregister_session_registration_until_terminal_if_current(&registration)
                     .await
-                    .map(|_| ())
-                    .err(),
+                {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        tracing::debug!(
+                            %session_id,
+                            epoch_id = %registration.epoch_id(),
+                            "stale live-session registration was replaced before unregister; \
+                             treating the captured registration as already clean"
+                        );
+                        None
+                    }
+                    Err(error) => Some(error),
+                },
                 None => None,
             };
             match (discard_error, unregister_error) {

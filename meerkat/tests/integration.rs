@@ -45,15 +45,13 @@ mod llm_normalization {
         // Stream returns Pin<Box<dyn Stream>> directly
         let mut stream = client.stream(&request);
 
-        let mut got_text_delta = false;
+        let mut got_text_output = false;
         let mut got_done = false;
 
         while let Some(event) = stream.next().await {
             match event {
                 Ok(LlmEvent::TextDelta { delta, .. }) => {
-                    // delta exists (may be empty for some deltas)
-                    let _ = delta;
-                    got_text_delta = true;
+                    got_text_output |= !delta.is_empty();
                 }
                 Ok(LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success { stop_reason },
@@ -84,6 +82,11 @@ mod llm_normalization {
                 Ok(LlmEvent::ServerToolContent { .. }) => {
                     // Provider-executed tool evidence is a valid side-channel event.
                 }
+                Ok(LlmEvent::AssistantOutput { blocks }) => {
+                    got_text_output = blocks.iter().any(|block| {
+                        matches!(block, AssistantBlock::Text { text, .. } if !text.is_empty())
+                    });
+                }
                 Ok(LlmEvent::WireLiveness) => {
                     // Transport liveness carries no content; it only re-arms
                     // the stream inactivity watchdog.
@@ -93,8 +96,8 @@ mod llm_normalization {
         }
 
         assert!(
-            got_text_delta,
-            "Should have received at least one TextDelta"
+            got_text_output,
+            "Should have received nonempty assistant text"
         );
         assert!(got_done, "Should have received Done event");
     }

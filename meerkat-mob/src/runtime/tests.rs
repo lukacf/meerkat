@@ -23598,8 +23598,15 @@ enum ColdLocalReadinessFault {
     CommsRuntime,
 }
 
+/// Wait for the spawn-detached keep-alive `start_turn` kickoff to be issued.
+///
+/// Autonomous spawn returns before its keep-alive turn is started (the kickoff
+/// runs on a detached lifecycle task), so a counter read right after spawn
+/// races the runtime loop (issue #1101). The bound is generous because the
+/// wait returns the moment the count is reached; it only converts a hang into
+/// an attributed failure.
 async fn wait_for_keep_alive_start_turn_count(service: &MockSessionService, expected: u64) {
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while service.keep_alive_start_turn_call_count() < expected {
             tokio::task::yield_now().await;
         }
@@ -45391,7 +45398,7 @@ async fn test_spawn_with_custom_initial_message() {
 
     // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
     // which delegates to start_turn and increments keep_alive_start_turn_call_count.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
@@ -45437,7 +45444,7 @@ async fn test_spawn_without_initial_message_uses_default() {
 
     // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
     // which delegates to start_turn and increments keep_alive_start_turn_call_count.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
@@ -45673,7 +45680,7 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .await
         .expect("spawn worker");
     // Runtime adapter path: autonomous spawn uses accept_input_with_completion.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
@@ -45732,7 +45739,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         .expect("turn-driven worker has an exact attachment");
     // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
     // which delegates to start_turn. No injects from spawn.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
@@ -45888,7 +45895,7 @@ async fn test_destroy_does_not_open_orchestrator_turn_before_archive() {
         .expect("spawn worker");
     // Runtime adapter path: autonomous members use accept_input_with_completion,
     // which delegates to start_turn. No injects from spawn.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 2).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         2,

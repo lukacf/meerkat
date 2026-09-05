@@ -64,6 +64,9 @@ pub enum LlmProviderErrorKind {
     /// `Retry-After` hint.
     QuotaExhausted,
     ContentFiltered,
+    /// The provider stopped the conversation for operator review. Never
+    /// automatically retry, refresh auth, fall back, or replace the conversation.
+    PolicyStop,
     ServerError,
     ServerOverloaded,
     ConnectionReset,

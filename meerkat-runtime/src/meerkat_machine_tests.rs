@@ -32336,6 +32336,7 @@ fn spine_snapshot_and_sticky_fallback_share_canonical_visibility_lock_order() {
                 provider: target.provider,
                 display_name: Some("Lock-order fallback target".to_string()),
                 context_window: Some(128_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(4096),
                 vision: Some(false),
                 web_search: Some(false),

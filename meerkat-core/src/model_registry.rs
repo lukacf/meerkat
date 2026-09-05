@@ -30,6 +30,7 @@ pub struct ModelRegistryEntry {
     pub tier: ModelTier,
     pub release_stage: ModelReleaseStage,
     pub context_window: Option<u32>,
+    pub max_input_tokens: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub self_hosted: Option<SelfHostedServerRef>,
 }
@@ -49,6 +50,7 @@ pub struct ModelProfileWitness {
     model: String,
     profile: ModelProfile,
     context_window: Option<u32>,
+    max_input_tokens: Option<u32>,
     max_output_tokens: Option<u32>,
 }
 
@@ -60,6 +62,7 @@ impl fmt::Debug for ModelProfileWitness {
             .field("model", &self.model)
             .field("profile", &self.profile)
             .field("context_window", &self.context_window)
+            .field("max_input_tokens", &self.max_input_tokens)
             .field("max_output_tokens", &self.max_output_tokens)
             .finish_non_exhaustive()
     }
@@ -84,6 +87,11 @@ impl ModelProfileWitness {
     /// Context-window limit owned by the same effective-registry entry.
     pub fn context_window(&self) -> Option<u32> {
         self.context_window
+    }
+
+    /// Separate input-token ceiling owned by the same effective-registry entry.
+    pub fn max_input_tokens(&self) -> Option<u32> {
+        self.max_input_tokens
     }
 
     /// Maximum output-token limit owned by the same effective-registry entry.
@@ -265,6 +273,7 @@ impl ModelRegistry {
                         tier: entry.tier,
                         release_stage: entry.release_stage,
                         context_window: entry.context_window,
+                        max_input_tokens: entry.max_input_tokens,
                         max_output_tokens: entry.max_output_tokens,
                         self_hosted: None,
                     },
@@ -358,6 +367,7 @@ impl ModelRegistry {
             model: model_id.to_string(),
             profile,
             context_window: entry.context_window,
+            max_input_tokens: entry.max_input_tokens,
             max_output_tokens: entry.max_output_tokens,
         })
     }
@@ -467,6 +477,7 @@ fn append_custom_models(
                 tier: ModelTier::Supported,
                 release_stage: ModelReleaseStage::OperatorDefined,
                 context_window: model.context_window,
+                max_input_tokens: model.max_input_tokens,
                 max_output_tokens: model.max_output_tokens,
                 self_hosted: None,
             },
@@ -574,6 +585,7 @@ fn append_self_hosted(
                 tier: model.tier,
                 release_stage: ModelReleaseStage::OperatorDefined,
                 context_window: model.context_window,
+                max_input_tokens: model.max_input_tokens,
                 max_output_tokens: model.max_output_tokens,
                 self_hosted: Some(self_hosted),
             },
@@ -645,6 +657,7 @@ mod tests {
                 family: "gemma-4".to_string(),
                 tier: ModelTier::Supported,
                 context_window: Some(256_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(8_192),
                 vision: true,
                 image_tool_results: true,
@@ -762,6 +775,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 display_name: None,
                 context_window: Some(32_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(1024),
                 vision: Some(false),
                 web_search: Some(false),
@@ -808,6 +822,7 @@ mod tests {
                 family: "gemma-4".to_string(),
                 tier: ModelTier::Supported,
                 context_window: Some(128_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(8_192),
                 vision: false,
                 image_tool_results: false,
@@ -882,6 +897,7 @@ mod tests {
                 family: "gemma-4".to_string(),
                 tier: ModelTier::Supported,
                 context_window: None,
+                max_input_tokens: None,
                 max_output_tokens: None,
                 vision: true,
                 image_tool_results: true,
@@ -920,6 +936,7 @@ mod tests {
                 family: "override".to_string(),
                 tier: ModelTier::Supported,
                 context_window: None,
+                max_input_tokens: None,
                 max_output_tokens: None,
                 vision: false,
                 image_tool_results: false,
@@ -943,6 +960,7 @@ mod tests {
             provider,
             display_name: Some("Claude Custom".to_string()),
             context_window: Some(500_000),
+            max_input_tokens: None,
             max_output_tokens: Some(16_384),
             vision: Some(true),
             web_search: None,

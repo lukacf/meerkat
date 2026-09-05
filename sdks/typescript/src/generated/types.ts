@@ -2279,6 +2279,7 @@ export interface CustomModelConfig {
   call_timeout_secs?: number | null;
   context_window?: number | null;
   display_name?: string | null;
+  max_input_tokens?: number | null;
   max_output_tokens?: number | null;
   provider: Provider;
   vision?: boolean | null;
@@ -5655,6 +5656,7 @@ export interface CatalogModelEntry {
   context_window?: number | null;
   display_name: string;
   id: string;
+  max_input_tokens?: number | null;
   max_output_tokens?: number | null;
   profile?: Record<string, unknown> | null;
   release_stage?: "stable" | "experimental" | "operator_defined";
@@ -5976,11 +5978,18 @@ export interface WireProviderMetaOpenAiResponse {
   response_id: string;
 }
 
+export interface WireProviderMetaOpenAiAssistantMessage {
+  id: string;
+  phase?: OpenAiAssistantPhase | null;
+  provider: "open_ai_assistant_message";
+  response_id?: string | null;
+}
+
 export interface WireProviderMetaUnknown {
   provider: "unknown";
 }
 
-export type WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaUnknown;
+export type WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaOpenAiAssistantMessage | WireProviderMetaUnknown;
 
 export interface WireTranscriptSourceSpoken {
   kind: "spoken";
@@ -6214,6 +6223,8 @@ export interface RevisedPromptDispositionRevised {
 }
 
 export type RevisedPromptDisposition = RevisedPromptDispositionNotRequested | RevisedPromptDispositionUnsupportedByBackend | RevisedPromptDispositionUnchanged | RevisedPromptDispositionRevised;
+
+export type OpenAiAssistantPhase = "commentary" | "final_answer";
 
 export interface WireServerToolKindWebSearch {
   kind: "web_search";

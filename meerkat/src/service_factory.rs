@@ -1976,6 +1976,7 @@ mod tests {
                 family: "video-family".to_string(),
                 tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: None,
+                max_input_tokens: None,
                 max_output_tokens: None,
                 vision: true,
                 image_tool_results: true,

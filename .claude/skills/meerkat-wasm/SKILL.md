@@ -74,9 +74,9 @@ The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around t
 
 Current release-line notes: `runtime_version()` and package compatibility
 should match the workspace `Cargo.toml` version (latest published release line
-is `0.8.x`; do not hardcode a stale patch pin). The OpenAI catalog default is
-`gpt-5.6-sol`, which is a limited preview; browser-facing examples should use
-`gpt-5.5` unless the proxy's API organization has preview access. Anthropic and
+is `0.8.x`; do not hardcode a stale patch pin). The OpenAI and global catalog
+default is `gpt-6-astra`. Confirm the proxy's API organization has access;
+otherwise select `gpt-5.5` explicitly. Existing configured models are unchanged. Anthropic and
 Gemini examples should use the current `claude-opus-5` and
 `gemini-3.5-flash` defaults unless a test deliberately pins another model. WASM
 mob flows use the same current

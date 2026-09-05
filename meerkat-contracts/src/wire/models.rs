@@ -129,9 +129,12 @@ pub struct CatalogModelEntry {
     /// Release maturity and admission class.
     #[serde(default)]
     pub release_stage: WireModelReleaseStage,
-    /// Maximum input context window in tokens.
+    /// Shared input-plus-output context window in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Separate maximum input tokens, if the model declares an input ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
     /// Maximum output tokens per response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,

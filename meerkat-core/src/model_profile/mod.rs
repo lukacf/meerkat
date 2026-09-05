@@ -249,8 +249,8 @@ impl ModelCatalog {
     /// Returns `None` for unknown providers, unknown model IDs, and
     /// provider/model mismatches. Text catalog models of a provider whose
     /// default image-generation route is the hosted Responses image tool are
-    /// admitted through that hosted route; other providers must have explicit
-    /// image model rows.
+    /// admitted through that hosted route only when their capability row
+    /// enables image generation; other providers must have explicit image rows.
     pub fn image_generation_model(
         self,
         provider: Provider,
@@ -267,6 +267,7 @@ impl ModelCatalog {
 
         let tool_model_id = self.hosted_responses_tool_model_id(provider)?;
         self.capabilities_for(provider, model_id)
+            .filter(|caps| caps.image_generation)
             .map(|caps| ImageGenerationModelProfile {
                 provider,
                 model_id: caps.id,
@@ -289,10 +290,10 @@ impl ModelCatalog {
             .find(|profile| profile.model_id == model_id)
             .map(|profile| profile.provider)
             .or_else(|| {
-                self.providers.iter().copied().find(|&provider| {
-                    self.hosted_responses_tool_model_id(provider).is_some()
-                        && self.capabilities_for(provider, model_id).is_some()
-                })
+                self.providers
+                    .iter()
+                    .copied()
+                    .find(|&provider| self.image_generation_model(provider, model_id).is_some())
             })
     }
 

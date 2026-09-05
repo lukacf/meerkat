@@ -64,9 +64,10 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 
 </details>
 
-Meerkat's OpenAI/global catalog default is `gpt-5.6-sol`. Catalog support
-does not guarantee that a particular API organization or ChatGPT workspace has
-access. Select `gpt-5.5` explicitly when the active account does not:
+Meerkat's OpenAI/global catalog default is `gpt-6-astra`. Explicit model and
+binding defaults are preserved. Catalog support does not guarantee access for
+an API organization or support through Azure, Copilot, or custom backends.
+Select an available model explicitly when needed:
 
 ```bash
 rkat run --model gpt-5.5 "Explain async/await"
@@ -166,7 +167,7 @@ Current catalog defaults:
 | Provider | Default |
 |----------|---------|
 | Anthropic | `claude-opus-5` |
-| OpenAI | `gpt-5.6-sol` |
+| OpenAI | `gpt-6-astra` |
 | Gemini | `gemini-3.8-flash` |
 
 Runtime model fallback is bounded and capability-aware. An accepted fallback

@@ -82,10 +82,10 @@ Provider-native names also work. For OAuth, Azure, cloud IAM, managed-store
 credentials, and tenant-scoped bindings, see [Auth](/guides/auth).
 
 <Warning>
-Meerkat's OpenAI/global catalog default is `gpt-5.6-sol`. Catalog support does
-not guarantee that the active API organization or ChatGPT workspace has access.
-If it does not, select `gpt-5.5` explicitly or configure a binding
-`default_model`.
+Meerkat's OpenAI/global catalog default is `gpt-6-astra`. Explicit model and
+binding defaults are preserved. Catalog support does not guarantee API access
+or support through Azure, Copilot, or custom backends. Select an available
+model explicitly or configure a binding `default_model` when needed.
 </Warning>
 
 ## Run A First Session

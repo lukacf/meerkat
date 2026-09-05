@@ -459,6 +459,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             family: "gemma-4".to_string(),
             tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(128_000),
+            max_input_tokens: None,
             max_output_tokens: Some(8_192),
             vision: true,
             image_tool_results: true,

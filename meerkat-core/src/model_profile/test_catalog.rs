@@ -27,6 +27,7 @@ const BASE_CAPS: ModelCapabilities = ModelCapabilities {
     release_stage: ModelReleaseStage::Stable,
     model_family: "test-family",
     context_window: Some(200_000),
+    max_input_tokens: None,
     max_output_tokens: Some(64_000),
     context_window_beta: None,
     max_output_tokens_beta: None,
@@ -104,6 +105,7 @@ const ENTRIES: &[CatalogEntry] = &[
         tier: ModelTier::Recommended,
         release_stage: ModelReleaseStage::Stable,
         context_window: Some(200_000),
+        max_input_tokens: None,
         max_output_tokens: Some(64_000),
     },
     CatalogEntry {
@@ -113,6 +115,7 @@ const ENTRIES: &[CatalogEntry] = &[
         tier: ModelTier::Recommended,
         release_stage: ModelReleaseStage::Stable,
         context_window: Some(200_000),
+        max_input_tokens: None,
         max_output_tokens: Some(64_000),
     },
     CatalogEntry {
@@ -122,6 +125,7 @@ const ENTRIES: &[CatalogEntry] = &[
         tier: ModelTier::Recommended,
         release_stage: ModelReleaseStage::Stable,
         context_window: Some(200_000),
+        max_input_tokens: None,
         max_output_tokens: Some(64_000),
     },
 ];

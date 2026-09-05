@@ -474,6 +474,13 @@ pub enum LlmDoneOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmEvent {
+    /// Final ordered output supplied by a provider's terminal response.
+    /// Replaces provisional delta assembly, including metadata that only
+    /// becomes available at completion. This is not another transcript.
+    AssistantOutput {
+        blocks: Vec<meerkat_core::AssistantBlock>,
+    },
+
     /// Incremental text output.
     /// Gemini may include `meta` for thoughtSignature on text parts.
     TextDelta {

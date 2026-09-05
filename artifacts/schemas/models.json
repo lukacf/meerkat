@@ -135,7 +135,7 @@
     "description": "A single model entry in the catalog response.",
     "properties": {
       "context_window": {
-        "description": "Maximum input context window in tokens.",
+        "description": "Shared input-plus-output context window in tokens.",
         "format": "uint32",
         "minimum": 0,
         "type": [
@@ -150,6 +150,15 @@
       "id": {
         "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
         "type": "string"
+      },
+      "max_input_tokens": {
+        "description": "Separate maximum input tokens, if the model declares an input ceiling.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
       },
       "max_output_tokens": {
         "description": "Maximum output tokens per response.",
@@ -202,7 +211,7 @@
         "description": "A single model entry in the catalog response.",
         "properties": {
           "context_window": {
-            "description": "Maximum input context window in tokens.",
+            "description": "Shared input-plus-output context window in tokens.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -217,6 +226,15 @@
           "id": {
             "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
             "type": "string"
+          },
+          "max_input_tokens": {
+            "description": "Separate maximum input tokens, if the model declares an input ceiling.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_output_tokens": {
             "description": "Maximum output tokens per response.",
@@ -472,7 +490,7 @@
         "description": "A single model entry in the catalog response.",
         "properties": {
           "context_window": {
-            "description": "Maximum input context window in tokens.",
+            "description": "Shared input-plus-output context window in tokens.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -487,6 +505,15 @@
           "id": {
             "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
             "type": "string"
+          },
+          "max_input_tokens": {
+            "description": "Separate maximum input tokens, if the model declares an input ceiling.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_output_tokens": {
             "description": "Maximum output tokens per response.",

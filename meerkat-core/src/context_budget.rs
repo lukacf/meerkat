@@ -1,9 +1,10 @@
 //! Pure pre-dispatch context-budget classification.
 //!
 //! The effective model registry remains the singular owner of the context
-//! window. This module accepts a registry-minted [`ModelProfileWitness`] and
-//! projects a loaded durable [`Session`] plus the exact visible tool set and
-//! output reserve into one typed, side-effect-free fact. Hosts can observe the
+//! window and optional input ceiling. This module accepts a registry-minted
+//! [`ModelProfileWitness`] and projects a loaded durable [`Session`] plus the
+//! exact visible tool set and output reserve into one typed, side-effect-free
+//! fact. Hosts can observe the
 //! projection without maintaining a second model-limit table. Forecasts never
 //! authorize runtime behavior; only exact provider-issued token evidence may
 //! authorize pre-dispatch refusal.
@@ -17,13 +18,13 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextBudgetState {
-    /// The request forecast remains within the witnessed context window.
+    /// The request remains within the witnessed context and input limits.
     Within,
     /// Forecast evidence projects the request beyond the active context
-    /// window, but does not authorize refusal.
+    /// window or input ceiling, but does not authorize refusal.
     ForecastExceeded,
     /// Exact provider-issued token evidence exceeds the active model profile's
-    /// context window.
+    /// context window or input ceiling.
     Exceeded,
 }
 
@@ -61,6 +62,9 @@ pub struct ContextBudgetFact {
     pub state: ContextBudgetState,
     /// Active registry-owned model context window.
     pub context_window_tokens: u32,
+    /// Active registry-owned separate input ceiling, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
     /// Observational estimate for the durable ordered transcript.
     pub estimated_input_tokens: u64,
     /// Observational estimate for the exact visible tool definitions.
@@ -72,9 +76,11 @@ pub struct ContextBudgetFact {
     /// An exact provider-issued count is used when available. Otherwise, this
     /// remains the canonical input/tool forecast.
     pub estimated_total_tokens: u64,
-    /// Remaining tokens when the request fits, otherwise zero.
+    /// Input headroom under both the input ceiling and context-minus-output
+    /// budget, otherwise zero.
     pub remaining_tokens: u64,
-    /// Tokens beyond the context window when exceeded, otherwise zero.
+    /// Greatest excess over either the context window or input ceiling,
+    /// otherwise zero.
     pub overage_tokens: u64,
     /// Provenance of the effective input-token value used by `state`.
     #[serde(default)]
@@ -217,6 +223,7 @@ fn context_budget_fact_for_messages_with_pressure(
     let context_window_tokens = active_model_profile
         .context_window()
         .ok_or(ContextBudgetFactError::ContextWindowUnavailable)?;
+    let max_input_tokens = active_model_profile.max_input_tokens();
 
     let estimated_input_tokens = crate::agent::compact::estimate_tokens(messages)
         .map_err(|error| ContextBudgetFactError::InputEstimationFailed {
@@ -249,7 +256,20 @@ fn context_budget_fact_for_messages_with_pressure(
     let estimated_total_tokens =
         effective_input_and_tools.saturating_add(u64::from(reserved_output_tokens));
     let context_window = u64::from(context_window_tokens);
-    let state = if estimated_total_tokens > context_window {
+    let remaining_tokens = max_input_tokens.map_or(
+        context_window.saturating_sub(estimated_total_tokens),
+        |input_limit| {
+            context_window
+                .saturating_sub(estimated_total_tokens)
+                .min(u64::from(input_limit).saturating_sub(effective_input_and_tools))
+        },
+    );
+    let overage_tokens = estimated_total_tokens.saturating_sub(context_window).max(
+        max_input_tokens.map_or(0, |input_limit| {
+            effective_input_and_tools.saturating_sub(u64::from(input_limit))
+        }),
+    );
+    let state = if overage_tokens > 0 {
         if provider_issued_input_tokens.is_some() {
             ContextBudgetState::Exceeded
         } else {
@@ -262,12 +282,13 @@ fn context_budget_fact_for_messages_with_pressure(
     Ok(ContextBudgetFact {
         state,
         context_window_tokens,
+        max_input_tokens,
         estimated_input_tokens,
         estimated_tool_tokens,
         reserved_output_tokens,
         estimated_total_tokens,
-        remaining_tokens: context_window.saturating_sub(estimated_total_tokens),
-        overage_tokens: estimated_total_tokens.saturating_sub(context_window),
+        remaining_tokens,
+        overage_tokens,
         estimate_provenance: if provider_issued_input_tokens.is_some() {
             ContextBudgetEstimateProvenance::ExactProviderTokenCount
         } else {
@@ -293,6 +314,13 @@ mod tests {
     fn profile_witness(
         context_window: Option<u32>,
     ) -> Result<ModelProfileWitness, Box<dyn std::error::Error>> {
+        profile_witness_with_input_limit(context_window, None)
+    }
+
+    fn profile_witness_with_input_limit(
+        context_window: Option<u32>,
+        max_input_tokens: Option<u32>,
+    ) -> Result<ModelProfileWitness, Box<dyn std::error::Error>> {
         let mut config = Config::default();
         config.models.custom.insert(
             MODEL.to_string(),
@@ -300,6 +328,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 display_name: None,
                 context_window,
+                max_input_tokens,
                 max_output_tokens: Some(8_192),
                 vision: None,
                 web_search: None,
@@ -497,6 +526,69 @@ mod tests {
             context_budget_fact_for_session(&session_with_system_bytes(20), &[], 0, &profile),
             Err(ContextBudgetFactError::ContextWindowUnavailable)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn separate_input_ceiling_and_shared_window_are_independent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_witness_with_input_limit(Some(1_000), Some(800))?;
+        for (input, reserve, remaining, overage) in [
+            (799, 100, 1, 0),
+            (800, 200, 0, 0),
+            (801, 1, 0, 1),
+            (790, 220, 0, 10),
+            (1_100, 300, 0, 400),
+        ] {
+            let fact = context_budget_fact_for_provider_request(
+                &[],
+                &[],
+                reserve,
+                &profile,
+                ProviderRequestPressure::new(1, None).with_provider_issued_input_tokens(input),
+            )?;
+            assert_eq!(fact.max_input_tokens, Some(800));
+            assert_eq!(fact.remaining_tokens, remaining);
+            assert_eq!(fact.overage_tokens, overage);
+            assert_eq!(fact.requires_dispatch_refusal(), overage > 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn input_ceiling_forecast_never_authorizes_refusal() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_witness_with_input_limit(Some(10_000), Some(100))?;
+        let fact =
+            context_budget_fact_for_session(&session_with_system_bytes(2_000), &[], 1, &profile)?;
+        assert!(fact.estimated_total_tokens < u64::from(fact.context_window_tokens));
+        assert!(fact.effective_input_tokens() > 100);
+        assert_eq!(fact.state, ContextBudgetState::ForecastExceeded);
+        assert_eq!(fact.remaining_tokens, 0);
+        assert_eq!(fact.overage_tokens, fact.effective_input_tokens() - 100);
+        assert!(!fact.requires_dispatch_refusal());
+        assert_eq!(
+            serde_json::from_value::<ContextBudgetFact>(serde_json::to_value(&fact)?)?,
+            fact
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_input_ceiling_preserves_shared_window_budget_and_wire_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_witness(Some(1_000))?;
+        let fact = context_budget_fact_for_provider_request(
+            &[],
+            &[],
+            100,
+            &profile,
+            ProviderRequestPressure::new(1, None).with_provider_issued_input_tokens(850),
+        )?;
+        assert_eq!(fact.state, ContextBudgetState::Within);
+        assert_eq!(fact.remaining_tokens, 50);
+        let wire = serde_json::to_value(&fact)?;
+        assert!(wire.get("max_input_tokens").is_none());
+        assert_eq!(serde_json::from_value::<ContextBudgetFact>(wire)?, fact);
         Ok(())
     }
 }

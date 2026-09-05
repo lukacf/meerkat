@@ -2581,6 +2581,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -9282,6 +9287,15 @@
             "description": "Human-readable display name. Defaults to the model id.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -17484,6 +17498,15 @@
               "null"
             ]
           },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_output_tokens": {
             "description": "Maximum output tokens per call.",
             "format": "uint32",
@@ -22107,6 +22130,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -24198,6 +24226,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -25535,6 +25571,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -33258,6 +33326,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -33635,6 +33708,14 @@
           "in_progress_truncated",
           "unavailable",
           "unavailable_truncated"
+        ],
+        "type": "string"
+      },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
         ],
         "type": "string"
       },
@@ -36584,6 +36665,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -46963,6 +47076,15 @@
               "null"
             ]
           },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_output_tokens": {
             "description": "Maximum output tokens per call.",
             "format": "uint32",
@@ -47735,6 +47857,11 @@
           {
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
             "type": "string"
           }
         ]
@@ -48532,6 +48659,14 @@
       },
       "ObjectiveId": {
         "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
         "type": "string"
       },
       "OpenAiImageMetadata": {
@@ -52667,6 +52802,38 @@
           },
           {
             "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "provider": {
                 "const": "unknown",
                 "type": "string"
@@ -56541,6 +56708,15 @@
             "description": "Human-readable display name. Defaults to the model id.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -64184,6 +64360,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -64561,6 +64742,14 @@
           "in_progress_truncated",
           "unavailable",
           "unavailable_truncated"
+        ],
+        "type": "string"
+      },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
         ],
         "type": "string"
       },
@@ -67510,6 +67699,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -71808,6 +72029,11 @@
           {
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
             "type": "string"
           }
         ]
@@ -88424,6 +88650,15 @@
               "null"
             ]
           },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_output_tokens": {
             "description": "Maximum output tokens per call.",
             "format": "uint32",
@@ -92729,6 +92964,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -94078,6 +94321,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -101193,6 +101468,15 @@
               "null"
             ]
           },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_output_tokens": {
             "description": "Maximum output tokens per call.",
             "format": "uint32",
@@ -101524,6 +101808,15 @@
             "description": "Human-readable display name. Defaults to the model id.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -116319,6 +116612,14 @@
         ],
         "type": "object"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -117608,6 +117909,38 @@
           },
           {
             "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "provider": {
                 "const": "unknown",
                 "type": "string"
@@ -118097,6 +118430,14 @@
         ],
         "type": "object"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -118354,6 +118695,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -123239,6 +123612,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -125873,6 +126251,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -127165,6 +127551,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -133166,6 +133584,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -134462,6 +134888,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -137690,6 +138148,16 @@
     "type": "object"
   },
   "WireProviderMeta": {
+    "$defs": {
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Provider continuity metadata for transcript blocks.",
     "oneOf": [
@@ -137804,6 +138272,38 @@
         "required": [
           "provider",
           "response_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiAssistantPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "const": "open_ai_assistant_message",
+            "type": "string"
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "id"
         ],
         "type": "object"
       },
@@ -139618,6 +140118,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -140910,6 +141418,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -141821,6 +142361,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -143113,6 +143661,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -144484,6 +145064,14 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -145776,6 +146364,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },

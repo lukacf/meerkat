@@ -631,8 +631,16 @@ pub struct RenderMetadata {
 // New ordered transcript types (spec section 3.1)
 // ===========================================================================
 
+/// Responses assistant-message phase, distinct from reasoning metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiAssistantPhase {
+    Commentary,
+    FinalAnswer,
+}
+
 /// Provider-specific metadata for replay continuity.
-/// Typed enum prevents runtime "is this an object?" errors.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case")]
@@ -685,6 +693,15 @@ pub enum ProviderMeta {
     OpenAiResponse {
         /// Provider response ID returned by the Responses API.
         response_id: String,
+    },
+    /// One Responses assistant message, not a reasoning item. Item identity
+    /// keeps adjacent messages distinct during stream assembly and replay.
+    OpenAiAssistantMessage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<OpenAiAssistantPhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
     },
 }
 

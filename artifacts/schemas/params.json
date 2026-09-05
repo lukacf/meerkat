@@ -7375,6 +7375,15 @@
               "null"
             ]
           },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "max_output_tokens": {
             "description": "Maximum output tokens per call.",
             "format": "uint32",
@@ -8147,6 +8156,11 @@
           {
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
             "type": "string"
           }
         ]
@@ -8944,6 +8958,14 @@
       },
       "ObjectiveId": {
         "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
         "type": "string"
       },
       "OpenAiImageMetadata": {
@@ -13074,6 +13096,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -17522,6 +17576,14 @@
         ],
         "type": "object"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -18968,6 +19030,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },
@@ -21835,6 +21929,15 @@
             "description": "Human-readable display name. Defaults to the model id.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -32841,6 +32944,14 @@
         ],
         "type": "object"
       },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -34394,6 +34505,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },

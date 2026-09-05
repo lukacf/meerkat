@@ -179,7 +179,10 @@ min_turns_between_compactions = 3
 
 When `session-compaction` is enabled, `AgentFactory` maps these values into
 the runtime `CompactionConfig`. If `auto_compact_threshold` is omitted,
-cataloged models scale the token trigger to 80 percent of their context window.
+cataloged models scale the token trigger to 80 percent of the smaller of their
+context window and separate input ceiling, when one is declared. For
+`gpt-6-astra`, the 922,000-token input ceiling gives a 737,600-token default
+trigger; its shared input-plus-output context window remains 1,050,000 tokens.
 Built-in provider clients also attach the current provider's approximate
 request-byte cap to each lowered request; the byte trigger fires at 80 percent
 of that cap. `max_request_bytes` is an optional operator override, especially

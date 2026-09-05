@@ -74,6 +74,12 @@ pub enum LlmError {
     #[error("Content filtered: {reason}")]
     ContentFiltered { reason: String },
 
+    /// The provider stopped the affected conversation for operator review.
+    /// This is not an authentication failure or ordinary content filtering:
+    /// do not retry, change providers, or reset the conversation automatically.
+    #[error("Provider policy stop ({code}): {message}")]
+    PolicyStop { code: String, message: String },
+
     #[error("Context length exceeded: {requested} > {max}")]
     ContextLengthExceeded { max: usize, requested: usize },
 
@@ -258,6 +264,27 @@ enum ProviderErrorBody {
 }
 
 impl ProviderErrorObject {
+    /// Classify a provider-declared conversation stop by exact structured code.
+    ///
+    /// For Responses streams, deserialize either the top-level `error` event
+    /// or `response.failed.response.error` into this object before classifying.
+    /// Message text and error type alone never establish a policy stop.
+    ///
+    /// <https://developers.openai.com/api/docs/guides/safety-checks/misalignment-monitoring>
+    pub fn policy_stop(&self) -> Option<LlmError> {
+        match &self.code {
+            Some(ProviderErrorCode::Named(code)) if code == "misalignment_policy_violation" => {
+                Some(LlmError::PolicyStop {
+                    code: code.clone(),
+                    message: self.message.clone().unwrap_or_else(|| {
+                        "Provider stopped this conversation; operator review required".to_string()
+                    }),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this error object reports exhausted quota, prepaid credit, or a
     /// spend allowance rather than a transient rate limit. Structured codes
     /// decide first (`code`, `type`, Anthropic `details.error_code`), then the
@@ -465,6 +492,15 @@ impl LlmError {
 
     /// Create from HTTP status code and message
     pub fn from_http_status(status: u16, message: String, retry_after_ms: Option<u64>) -> Self {
+        // Structured conversation stops take precedence over generic status
+        // classification, especially 403's historical authentication mapping.
+        if status >= 400
+            && let Ok(ProviderErrorBody::Wrapped { error } | ProviderErrorBody::Bare(error)) =
+                serde_json::from_str::<ProviderErrorBody>(&message)
+            && let Some(stop) = error.policy_stop()
+        {
+            return stop;
+        }
         match status {
             401 => Self::AuthenticationFailed { message },
             // 402 is a billing failure (Anthropic `billing_error`): the key is
@@ -590,6 +626,15 @@ impl LlmError {
                     }),
                 ))
             }
+            Self::PolicyStop { code, message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::PolicyStop,
+                    json!({
+                        "code": code,
+                        "message": message,
+                    }),
+                ))
+            }
             Self::ServerError { status, message } => {
                 let details = json!({
                     "status": status,
@@ -654,6 +699,113 @@ impl LlmError {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_stop_precedes_http_auth_classification() {
+        let error = json!({
+            "type": "invalid_request_error",
+            "code": "misalignment_policy_violation",
+            "message": "Operator review required",
+        });
+        for body in [error.clone(), json!({"error": error})] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::RETRY_AFTER, "1".parse().unwrap());
+            let stop = LlmError::from_http_response(403, body.to_string(), &headers);
+            assert!(matches!(
+                &stop,
+                LlmError::PolicyStop { code, message }
+                    if code == "misalignment_policy_violation"
+                        && message == "Operator review required"
+            ));
+            assert!(!stop.is_retryable());
+            assert_eq!(stop.retry_after(), None);
+            let roundtrip: LlmError =
+                serde_json::from_value(serde_json::to_value(&stop).unwrap()).unwrap();
+            assert_eq!(roundtrip.failure_reason(), stop.failure_reason());
+
+            let reason = stop.failure_reason();
+            let LlmFailureReason::ProviderError(provider_error) = &reason else {
+                panic!("policy stops must not be classified as auth or filtering");
+            };
+            assert_eq!(provider_error.kind, LlmProviderErrorKind::PolicyStop);
+            assert!(!provider_error.is_retryable());
+            let wire = serde_json::to_value(provider_error).unwrap();
+            assert_eq!(wire["kind"], "policy_stop");
+            assert_eq!(wire["retryability"], "non_retryable");
+            assert_eq!(wire["details"]["code"], "misalignment_policy_violation");
+            let restored: LlmProviderError = serde_json::from_value(wire).unwrap();
+            assert_eq!(&restored, provider_error);
+
+            let agent_error = meerkat_core::AgentError::llm("openai", reason, stop.to_string());
+            assert!(meerkat_core::retry::LlmRetryFailure::from_agent_error(&agent_error).is_none());
+            assert!(
+                meerkat_core::retry::RetryPolicy::default()
+                    .schedule_retry(&agent_error, 0, None)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn policy_stop_stream_helper_accepts_top_level_and_failed_response_error_objects() {
+        use serde::Deserialize as _;
+
+        let top_level = json!({
+            "type": "error",
+            "code": "misalignment_policy_violation",
+            "message": "Stop this workflow",
+        });
+        let failed_response = json!({
+            "type": "response.failed",
+            "response": {"error": top_level},
+        });
+        for object in [&top_level, &failed_response["response"]["error"]] {
+            let parsed = ProviderErrorObject::deserialize(object).unwrap();
+            assert!(matches!(
+                parsed.policy_stop(),
+                Some(LlmError::PolicyStop { .. })
+            ));
+            assert!(!parsed.signals_quota_exhausted());
+        }
+        let no_message = json!({"code": "misalignment_policy_violation"});
+        assert!(
+            ProviderErrorObject::deserialize(&no_message)
+                .unwrap()
+                .policy_stop()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn policy_stop_does_not_match_auth_failures_prose_types_or_unrelated_nested_codes() {
+        for body in [
+            r#"{"error":{"code":"invalid_api_key","message":"misalignment_policy_violation"}}"#,
+            r#"{"error":{"type":"misalignment_policy_violation","message":"policy stop"}}"#,
+            r#"{"error":{"code":"misalignment_policy_violation_suffix"}}"#,
+            r#"{"error":{"code":403,"message":"misalignment_policy_violation"}}"#,
+            r#"{"error":{"code":"content_filter"}}"#,
+            r#"{"error":{"details":{"code":"misalignment_policy_violation"}}}"#,
+            r#"{"error":{"message":"{\"code\":\"misalignment_policy_violation\"}"}}"#,
+            r#"{"metadata":{"code":"misalignment_policy_violation"}}"#,
+            "misalignment_policy_violation",
+            r#"{"error":{"code":"misalignment_policy_violation"}"#,
+        ] {
+            assert!(
+                matches!(
+                    LlmError::from_http_status(403, body.to_string(), None),
+                    LlmError::InvalidApiKey
+                ),
+                "{body}"
+            );
+            assert!(
+                matches!(
+                    LlmError::from_http_status(401, body.to_string(), None),
+                    LlmError::AuthenticationFailed { .. }
+                ),
+                "{body}"
+            );
+        }
+    }
 
     #[test]
     fn test_retryable_errors() {

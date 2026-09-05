@@ -12,6 +12,16 @@ use meerkat_core::model_profile::capabilities::{
 };
 use meerkat_core::model_profile::catalog::{ModelReleaseStage, ModelTier};
 
+/// Astra is reasoning-only; `none` and `minimal` are not supported.
+/// Source: https://developers.openai.com/api/docs/models/gpt-6-astra
+const GPT6_ASTRA_EFFORT: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
+
 /// Reasoning-effort levels accepted by recent GPT-5.x models (5.4, 5.5, 5.5-pro).
 ///
 /// Verified against the live API: `minimal` is rejected with
@@ -90,6 +100,49 @@ const REALTIME_2_EFFORT: &[EffortLevel] = &[
 
 /// Capability rows for OpenAI catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // Source: https://developers.openai.com/api/docs/models/gpt-6-astra
+    // Text/image input and text output through ordinary Responses function
+    // calling. The output allowance includes reasoning tokens. GPT-5.6-only
+    // controls and non-OpenAI backend support are not implied by this row.
+    ModelCapabilities {
+        id: "gpt-6-astra",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6 Astra",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT6_ASTRA_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
     // GPT-5.6 Sol / Terra / Luna (plus the official Sol alias)
     //
     // Sources:
@@ -115,6 +168,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -153,6 +207,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -191,6 +246,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -231,6 +287,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -273,6 +330,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -315,6 +373,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -355,7 +414,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://developers.openai.com/api/docs/guides/reasoning
     //
     // Demoted to Supported with the GPT-5.5 release; remains a fully
-    // supported choice while the current catalog default is GPT-5.6 Sol.
+    // supported choice while the current catalog default is GPT-6 Astra.
     ModelCapabilities {
         id: "gpt-5.4",
         provider: Provider::OpenAI,
@@ -364,6 +423,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(1_050_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -415,6 +475,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-5",
         context_window: Some(128_000),
+        max_input_tokens: None,
         max_output_tokens: Some(16_384),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -462,6 +523,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "codex",
         context_window: Some(400_000),
+        max_input_tokens: None,
         max_output_tokens: Some(128_000),
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -508,6 +570,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Experimental,
         model_family: "gpt-live",
         context_window: None,
+        max_input_tokens: None,
         max_output_tokens: None,
         context_window_beta: None,
         max_output_tokens_beta: None,
@@ -577,6 +640,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         release_stage: ModelReleaseStage::Stable,
         model_family: "gpt-realtime",
         context_window: Some(128_000),
+        max_input_tokens: None,
         max_output_tokens: Some(32_000),
         context_window_beta: None,
         max_output_tokens_beta: None,

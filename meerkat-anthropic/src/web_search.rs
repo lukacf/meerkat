@@ -195,6 +195,15 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
                         .and_then(serde_json::Value::as_u64),
                 },
                 LlmProviderErrorKind::QuotaExhausted => LlmError::QuotaExhausted { message },
+                LlmProviderErrorKind::PolicyStop => LlmError::PolicyStop {
+                    code: provider_error
+                        .details
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("policy_stop")
+                        .to_string(),
+                    message,
+                },
                 LlmProviderErrorKind::ContentFiltered => {
                     LlmError::ContentFiltered { reason: message }
                 }
@@ -301,6 +310,21 @@ mod tests {
     use meerkat_core::types::Usage;
     use meerkat_core::{AgentError, StopReason, ToolDef};
     use std::sync::Mutex;
+
+    #[test]
+    fn policy_stop_projection_preserves_terminal_kind_and_code() {
+        let stop = LlmError::PolicyStop {
+            code: "misalignment_policy_violation".to_string(),
+            message: "Operator review required".to_string(),
+        };
+        let error = map_agent_error_to_llm_error(AgentError::llm(
+            "anthropic",
+            stop.failure_reason(),
+            "Operator review required",
+        ));
+        assert_eq!(error.failure_reason(), stop.failure_reason());
+        assert!(!error.is_retryable());
+    }
 
     /// A fake LLM client that yields one canned outcome per call. The outcome
     /// is moved out so a single configured result is consumed exactly once.

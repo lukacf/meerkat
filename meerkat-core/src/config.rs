@@ -740,6 +740,9 @@ impl Config {
                     if model_table.contains_key("context_window") {
                         merged.context_window = model_layer.context_window;
                     }
+                    if model_table.contains_key("max_input_tokens") {
+                        merged.max_input_tokens = model_layer.max_input_tokens;
+                    }
                     if model_table.contains_key("max_output_tokens") {
                         merged.max_output_tokens = model_layer.max_output_tokens;
                     }
@@ -1219,6 +1222,9 @@ pub struct CustomModelConfig {
     /// Model context window in tokens (drives compaction scaling).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Separate input-token ceiling, independent of the shared context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
     /// Maximum output tokens per call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
@@ -1427,6 +1433,9 @@ pub struct SelfHostedModelConfig {
     pub tier: ModelTier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Separate input-token ceiling, independent of the shared context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     pub vision: bool,
@@ -1451,6 +1460,7 @@ impl Default for SelfHostedModelConfig {
             family: String::new(),
             tier: ModelTier::Supported,
             context_window: None,
+            max_input_tokens: None,
             max_output_tokens: None,
             vision: false,
             image_tool_results: false,
@@ -3530,6 +3540,82 @@ transport = "openai_compatible"
         assert_eq!(server.base_url, "http://127.0.0.1:11434");
         assert_eq!(server.api_style, SelfHostedApiStyle::Responses);
         assert_eq!(server.transport, SelfHostedTransport::OpenAiCompatible);
+    }
+
+    #[test]
+    fn test_merge_self_hosted_input_ceiling_is_presence_based() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://localhost:11434"
+[self_hosted.models.budget-test]
+server = "local"
+remote_model = "budget-test"
+context_window = 1000
+max_input_tokens = 800
+"#,
+            )
+            .expect("base");
+        config
+            .merge_toml_str(
+                r"
+[self_hosted.models.budget-test]
+max_output_tokens = 100
+",
+            )
+            .expect("unrelated overlay");
+        assert_eq!(
+            config.self_hosted.models["budget-test"].max_input_tokens,
+            Some(800)
+        );
+        config
+            .merge_toml_str(
+                r"
+[self_hosted.models.budget-test]
+max_input_tokens = 700
+",
+            )
+            .expect("ceiling override");
+        let registry = config
+            .model_registry(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("registry");
+        let witness = registry
+            .profile_witness_for_provider(crate::Provider::SelfHosted, "budget-test")
+            .expect("witness");
+        assert_eq!(witness.context_window(), Some(1000));
+        assert_eq!(witness.max_input_tokens(), Some(700));
+        assert_eq!(witness.max_output_tokens(), Some(100));
+    }
+
+    #[test]
+    fn custom_model_input_ceiling_roundtrips_and_reaches_registry() {
+        let config: Config = toml::from_str(
+            r#"
+[models.budget-test]
+provider = "openai"
+context_window = 1000
+max_input_tokens = 800
+max_output_tokens = 100
+"#,
+        )
+        .expect("config");
+        let restored: Config =
+            toml::from_str(&toml::to_string(&config).expect("serialize")).expect("roundtrip");
+        assert_eq!(
+            restored.models.custom["budget-test"].max_input_tokens,
+            Some(800)
+        );
+        let registry = restored
+            .model_registry(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("registry");
+        let witness = registry
+            .profile_witness_for_provider(crate::Provider::OpenAI, "budget-test")
+            .expect("witness");
+        assert_eq!(witness.context_window(), Some(1000));
+        assert_eq!(witness.max_input_tokens(), Some(800));
+        assert_eq!(witness.max_output_tokens(), Some(100));
     }
 
     #[test]

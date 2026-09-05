@@ -41,7 +41,9 @@ impl ReplayWireFamily {
             | ProviderMeta::AnthropicRedacted { .. }
             | ProviderMeta::AnthropicCompaction { .. } => Self::Anthropic,
             ProviderMeta::Gemini { .. } => Self::Gemini,
-            ProviderMeta::OpenAi { .. } | ProviderMeta::OpenAiResponse { .. } => Self::OpenAi,
+            ProviderMeta::OpenAi { .. }
+            | ProviderMeta::OpenAiResponse { .. }
+            | ProviderMeta::OpenAiAssistantMessage { .. } => Self::OpenAi,
         }
     }
 
@@ -923,6 +925,14 @@ fn projection_mismatch(subject: ReplaySubject, disposition: ReplayDisposition) -
 
 fn assistant_disposition(block: &AssistantBlock, target: ReplayTarget) -> ReplayDisposition {
     match block {
+        AssistantBlock::Text {
+            text,
+            meta: Some(meta),
+        } if text.is_empty()
+            && matches!(meta.as_ref(), ProviderMeta::OpenAiAssistantMessage { .. }) =>
+        {
+            ReplayDisposition::ProviderNative
+        }
         AssistantBlock::Text { text, .. } if text.is_empty() => ReplayDisposition::Omit,
         AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => ReplayDisposition::Preserve,
         AssistantBlock::Transcript { text, .. } if text.is_empty() => ReplayDisposition::Omit,
@@ -1108,6 +1118,56 @@ fn validate_tool_adjacency(messages: &[Message]) -> Result<(), ReplayPlanError> 
 mod tests {
     use super::*;
     use crate::{BlockAssistantMessage, StopReason, UserMessage};
+
+    #[test]
+    fn empty_text_native_replay_is_limited_to_openai_assistant_items() {
+        let target = ReplayTarget::new(
+            ReplayWireFamily::OpenAi,
+            false,
+            false,
+            false,
+            ReplayToolResultProjection::CollapseToText,
+            ReplayReasoningProjection::ProviderNative,
+        );
+        for meta in [
+            ProviderMeta::Anthropic {
+                signature: "signature".to_string(),
+            },
+            ProviderMeta::Gemini {
+                thought_signature: "signature".to_string(),
+            },
+            ProviderMeta::OpenAiResponse {
+                response_id: "resp_1".to_string(),
+            },
+            ProviderMeta::OpenAi {
+                id: "rs_1".to_string(),
+                encrypted_content: None,
+                phase: None,
+                response_id: None,
+            },
+        ] {
+            let block = AssistantBlock::Text {
+                text: String::new(),
+                meta: Some(Box::new(meta)),
+            };
+            assert_eq!(
+                assistant_disposition(&block, target),
+                ReplayDisposition::Omit
+            );
+        }
+        let block = AssistantBlock::Text {
+            text: String::new(),
+            meta: Some(Box::new(ProviderMeta::OpenAiAssistantMessage {
+                id: "msg_1".to_string(),
+                phase: Some(crate::types::OpenAiAssistantPhase::Commentary),
+                response_id: None,
+            })),
+        };
+        assert_eq!(
+            assistant_disposition(&block, target),
+            ReplayDisposition::ProviderNative
+        );
+    }
 
     #[test]
     fn rejects_wrong_lowering_from_actual_projected_content() {

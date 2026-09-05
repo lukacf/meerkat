@@ -1004,6 +1004,7 @@ pub fn build_models_catalog_response(
                             }
                         },
                         context_window: entry.context_window,
+                        max_input_tokens: entry.max_input_tokens,
                         max_output_tokens: entry.max_output_tokens,
                         server_id: entry
                             .self_hosted
@@ -2243,5 +2244,40 @@ family = "gemma-4"
         // catalog cleanup retired.
         assert!(realtime.image_input);
         assert!(realtime.realtime);
+    }
+
+    #[test]
+    fn build_models_catalog_response_projects_astra_input_ceiling() {
+        let catalog = build_models_catalog_response(&Config::default()).expect("catalog");
+        let openai = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.provider == "openai")
+            .expect("OpenAI");
+        assert_eq!(openai.default_model_id, "gpt-6-astra");
+        let astra = openai
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-6-astra")
+            .expect("Astra");
+        assert_eq!(astra.context_window, Some(1_050_000));
+        assert_eq!(astra.max_input_tokens, Some(922_000));
+        assert_eq!(astra.max_output_tokens, Some(128_000));
+        let wire = serde_json::to_value(astra).expect("wire");
+        assert_eq!(wire["max_input_tokens"], 922_000);
+        let restored: meerkat_contracts::CatalogModelEntry =
+            serde_json::from_value(wire).expect("roundtrip");
+        assert_eq!(restored.max_input_tokens, Some(922_000));
+
+        let legacy = openai
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("legacy");
+        let wire = serde_json::to_value(legacy).expect("wire");
+        assert!(wire.get("max_input_tokens").is_none());
+        let restored: meerkat_contracts::CatalogModelEntry =
+            serde_json::from_value(wire).expect("old shape");
+        assert_eq!(restored.max_input_tokens, None);
     }
 }

@@ -6611,7 +6611,7 @@
         "description": "A single model entry in the catalog response.",
         "properties": {
           "context_window": {
-            "description": "Maximum input context window in tokens.",
+            "description": "Shared input-plus-output context window in tokens.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -6626,6 +6626,15 @@
           "id": {
             "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
             "type": "string"
+          },
+          "max_input_tokens": {
+            "description": "Separate maximum input tokens, if the model declares an input ceiling.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_output_tokens": {
             "description": "Maximum output tokens per response.",
@@ -8029,6 +8038,15 @@
             "description": "Human-readable display name. Defaults to the model id.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "max_input_tokens": {
+            "description": "Separate input-token ceiling, independent of the shared context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -9603,6 +9621,11 @@
           {
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
             "type": "string"
           }
         ]
@@ -11326,6 +11349,14 @@
       },
       "OpaqueProviderBody": {
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+        "type": "string"
+      },
+      "OpenAiAssistantPhase": {
+        "description": "Responses assistant-message phase, distinct from reasoning metadata.",
+        "enum": [
+          "commentary",
+          "final_answer"
+        ],
         "type": "string"
       },
       "OpenAiImageMetadata": {
@@ -20616,6 +20647,38 @@
             "required": [
               "provider",
               "response_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpenAiAssistantPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai_assistant_message",
+                "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider",
+              "id"
             ],
             "type": "object"
           },

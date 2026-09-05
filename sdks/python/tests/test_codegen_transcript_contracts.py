@@ -26,6 +26,7 @@ from meerkat.generated.types import (
     WireProviderMetaAnthropicRedacted,
     WireProviderMetaGemini,
     WireProviderMetaOpenAi,
+    WireProviderMetaOpenAiAssistantMessage,
     WireProviderMetaOpenAiResponse,
     WireProviderMetaUnknown,
     WireTranscriptReplacement,
@@ -101,6 +102,7 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         WireProviderMetaAnthropicCompaction,
         WireProviderMetaGemini,
         WireProviderMetaOpenAi,
+        WireProviderMetaOpenAiAssistantMessage,
         WireProviderMetaOpenAiResponse,
         WireProviderMetaUnknown,
     }
@@ -111,6 +113,7 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         WireProviderMetaAnthropicCompaction: "content",
         WireProviderMetaGemini: "thoughtSignature",
         WireProviderMetaOpenAi: "id",
+        WireProviderMetaOpenAiAssistantMessage: "id",
         WireProviderMetaOpenAiResponse: "response_id",
     }
     for variant, payload in required_payloads.items():
@@ -123,6 +126,14 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         assert get_origin(open_ai_hints[field]) is NotRequired
         nullable = get_args(open_ai_hints[field])[0]
         assert set(get_args(nullable)) == {str, type(None)}
+
+    message_hints = get_type_hints(
+        WireProviderMetaOpenAiAssistantMessage, include_extras=True
+    )
+    assert get_origin(message_hints["phase"]) is NotRequired
+    phase_variants = get_args(get_args(message_hints["phase"])[0])
+    assert type(None) in phase_variants
+    assert any(set(get_args(variant)) == {"commentary", "final_answer"} for variant in phase_variants)
 
 
 def test_promoted_optional_nullable_fields_keep_null_as_a_value() -> None:

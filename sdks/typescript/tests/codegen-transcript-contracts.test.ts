@@ -100,6 +100,8 @@ const providerMetas: WireProviderMeta[] = [
     response_id: null,
   },
   { provider: "open_ai_response", response_id: "response-1" },
+  { provider: "open_ai_assistant_message", id: "message-1", phase: "commentary" },
+  { provider: "open_ai_assistant_message", id: "message-2", phase: "final_answer", response_id: null },
   { provider: "unknown" },
 ];
 
@@ -133,6 +135,12 @@ const nullableRewriteMessage: TranscriptRewriteMessage = {
 const invalidAnthropicMeta: WireProviderMeta = { provider: "anthropic" };
 // @ts-expect-error provider metadata is a closed wire vocabulary.
 const invalidProviderMeta: WireProviderMeta = { provider: "future" };
+const invalidAssistantPhase: WireProviderMeta = {
+  provider: "open_ai_assistant_message",
+  id: "message-3",
+  // @ts-expect-error assistant phase is not the reasoning metadata phase.
+  phase: "reasoning",
+};
 const invalidReasoningNull: WireAssistantBlock = {
   block_type: "reasoning",
   // @ts-expect-error omission is allowed, but explicit null is not in this schema.
@@ -166,6 +174,7 @@ void nullableImageProviderMeta;
 void nullableRewriteMessage;
 void invalidAnthropicMeta;
 void invalidProviderMeta;
+void invalidAssistantPhase;
 void invalidReasoningNull;
 void invalidInlineImage;
 void invalidBlobImage;

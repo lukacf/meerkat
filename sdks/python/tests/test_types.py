@@ -3172,6 +3172,49 @@ def test_parse_turn_completed_with_usage():
     assert event.usage.cache_creation_tokens is None
 
 
+def test_parse_run_failed_preserves_policy_stop():
+    from meerkat.generated.event_types import LlmProviderErrorKind
+
+    kinds = {
+        value
+        for member in get_args(LlmProviderErrorKind)
+        for value in (get_args(member) if get_origin(member) is Literal else (member,))
+    }
+    assert "policy_stop" in kinds
+    reason = {
+        "reason_type": "llm_provider_error",
+        "provider_error_kind": "policy_stop",
+        "provider_error_retryability": "non_retryable",
+        "provider_error": {
+            "code": "misalignment_policy_violation",
+            "message": "Operator review required",
+        },
+    }
+    raw = {
+        "type": "run_failed",
+        "session_id": "s1",
+        "terminal_cause_kind": "llm_failure",
+        "error_report": {"class": "llm", "message": "Stopped", "reason": reason},
+    }
+    event = parse_event(raw)
+    assert isinstance(event, RunFailed)
+    assert event.error_report.reason.reason_type == "llm_provider_error"
+    assert event.error_report.reason.provider_error_kind == "policy_stop"
+    assert event.error_report.reason.provider_error_retryability == "non_retryable"
+    assert event.error_report.reason.provider_error == reason["provider_error"]
+    assert event.error_report.reason["provider_error_kind"] == "policy_stop"
+
+    for retryability in (None, "unknown", True):
+        malformed = {
+            **raw,
+            "error_report": {
+                **raw["error_report"],
+                "reason": {**reason, "provider_error_retryability": retryability},
+            },
+        }
+        assert parse_event(malformed).type == "malformed_event"
+
+
 def test_parse_run_failed_preserves_typed_terminal_cause_report():
     raw = {
         "type": "run_failed",
@@ -3192,7 +3235,8 @@ def test_parse_run_failed_preserves_typed_terminal_cause_report():
     event = parse_event(raw)
 
     assert isinstance(event, RunFailed)
-    assert event.error == "display text changed by caller"
+    assert event.error == "machine terminalized LLM failure"
+    assert event.error_class == "llm"
     assert isinstance(event.error_report, AgentErrorReport)
     assert event.error_report.class_ == "llm"
     assert event.error_report.message == "machine terminalized LLM failure"

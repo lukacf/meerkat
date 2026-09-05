@@ -823,6 +823,7 @@ mod tests {
                 provider: meerkat_core::Provider::OpenAI,
                 display_name: None,
                 context_window: Some(window_tokens),
+                max_input_tokens: None,
                 max_output_tokens: Some(2_048),
                 vision: None,
                 web_search: None,

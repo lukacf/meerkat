@@ -120,7 +120,8 @@ pub struct OpenAiResponsesParamCapabilities {
 ///
 /// Fields group into:
 /// - identity (`id`, `provider`, `display_name`, `tier`, `model_family`)
-/// - context/output (`context_window`, `max_output_tokens`, plus `_beta` variants)
+/// - context/input/output (`context_window`, `max_input_tokens`, `max_output_tokens`,
+///   plus `_beta` variants)
 /// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`,
 ///   `image_generation`)
 /// - realtime transport capability facts (`realtime_supports_provider_managed_turns`,
@@ -152,8 +153,10 @@ pub struct ModelCapabilities {
     pub model_family: &'static str,
 
     // ── Context / output ──────────────────────────────────────────────
-    /// Maximum input context window in tokens (default, no beta).
+    /// Shared input-plus-output context window in tokens (default, no beta).
     pub context_window: Option<u32>,
+    /// Separate maximum input tokens, if the model declares an input ceiling.
+    pub max_input_tokens: Option<u32>,
     /// Maximum output tokens per response (default, no beta).
     pub max_output_tokens: Option<u32>,
     /// Extended context window via beta header, if available.

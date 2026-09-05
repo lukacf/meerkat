@@ -52,6 +52,18 @@ import type {
   WirePeerConnectivitySnapshot,
   WireUnreachablePeer,
 } from '../src/generated/mob.js';
+import type { AgentErrorReason } from '../src/generated/events.js';
+
+const policyStopReason: AgentErrorReason = {
+  reason_type: 'llm_provider_error',
+  provider_error_kind: 'policy_stop',
+  provider_error_retryability: 'non_retryable',
+  provider_error: {
+    code: 'misalignment_policy_violation',
+    message: 'Operator review required',
+  },
+};
+void policyStopReason;
 
 declare const typedRuntimeError: MeerkatError;
 const typedRuntimeErrorCode: string = typedRuntimeError.code;

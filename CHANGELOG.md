@@ -30,6 +30,65 @@ them.
 
 ### Breaking
 
+- **Separate input ceilings add the public `max_input_tokens: Option<u32>`
+  field to the following constructible Rust structs:** exact-pinned consumers
+  must update exhaustive struct literals:
+  - `meerkat_core::model_profile::capabilities::ModelCapabilities::max_input_tokens`
+  - `meerkat_core::model_profile::catalog::CatalogEntry::max_input_tokens`
+  - `meerkat_core::model_registry::ModelRegistryEntry::max_input_tokens`
+  - `meerkat_core::context_budget::ContextBudgetFact::max_input_tokens`
+  - `meerkat_core::config::CustomModelConfig::max_input_tokens`
+  - `meerkat_core::config::SelfHostedModelConfig::max_input_tokens`
+  - `meerkat_contracts::wire::CatalogModelEntry::max_input_tokens`
+
+  The additive `meerkat_core::model_registry::ModelProfileWitness::max_input_tokens()`
+  accessor exposes the same registry-owned ceiling. New readers deserialize
+  omitted optional fields as `None`; existing model rows omit the field.
+  Older strict `ContextBudgetFact` readers reject populated ceiling fields.
+  **Behaviour changes:** `ContextBudgetFact` classification, `remaining_tokens`,
+  and `overage_tokens` account for both the input ceiling and shared
+  input-plus-output window; forecasts still never authorize refusal. The
+  OpenAI/global catalog default becomes `gpt-6-astra`, with a 737,600-token
+  default compaction trigger; explicit model selections and thresholds remain
+  unchanged. `meerkat_core::model_profile::ModelCatalog::image_generation_model`
+  and `ModelCatalog::image_generation_provider_for_model` now require the
+  model-owned image-generation capability for hosted text-model routes rather
+  than inferring support from the provider.
+
+- **`meerkat_llm_core::LlmError::PolicyStop { code: String, message: String }`
+  and `meerkat_core::error::LlmProviderErrorKind::PolicyStop` are new
+  variants of exhaustive public enums** (`enum_variant_added`). Exact-pinned
+  Rust consumers must add matching arms. The wire/SDK
+  `LlmProviderErrorKind` vocabulary gains `policy_stop`, with
+  `provider_error_retryability = "non_retryable"` and the provider code and
+  message retained in `provider_error`. The additive
+  `meerkat_llm_core::error::ProviderErrorObject::policy_stop` classifier
+  recognizes exact structured `misalignment_policy_violation` codes.
+  **Behaviour change:** these failures are no longer authentication errors;
+  they stop recovery, provider fallback, and continuation after a failed
+  compaction call rather than retrying or replacing the conversation.
+- **SDK policy-stop error projections:** Python's
+  `meerkat.events.AgentErrorReason` gains `provider_error_kind`,
+  `provider_error_retryability`, and `provider_error` fields.
+  TypeScript's exported `AgentErrorReason` union gains
+  `ProviderAgentErrorReason`, whose fields are `reasonType`,
+  `providerErrorKind`, `providerErrorRetryability`, and `providerError`.
+  Generated Python, TypeScript, and Web SDK `LlmProviderErrorKind` types
+  include `policy_stop`. **Behaviour change:** Python and TypeScript
+  `run_failed` parsing accepts the canonical `error_report`-only wire
+  shape; when present, that report supplies the projected error class and
+  message instead of conflicting legacy `error_class` / `error` scalars.
+
+- **`meerkat_llm_core::LlmEvent::AssistantOutput { blocks }` and
+  `meerkat_contracts::wire::WireProviderMeta::OpenAiAssistantMessage`
+  are new variants of exhaustive public enums** (`enum_variant_added`).
+  Rust consumers must handle the final ordered-output event and the new
+  assistant-message metadata projection. `meerkat_core::ProviderMeta` (already
+  non-exhaustive) gains `OpenAiAssistantMessage { id, phase, response_id }`;
+  its typed phase is `meerkat_core::types::OpenAiAssistantPhase`.
+  Existing serialized transcripts without this metadata still deserialize;
+  older readers cannot faithfully replay new phased assistant items.
+
 - **`meerkat_llm_core::LlmError` gained the `QuotaExhausted { message }`
   variant** (`LlmError::QuotaExhausted`, an `enum_variant_added` finding). The
   enum is not `#[non_exhaustive]`, so exact-pinned Rust consumers that match
@@ -162,6 +221,16 @@ them.
   (`MemberAdmissionBacklogGauge`, `MEMBER_ADMISSION_LANE_CAPACITY`).
 
 ### Fixed
+
+- **Responses transcript continuity:** assistant-item `commentary` /
+  `final_answer` phase, multiple assistant messages, mixed reasoning/tool
+  ordering, and terminal-only encrypted reasoning now survive session
+  serialization and `store: false` replay. Complete terminal output replaces
+  provisional stream assembly without replaying tools or counting usage twice.
+  Unsupported output execution semantics fail explicitly instead of disappearing;
+  existing Responses web-search evidence and additive inert metadata remain
+  supported. Async tools, WebSocket steering, provider orchestration/compaction,
+  and new hosted-tool protocols are not enabled by this change.
 
 - **Member retirement no longer fails when a runtime teardown outlives the
   2 s caller grace** (#1104). The retirement archive path disposed a terminal

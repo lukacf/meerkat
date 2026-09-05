@@ -3062,6 +3062,7 @@ treated as absent rather than guessed from the model name."""
     call_timeout_secs: Optional[int] = None
     context_window: Optional[int] = None
     display_name: Optional[str] = None
+    max_input_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
     vision: Optional[bool] = None
     web_search: Optional[bool] = None
@@ -5429,6 +5430,7 @@ class CatalogModelEntry:
     id: str
     tier: Literal['recommended', 'supported']
     context_window: Optional[int] = None
+    max_input_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
     profile: Optional[dict[str, Any]] = None
     release_stage: Optional[Literal['stable', 'experimental', 'operator_defined']] = None
@@ -6787,10 +6789,16 @@ class WireProviderMetaOpenAiResponse(TypedDict, total=False):
     provider: Required[Literal['open_ai_response']]
     response_id: Required[str]
 
+class WireProviderMetaOpenAiAssistantMessage(TypedDict, total=False):
+    id: Required[str]
+    phase: NotRequired[Optional[OpenAiAssistantPhase]]
+    provider: Required[Literal['open_ai_assistant_message']]
+    response_id: NotRequired[Optional[str]]
+
 class WireProviderMetaUnknown(TypedDict, total=False):
     provider: Required[Literal['unknown']]
 
-WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaUnknown
+WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaOpenAiAssistantMessage | WireProviderMetaUnknown
 
 # Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
 # for spoken-transcript blocks.
@@ -7173,6 +7181,9 @@ class RevisedPromptDispositionRevised(TypedDict, total=False):
     text: Required[PromptText]
 
 RevisedPromptDisposition = RevisedPromptDispositionNotRequested | RevisedPromptDispositionUnsupportedByBackend | RevisedPromptDispositionUnchanged | RevisedPromptDispositionRevised
+
+# Responses assistant-message phase, distinct from reasoning metadata.
+OpenAiAssistantPhase = Literal['commentary', 'final_answer']
 
 # Wire projection of `meerkat_core::ServerToolKind`.
 #

@@ -26,16 +26,18 @@ self-hosted aliases appear beside built-in models.
 | Provider | Catalog default |
 |----------|-----------------|
 | Anthropic | `claude-opus-5` |
-| OpenAI | `gpt-5.6-sol` |
+| OpenAI | `gpt-6-astra` |
 | Gemini | `gemini-3.8-flash` |
-| Global catalog default | `gpt-5.6-sol` |
+| Global catalog default | `gpt-6-astra` |
 
 <Warning>
 A catalog entry describes Meerkat's supported capability contract, not the
 entitlement of a particular API organization, ChatGPT workspace, cloud
-deployment, or OAuth account. If `gpt-5.6-sol` is unavailable to the active
+deployment, or OAuth account. If `gpt-6-astra` is unavailable to the active
 OpenAI account, explicitly select `gpt-5.5` or set a compatible binding
 `default_model`.
+Explicit configured models and binding defaults are not migrated by a
+catalog-default change.
 </Warning>
 
 ## Provider Setup
@@ -69,7 +71,8 @@ Use `rkat models` for every supported ID and its current limits.
 
     | Selected model | Context | Max output | Positioning |
     |----------------|---------|------------|-------------|
-    | `gpt-5.6-sol` | 1.05M | 128K | Default OpenAI/global model |
+    | `gpt-6-astra` | 1.05M | 128K | Default OpenAI/global model; separate 922K input ceiling |
+    | `gpt-5.6-sol` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.6-terra` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.6-luna` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.5` | 1.05M | 128K | Recommended fallback |
@@ -80,7 +83,7 @@ Use `rkat models` for every supported ID and its current limits.
 
     ```toml
     [agent]
-    model = "gpt-5.6-sol"
+    model = "gpt-6-astra"
     ```
   </Tab>
   <Tab title="Gemini">
@@ -136,6 +139,44 @@ Use `rkat models` for every supported ID and its current limits.
     See [Self-hosting models](/guides/self-hosting-models).
   </Tab>
 </Tabs>
+
+## GPT-6 Astra: Initial Responses Support
+
+Meerkat supports ordinary Astra Responses requests: text/image input, text
+output, application function calls, and the existing provider-native web-search
+path. Its 1,050,000-token context has a distinct 922,000-token input ceiling
+and a 128,000-token output ceiling (including reasoning). Context-budget
+projections apply the input ceiling in addition to the output reserve;
+estimated context pressure is not exact provider token accounting.
+
+Supported reasoning efforts are `low`, `medium`, `high`, `xhigh`, and `max`.
+`none`, `temperature`, `top_p`, and log-probability controls are unsupported.
+Astra does not support the Realtime endpoint; it cannot back `live/*`.
+
+`store: false` remains the default. Assistant-item `commentary` and
+`final_answer` phases, supported output order, and terminal encrypted
+reasoning associated with assistant output survive transcript persistence and
+input replay. The existing orphan-only compatibility rule remains: replay
+strips reasoning from an assistant message with no replayable text, assistant
+item, or tool output, even if that reasoning is encrypted. An empty identified
+assistant item still counts as output. Provider response and item IDs are
+continuity metadata, never Meerkat session identity.
+`misalignment_policy_violation` is a typed terminal policy stop, not an
+authentication error: Meerkat does not refresh credentials, retry, switch
+providers, or reset the conversation to evade it.
+
+This integration does not enable async/pending provider tools, early tool
+dispatch, Responses WebSocket steering, `configuration_update`, tool search,
+programmatic calling, new hosted tools/MCP/connectors, provider multi-agent
+orchestration, provider compaction/conversations, or background responses.
+Unsupported output execution semantics fail explicitly; additive inert
+metadata does not disable established behavior. Direct OpenAI support does not
+establish Astra availability on Azure, Copilot, ChatGPT OAuth, or a custom
+endpoint.
+
+See OpenAI's [model contract](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[reasoning and phase guidance](https://developers.openai.com/api/docs/guides/reasoning),
+and [misalignment monitoring](https://developers.openai.com/api/docs/guides/safety-checks/misalignment-monitoring).
 
 ## Environment Credential Precedence
 

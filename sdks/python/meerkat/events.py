@@ -198,6 +198,9 @@ class AgentErrorReason:
     cause_kind: str | None = None
     raw_reason_type: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    provider_error_kind: str | None = None
+    provider_error_retryability: Literal["retryable", "non_retryable"] | None = None
+    provider_error: Any = None
 
     def __getitem__(self, key: str) -> Any:
         if key == "reason_type":
@@ -798,6 +801,23 @@ def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
             )
         return None
 
+    if reason_type == "llm_provider_error":
+        provider_error_kind = raw.get("provider_error_kind")
+        retryability = raw.get("provider_error_retryability")
+        if not isinstance(provider_error_kind, str):
+            raise ValueError("error_report.reason.provider_error_kind must be string")
+        if retryability not in ("retryable", "non_retryable"):
+            raise ValueError("error_report.reason.provider_error_retryability is invalid")
+        if "provider_error" not in raw:
+            raise ValueError("error_report.reason.provider_error is required")
+        return AgentErrorReason(
+            reason_type=reason_type,
+            raw=dict(raw),
+            provider_error_kind=provider_error_kind,
+            provider_error_retryability=retryability,
+            provider_error=raw["provider_error"],
+        )
+
     if reason_type not in {
         "hook_denied",
         "hook_timeout",
@@ -1184,7 +1204,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "run_completed": ("session_id", "result", "usage"),
         "extraction_succeeded": ("session_id", "structured_output"),
         "extraction_failed": ("session_id", "last_output", "attempts", "reason"),
-        "run_failed": ("session_id", "error_class", "error"),
+        "run_failed": ("session_id",),
         "turn_started": ("turn_number",),
         "text_delta": ("delta",),
         "text_complete": ("content",),
@@ -1253,8 +1273,10 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "tool_calls",
     }:
         raise ValueError("budget_type must be known")
-    if event_type == "run_failed" and "error_report" in raw:
-        _parse_agent_error_report(raw.get("error_report"))
+    if event_type == "run_failed":
+        if _parse_agent_error_report(raw.get("error_report")) is None:
+            _require_str(raw, "error_class")
+            _require_str(raw, "error")
     if event_type in {"run_completed", "run_failed"} and raw.get("terminal_cause_kind") is not None:
         terminal_cause_kind = raw.get("terminal_cause_kind")
         if terminal_cause_kind not in _TURN_TERMINAL_CAUSE_KINDS:
@@ -1394,6 +1416,9 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 )
             elif f in raw:
                 kwargs[f] = raw[f]
+        if cls is RunFailed and kwargs["error_report"] is not None:
+            kwargs["error_class"] = kwargs["error_report"].class_
+            kwargs["error"] = kwargs["error_report"].message
         return cls(**kwargs)
     except (AssertionError, KeyError, TypeError, ValueError):
         return _malformed(raw, "malformed known event")

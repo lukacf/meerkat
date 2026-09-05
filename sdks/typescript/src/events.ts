@@ -32,6 +32,7 @@
 import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
+import type { LlmProviderErrorKind, LlmProviderErrorRetryability } from "./generated/event_types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -221,7 +222,16 @@ export type HookAgentErrorReason = Record<string, unknown> & {
   readonly hook_id?: HookId | null;
 };
 
+export interface ProviderAgentErrorReason {
+  readonly reasonType: "llm_provider_error";
+  /** Preserves future provider-error kinds without reclassifying their meaning. */
+  readonly providerErrorKind: LlmProviderErrorKind | (string & {});
+  readonly providerErrorRetryability: LlmProviderErrorRetryability;
+  readonly providerError: unknown;
+}
+
 export type AgentErrorReason =
+  | ProviderAgentErrorReason
   | TurnTerminalCauseReason
   | UnknownAgentErrorReason
   | HookAgentErrorReason;
@@ -818,6 +828,23 @@ function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefine
     return undefined;
   }
 
+  if (reasonType === "llm_provider_error") {
+    const providerErrorKind = requireStringField(raw, "provider_error_kind");
+    const providerErrorRetryability = requireStringField(raw, "provider_error_retryability");
+    if (providerErrorRetryability !== "retryable" && providerErrorRetryability !== "non_retryable") {
+      throw new Error("error_report.reason.provider_error_retryability is invalid");
+    }
+    if (!hasOwn(raw, "provider_error")) {
+      throw new Error("error_report.reason.provider_error is required");
+    }
+    return {
+      reasonType,
+      providerErrorKind,
+      providerErrorRetryability,
+      providerError: raw.provider_error,
+    };
+  }
+
   if (!["hook_denied", "hook_timeout", "hook_execution_failed"].includes(reasonType)) {
     return { reasonType: "unknown", rawReasonType: reasonType, raw };
   }
@@ -1331,15 +1358,17 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         attempts: requireNumberField(raw, "attempts"),
         reason: requireStringField(raw, "reason"),
       };
-    case "run_failed":
+    case "run_failed": {
+      const errorReport = parseAgentErrorReport(raw.error_report);
       return {
         type,
         sessionId: requireStringField(raw, "session_id"),
-        errorClass: requireStringField(raw, "error_class"),
-        error: requireStringField(raw, "error"),
+        errorClass: errorReport?.class ?? requireStringField(raw, "error_class"),
+        error: errorReport?.message ?? requireStringField(raw, "error"),
         ...terminalCauseKindField(raw),
-        ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
+        ...(hasOwn(raw, "error_report") ? { errorReport: errorReport ?? null } : {}),
       };
+    }
 
     // Turn / LLM
     case "turn_started":

@@ -73,6 +73,19 @@ pub struct BlockAssembler {
 }
 
 impl BlockAssembler {
+    /// Finalize from the provider's complete ordered output rather than the
+    /// provisional arrival order of deltas and item-completion notifications.
+    pub fn from_final_blocks(blocks: Vec<AssistantBlock>) -> Self {
+        Self {
+            slots: blocks
+                .into_iter()
+                .map(|block| BlockSlot::Finalized(Box::new(block)))
+                .collect(),
+            tool_buffers: IndexMap::new(),
+            reasoning_buffer: None,
+        }
+    }
+
     /// Create a new empty assembler.
     pub fn new() -> Self {
         Self {

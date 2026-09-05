@@ -16,7 +16,6 @@ use meerkat_core::{
     RevisedPromptDisposition, RevisedPromptSource, ServerToolKind, StopReason, SystemNoticeBlock,
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
-use meerkat_llm_core::BlockAssembler;
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
@@ -122,7 +121,7 @@ fn invalid_replay(message: impl Into<String>) -> LlmError {
 /// The Responses API includes `annotations: []` on ordinary output text and
 /// can also carry annotation kinds unrelated to web search. Presence of the
 /// field is therefore not evidence that a server-side search ran.
-fn web_search_message_annotations(value: &Value) -> Option<Vec<Value>> {
+pub(crate) fn web_search_message_annotations(value: &Value) -> Option<Vec<Value>> {
     let annotations = value.as_array()?;
     let web_citations = annotations
         .iter()
@@ -216,6 +215,10 @@ fn openai_response_id_from_meta(meta: &Option<Box<ProviderMeta>>) -> Option<&str
                 response_id: Some(response_id),
                 ..
             }
+            | ProviderMeta::OpenAiAssistantMessage {
+                response_id: Some(response_id),
+                ..
+            }
             | ProviderMeta::OpenAiResponse { response_id },
         ) => Some(response_id.as_str()),
         _ => None,
@@ -233,7 +236,7 @@ fn openai_response_id_from_block(block: &AssistantBlock) -> Option<&str> {
     }
 }
 
-fn openai_response_meta(response_id: Option<&str>) -> Option<Box<ProviderMeta>> {
+pub(crate) fn openai_response_meta(response_id: Option<&str>) -> Option<Box<ProviderMeta>> {
     response_id.map(|response_id| {
         Box::new(ProviderMeta::OpenAiResponse {
             response_id: response_id.to_string(),
@@ -285,20 +288,31 @@ fn project_openai_assistant_blocks(
 ) -> Result<Vec<AssistantBlock>, LlmError> {
     let mut projected = Vec::with_capacity(blocks.len());
     let has_output_item = blocks.iter().any(|block| match block {
-        AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+        AssistantBlock::Text { text, meta } => {
             !text.is_empty()
+                || matches!(
+                    meta.as_deref(),
+                    Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                )
         }
+        AssistantBlock::Transcript { text, .. } => !text.is_empty(),
         AssistantBlock::ToolUse { .. } => true,
         AssistantBlock::ServerToolContent { content, .. } => {
             openai_server_tool_content_replayable(mode, content)
         }
-        AssistantBlock::Reasoning { .. } | AssistantBlock::Image { .. } => false,
         _ => false,
     });
-
     for (block_index, block) in blocks.iter().enumerate() {
         let projected_block = match block {
-            AssistantBlock::Text { text, .. } if text.is_empty() => None,
+            AssistantBlock::Text { text, meta }
+                if text.is_empty()
+                    && !matches!(
+                        meta.as_deref(),
+                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                    ) =>
+            {
+                None
+            }
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => {
                 Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
             }
@@ -1125,114 +1139,62 @@ impl OpenAiClient {
         fallback_body: Option<Value>,
         has_images: bool,
     ) -> Result<reqwest::Response, LlmError> {
-        let (mut response, receipt) = self
-            .send_responses_request(endpoint, body, has_images)
-            .await?;
-        let mut status_code = response.status().as_u16();
-        if (200..=299).contains(&status_code) {
-            return Ok(response);
-        }
-        if let Some(authorizer) = &self.authorizer
-            && authorizer
-                .observe_response_with_receipt(
-                    receipt,
-                    &meerkat_core::HttpAuthorizationResponse {
-                        method: "POST",
-                        url: endpoint,
-                        status: status_code,
-                    },
-                )
-                .await
-                .map_err(|error| LlmError::AuthenticationFailed {
-                    message: error.to_string(),
-                })?
-                == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
-        {
-            let retried = self
-                .send_responses_request(endpoint, body, has_images)
+        let mut current_body = body;
+        let mut used_fallback = false;
+        let mut refreshed_authorization = false;
+        loop {
+            let (response, receipt) = self
+                .send_responses_request(endpoint, current_body, has_images)
                 .await?;
-            response = retried.0;
-            let retry_receipt = retried.1;
-            status_code = response.status().as_u16();
-            if (200..=299).contains(&status_code) {
+            let status = response.status().as_u16();
+            if (200..=299).contains(&status) {
                 return Ok(response);
             }
-            authorizer
-                .observe_response_with_receipt(
-                    retry_receipt,
-                    &meerkat_core::HttpAuthorizationResponse {
-                        method: "POST",
-                        url: endpoint,
-                        status: status_code,
-                    },
-                )
+            let headers = response.headers().clone();
+            let text = response
+                .text()
                 .await
-                .map_err(|error| LlmError::AuthenticationFailed {
-                    message: error.to_string(),
+                .map_err(|error| LlmError::StreamParseError {
+                    message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-        }
-
-        let headers = response.headers().clone();
-        let text = response.text().await.unwrap_or_default();
-        if let Some(fallback_body) = fallback_body
-            && Self::previous_response_id_retriable_error(status_code, &text)
-        {
-            let (mut retry, fallback_receipt) = self
-                .send_responses_request(endpoint, &fallback_body, has_images)
-                .await?;
-            let mut retry_status = retry.status().as_u16();
-            if (200..=299).contains(&retry_status) {
-                return Ok(retry);
+            let rejection = LlmError::from_http_response(status, text.clone(), &headers);
+            // A policy stop must reach the recovery owner before auth refresh
+            // or stateless continuation fallback can issue another request.
+            if matches!(rejection, LlmError::PolicyStop { .. }) {
+                return Err(rejection);
             }
-            if let Some(authorizer) = &self.authorizer
-                && authorizer
+            if let Some(authorizer) = &self.authorizer {
+                let action = authorizer
                     .observe_response_with_receipt(
-                        fallback_receipt,
+                        receipt,
                         &meerkat_core::HttpAuthorizationResponse {
                             method: "POST",
                             url: endpoint,
-                            status: retry_status,
-                        },
-                    )
-                    .await
-                    .map_err(|error| LlmError::AuthenticationFailed {
-                        message: error.to_string(),
-                    })?
-                    == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
-            {
-                let retried = self
-                    .send_responses_request(endpoint, &fallback_body, has_images)
-                    .await?;
-                retry = retried.0;
-                let retry_receipt = retried.1;
-                retry_status = retry.status().as_u16();
-                if (200..=299).contains(&retry_status) {
-                    return Ok(retry);
-                }
-                authorizer
-                    .observe_response_with_receipt(
-                        retry_receipt,
-                        &meerkat_core::HttpAuthorizationResponse {
-                            method: "POST",
-                            url: endpoint,
-                            status: retry_status,
+                            status,
                         },
                     )
                     .await
                     .map_err(|error| LlmError::AuthenticationFailed {
                         message: error.to_string(),
                     })?;
+                if !refreshed_authorization
+                    && action == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+                {
+                    refreshed_authorization = true;
+                    continue;
+                }
             }
-            let retry_headers = retry.headers().clone();
-            let retry_text = retry.text().await.unwrap_or_default();
-            return Err(LlmError::from_http_response(
-                retry_status,
-                retry_text,
-                &retry_headers,
-            ));
+            if !used_fallback
+                && let Some(fallback) = fallback_body.as_ref()
+                && Self::previous_response_id_retriable_error(status, &text)
+            {
+                used_fallback = true;
+                refreshed_authorization = false;
+                current_body = fallback;
+                continue;
+            }
+            return Err(rejection);
         }
-
-        Err(LlmError::from_http_response(status_code, text, &headers))
     }
 
     /// Convert messages to Responses API input format.
@@ -1499,13 +1461,35 @@ impl OpenAiClient {
                     // BlockAssistantMessage format - render blocks as items
                     for block in &a.blocks {
                         match block {
-                            AssistantBlock::Text { text, .. } => {
-                                if !text.is_empty() {
-                                    items.push(serde_json::json!({
+                            AssistantBlock::Text { text, meta } => {
+                                if !text.is_empty()
+                                    || matches!(
+                                        meta.as_deref(),
+                                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                                    )
+                                {
+                                    let mut item = serde_json::json!({
                                         "type": "message",
                                         "role": "assistant",
                                         "content": text
-                                    }));
+                                    });
+                                    if let Some(ProviderMeta::OpenAiAssistantMessage {
+                                        id,
+                                        phase,
+                                        ..
+                                    }) = meta.as_deref()
+                                    {
+                                        item["id"] = Value::String(id.clone());
+                                        item["status"] = Value::String("completed".into());
+                                        item["content"] = serde_json::json!([{"type":"output_text","text":text,"annotations":[]}]);
+                                        if let Some(phase) = phase {
+                                            item["phase"] =
+                                                serde_json::to_value(phase).map_err(|error| {
+                                                    invalid_replay(error.to_string())
+                                                })?;
+                                        }
+                                    }
+                                    items.push(item);
                                 }
                             }
                             AssistantBlock::ToolUse { id, name, args, .. } => {
@@ -2412,14 +2396,17 @@ impl LlmClient for OpenAiClient {
                 .await?;
             let mut stream = response.bytes_stream();
             let mut buffer = String::with_capacity(512);
-            let mut assembler = BlockAssembler::new();
             let mut usage = Usage::default();
             let mut active_response_id: Option<String> = None;
             let mut saw_stream_text_delta = false;
+            let mut streamed_text_items: HashSet<String> = HashSet::new();
+            let mut assistant_items: HashMap<String, Value> = HashMap::new();
+            let mut completed_items: std::collections::BTreeMap<ResponsesOutputIndex, Value> = std::collections::BTreeMap::new();
             let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
             let mut response_item_tool_calls: HashMap<String, (String, String)> =
                 HashMap::with_capacity(4);
             let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
+            let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
 
@@ -2435,6 +2422,13 @@ impl LlmClient for OpenAiClient {
                     if line == "data: [DONE]" {
                         buffer.drain(..=newline_pos);
                         if !done_emitted && saw_terminal_fallback_output {
+                            if !completed_items.is_empty() {
+                                let blocks = crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?;
+                                crate::responses_output::validate_coverage(
+                                    &blocks, &streamed_tool_ids, &streamed_reasoning_ids, &streamed_text_items, &streamed_web_search_ids,
+                                )?;
+                                yield LlmEvent::AssistantOutput { blocks };
+                            }
                             done_emitted = true;
                             let stop_reason = if streamed_tool_ids.is_empty() {
                                 StopReason::EndTurn
@@ -2471,6 +2465,7 @@ impl LlmClient for OpenAiClient {
                         // same output/usage projection path as `response.completed`.
                         if event.event_type == "response.completed"
                             || event.event_type == "response.incomplete"
+                            || event.event_type == "response.done"
                         {
                             if done_emitted {
                                 // Already processed a terminal event, skip
@@ -2495,6 +2490,22 @@ impl LlmClient for OpenAiClient {
                                         outcome: LlmDoneOutcome::Error { error },
                                     };
                                     continue;
+                                }
+                                let final_blocks = match response_obj.get("output") {
+                                    Some(Value::Array(output)) if !output.is_empty() => {
+                                        crate::responses_output::validate_completed_coverage(output, completed_items.values())?;
+                                        Some(crate::responses_output::lower_items(output, active_response_id.as_deref())?)
+                                    },
+                                    Some(Value::Array(_)) | None if !completed_items.is_empty() => Some(
+                                        crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?
+                                    ),
+                                    Some(Value::Array(_)) | None => None,
+                                    Some(_) => Err(LlmError::StreamParseError { message: "Responses output must be an array".into() })?,
+                                };
+                                if let Some(blocks) = final_blocks.as_ref() {
+                                    crate::responses_output::validate_coverage(
+                                        blocks, &streamed_tool_ids, &streamed_reasoning_ids, &streamed_text_items, &streamed_web_search_ids,
+                                    )?;
                                 }
                                 // Process output items
                                 if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
@@ -2527,10 +2538,10 @@ impl LlmClient for OpenAiClient {
                                                                         }
                                                                         if let Some(text) = part.get("text").and_then(|t| t.as_str())
                                                                             && !saw_stream_text_delta
+                                                                            && !item.get("id").and_then(Value::as_str).is_some_and(|id| streamed_text_items.contains(id))
                                                                         {
-                                                                            let meta = openai_response_meta(active_response_id.as_deref());
+                                                                            let meta = crate::responses_output::assistant_meta(item, active_response_id.as_deref())?;
                                                                             saw_terminal_fallback_output = true;
-                                                                            assembler.on_text_delta(text, meta.clone());
                                                                             chunk_yielded.set(true);
                                                                             yield LlmEvent::TextDelta { delta: text.to_string(), meta };
                                                                         }
@@ -2538,10 +2549,10 @@ impl LlmClient for OpenAiClient {
                                                                     "refusal" => {
                                                                         if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
                                                                             && !saw_stream_text_delta
+                                                                            && !item.get("id").and_then(Value::as_str).is_some_and(|id| streamed_text_items.contains(id))
                                                                         {
-                                                                            let meta = openai_response_meta(active_response_id.as_deref());
+                                                                            let meta = crate::responses_output::assistant_meta(item, active_response_id.as_deref())?;
                                                                             saw_terminal_fallback_output = true;
-                                                                            assembler.on_text_delta(refusal, meta.clone());
                                                                             chunk_yielded.set(true);
                                                                             yield LlmEvent::TextDelta { delta: refusal.to_string(), meta };
                                                                         }
@@ -2592,12 +2603,9 @@ impl LlmClient for OpenAiClient {
                                                         response_id: active_response_id.clone(),
                                                     }));
 
-                                                    assembler.on_reasoning_start();
                                                     if !summary_text.is_empty() {
                                                         saw_terminal_fallback_output = true;
-                                                        let _ = assembler.on_reasoning_delta(&summary_text);
                                                     }
-                                                    assembler.on_reasoning_complete(meta.clone());
 
                                                     chunk_yielded.set(true);
                                                     yield LlmEvent::ReasoningComplete {
@@ -2623,21 +2631,13 @@ impl LlmClient for OpenAiClient {
                                                     // arguments is a JSON string. Missing arguments
                                                     // represent a no-arg tool; malformed or non-object
                                                     // JSON fails closed before projection.
-                                                    let (args, args_value) = match item.get("arguments").and_then(|a| a.as_str()) {
+                                                    let (_, args_value) = match item.get("arguments").and_then(|a| a.as_str()) {
                                                         Some(args_str) => parse_tool_call_arguments(args_str, call_id)?,
                                                         None => {
                                                             // Empty args - treat as empty object
                                                             (empty_tool_args_raw_value(), serde_json::json!({}))
                                                         }
                                                     };
-
-                                                    let _ = assembler.on_tool_call_start(call_id.to_string());
-                                                    let _ = assembler.on_tool_call_complete(
-                                                        call_id.to_string(),
-                                                        name.to_string(),
-                                                        args.clone(),
-                                                        openai_response_meta(active_response_id.as_deref()),
-                                                    );
 
                                                     chunk_yielded.set(true);
                                                     yield LlmEvent::ToolCallComplete {
@@ -2670,6 +2670,11 @@ impl LlmClient for OpenAiClient {
                                     }
                                 }
 
+                                if let Some(blocks) = final_blocks {
+                                    // Last content event: usage and terminal fate follow.
+                                    chunk_yielded.set(true);
+                                    yield LlmEvent::AssistantOutput { blocks };
+                                }
                                 // Extract usage
                                 if let Some(usage_obj) = response_obj.get("usage") {
                                     apply_responses_usage(&mut usage, usage_obj, &request.model);
@@ -2694,6 +2699,14 @@ impl LlmClient for OpenAiClient {
                         }
                         // Handle streaming delta events
                         else if event.event_type == "response.output_item.added" {
+                            if let Some(item) = &event.item {
+                                crate::responses_output::validate_item(item)?;
+                                if item.get("type").and_then(Value::as_str) == Some("message")
+                                    && let Some(id) = item.get("id").and_then(Value::as_str)
+                                {
+                                    assistant_items.insert(id.to_owned(), item.clone());
+                                }
+                            }
                             if let Some(item) = &event.item
                                 && item.get("type").and_then(Value::as_str) == Some("function_call")
                                 && let (Some(item_id), Some(call_id), Some(name)) = (
@@ -2710,10 +2723,16 @@ impl LlmClient for OpenAiClient {
                         }
                         else if event.event_type == "response.output_text.delta" {
                             if let Some(delta) = &event.delta {
-                                saw_stream_text_delta = true;
+                                if let Some(id) = &event.item_id {
+                                    streamed_text_items.insert(id.clone());
+                                } else {
+                                    saw_stream_text_delta = true;
+                                }
                                 saw_terminal_fallback_output = true;
-                                let meta = openai_response_meta(active_response_id.as_deref());
-                                assembler.on_text_delta(delta, meta.clone());
+                                let meta = match event.item_id.as_ref().and_then(|id| assistant_items.get(id)) {
+                                    Some(item) => crate::responses_output::assistant_meta(item, active_response_id.as_deref())?,
+                                    None => openai_response_meta(active_response_id.as_deref()),
+                                };
                                 chunk_yielded.set(true);
                                 yield LlmEvent::TextDelta { delta: delta.clone(), meta };
                             }
@@ -2770,16 +2789,8 @@ impl LlmClient for OpenAiClient {
                                     .clone()
                                     .or_else(|| item_lookup.map(|(_, name)| name.clone()))
                                     .unwrap_or_default();
-                                let (args, args_value) =
+                                let (_, args_value) =
                                     parse_tool_call_arguments(arguments, call_id)?;
-
-                                let _ = assembler.on_tool_call_start(call_id.clone());
-                                let _ = assembler.on_tool_call_complete(
-                                    call_id.clone(),
-                                    name.clone(),
-                                    args.clone(),
-                                    openai_response_meta(active_response_id.as_deref()),
-                                );
 
                                 streamed_tool_ids.insert(call_id.clone());
                                 saw_terminal_fallback_output = true;
@@ -2793,6 +2804,12 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         else if event.event_type == "response.output_item.done" {
+                            if let Some(item) = &event.item {
+                                crate::responses_output::validate_item(item)?;
+                                if let Some(index) = event.output_index {
+                                    completed_items.insert(ResponsesOutputIndex(index), item.clone());
+                                }
+                            }
                             if let Some(item) = &event.item
                                 && item.get("type").and_then(Value::as_str) == Some("function_call")
                             {
@@ -2808,7 +2825,7 @@ impl LlmClient for OpenAiClient {
                                     tracing::warn!(call_id, "function_call output item missing name");
                                     continue;
                                 };
-                                let (args, args_value) = match item
+                                let (_, args_value) = match item
                                     .get("arguments")
                                     .and_then(Value::as_str)
                                 {
@@ -2817,14 +2834,6 @@ impl LlmClient for OpenAiClient {
                                     }
                                     None => (empty_tool_args_raw_value(), serde_json::json!({})),
                                 };
-
-                                let _ = assembler.on_tool_call_start(call_id.to_string());
-                                let _ = assembler.on_tool_call_complete(
-                                    call_id.to_string(),
-                                    name.to_string(),
-                                    args,
-                                    openai_response_meta(active_response_id.as_deref()),
-                                );
 
                                 streamed_tool_ids.insert(call_id.to_string());
                                 saw_terminal_fallback_output = true;
@@ -2872,12 +2881,9 @@ impl LlmClient for OpenAiClient {
                                     response_id: active_response_id.clone(),
                                 }));
 
-                                assembler.on_reasoning_start();
                                 if !summary_text.is_empty() {
                                     saw_terminal_fallback_output = true;
-                                    let _ = assembler.on_reasoning_delta(&summary_text);
                                 }
-                                assembler.on_reasoning_complete(meta.clone());
 
                                 streamed_reasoning_ids.insert(reasoning_id.to_string());
                                 if !summary_text.trim().is_empty() || meta.is_some() {
@@ -2891,6 +2897,9 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         else if event.event_type.starts_with("response.web_search_call.") {
+                            if let Some(id) = &event.item_id {
+                                streamed_web_search_ids.insert(id.clone());
+                            }
                             let mut content = serde_json::Map::new();
                             content.insert("type".to_string(), Value::String(event.event_type.clone()));
                             if let Some(item_id) = &event.item_id {
@@ -2910,55 +2919,10 @@ impl LlmClient for OpenAiClient {
                                 meta: openai_response_meta(active_response_id.as_deref()),
                             };
                         }
-                        else if event.event_type == "response.done" {
-                            // Final done event — always update usage
-                            if event.response.is_none() {
-                                done_emitted = true;
-                                chunk_yielded.set(true);
-                                yield LlmEvent::Done {
-                                    outcome: missing_terminal_response_outcome(&event.event_type),
-                                };
-                                continue;
-                            }
-                            if let Some(response_obj) = &event.response {
-                                if let Err(error) = validate_responses_terminal_status(
-                                    &event.event_type,
-                                    response_obj,
-                                ) {
-                                    done_emitted = true;
-                                    chunk_yielded.set(true);
-                                    yield LlmEvent::Done {
-                                        outcome: LlmDoneOutcome::Error { error },
-                                    };
-                                    continue;
-                                }
-                                if let Some(usage_obj) = response_obj.get("usage") {
-                                    apply_responses_usage(&mut usage, usage_obj, &request.model);
-                                    chunk_yielded.set(true);
-                                    yield LlmEvent::UsageUpdate {
-                                        usage: meerkat_core::TurnUsage::try_from_usage(usage.clone())
-                                            .map_err(|error| LlmError::Unknown {
-                                                message: error.to_string(),
-                                            })?,
-                                    };
-                                }
-
-                                if !done_emitted {
-                                    done_emitted = true;
-                                    chunk_yielded.set(true);
-                                    yield LlmEvent::Done {
-                                        outcome: responses_terminal_outcome(
-                                            &event.event_type,
-                                            response_obj,
-                                        ),
-                                    };
-                                }
-                            }
-                        }
                         else if event.event_type == "response.failed" {
                             let error_msg = event.response
                                 .as_ref()
-                                .and_then(|r| r.get("error"))
+                                .and_then(responses_error_object)
                                 .and_then(|e| e.get("message"))
                                 .and_then(|m| m.as_str())
                                 .or_else(|| event.response
@@ -2970,7 +2934,7 @@ impl LlmClient for OpenAiClient {
                                 .unwrap_or("response failed");
                             let error_code = event.response
                                 .as_ref()
-                                .and_then(|r| r.get("error"))
+                                .and_then(responses_error_object)
                                 .and_then(|e| e.get("code"))
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("server_error");
@@ -2995,11 +2959,13 @@ impl LlmClient for OpenAiClient {
                                 .as_ref()
                                 .and_then(|e| e.get("message"))
                                 .and_then(|m| m.as_str())
+                                .or(event.message.as_deref())
                                 .unwrap_or("unknown streaming error");
                             let error_code = event.error
                                 .as_ref()
                                 .and_then(|e| e.get("code"))
                                 .and_then(|c| c.as_str())
+                                .or(event.code.as_deref())
                                 .unwrap_or("unknown");
 
                             tracing::error!(
@@ -3075,6 +3041,10 @@ struct ResponsesStreamEvent {
     response: Option<Value>,
     /// Error object for streaming error events
     error: Option<Value>,
+    /// Official Responses `error` events carry these at the top level;
+    /// compatible endpoints may wrap them in `error` instead.
+    code: Option<String>,
+    message: Option<String>,
     /// Output item ID for built-in tool streaming events.
     item_id: Option<String>,
     /// Output index for built-in tool streaming events.
@@ -3083,8 +3053,15 @@ struct ResponsesStreamEvent {
     sequence_number: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ResponsesOutputIndex(u64);
+
 fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError {
     match error_code {
+        "misalignment_policy_violation" => LlmError::PolicyStop {
+            code: error_code.to_owned(),
+            message: error_message.to_owned(),
+        },
         "rate_limit_exceeded" => LlmError::RateLimited {
             retry_after_ms: None,
         },
@@ -3109,7 +3086,29 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
     }
 }
 
+fn responses_error_object(response: &Value) -> Option<&Value> {
+    response
+        .get("error")
+        .filter(|error| !error.is_null())
+        .or_else(|| {
+            response
+                .get("status_details")
+                .and_then(|details| details.get("error"))
+        })
+}
+
 fn validate_responses_terminal_status(event_type: &str, response: &Value) -> Result<(), LlmError> {
+    if let Some(error) = responses_error_object(response)
+        && error.get("code").and_then(Value::as_str) == Some("misalignment_policy_violation")
+    {
+        return Err(map_responses_stream_error(
+            "misalignment_policy_violation",
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider policy stop"),
+        ));
+    }
     let status = response.get("status").and_then(Value::as_str);
     let status_is_valid_for_event = match event_type {
         "response.completed" => status == Some("completed"),
@@ -3242,7 +3241,7 @@ fn empty_tool_args_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
-fn parse_tool_call_arguments(
+pub(crate) fn parse_tool_call_arguments(
     arguments: &str,
     call_id: &str,
 ) -> Result<(Box<RawValue>, Value), LlmError> {
@@ -3888,6 +3887,66 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn policy_stop_precedes_authorizer_and_continuation_fallback() {
+        for status in [StatusCode::FORBIDDEN, StatusCode::BAD_REQUEST] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&calls);
+            let app = Router::new().route(
+                "/v1/responses",
+                post(move || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        (
+                            status,
+                            Json(serde_json::json!({"error":{
+                                "type":"invalid_request_error",
+                                "code":"misalignment_policy_violation",
+                                "message":"previous_response_id is blocked"
+                            }})),
+                        )
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let authorizer = Arc::new(RetryAuthorizer {
+                authorizations: std::sync::atomic::AtomicUsize::new(0),
+                observations: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let client = OpenAiClient::new_with_base_url("unused".into(), base_url)
+                .with_authorizer(authorizer.clone());
+            let error = client
+                .responses_response_with_fallback(
+                    &client.responses_endpoint(),
+                    &serde_json::json!({"previous_response_id":"resp_blocked"}),
+                    Some(serde_json::json!({"input":[]})),
+                    false,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, LlmError::PolicyStop { .. }));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                authorizer
+                    .observations
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_eq!(
+                authorizer
+                    .authorizations
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            server.abort();
+        }
     }
 
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
@@ -5709,6 +5768,45 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn test_astra_request_validates_catalog_reasoning_efforts() {
+        use meerkat_core::lifecycle::run_primitive::ReasoningEffort;
+
+        let client = OpenAiClient::new("unused".to_string());
+        for effort in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ] {
+            let request = LlmRequest::new("gpt-6-astra", vec![])
+                .with_openai_tag_merge(|tag| tag.reasoning_effort = Some(effort));
+            let body = client
+                .build_request_body(&request)
+                .expect("supported effort");
+            assert_eq!(body["reasoning"]["effort"], effort.as_legacy_str());
+            assert_eq!(body["store"], false);
+        }
+        let request = LlmRequest::new("gpt-6-astra", vec![])
+            .with_openai_tag_merge(|tag| tag.reasoning_effort = Some(ReasoningEffort::None));
+        assert!(matches!(
+            client.build_request_body(&request),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        assert!(serde_json::from_value::<ReasoningEffort>(serde_json::json!("minimal")).is_err());
+        for field in ["logprobs", "top_logprobs"] {
+            let payload = serde_json::json!({field: true});
+            assert!(serde_json::from_value::<meerkat_core::lifecycle::run_primitive::OpenAiProviderTag>(payload.clone()).is_err());
+            assert!(
+                serde_json::from_value::<
+                    meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+                >(payload)
+                .is_err()
+            );
+        }
     }
 
     #[test]

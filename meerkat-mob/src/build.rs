@@ -3284,6 +3284,7 @@ mod tests {
                 provider: meerkat_core::Provider::Anthropic,
                 display_name: None,
                 context_window: Some(500_000),
+                max_input_tokens: None,
                 max_output_tokens: None,
                 vision: None,
                 web_search: None,

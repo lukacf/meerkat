@@ -352,6 +352,7 @@ mod tests {
                 provider,
                 display_name: None,
                 context_window,
+                max_input_tokens: None,
                 max_output_tokens,
                 vision: Some(false),
                 web_search: Some(false),

@@ -33,10 +33,7 @@ const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 /// Explicit default model ID per provider. This product policy is independent
 /// of [`ModelTier`].
 const DEFAULT_ANTHROPIC: &str = "claude-opus-5";
-// Deliberate product policy: GPT-5.6 Sol is the OpenAI/global default even
-// while OpenAI limits access to preview-enabled API organizations and Codex
-// workspaces. Operators without preview access must explicitly pin GPT-5.5.
-const DEFAULT_OPENAI: &str = "gpt-5.6-sol";
+const DEFAULT_OPENAI: &str = "gpt-6-astra";
 const DEFAULT_GEMINI: &str = "gemini-3.8-flash";
 
 /// Default model table consumed by [`ModelCatalog::default_model`].
@@ -176,6 +173,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
                 tier: c.tier,
                 release_stage: c.release_stage,
                 context_window: c.context_window,
+                max_input_tokens: c.max_input_tokens,
                 max_output_tokens: c.max_output_tokens,
             })
             .collect()
@@ -208,8 +206,9 @@ pub fn default_image_generation_model(provider: Provider) -> Option<ImageGenerat
 /// Return a catalog-owned image-generation model profile for a typed provider/model pair.
 ///
 /// Returns `None` for unknown providers, unknown model IDs, and provider/model
-/// mismatches. OpenAI text catalog models are supported through the hosted
-/// Responses image tool; other providers must have explicit image model rows.
+/// mismatches. OpenAI text catalog models with image-generation capability
+/// are supported through the hosted Responses image tool; other providers must
+/// have explicit image model rows.
 pub fn image_generation_model(
     provider: Provider,
     model_id: &str,

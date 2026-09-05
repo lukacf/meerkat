@@ -197,6 +197,52 @@ mod tests {
     use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
 
     #[test]
+    fn wire_event_policy_stop_preserves_terminal_provider_error() {
+        use meerkat_core::error::{
+            AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind,
+        };
+        use meerkat_core::event::AgentErrorReport;
+
+        let error = AgentError::llm(
+            "openai",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::PolicyStop,
+                serde_json::json!({
+                    "code": "misalignment_policy_violation",
+                    "message": "Operator review required",
+                }),
+            )),
+            "Operator review required",
+        );
+        let report = AgentErrorReport::from_agent_error(&error);
+        let session_id = SessionId::new();
+        let event = WireEvent {
+            session_id: session_id.clone(),
+            sequence: 1,
+            event: AgentEvent::RunFailed {
+                session_id,
+                error_report: report.clone(),
+                terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
+            },
+            contract_version: ContractVersion::CURRENT,
+        };
+        let encoded = serde_json::to_value(&event).expect("serialize policy stop");
+        let reason = &encoded["event"]["error_report"]["reason"];
+        assert_eq!(reason["reason_type"], "llm_provider_error");
+        assert_eq!(reason["provider_error_kind"], "policy_stop");
+        assert_eq!(reason["provider_error_retryability"], "non_retryable");
+        assert_eq!(
+            reason["provider_error"]["code"],
+            "misalignment_policy_violation"
+        );
+        let decoded: WireEvent = serde_json::from_value(encoded).expect("deserialize policy stop");
+        let AgentEvent::RunFailed { error_report, .. } = decoded.event else {
+            panic!("policy stop must remain a failed run");
+        };
+        assert_eq!(error_report, report);
+    }
+
+    #[test]
     fn wire_event_roundtrip_tool_config_changed() {
         let event = WireEvent {
             session_id: SessionId::new(),

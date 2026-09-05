@@ -426,7 +426,10 @@ fn fallback_activation_is_pre_stream_safe(
             LlmFailureReason::NetworkTimeout { .. }
             | LlmFailureReason::CallTimeout { .. }
             | LlmFailureReason::StreamStalled { .. } => false,
-            LlmFailureReason::ProviderError(error) if is_authorization_route_changed(error) => {
+            LlmFailureReason::ProviderError(error)
+                if is_authorization_route_changed(error)
+                    || error.kind == crate::error::LlmProviderErrorKind::PolicyStop =>
+            {
                 false
             }
             _ => true,
@@ -446,6 +449,16 @@ fn agent_error_is_authorization_route_changed(error: &AgentError) -> bool {
             reason: LlmFailureReason::ProviderError(provider_error),
             ..
         } if is_authorization_route_changed(provider_error)
+    )
+}
+
+fn agent_error_is_policy_stop(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Llm {
+            reason: LlmFailureReason::ProviderError(provider_error),
+            ..
+        } if provider_error.kind == crate::error::LlmProviderErrorKind::PolicyStop
     )
 }
 
@@ -2522,6 +2535,14 @@ where
                             }
                         };
 
+                        let outcome = match outcome {
+                            Err(crate::agent::compact::CompactionError::LlmFailed(error))
+                                if agent_error_is_policy_stop(&error) =>
+                            {
+                                return Err(error);
+                            }
+                            outcome => outcome,
+                        };
                         if let Ok(outcome) = outcome {
                             // A successful summary call is real provider work
                             // even when the rebuilt transcript or its memory
@@ -5123,8 +5144,8 @@ where
     /// Classify one already-measured request budget against the active model
     /// profile before any provider dispatch.
     ///
-    /// The effective model registry owns the context-window limit. Exact
-    /// provider-lowered bytes remain observational. Only an exact
+    /// The effective model registry owns the context-window and input limits.
+    /// Exact provider-lowered bytes remain observational. Only an exact
     /// provider-issued token count may authorize a typed pre-dispatch
     /// `ContextExceeded` terminal; otherwise provider rejection remains the
     /// authoritative typed failure. The fact is taken as a parameter because
@@ -5140,17 +5161,23 @@ where
             return None;
         }
 
-        let requested = u32::try_from(fact.estimated_total_tokens).unwrap_or(u32::MAX);
+        let (requested, max, limit_name) = match fact.max_input_tokens {
+            Some(max) if fact.effective_input_tokens() > u64::from(max) => {
+                (fact.effective_input_tokens(), max, "input ceiling")
+            }
+            _ => (
+                fact.estimated_total_tokens,
+                fact.context_window_tokens,
+                "context window",
+            ),
+        };
+        let requested = u32::try_from(requested).unwrap_or(u32::MAX);
         Some(AgentError::llm(
             self.client.provider().as_str(),
-            LlmFailureReason::ContextExceeded {
-                max: fact.context_window_tokens,
-                requested,
-            },
+            LlmFailureReason::ContextExceeded { max, requested },
             format!(
-                "request requires {requested} provider-counted tokens but active model '{}' has a {}-token context window; provider dispatch was refused",
+                "request requires {requested} tokens but active model '{}' has a {max}-token {limit_name}; provider dispatch was refused",
                 self.client.model(),
-                fact.context_window_tokens,
             ),
         ))
     }
@@ -17790,6 +17817,12 @@ mod tests {
     }
 
     fn fallback_activation_test_registry() -> Arc<crate::ModelRegistry> {
+        fallback_activation_test_registry_with_input_ceiling(None)
+    }
+
+    fn fallback_activation_test_registry_with_input_ceiling(
+        max_input_tokens: Option<u32>,
+    ) -> Arc<crate::ModelRegistry> {
         let mut config = crate::Config::default();
         for (model, vision, max_output_tokens) in [("primary", true, 8192), ("backup", false, 2048)]
         {
@@ -17799,6 +17832,7 @@ mod tests {
                     provider: crate::Provider::OpenAI,
                     display_name: None,
                     context_window: Some(128_000),
+                    max_input_tokens,
                     max_output_tokens: Some(max_output_tokens),
                     vision: Some(vision),
                     web_search: Some(false),
@@ -17865,6 +17899,50 @@ mod tests {
                 requested,
             }) if *requested > 128_000
         ));
+    }
+
+    #[tokio::test]
+    async fn context_budget_preflight_reports_input_ceiling_without_output_reserve() {
+        // The input ceiling takes precedence even when the shared 128K
+        // context window is also exceeded.
+        for input_tokens in [121_000, 129_000] {
+            let registry = fallback_activation_test_registry_with_input_ceiling(Some(120_000));
+            let client = Arc::new(
+                HotSwapLimitRecordingClient::with_provider_issued_input_tokens(
+                    "primary",
+                    input_tokens,
+                ),
+            );
+            let mut agent = with_test_turn_state_handle_for_session(
+                AgentBuilder::new()
+                    .model("primary")
+                    .max_tokens_per_turn(100)
+                    .with_effective_model_registry(registry),
+                explicit_hot_swap_session("primary"),
+            )
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+            agent.config.max_turns = Some(1);
+
+            let error = agent
+                .run("tiny".into())
+                .await
+                .expect_err("input ceiling exceeded");
+            assert!(client.seen_max_tokens().is_empty());
+            assert!(matches!(error, AgentError::TerminalFailure { .. }));
+            let metadata = agent
+                .terminal_error_metadata
+                .as_ref()
+                .expect("refusal metadata");
+            assert!(matches!(
+                &metadata.reason,
+                Some(crate::event::AgentErrorReason::LlmContextExceeded {
+                    max: 120_000,
+                    requested,
+                }) if u64::from(*requested) == input_tokens
+            ));
+        }
     }
 
     /// Trigger-side accounting plumbing: every compaction check the loop runs
@@ -19749,6 +19827,156 @@ mod tests {
         );
     }
 
+    struct PolicyStopClient {
+        calls: std::sync::atomic::AtomicUsize,
+        fallback_proposals: std::sync::atomic::AtomicUsize,
+        output_observed: bool,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for PolicyStopClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(AgentError::llm(
+                "openai",
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::PolicyStop,
+                    serde_json::json!({
+                        "code": "misalignment_policy_violation",
+                        "message": "Operator review required",
+                    }),
+                )),
+                "Operator review required",
+            ))
+        }
+
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "primary"
+        }
+
+        fn prepare_model_fallback(
+            &self,
+            _failure: &AgentError,
+        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            self.fallback_proposals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+
+        fn stream_output_observed(&self) -> bool {
+            self.output_observed
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_stop_refuses_retry_fallback_and_conversation_replacement() {
+        for output_observed in [false, true] {
+            let client = Arc::new(PolicyStopClient {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fallback_proposals: std::sync::atomic::AtomicUsize::new(0),
+                output_observed,
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("primary"))
+                .retry_policy(crate::retry::RetryPolicy::default())
+                .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+                .await;
+            agent.session.push(Message::User(UserMessage::text(
+                "Preserve the affected conversation and its prior work",
+            )));
+            let session_id = agent.session().id().clone();
+            let transcript = agent.session().messages().to_vec();
+
+            let error = agent.run("affected workflow".into()).await.unwrap_err();
+            assert!(matches!(
+                error,
+                AgentError::TerminalFailure {
+                    outcome: TurnTerminalOutcome::Failed,
+                    cause_kind: crate::TurnTerminalCauseKind::LlmFailure,
+                    ..
+                }
+            ));
+            assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                client
+                    .fallback_proposals
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_eq!(agent.session().id(), &session_id);
+            assert!(agent.session().messages().starts_with(&transcript));
+            assert_eq!(agent.config.model, "primary");
+            let metadata = agent.terminal_error_metadata.as_ref().unwrap();
+            assert!(matches!(
+                &metadata.reason,
+                Some(crate::event::AgentErrorReason::LlmProviderError {
+                    provider_error_kind: LlmProviderErrorKind::PolicyStop,
+                    provider_error_retryability:
+                        crate::error::LlmProviderErrorRetryability::NonRetryable,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_stop_during_compaction_never_dispatches_the_main_request() {
+        let client = Arc::new(PolicyStopClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fallback_proposals: std::sync::atomic::AtomicUsize::new(0),
+            output_observed: false,
+        });
+        let compactor = Arc::new(TrackingCompactor::new(Some(0)));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new().model("primary"))
+            .compactor(compactor.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let session_id = agent.session().id().clone();
+        assert!(agent.run("affected workflow".into()).await.is_err());
+        assert_eq!(compactor.seen_boundaries(), vec![0]);
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(agent.session().id(), &session_id);
+        assert_eq!(
+            agent.compaction_cadence.last_compaction_boundary_index,
+            None
+        );
+        assert!(matches!(
+            &agent.terminal_error_metadata.as_ref().unwrap().reason,
+            Some(crate::event::AgentErrorReason::LlmProviderError {
+                provider_error_kind: LlmProviderErrorKind::PolicyStop,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_stop_is_never_a_safe_fallback_trigger() {
+        let error = AgentError::llm(
+            "openai",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::PolicyStop,
+                serde_json::json!({}),
+            )),
+            "review required",
+        );
+        assert!(!super::fallback_activation_is_pre_stream_safe(
+            &error, false
+        ));
+        assert!(!super::fallback_activation_is_pre_stream_safe(&error, true));
+        assert!(crate::retry::LlmRetryFailure::from_agent_error(&error).is_none());
+    }
+
     #[tokio::test]
     async fn model_fallback_does_not_switch_after_visible_stream_output() {
         use crate::retry::RetryPolicy;
@@ -20545,6 +20773,7 @@ mod tests {
                 provider: crate::Provider::Anthropic,
                 display_name: Some("Extraction fallback".to_string()),
                 context_window: Some(64_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(1024),
                 vision: Some(false),
                 web_search: Some(false),

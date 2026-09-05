@@ -1680,11 +1680,17 @@ fn model_aware_compaction_config(
 
     if let Some(context_window) = registry
         .entry_for_provider(provider, model)
-        .and_then(|entry| entry.context_window)
+        .and_then(|entry| {
+            entry.context_window.map(|window| {
+                entry
+                    .max_input_tokens
+                    .map_or(window, |input| input.min(window))
+            })
+        })
     {
         // The static default is intentionally conservative for unknown models.
-        // Cataloged large-context models should compact near the model window,
-        // with enough headroom for the active turn's output.
+        // Compact before the tighter of the shared window and separate input
+        // ceiling, leaving headroom for the active turn.
         let context_window = u64::from(context_window);
         if context_window > 0 {
             compaction.auto_compact_threshold = context_window.saturating_mul(4) / 5;
@@ -8147,6 +8153,86 @@ mod tests {
     }
 
     #[test]
+    fn astra_input_ceiling_bounds_default_compaction_without_overriding_explicit_limits() {
+        let mut config = Config::default();
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-6-astra",
+            None,
+        );
+        assert_eq!(compaction.auto_compact_threshold, 737_600);
+        assert_eq!(
+            model_aware_default_max_tokens(&registry, Provider::OpenAI, "gpt-6-astra"),
+            128_000
+        );
+
+        config.compaction.auto_compact_threshold = 42_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let explicit = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-6-astra",
+            None,
+        );
+        assert_eq!(explicit.auto_compact_threshold, 42_000);
+        let build_override = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-6-astra",
+            std::num::NonZeroU64::new(9_000),
+        );
+        assert_eq!(build_override.auto_compact_threshold, 9_000);
+    }
+
+    #[test]
+    fn astra_is_global_and_openai_default_but_explicit_models_win() {
+        let config = Config::default();
+        assert_eq!(resolve_create_session_default_model(&config), "gpt-6-astra");
+        for provider in [None, Some(Provider::OpenAI)] {
+            let resolved = resolve_create_session_model(
+                &config,
+                CreateSessionModelResolutionRequest {
+                    provider,
+                    ..Default::default()
+                },
+            )
+            .expect("default resolution");
+            assert_eq!(resolved.model, "gpt-6-astra");
+            assert_eq!(resolved.provider, Provider::OpenAI);
+        }
+        for pin in ["gpt-5.5", "gpt-5.6-sol"] {
+            let mut config = Config::default();
+            config.agent.model = pin.to_string();
+            let resolved =
+                resolve_create_session_model(&config, Default::default()).expect("agent pin");
+            assert_eq!(resolved.model, pin);
+
+            config.agent.model.clear();
+            config.models.openai = pin.to_string();
+            let resolved =
+                resolve_create_session_model(&config, Default::default()).expect("provider pin");
+            assert_eq!(resolved.model, pin);
+
+            let resolved = resolve_create_session_model(
+                &Config::default(),
+                CreateSessionModelResolutionRequest {
+                    model: Some(pin.to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("request pin");
+            assert_eq!(resolved.model, pin);
+        }
+    }
+
+    #[test]
     fn default_compaction_byte_cap_is_resolved_per_active_provider_request() {
         // The static config remains unset: each exact provider request witness
         // carries the currently active fallback candidate's cap.
@@ -9702,6 +9788,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 display_name: Some("Text-only backup".to_string()),
                 context_window: Some(32_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(4_096),
                 vision: Some(false),
                 web_search: Some(false),
@@ -9901,6 +9988,7 @@ mod tests {
                 provider: Provider::OpenAI,
                 display_name: Some("Text-only backup".to_string()),
                 context_window: Some(32_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(4_096),
                 vision: Some(false),
                 web_search: Some(false),
@@ -12511,6 +12599,7 @@ mod tests {
                 family: "gemma-4".to_string(),
                 tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: Some(128_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(8_192),
                 vision: true,
                 image_tool_results: true,
@@ -12629,6 +12718,7 @@ mod tests {
             family: "test".to_string(),
             tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
             context_window: Some(128_000),
+            max_input_tokens: None,
             max_output_tokens: Some(8_192),
             vision: false,
             image_tool_results: false,
@@ -15165,6 +15255,7 @@ mod tests {
                 provider: Provider::Anthropic,
                 display_name: None,
                 context_window: Some(400_000),
+                max_input_tokens: None,
                 max_output_tokens: None,
                 vision: None,
                 web_search: None,
@@ -15215,6 +15306,7 @@ mod tests {
                 family: "gemma-4".to_string(),
                 tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
                 context_window: Some(128_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(8_192),
                 vision: true,
                 image_tool_results: true,

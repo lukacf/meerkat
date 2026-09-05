@@ -339,6 +339,10 @@ impl LlmClientAdapter {
             self.stream_activity.fetch_add(1, Ordering::SeqCst);
             match result {
                 Ok(event) => match event {
+                    LlmEvent::AssistantOutput { blocks } => {
+                        assembler = BlockAssembler::from_final_blocks(blocks);
+                        reasoning_started = false;
+                    }
                     LlmEvent::TextDelta { delta, meta } => {
                         assembler.on_text_delta(&delta, meta);
                         self.mark_visible_stream_output(&delta);

@@ -396,7 +396,8 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "run_failed");
     if (event.type === "run_failed") {
-      assert.equal(event.error, "display text changed by caller");
+      assert.equal(event.error, "machine terminalized LLM failure");
+      assert.equal(event.errorClass, "llm");
       assert.equal(event.errorReport?.class, "llm");
       assert.equal(event.errorReport?.message, "machine terminalized LLM failure");
       assert.equal(event.errorReport?.reason?.reasonType, "turn_terminal_cause");
@@ -533,6 +534,40 @@ describe("Typed Events", () => {
       assert.equal(failed.lastOutput, "main answer");
       assert.equal(failed.attempts, 2);
       assert.equal(failed.reason, "Invalid JSON");
+    }
+  });
+
+  it("preserves policy-stop kind, terminality, and provider details on run_failed", () => {
+    const reason = {
+      reason_type: "llm_provider_error",
+      provider_error_kind: "policy_stop",
+      provider_error_retryability: "non_retryable",
+      provider_error: {
+        code: "misalignment_policy_violation",
+        message: "Operator review required",
+      },
+    };
+    const raw = {
+      type: "run_failed",
+      session_id: "session-1",
+      terminal_cause_kind: "llm_failure",
+      error_report: { class: "llm", message: "Stopped", reason },
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "run_failed");
+    assert.equal(event.errorReport.reason.reasonType, "llm_provider_error");
+    assert.equal(event.errorReport.reason.providerErrorKind, "policy_stop");
+    assert.equal(event.errorReport.reason.providerErrorRetryability, "non_retryable");
+    assert.deepEqual(event.errorReport.reason.providerError, reason.provider_error);
+
+    for (const retryability of [undefined, "unknown", true]) {
+      assert.equal(parseEvent({
+        ...raw,
+        error_report: {
+          ...raw.error_report,
+          reason: { ...reason, provider_error_retryability: retryability },
+        },
+      }).type, "malformed_event");
     }
   });
 

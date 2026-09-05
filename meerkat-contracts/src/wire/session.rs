@@ -481,6 +481,13 @@ pub enum WireProviderMeta {
     OpenAiResponse {
         response_id: String,
     },
+    OpenAiAssistantMessage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<meerkat_core::types::OpenAiAssistantPhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
+    },
     Unknown,
 }
 
@@ -503,6 +510,15 @@ impl From<ProviderMeta> for WireProviderMeta {
                 response_id,
             },
             ProviderMeta::OpenAiResponse { response_id } => Self::OpenAiResponse { response_id },
+            ProviderMeta::OpenAiAssistantMessage {
+                id,
+                phase,
+                response_id,
+            } => Self::OpenAiAssistantMessage {
+                id,
+                phase,
+                response_id,
+            },
             _ => Self::Unknown,
         }
     }
@@ -1044,6 +1060,15 @@ fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
         WireProviderMeta::OpenAiResponse { response_id } => {
             Some(ProviderMeta::OpenAiResponse { response_id })
         }
+        WireProviderMeta::OpenAiAssistantMessage {
+            id,
+            phase,
+            response_id,
+        } => Some(ProviderMeta::OpenAiAssistantMessage {
+            id,
+            phase,
+            response_id,
+        }),
         WireProviderMeta::Unknown => None,
     }
 }
@@ -2840,6 +2865,14 @@ mod tests {
         use uuid::Uuid;
 
         let cases: Vec<AssistantBlock> = vec![
+            AssistantBlock::Text {
+                text: "intermediate".into(),
+                meta: Some(Box::new(ProviderMeta::OpenAiAssistantMessage {
+                    id: "msg_1".into(),
+                    phase: Some(meerkat_core::types::OpenAiAssistantPhase::Commentary),
+                    response_id: Some("resp_1".into()),
+                })),
+            },
             AssistantBlock::Text {
                 text: "display lane".to_string(),
                 meta: Some(Box::new(ProviderMeta::Anthropic {

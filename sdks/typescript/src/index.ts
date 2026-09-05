@@ -556,6 +556,7 @@ export type {
   AgentErrorClass,
   AgentErrorReport,
   AgentErrorReason,
+  ProviderAgentErrorReason,
   TurnTerminalCauseReason,
   TurnTerminalCauseKind,
   TurnTerminalOutcome,

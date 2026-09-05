@@ -320,6 +320,7 @@ mod tests {
                 provider,
                 display_name: Some(format!("Test {model}")),
                 context_window: Some(128_000),
+                max_input_tokens: None,
                 max_output_tokens: Some(4096),
                 vision: Some(vision),
                 web_search: Some(false),

@@ -165,7 +165,7 @@ Resume targets: full UUID, UUID prefix/tail handle, `realm:<uuid>`, `last`,
 Defaults:
 
 - `--tools safe`
-- default model is OpenAI `gpt-5.6-sol` unless realm config/auth binding selects another model; Sol is a limited preview, so configure `gpt-5.5` when the relevant API organization or Codex workspace lacks access
+- default model is OpenAI `gpt-6-astra` unless realm config/auth binding selects another model; catalog support does not imply access through Azure, Copilot, or custom backends
 - current recommended Gemini model is `gemini-3.5-flash`
 - CLI realm state is project-local by default: `<project-root>/.rkat/realms/<ws-...>/`, where the project root is the nearest ancestor containing `.rkat` and falls back to the context root outside a project; that head realm's config composes over its parent chain and the HOME-rooted `global` doc (`~/.rkat/config.toml`)
 - stream on in a TTY, off in pipes/scripts

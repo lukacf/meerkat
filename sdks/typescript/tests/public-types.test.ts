@@ -675,6 +675,19 @@ const mobWireMembersBatchPromise: Promise<MobWireMembersBatchResult> =
 void mobWireMembersBatchEdges;
 void mobWireMembersBatchPromise;
 
+const generatedPolicyStopKind: import("../src/generated/event_types.js").LlmProviderErrorKind = "policy_stop";
+const policyStopErrorReport: AgentErrorReport = {
+  class: "llm",
+  message: "Operator review required",
+  reason: {
+    reasonType: "llm_provider_error",
+    providerErrorKind: generatedPolicyStopKind,
+    providerErrorRetryability: "non_retryable",
+    providerError: { code: "misalignment_policy_violation" },
+  },
+};
+void policyStopErrorReport;
+
 const hookDeniedErrorReport: AgentErrorReport = {
   class: "hook",
   message: "denied",

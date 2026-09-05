@@ -175,6 +175,7 @@ fn catalog_matches_capability_table() {
         assert_eq!(entry.display_name, caps.display_name);
         assert_eq!(entry.tier, caps.tier);
         assert_eq!(entry.context_window, caps.context_window);
+        assert_eq!(entry.max_input_tokens, caps.max_input_tokens);
         assert_eq!(entry.max_output_tokens, caps.max_output_tokens);
     }
 }
@@ -193,7 +194,7 @@ fn claude_fable_51_is_recommended_without_changing_default_ladder() {
         "claude-fable-5-1 must be in the Anthropic allowlist"
     );
     assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5"));
-    assert_eq!(global_default_model(), "gpt-5.6-sol");
+    assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
 #[test]
@@ -228,7 +229,7 @@ fn claude_opus_5_is_cataloged_and_owns_the_anthropic_default() {
 }
 
 #[test]
-fn gpt_56_family_is_cataloged_and_sol_owns_the_openai_default() {
+fn gpt_56_family_remains_cataloged_without_changing_explicit_selection() {
     for (id, display_name) in [
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
         ("gpt-5.6-terra", "GPT-5.6 Terra"),
@@ -262,8 +263,152 @@ fn gpt_56_family_is_cataloged_and_sol_owns_the_openai_default() {
         assert!(!profile.supports_temperature);
     }
 
-    assert_eq!(default_model(Provider::OpenAI), Some("gpt-5.6-sol"));
-    assert_eq!(global_default_model(), "gpt-5.6-sol");
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-6-astra"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
+#[test]
+fn gpt_6_astra_owns_defaults_and_projects_independent_input_limit() {
+    let caps = capabilities_for(Provider::OpenAI, "gpt-6-astra").expect("Astra capabilities");
+    assert_eq!(caps.display_name, "GPT-6 Astra");
+    assert_eq!(caps.model_family, "gpt-6");
+    assert_eq!(caps.tier, ModelTier::Recommended);
+    assert_eq!(caps.context_window, Some(1_050_000));
+    assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert_eq!(caps.max_output_tokens, Some(128_000));
+    assert!(caps.vision && caps.image_tool_results);
+    assert!(caps.supports_reasoning && caps.supports_web_search);
+    assert!(caps.supports_structured_output);
+    assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
+    assert!(image_generation_model(Provider::OpenAI, "gpt-6-astra").is_none());
+    assert_eq!(image_generation_provider_for_model("gpt-6-astra"), None);
+    assert!(image_generation_provider_defaults().iter().all(|provider| {
+        provider
+            .models
+            .iter()
+            .all(|model| model.model_id != "gpt-6-astra")
+    }));
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-6-astra"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+    assert_eq!(infer_provider("gpt-6-astra"), Some(Provider::OpenAI));
+    assert!(allowed_models(Provider::OpenAI).any(|id| id == "gpt-6-astra"));
+
+    let config = meerkat_core::Config::default();
+    let registry = config.model_registry(canonical()).expect("registry");
+    let witness = registry
+        .profile_witness_for_provider(Provider::OpenAI, "gpt-6-astra")
+        .expect("Astra witness");
+    assert_eq!(witness.context_window(), caps.context_window);
+    assert_eq!(witness.max_input_tokens(), caps.max_input_tokens);
+    assert_eq!(witness.max_output_tokens(), caps.max_output_tokens);
+    assert_eq!(
+        registry.default_model(Provider::OpenAI),
+        Some("gpt-6-astra")
+    );
+    assert!(
+        registry
+            .profile_witness_for_provider(Provider::SelfHosted, "gpt-6-astra")
+            .is_none()
+    );
+    assert!(
+        registry
+            .profile_witness_for_provider(Provider::Other, "gpt-6-astra")
+            .is_none()
+    );
+    for entry in catalog().iter().filter(|entry| entry.id != "gpt-6-astra") {
+        assert_eq!(entry.max_input_tokens, None, "{}", entry.id);
+    }
+}
+
+#[test]
+fn gpt_6_astra_params_advertise_only_supported_efforts_and_no_sampling() {
+    let caps = capabilities_for(Provider::OpenAI, "gpt-6-astra").expect("Astra capabilities");
+    assert_eq!(
+        caps.effort_levels,
+        &[
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max
+        ]
+    );
+    assert!(!caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k);
+    let profile = profile_for(Provider::OpenAI, "gpt-6-astra").expect("Astra profile");
+    assert_eq!(profile.params_schema["additionalProperties"], false);
+    assert_eq!(
+        profile.params_schema["properties"]["reasoning_effort"]["enum"],
+        serde_json::json!(["low", "medium", "high", "xhigh", "max"])
+    );
+    for unsupported in [
+        "temperature",
+        "top_p",
+        "logprobs",
+        "reasoning_mode",
+        "reasoning_context",
+    ] {
+        assert!(
+            profile.params_schema["properties"]
+                .get(unsupported)
+                .is_none(),
+            "{unsupported}"
+        );
+    }
+}
+
+#[test]
+fn gpt_6_astra_input_ceiling_does_not_grow_when_output_reserve_shrinks() {
+    let registry = meerkat_core::Config::default()
+        .model_registry(canonical())
+        .expect("registry");
+    let witness = registry
+        .profile_witness_for_provider(Provider::OpenAI, "gpt-6-astra")
+        .expect("Astra witness");
+    for (input, reserve, state, overage) in [
+        (
+            922_000,
+            128_000,
+            meerkat_core::ContextBudgetState::Within,
+            0,
+        ),
+        (922_001, 1, meerkat_core::ContextBudgetState::Exceeded, 1),
+        (
+            900_000,
+            151_000,
+            meerkat_core::ContextBudgetState::Exceeded,
+            1_000,
+        ),
+    ] {
+        let fact = meerkat_core::context_budget_fact_for_provider_request(
+            &[],
+            &[],
+            reserve,
+            &witness,
+            meerkat_core::ProviderRequestPressure::new(1, None)
+                .with_provider_issued_input_tokens(input),
+        )
+        .expect("budget");
+        assert_eq!(fact.max_input_tokens, Some(922_000));
+        assert_eq!(fact.state, state);
+        assert_eq!(fact.overage_tokens, overage);
+    }
+}
+
+#[test]
+fn explicitly_configured_openai_defaults_are_not_rewritten() {
+    for selected in ["gpt-5.5", "gpt-5.6-sol"] {
+        let mut config = meerkat_core::Config::default();
+        config.agent.model = selected.to_string();
+        config.models.openai = selected.to_string();
+        let registry = config.model_registry(canonical()).expect("registry");
+        assert!(
+            registry
+                .entry_for_provider(Provider::OpenAI, selected)
+                .is_some()
+        );
+        assert_eq!(config.agent.model, selected);
+        assert_eq!(config.models.openai, selected);
+    }
 }
 
 #[test]
@@ -351,7 +496,7 @@ fn openai_text_models_route_through_hosted_image_tool() {
 
 #[test]
 fn global_default_and_provider_priority_are_catalog_owned() {
-    assert_eq!(global_default_model(), "gpt-5.6-sol");
+    assert_eq!(global_default_model(), "gpt-6-astra");
 
     let priority = provider_priority();
     assert_eq!(

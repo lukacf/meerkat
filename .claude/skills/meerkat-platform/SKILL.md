@@ -255,8 +255,8 @@ for live messages.
 For platform integration answers in this checkout, assume the current branch
 surface, not the old live-adapter/docs-refresh snapshot:
 
-- Default hosted text selections are OpenAI `gpt-5.6-sol` (limited preview;
-  requires access for the relevant API organization or Codex workspace),
+- Default hosted text selections are OpenAI `gpt-6-astra` (backend availability
+  remains independent; Azure, Copilot, and custom support are not implied),
   Anthropic `claude-opus-5`, and Gemini `gemini-3.5-flash`.
 - WorkGraph is available through agent `workgraph_*` tools plus host
   observability (`workgraph/list`, `ready`, `snapshot`, `events`,

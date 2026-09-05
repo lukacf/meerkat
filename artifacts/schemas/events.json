@@ -1435,6 +1435,11 @@
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
+            "type": "string"
           }
         ]
       },
@@ -6512,6 +6517,11 @@
           {
             "const": "quota_exhausted",
             "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
+          },
+          {
+            "const": "policy_stop",
+            "description": "The provider stopped the conversation for operator review. Never\nautomatically retry, refresh auth, fall back, or replace the conversation.",
             "type": "string"
           }
         ]

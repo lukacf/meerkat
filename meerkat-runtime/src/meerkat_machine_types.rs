@@ -422,6 +422,13 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         reason: String,
     },
+    /// Explicit stop of one exact registration epoch that awaits the owned
+    /// cleanup coordinator to terminal completion (no caller grace).
+    StopRuntimeExecutorUntilTerminal {
+        session_id: SessionId,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        reason: String,
+    },
     #[cfg_attr(not(test), allow(dead_code))]
     ContainsSession {
         session_id: SessionId,
@@ -1934,6 +1941,9 @@ impl MeerkatMachineCommandVariant {
             Self::SetSilentIntents => Some(MeerkatMachineCatalogInput::SetSilentIntents),
             Self::CancelAfterBoundary => Some(MeerkatMachineCatalogInput::CancelAfterBoundary),
             Self::StopRuntimeExecutor => Some(MeerkatMachineCatalogInput::StopRuntimeExecutor),
+            Self::StopRuntimeExecutorUntilTerminal => {
+                Some(MeerkatMachineCatalogInput::StopRuntimeExecutor)
+            }
             Self::ContainsSession => Some(MeerkatMachineCatalogInput::ContainsSession),
             Self::SessionHasExecutor => Some(MeerkatMachineCatalogInput::SessionHasExecutor),
             Self::SessionHasComms => Some(MeerkatMachineCatalogInput::SessionHasComms),
@@ -2087,6 +2097,11 @@ const fn meerkat_machine_command_classification(
             )
         }
         MeerkatMachineCommandVariant::StopRuntimeExecutor => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::StopRuntimeExecutor,
+            )
+        }
+        MeerkatMachineCommandVariant::StopRuntimeExecutorUntilTerminal => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::StopRuntimeExecutor,
             )

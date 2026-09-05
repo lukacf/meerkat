@@ -45,8 +45,23 @@ impl UnregisterTeardownWaitOutcome {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RuntimeStopCleanupCaller {
     ExplicitStop,
+    /// An explicit stop whose caller awaits the owned cleanup coordinator to
+    /// terminal completion instead of returning at the caller grace.
+    ExplicitStopUntilTerminal,
     ExplicitUnregister,
     RuntimeLoopWatcher,
+}
+
+/// How long an explicit stop caller waits for the owned cleanup coordinator.
+///
+/// The coordinator and exact executor remain owned either way; this only
+/// selects what the CALLER observes when cleanup outlives the grace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeStopCallerWait {
+    /// Return typed `RuntimeStopInProgress` after `RUNTIME_STOP_CALLER_WAIT_GRACE`.
+    CallerGrace,
+    /// Await the coordinator's terminal result with no outer bound.
+    UntilTerminal,
 }
 
 enum RuntimeStopCleanupWork {
@@ -6226,11 +6241,31 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
+        self.request_runtime_stop_with_wait(session_id, reason, RuntimeStopCallerWait::CallerGrace)
+            .await
+    }
+
+    /// [`Self::request_runtime_stop`] with an explicit caller wait policy.
+    ///
+    /// Every exit that can surface `RuntimeStopInProgress` under
+    /// [`RuntimeStopCallerWait::CallerGrace`] (the ordinary stop coordinator,
+    /// and the canonical unregister owner joined when generated Draining is
+    /// observed before or after the stop) instead awaits terminal completion
+    /// under [`RuntimeStopCallerWait::UntilTerminal`].
+    pub(super) async fn request_runtime_stop_with_wait(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+        wait: RuntimeStopCallerWait,
+    ) -> Result<(), RuntimeDriverError> {
         let generated_draining = self.session_dsl_state(session_id).await.is_ok_and(|state| {
             state.registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining
         });
         if generated_draining {
-            return match self.unregister_session_inner(session_id).await {
+            return match self
+                .unregister_session_inner_with_wait(session_id, wait)
+                .await
+            {
                 Err(RuntimeDriverError::UnregisterInProgress { .. }) => {
                     Err(RuntimeDriverError::RuntimeStopInProgress {
                         runtime_id: LogicalRuntimeId::for_session(session_id),
@@ -6248,13 +6283,14 @@ impl MeerkatMachine {
                     .map(|slot| (entry.epoch_id.clone(), Arc::clone(slot)))
             })
         };
+        let caller = match wait {
+            RuntimeStopCallerWait::CallerGrace => RuntimeStopCleanupCaller::ExplicitStop,
+            RuntimeStopCallerWait::UntilTerminal => {
+                RuntimeStopCleanupCaller::ExplicitStopUntilTerminal
+            }
+        };
         let stop_result = self
-            .join_or_start_runtime_stop_cleanup(
-                session_id,
-                RuntimeStopCleanupCaller::ExplicitStop,
-                Some(reason),
-                None,
-            )
+            .join_or_start_runtime_stop_cleanup(session_id, caller, Some(reason), None)
             .await;
         if matches!(
             &stop_result,
@@ -6267,7 +6303,10 @@ impl MeerkatMachine {
             // above. Join its canonical unregister owner; a genuinely
             // mid-apply ordinary stop remains Queuing and keeps the typed
             // RuntimeStopInProgress result from the stop coordinator.
-            return match self.unregister_session_inner(session_id).await {
+            return match self
+                .unregister_session_inner_with_wait(session_id, wait)
+                .await
+            {
                 Err(RuntimeDriverError::UnregisterInProgress { .. }) => {
                     Err(RuntimeDriverError::RuntimeStopInProgress {
                         runtime_id: LogicalRuntimeId::for_session(session_id),
@@ -6284,10 +6323,11 @@ impl MeerkatMachine {
         // that may have reused the SessionId.
         if let Some((observed_epoch, observed_teardown_slot)) = observed_teardown {
             return match self
-                .join_unregister_if_observed_runtime_loop_became_draining(
+                .join_unregister_if_observed_runtime_loop_became_draining_with_wait(
                     session_id,
                     &observed_epoch,
                     &observed_teardown_slot,
+                    wait,
                 )
                 .await
             {
@@ -6492,6 +6532,22 @@ impl MeerkatMachine {
         observed_epoch: &meerkat_core::RuntimeEpochId,
         observed_teardown_slot: &Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
     ) -> Result<(), RuntimeDriverError> {
+        self.join_unregister_if_observed_runtime_loop_became_draining_with_wait(
+            session_id,
+            observed_epoch,
+            observed_teardown_slot,
+            RuntimeStopCallerWait::CallerGrace,
+        )
+        .await
+    }
+
+    async fn join_unregister_if_observed_runtime_loop_became_draining_with_wait(
+        &self,
+        session_id: &SessionId,
+        observed_epoch: &meerkat_core::RuntimeEpochId,
+        observed_teardown_slot: &Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
+        wait: RuntimeStopCallerWait,
+    ) -> Result<(), RuntimeDriverError> {
         let became_draining = {
             let sessions = self.sessions.read().await;
             sessions.get(session_id).is_some_and(|entry| {
@@ -6512,12 +6568,26 @@ impl MeerkatMachine {
         if !became_draining {
             return Ok(());
         }
-        self.join_or_start_unregister_teardown(
+        self.join_or_start_unregister_teardown_with_admission(
             session_id,
             Some(observed_epoch),
             UnregisterTeardownCaller::RuntimeLoopWatcher,
+            UnregisterTeardownAdmission::AnyCurrentRegistration,
+            None,
+            Self::unregister_wait_for_stop_caller(wait),
         )
         .await
+        .and_then(UnregisterTeardownWaitOutcome::require_completed)
+        .map(|_| ())
+    }
+
+    fn unregister_wait_for_stop_caller(wait: RuntimeStopCallerWait) -> UnregisterTeardownWait {
+        match wait {
+            RuntimeStopCallerWait::CallerGrace => {
+                UnregisterTeardownWait::CallerGrace(unregister_caller_wait_deadline())
+            }
+            RuntimeStopCallerWait::UntilTerminal => UnregisterTeardownWait::UntilTerminal,
+        }
     }
 
     async fn join_or_start_runtime_stop_cleanup(
@@ -6589,7 +6659,12 @@ impl MeerkatMachine {
                 .state()
                 .registration_phase
                 == crate::meerkat_machine::dsl::RegistrationPhase::Draining;
-            if caller == RuntimeStopCleanupCaller::ExplicitStop && generated_draining {
+            if matches!(
+                caller,
+                RuntimeStopCleanupCaller::ExplicitStop
+                    | RuntimeStopCleanupCaller::ExplicitStopUntilTerminal
+            ) && generated_draining
+            {
                 // The optimistic sample in request_runtime_stop can become
                 // stale while this caller waits for M behind a terminal loop
                 // handoff. Draining is the newer generated authority: never
@@ -8053,6 +8128,27 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         self.join_or_start_unregister_teardown(session_id, None, UnregisterTeardownCaller::Explicit)
             .await
+    }
+
+    /// [`Self::unregister_session_inner`] with the stop caller's wait policy:
+    /// the canonical unregister owner joined on behalf of an explicit stop is
+    /// awaited to terminal completion when the stop caller asked for it.
+    async fn unregister_session_inner_with_wait(
+        &self,
+        session_id: &SessionId,
+        wait: RuntimeStopCallerWait,
+    ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown_with_admission(
+            session_id,
+            None,
+            UnregisterTeardownCaller::Explicit,
+            UnregisterTeardownAdmission::AnyCurrentRegistration,
+            None,
+            Self::unregister_wait_for_stop_caller(wait),
+        )
+        .await
+        .and_then(UnregisterTeardownWaitOutcome::require_completed)
+        .map(|_| ())
     }
 
     /// Two-phase unregister drain (campaign 0.7.2 D1).

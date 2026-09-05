@@ -2436,10 +2436,23 @@ async fn host_status_marks_stopped_member_unhealthy_and_replay_repairs_it() {
         .as_ref()
         .expect("member-build fixture has runtime adapter");
 
-    adapter
-        .stop_runtime_executor(&session_id, "host health stopped-state regression")
+    // Observe the stop's terminal completion, not the 2 s caller grace that
+    // surfaces RuntimeStopInProgress while the owned coordinator is still
+    // cleaning up (#1104); the health probe below reads the STOPPED state.
+    let registration = adapter
+        .current_session_registration_witness(&session_id)
         .await
-        .expect("stop materialized runtime executor");
+        .expect("materialized runtime must expose an exact registration");
+    assert!(
+        adapter
+            .stop_runtime_executor_until_terminal_if_current(
+                &registration,
+                "host health stopped-state regression",
+            )
+            .await
+            .expect("stop materialized runtime executor"),
+        "the materialized registration must still be current when stopped"
+    );
     assert!(
         matches!(
             adapter.runtime_state(&session_id).await,

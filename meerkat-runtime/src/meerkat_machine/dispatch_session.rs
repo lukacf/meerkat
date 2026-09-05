@@ -3074,6 +3074,19 @@ impl MeerkatMachine {
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
+            MeerkatMachineCommand::StopRuntimeExecutorUntilTerminal {
+                session_id,
+                epoch_id,
+                reason,
+            } => {
+                // Same stage-first shape as StopRuntimeExecutor; only the
+                // caller's wait policy differs, and the exact epoch keeps a
+                // same-SessionId replacement out of this stop's authority.
+                let stopped = self
+                    .stop_runtime_executor_until_terminal_inner(&session_id, &epoch_id, reason)
+                    .await?;
+                Ok(MeerkatMachineCommandResult::Bool(stopped))
+            }
             MeerkatMachineCommand::ContainsSession { session_id } => {
                 Ok(MeerkatMachineCommandResult::Bool(
                     self.sessions.read().await.contains_key(&session_id),

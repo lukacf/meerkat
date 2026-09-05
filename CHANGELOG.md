@@ -89,6 +89,13 @@ them.
 
 ### Fixed
 
+- **`MeerkatMachine::stop_runtime_executor_until_terminal_if_current`** is the
+  exact-witness variant of `stop_runtime_executor` for callers that must act
+  on the STOPPED state (#1104): it awaits the owned stop cleanup coordinator
+  to terminal completion instead of returning `RuntimeStopInProgress` at the
+  2 s caller grace, and a stale registration witness is an idempotent
+  `Ok(false)` that never reaches a same-`SessionId` replacement.
+  `stop_runtime_executor` keeps its grace for existing callers.
 - **An exhausted provider account fails in one round trip instead of after
   the rate-limit retry window.** `LlmError::from_http_status` mapped every
   429 to the retryable `RateLimited` class, so a key whose account had no

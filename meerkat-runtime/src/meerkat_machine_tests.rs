@@ -15820,6 +15820,123 @@ mod stop_teardown_coordinator_class {
             .expect("test cleanup should remove the stopped session");
     }
 
+    /// Regression for #1104: `stop_runtime_executor` returns typed
+    /// `RuntimeStopInProgress` once the 2 s caller grace elapses while the owned
+    /// cleanup coordinator is still running. Callers that must act on the
+    /// STOPPED state use the exact-witness until-terminal variant, which keeps
+    /// waiting past the grace and completes with the coordinator.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explicit_stop_until_terminal_outlasts_caller_grace() {
+        // Mirrors RUNTIME_STOP_CALLER_WAIT_GRACE; the hold must exceed it so
+        // the grace-bounded stop has already returned `RuntimeStopInProgress`.
+        const CALLER_GRACE: Duration = Duration::from_secs(2);
+        const PAST_GRACE_HOLD: Duration = Duration::from_millis(2600);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime exposes an exact registration witness");
+
+        // The grace-bounded caller opens the owned coordinator and observes
+        // only that it is still in progress once the grace elapses.
+        let started = Instant::now();
+        let grace_result = machine
+            .stop_runtime_executor(&session_id, "grace-bounded stop")
+            .await;
+        assert!(
+            matches!(
+                &grace_result,
+                Err(RuntimeDriverError::RuntimeStopInProgress { runtime_id })
+                    if runtime_id == &runtime_id_for_session(&session_id)
+            ),
+            "the grace-bounded stop must report the in-flight coordinator: {grace_result:?}"
+        );
+        assert!(started.elapsed() >= CALLER_GRACE);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "cleanup is parked, not skipped"
+        );
+
+        let until_terminal = {
+            let machine = Arc::clone(&machine);
+            let registration = registration.clone();
+            tokio::spawn(async move {
+                machine
+                    .stop_runtime_executor_until_terminal_if_current(
+                        &registration,
+                        "until-terminal stop",
+                    )
+                    .await
+            })
+        };
+        assert!(PAST_GRACE_HOLD > CALLER_GRACE);
+        tokio::time::sleep(PAST_GRACE_HOLD).await;
+        assert!(
+            !until_terminal.is_finished(),
+            "the until-terminal stop must keep waiting on the owned coordinator past the caller grace"
+        );
+        assert!(
+            machine.contains_session(&session_id).await,
+            "the registration remains owned while cleanup is parked"
+        );
+
+        release_cleanup.notify_one();
+        let stopped = tokio::time::timeout(Duration::from_secs(10), until_terminal)
+            .await
+            .expect("the until-terminal stop must finish once cleanup releases")
+            .expect("stop task should not panic")
+            .expect("the joined coordinator must complete cleanly");
+        assert!(stopped, "the exact registration must be the one stopped");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("stopped session authority")
+                .lifecycle_phase,
+            mm_dsl::MeerkatPhase::Stopped
+        );
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "one coordinator ran cleanup once"
+        );
+
+        // A stale witness never reaches a same-SessionId replacement.
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("explicit unregister should remove the stopped session");
+        assert!(
+            !machine
+                .stop_runtime_executor_until_terminal_if_current(&registration, "stale witness")
+                .await
+                .expect("a stale witness is an idempotent no-op"),
+            "a stale registration witness must not request a stop"
+        );
+    }
+
     #[tokio::test]
     async fn explicit_stop_waits_for_exact_cleanup_ack_after_loop_exit() {
         let machine = Arc::new(MeerkatMachine::ephemeral());

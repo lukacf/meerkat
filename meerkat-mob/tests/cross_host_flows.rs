@@ -528,6 +528,21 @@ async fn overlay_autonomous_rejected_at_dispatch_same_cause_local_and_remote() {
         .spawn_spec(placed_spec)
         .await
         .expect("spawn placed autonomous member");
+    // The placed member's kickoff is the ONE legitimate directed turn on the
+    // member host: it runs there, journals a turn-outcome row, and that row is
+    // pruned only after the controlling pump consumes and exact-ACKs it.
+    // Settle that lifecycle before the overlay flows run so the journal
+    // assertion below measures the flow steps alone instead of racing the
+    // kickoff row (issue #1094).
+    controlling
+        .handle
+        .wait_for_members_kickoff_complete(&[identity("b-auto")], Some(RUN_WAIT))
+        .await
+        .expect("placed autonomous kickoff barrier resolves");
+    wait_until("placed kickoff turn outcome pruned", || async {
+        fixture.turn_outcome_rows(&mob_id).await.is_empty()
+    })
+    .await;
 
     for flow in ["overlay-local", "overlay-remote"] {
         let run_id = controlling
@@ -561,11 +576,12 @@ async fn overlay_autonomous_rejected_at_dispatch_same_cause_local_and_remote() {
         );
     }
 
-    // Rejected BEFORE delivery: the member host never saw a directed turn —
-    // no journal row, and the placed member ran no turn.
+    // Rejected BEFORE delivery: neither overlay step reached the member host -
+    // no journal row, and the placed member ran no flow turn.
+    let rows = fixture.turn_outcome_rows(&mob_id).await;
     assert!(
-        fixture.turn_outcome_rows(&mob_id).await.is_empty(),
-        "no directed turn ever reached the member host"
+        rows.is_empty(),
+        "no directed flow turn may reach the member host, got journal rows {rows:?}"
     );
 
     fixture.shutdown().await;

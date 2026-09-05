@@ -2576,6 +2576,11 @@
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
             "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
           }
         ]
       },
@@ -22097,6 +22102,11 @@
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
             "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
           }
         ]
       },
@@ -33242,6 +33252,11 @@
           {
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
           }
         ]
@@ -47715,6 +47730,11 @@
           {
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
           }
         ]
@@ -64159,6 +64179,11 @@
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
             "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
+            "type": "string"
           }
         ]
       },
@@ -71778,6 +71803,11 @@
           {
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
           }
         ]
@@ -123203,6 +123233,11 @@
           {
             "const": "request_too_large",
             "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          },
+          {
+            "const": "quota_exhausted",
+            "description": "The provider account or project has no quota left (exhausted credits,\na spend cap or a hard billing limit). Terminal for the key until a\nhuman tops up the account: no retry clears it and it is not a\nper-window rate limit, which stays `RateLimited` with its\n`Retry-After` hint.",
             "type": "string"
           }
         ]

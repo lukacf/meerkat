@@ -57,7 +57,7 @@ export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_ll
  */
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
 
-export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large";
+export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large" | "quota_exhausted";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 

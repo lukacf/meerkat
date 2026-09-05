@@ -53,7 +53,7 @@ HookPoint = Literal['run_started', 'run_completed', 'run_failed', 'pre_llm_reque
 HookReasonCode = Literal['policy_violation', 'safety_violation', 'schema_violation', 'timeout', 'runtime_error']
 
 
-LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_error', 'server_overloaded', 'connection_reset', 'unknown', 'stream_parse_error', 'incomplete_response'] | Literal['authorization_route_changed'] | Literal['request_too_large']
+LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_error', 'server_overloaded', 'connection_reset', 'unknown', 'stream_parse_error', 'incomplete_response'] | Literal['authorization_route_changed'] | Literal['request_too_large'] | Literal['quota_exhausted']
 
 
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']

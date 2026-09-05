@@ -51,7 +51,6 @@ use meerkat_llm_core::provider_runtime::errors::{
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
-#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 
 pub use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};

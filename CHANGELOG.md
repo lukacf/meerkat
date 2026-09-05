@@ -38,6 +38,19 @@ them.
   `LlmError::from_http_status` returns the new variant for a 429, 400 or 402
   body whose provider code, documented message prefix, or Google
   `QuotaFailure` detail names exhausted quota (see Fixed).
+- **`meerkat_core::error::LlmProviderErrorKind` gained the `QuotaExhausted`
+  variant** (`LlmProviderErrorKind::QuotaExhausted`, an `enum_variant_added`
+  finding). The enum is not `#[non_exhaustive]`, so exact-pinned Rust
+  consumers that match a provider error kind exhaustively must add an arm;
+  the three in-workspace exhaustive matches (the provider `web_search`
+  adapters) now map it back to `LlmError::QuotaExhausted`. On the wire the
+  `llm_provider_error` failure for exhausted quota now reports
+  `provider_error_kind = "quota_exhausted"` instead of the `invalid_request`
+  misnomer documented under Fixed; the schema artifacts and the generated
+  Python and TypeScript SDK types carry the new value. `details.class =
+  "quota_exhausted"` is still emitted alongside the kind for exactly one
+  release so consumers that started branching on the class keep working;
+  it is removed in the next release, so branch on the kind.
 
 ### Billing-affecting default change
 

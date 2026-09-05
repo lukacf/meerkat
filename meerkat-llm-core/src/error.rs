@@ -157,9 +157,10 @@ const ANTHROPIC_SELF_SET_SPEND_LIMIT_PREFIXES: &[&str] = &[
 ];
 
 /// Value of `details.class` on the wire projection of
-/// [`LlmError::QuotaExhausted`]: the machine-readable discriminator that tells
-/// exhausted quota apart from an ordinary `invalid_request` provider error
-/// while both share the `invalid_request` provider error kind.
+/// [`LlmError::QuotaExhausted`]. The dedicated `quota_exhausted` provider
+/// error kind is the primary discriminator; the class is a one-release
+/// compatibility carrier for consumers that started branching on it while
+/// the failure still rode the `invalid_request` kind.
 pub const QUOTA_EXHAUSTED_DETAILS_CLASS: &str = "quota_exhausted";
 
 /// Recovery hint appended to request-too-large provider rejections.
@@ -558,15 +559,13 @@ impl LlmError {
                     }),
                 ))
             }
-            // The wire kind vocabulary (`LlmProviderErrorKind`) is schema-
-            // emitted and unchanged in this release, so exhausted quota rides
-            // the existing non-retryable request kind. `details.class` is the
-            // stable machine-readable discriminator wire consumers branch on
-            // until a dedicated `LlmProviderErrorKind::QuotaExhausted` lands
-            // with a schema regeneration; nothing should match the message.
+            // `details.class` is kept for one release: 0.8.33 projected
+            // exhausted quota as `invalid_request` and consumers were told to
+            // branch on the class, so it stays alongside the dedicated kind
+            // until they have moved. Nothing should match the message.
             Self::QuotaExhausted { message } => {
                 LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
-                    LlmProviderErrorKind::InvalidRequest,
+                    LlmProviderErrorKind::QuotaExhausted,
                     json!({
                         "class": QUOTA_EXHAUSTED_DETAILS_CLASS,
                         "message": message,
@@ -1018,13 +1017,18 @@ mod tests {
             panic!("exhausted quota must keep the typed provider carrier: {reason:?}");
         };
         assert_eq!(
+            provider_error.kind,
+            LlmProviderErrorKind::QuotaExhausted,
+            "exhausted quota has its own wire kind: {provider_error:?}"
+        );
+        assert_eq!(
             provider_error.retryability,
             meerkat_core::error::LlmProviderErrorRetryability::NonRetryable
         );
         assert_eq!(
             provider_error.details["class"],
             serde_json::json!(QUOTA_EXHAUSTED_DETAILS_CLASS),
-            "wire consumers discriminate exhausted quota by details.class, never by prose: {:?}",
+            "details.class stays for one release next to the dedicated kind: {:?}",
             provider_error.details
         );
         let agent_error =
@@ -1038,6 +1042,33 @@ mod tests {
     }
 
     #[test]
+    fn quota_exhausted_projects_to_dedicated_wire_kind() {
+        let err = LlmError::QuotaExhausted {
+            message: "insufficient_quota".to_string(),
+        };
+        let LlmFailureReason::ProviderError(provider_error) = err.failure_reason() else {
+            panic!("exhausted quota must keep the typed provider carrier");
+        };
+        assert_eq!(provider_error.kind, LlmProviderErrorKind::QuotaExhausted);
+        assert!(!provider_error.is_retryable());
+        let wire = serde_json::to_value(&provider_error).expect("provider error serializes");
+        assert_eq!(wire["kind"], serde_json::json!("quota_exhausted"));
+        assert_eq!(wire["retryability"], serde_json::json!("non_retryable"));
+        assert_eq!(
+            wire["details"]["class"],
+            serde_json::json!(QUOTA_EXHAUSTED_DETAILS_CLASS),
+            "compatibility class rides along for one release"
+        );
+        assert_eq!(
+            wire["details"]["message"],
+            serde_json::json!("insufficient_quota")
+        );
+        let back: meerkat_core::error::LlmProviderError =
+            serde_json::from_value(wire).expect("wire kind round-trips");
+        assert_eq!(back.kind, LlmProviderErrorKind::QuotaExhausted);
+    }
+
+    #[test]
     fn openai_insufficient_quota_429_terminalizes_in_one_round_trip() {
         let headers = reqwest::header::HeaderMap::new();
         let err =
@@ -1048,14 +1079,15 @@ mod tests {
             serde_json::json!(OPENAI_INSUFFICIENT_QUOTA_BODY),
             "the provider body travels verbatim in details.message"
         );
-        // An ordinary invalid request shares the wire kind but not the class.
+        // An ordinary invalid request keeps its own kind and carries no class.
         let invalid = LlmError::InvalidRequest {
             message: "bad request".to_string(),
         };
         let LlmFailureReason::ProviderError(invalid_error) = invalid.failure_reason() else {
             panic!("invalid request keeps the provider carrier");
         };
-        assert_eq!(invalid_error.kind, provider_error.kind);
+        assert_eq!(invalid_error.kind, LlmProviderErrorKind::InvalidRequest);
+        assert_ne!(invalid_error.kind, provider_error.kind);
         assert!(
             invalid_error.details.get("class").is_none(),
             "only exhausted quota carries details.class: {:?}",

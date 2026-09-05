@@ -1846,6 +1846,16 @@ struct MockSessionService {
     create_session_max_in_flight: AtomicU64,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
+    /// #1102 fault seam: sessions whose `live_session_actor_registered`
+    /// lookup parks until `release_live_session_lookups` (models a session
+    /// actor whose teardown is retained and never answers).
+    parked_live_session_lookups: RwLock<HashSet<SessionId>>,
+    release_live_session_lookups: tokio::sync::Notify,
+    /// #1102 fault seam: artificial latency on the next N `comms_runtime`
+    /// reads (models slow SDK-hosted continuity loads during resume
+    /// readiness).
+    comms_runtime_delay_ms: AtomicU64,
+    comms_runtime_delayed_calls_remaining: AtomicU64,
     start_turn_interrupts: RwLock<HashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
     /// Exact runtime runs whose executor call has entered this mock service.
     /// The production session services fence interruption by `RunId`; the mock
@@ -1982,6 +1992,10 @@ impl MockSessionService {
             create_session_max_in_flight: AtomicU64::new(0),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
+            parked_live_session_lookups: RwLock::new(HashSet::new()),
+            release_live_session_lookups: tokio::sync::Notify::new(),
+            comms_runtime_delay_ms: AtomicU64::new(0),
+            comms_runtime_delayed_calls_remaining: AtomicU64::new(0),
             start_turn_interrupts: RwLock::new(HashMap::new()),
             runtime_apply_runs: RwLock::new(HashMap::new()),
             pending_runtime_interrupts: RwLock::new(HashSet::new()),
@@ -2569,6 +2583,14 @@ impl MockSessionService {
         self.session_read_calls.load(Ordering::Relaxed)
     }
 
+    /// Make the next `count` durable resume-authority observations report
+    /// no current authority (the durable store unreadable), without touching
+    /// session reads.
+    fn set_resume_authority_absent_remaining(&self, count: u64) {
+        self.resume_authority_absent_remaining
+            .store(count, Ordering::Release);
+    }
+
     fn fail_next_session_read_as_absent(&self) {
         self.session_read_not_found_remaining
             .store(1, Ordering::Release);
@@ -2649,6 +2671,33 @@ impl MockSessionService {
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
         self.start_turn_delay_ms
             .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Park every `live_session_actor_registered` lookup for `session_id`
+    /// until [`Self::release_live_session_lookups`].
+    async fn park_live_session_lookups(&self, session_id: &SessionId) {
+        self.parked_live_session_lookups
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    async fn release_live_session_lookups(&self) {
+        self.parked_live_session_lookups.write().await.clear();
+        self.release_live_session_lookups.notify_waiters();
+    }
+
+    /// Delay the next `calls` `comms_runtime` reads by `delay_ms` each.
+    fn set_comms_runtime_delay_for_next_calls(&self, calls: u64, delay_ms: u64) {
+        self.comms_runtime_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
+        self.comms_runtime_delayed_calls_remaining
+            .store(calls, Ordering::Relaxed);
+    }
+
+    fn comms_runtime_delayed_calls_remaining(&self) -> u64 {
+        self.comms_runtime_delayed_calls_remaining
+            .load(Ordering::Relaxed)
     }
 
     fn set_inject_delay_ms(&self, delay_ms: u64) {
@@ -3780,6 +3829,17 @@ impl SessionServiceCommsExt for MockSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
         self.comms_runtime_observations
             .fetch_add(1, Ordering::Relaxed);
+        let delay_ms = self.comms_runtime_delay_ms.load(Ordering::Relaxed);
+        if delay_ms > 0
+            && self
+                .comms_runtime_delayed_calls_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         if self
             .missing_comms_sessions
             .read()
@@ -4210,6 +4270,18 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionError> {
+        loop {
+            let released = self.release_live_session_lookups.notified();
+            if !self
+                .parked_live_session_lookups
+                .read()
+                .await
+                .contains(session_id)
+            {
+                break;
+            }
+            released.await;
+        }
         Ok(self.actor_registry.contains(session_id))
     }
 
@@ -4613,6 +4685,16 @@ impl MobSessionService for MockSessionService {
             .await
             .remove(session_id);
         Ok(())
+    }
+
+    async fn discard_live_session_actor_after_durability_reload_required(
+        &self,
+        witness: &meerkat_session::LiveSessionActorWitness,
+    ) -> Result<bool, SessionError> {
+        // The mock's live materialization is process-local only: the exact
+        // compare-and-remove is the whole degraded cleanup.
+        self.discard_live_session_actor_under_runtime_turn_boundary(witness)
+            .await
     }
 
     async fn discard_live_session_actor_under_runtime_turn_boundary(
@@ -72556,3 +72638,7 @@ async fn test_running_steer_without_override_resolves_applied_identity_as_none()
         .expect("active turn should finish after release")
         .expect("active turn should succeed");
 }
+
+/// #1102 actor-loop isolation, per-member admission lanes, bounded
+/// deliveries, and the member registration reload primitive.
+mod actor_isolation;

@@ -499,6 +499,61 @@ pub enum MobError {
         reason: String,
     },
 
+    /// The member's runtime registration is durability-degraded: a durable
+    /// commit could not be reconciled with the live shell, so the runtime
+    /// refuses every ordinary input until a registration-authorized cold
+    /// reload replaces the registration. Delivery is rejected before dispatch
+    /// so a degraded member never costs the caller an admission budget.
+    /// `MobHandle::reload_member_registration` is the non-destructive repair.
+    #[error("member {member_id} requires a runtime reload before it can accept work: {reason}")]
+    MemberReloadRequired {
+        member_id: AgentIdentity,
+        reason: String,
+    },
+
+    /// The member's per-member admission lane already holds the maximum
+    /// number of parked deliveries. One admission is in flight and `depth`
+    /// deliveries wait behind it; the caller must retry later. This is
+    /// backpressure for exactly one member, never a verdict on the mob.
+    #[error("member {member_id} admission backlog is full ({depth} parked deliveries)")]
+    MemberAdmissionBacklogFull {
+        member_id: AgentIdentity,
+        depth: usize,
+    },
+
+    /// `reload_member_registration` refused to discard the member's live
+    /// runtime shell because the durable session authority it would reload
+    /// from is not currently readable (store still failing, contradictory,
+    /// archived, or the session service holds no durable sessions). The
+    /// member stays degraded and repairable instead of being marked Broken
+    /// by a revival that could only fail.
+    #[error("member session {session_id} reload refused: {reason}")]
+    MemberReloadRefused {
+        session_id: meerkat_core::types::SessionId,
+        reason: String,
+    },
+
+    /// `reload_member_registration` did not finish `stage` within
+    /// `MEMBER_RELOAD_TOTAL_TIMEOUT`. Every completed step is durable and
+    /// idempotent; a repeat call observes the current state
+    /// (`NotDegraded` once the reload landed).
+    #[error("member session {session_id} reload timed out at {stage}")]
+    MemberReloadTimedOut {
+        session_id: meerkat_core::types::SessionId,
+        stage: &'static str,
+    },
+
+    /// A bounded actor command did not reach `stage` before its caller
+    /// deadline. The command was NOT executed: a bounded send either reserves
+    /// actor channel capacity within the deadline or never enters the queue,
+    /// and a reply that misses the deadline closes the reply channel so the
+    /// actor skips the command instead of running it as a ghost.
+    #[error("actor command {command_kind} exceeded its deadline at {stage}")]
+    ActorCommandTimedOut {
+        command_kind: &'static str,
+        stage: &'static str,
+    },
+
     /// A generated MobMachine -> runtime route reached its consumer, which
     /// rejected the typed input. The MobMachine has already absorbed the
     /// generated refusal closure before this error is returned; `kind` and
@@ -1282,6 +1337,47 @@ impl MobError {
                 "retryable": true,
                 "authority_retained": false,
             })),
+            Self::MemberReloadRequired { member_id, reason } => Some(serde_json::json!({
+                "kind": "mob_member_reload_required",
+                "member_id": member_id.as_str(),
+                "reason": reason,
+                "retryable": false,
+                "authority_retained": true,
+                "required_action": "reload_member_registration",
+            })),
+            Self::MemberAdmissionBacklogFull { member_id, depth } => Some(serde_json::json!({
+                "kind": "mob_member_admission_backlog_full",
+                "member_id": member_id.as_str(),
+                "depth": depth,
+                "retryable": true,
+                "authority_retained": true,
+            })),
+            Self::ActorCommandTimedOut {
+                command_kind,
+                stage,
+            } => Some(serde_json::json!({
+                "kind": "mob_actor_command_timed_out",
+                "command_kind": command_kind,
+                "stage": stage,
+                "deadline_reached": true,
+                "retryable": true,
+                "executed": false,
+            })),
+            Self::MemberReloadRefused { session_id, reason } => Some(serde_json::json!({
+                "kind": "mob_member_reload_refused",
+                "session_id": session_id.to_string(),
+                "reason": reason,
+                "retryable": true,
+                "authority_retained": true,
+                "live_shell_discarded": false,
+            })),
+            Self::MemberReloadTimedOut { session_id, stage } => Some(serde_json::json!({
+                "kind": "mob_member_reload_timed_out",
+                "session_id": session_id.to_string(),
+                "stage": stage,
+                "deadline_reached": true,
+                "retryable": true,
+            })),
             Self::SupervisorProtocolUpgradeRequired {
                 operation,
                 current,
@@ -1338,7 +1434,12 @@ impl MobError {
                 | Self::LifecycleOperationPending { .. }
                 | Self::LifecycleOperationProgressStalled { .. }
                 | Self::LifecycleOperationAdmissionPending { .. }
-                | Self::DirectMemberAdoptionPending { .. } => {
+                | Self::DirectMemberAdoptionPending { .. }
+                | Self::MemberReloadRequired { .. }
+                | Self::MemberAdmissionBacklogFull { .. }
+                | Self::ActorCommandTimedOut { .. }
+                | Self::MemberReloadRefused { .. }
+                | Self::MemberReloadTimedOut { .. } => {
                     Some(meerkat_contracts::ErrorCode::SessionBusy)
                 }
                 Self::SupervisorProtocolUpgradeRequired { .. } => {
@@ -1427,9 +1528,10 @@ impl MobError {
             // "target exists but cannot accept this right now" shape, not a
             // mob-authority rejection. Classified here as a decision, because
             // `MobFailureClass` is what schedule delivery records.
-            Self::MemberAlreadyExists(_) | Self::ParticipantNameOccupied { .. } => {
-                MobFailureClass::TargetBusy
-            }
+            Self::MemberAlreadyExists(_)
+            | Self::ParticipantNameOccupied { .. }
+            | Self::MemberReloadRequired { .. }
+            | Self::MemberAdmissionBacklogFull { .. } => MobFailureClass::TargetBusy,
             Self::StorageError(_)
             | Self::SessionError(_)
             | Self::MemberProvisionFailed { .. }
@@ -1440,6 +1542,9 @@ impl MobError {
             | Self::KickoffWaitTimedOut { .. }
             | Self::ReadyWaitTimedOut { .. }
             | Self::BridgeRequestTimedOut { .. }
+            | Self::ActorCommandTimedOut { .. }
+            | Self::MemberReloadRefused { .. }
+            | Self::MemberReloadTimedOut { .. }
             | Self::FlowTurnTimedOut => MobFailureClass::Transport,
             Self::Internal(_) | Self::ExternalMemberCleanupUncertain { .. } => {
                 MobFailureClass::Internal
@@ -1794,6 +1899,26 @@ mod tests {
             },
             MobError::KickoffWaitTimedOut {
                 pending_member_ids: vec![AgentIdentity::from("m")],
+            },
+            MobError::MemberReloadRequired {
+                member_id: AgentIdentity::from("m"),
+                reason: "durability reload required".to_string(),
+            },
+            MobError::MemberAdmissionBacklogFull {
+                member_id: AgentIdentity::from("m"),
+                depth: 3,
+            },
+            MobError::ActorCommandTimedOut {
+                command_kind: "SubmitWork",
+                stage: "actor_command_admission",
+            },
+            MobError::MemberReloadRefused {
+                session_id: meerkat_core::types::SessionId::new(),
+                reason: "durable authority unreadable".to_string(),
+            },
+            MobError::MemberReloadTimedOut {
+                session_id: meerkat_core::types::SessionId::new(),
+                stage: "durability_reload_discard",
             },
             MobError::DefinitionError(vec![]),
             MobError::FlowNotFound(FlowId::from("f")),

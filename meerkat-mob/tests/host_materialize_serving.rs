@@ -1901,16 +1901,21 @@ async fn executor_stop_between_ensure_and_attach_return_cleans_preinstalled_side
         MaterializeLaunchMode::Fresh {},
     );
     let command = BridgeCommand::MaterializeMember(payload);
-    let reply = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT),
-    )
-    .await
-    .expect("failed attachment cleanup must not wait for the 30s reconciliation grace")
-    .expect("typed post-ensure stop reply");
+    let reply = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &command, REPLY_TIMEOUT)
+        .await
+        .expect("typed post-ensure stop reply");
+    // Structural proof that the failed attachment took the exact cleanup
+    // path: the 30 s non-serving reconciliation grace names itself in its
+    // rejection reason ("did not quiesce within"), so a reply that carries any
+    // other reason cannot have waited it out. This replaces a 5 s wall-clock
+    // bound that measured runner load under a saturated gate (#1104).
+    let BridgeReply::Rejected { reason, .. } = &reply else {
+        panic!("the stopped startup incarnation cannot be acknowledged: {reply:?}");
+    };
     assert!(
-        matches!(reply, BridgeReply::Rejected { .. }),
-        "the stopped startup incarnation cannot be acknowledged: {reply:?}"
+        !reason.contains("did not quiesce within"),
+        "failed attachment cleanup must take the exact path, not the reconciliation grace: {reason}"
     );
     assert!(
         fixture
@@ -1933,13 +1938,14 @@ async fn executor_stop_between_ensure_and_attach_return_cleans_preinstalled_side
         },
     ));
 
-    let reply = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.send_bridge_command_raw(&fixture.host_peer_descriptor(), &resume, REPLY_TIMEOUT),
-    )
-    .await
-    .expect("same-tuple retry must not encounter a stale cleanup sidecar")
-    .expect("retry materialize reply");
+    // A stale cleanup sidecar would surface as a typed rejection (or as the
+    // reconciliation-grace reason above), never as a materialized ack, so the
+    // ack itself is the proof; no wall-clock bound is needed beyond the
+    // fixture's reply timeout.
+    let reply = probe
+        .send_bridge_command_raw(&fixture.host_peer_descriptor(), &resume, REPLY_TIMEOUT)
+        .await
+        .expect("retry materialize reply");
     let BridgeReply::MemberMaterialized(ack) = reply else {
         panic!("explicit resume must rebuild the preserved session cleanly, got {reply:?}");
     };

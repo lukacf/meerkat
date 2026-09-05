@@ -93,14 +93,49 @@ use tokio::sync::watch;
 pub static REAL_COMMS_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// Reserve-then-drop a loopback port (race-prone but serialized under
-/// `REAL_COMMS_TEST_LOCK`; moved from `smoke_mob_flow_runtime.rs`).
-pub fn unused_loopback_port() -> u16 {
-    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("reserved listener local addr")
-        .port()
+/// Reserve a loopback TCP port for a fixed-port supervisor bridge and hold the
+/// reservation for the rest of the process.
+///
+/// Probing `:0` and dropping the probe hands the port back to the kernel, and
+/// any other process (a second nextest lane on the same box, or any ephemeral
+/// `connect()`) may be given it before the bridge binds (issue #1097).
+/// `REAL_COMMS_TEST_LOCK` cannot help: nextest runs every test in its own
+/// process.
+///
+/// On Linux the reservation is a bound, never-listening socket with
+/// `SO_REUSEADDR`. While it lives, the kernel excludes the port from every
+/// other process's ephemeral `bind(:0)` and `connect()` selection, yet a
+/// listener that also sets `SO_REUSEADDR` (tokio/mio always do) may bind,
+/// listen, close and rebind the exact port - which the bridge does on
+/// rotation and across the cold-restart fixtures. The socket is deliberately
+/// kept for the process lifetime because the port travels inside a
+/// `MobDefinition`; one descriptor per fixture is the price. Other platforms
+/// have no non-listening reuse semantics and keep the probe-then-drop shape;
+/// `.config/nextest.toml` serializes and retries that macOS cohort.
+pub fn reserve_loopback_port() -> u16 {
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    #[cfg(target_os = "linux")]
+    {
+        let socket = tokio::net::TcpSocket::new_v4().expect("create loopback reservation socket");
+        socket
+            .set_reuseaddr(true)
+            .expect("set SO_REUSEADDR on loopback reservation");
+        socket.bind(loopback).expect("reserve loopback port");
+        let port = socket
+            .local_addr()
+            .expect("reserved loopback socket local addr")
+            .port();
+        std::mem::forget(socket);
+        port
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::net::TcpListener::bind(loopback)
+            .expect("reserve loopback port")
+            .local_addr()
+            .expect("reserved listener local addr")
+            .port()
+    }
 }
 
 // ===========================================================================
@@ -3468,7 +3503,7 @@ fn persistent_service_with_client_in_realm(
 /// spawned by the ceremony tests) and a supervisor bridge on a reserved
 /// loopback port so `BindHost` replies can route back.
 pub fn controlling_mob_definition(mob_id: meerkat_mob::MobId) -> meerkat_mob::MobDefinition {
-    let supervisor_port = unused_loopback_port();
+    let supervisor_port = reserve_loopback_port();
     let mut profiles = std::collections::BTreeMap::new();
     profiles.insert(
         meerkat_mob::ProfileName::from("lead"),

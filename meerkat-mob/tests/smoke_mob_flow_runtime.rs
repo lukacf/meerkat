@@ -39,8 +39,8 @@ use tokio::time::{Duration, Instant, sleep};
 mod support;
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, create_controlling_mob,
-    create_controlling_mob_with_definition, send_peer_text, spawn_host_daemon_fixture,
-    spawn_production_external_tcp_target, unused_loopback_port, wait_until,
+    create_controlling_mob_with_definition, reserve_loopback_port, send_peer_text,
+    spawn_host_daemon_fixture, spawn_production_external_tcp_target, wait_until,
 };
 
 const REMOTE_MOB_LIVE_MODEL: &str = "claude-haiku-4-5-20251001";
@@ -2834,7 +2834,7 @@ async fn setup_flow_mob(
 }
 
 // `ProductionExternalTcpTarget`, `spawn_production_external_tcp_target`, and
-// `unused_loopback_port` moved to the shared fixture module
+// `reserve_loopback_port` moved to the shared fixture module
 // `tests/support/mod.rs` (multi-host mobs phase 2, Lane W4) so deterministic
 // lanes can compose the production-drain external target too. This file
 // consumes the shared fixture; the composition is byte-for-byte the same.
@@ -3251,7 +3251,7 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
         "external-tcp-production-drain-smoke-{}",
         uuid::Uuid::new_v4().simple()
     ));
-    let supervisor_port = unused_loopback_port();
+    let supervisor_port = reserve_loopback_port();
     let supervisor_advertised_address = format!("tcp://127.0.0.1:{supervisor_port}");
     let definition = external_tcp_smoke_definition(
         mob_id.clone(),

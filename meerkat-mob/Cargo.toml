@@ -95,7 +95,7 @@ meerkat = { workspace = true, features = ["live", "session-store", "jsonl-store"
 meerkat-live = { workspace = true }
 # T-C2 drives the returned bootstrap URL over a real WS client (pinned to
 # meerkat-live's tungstenite major).
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 # Idle-CPU gate (smoke_mob_idle_burn): process CPU-time deltas, never wall
 # clock; safe wrapper over getrusage/GetProcessTimes.
 cpu-time = "1"

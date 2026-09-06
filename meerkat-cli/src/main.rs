@@ -3758,7 +3758,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         #[cfg(feature = "skills")]
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         #[cfg(feature = "mob")]
-        Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
+        Commands::Mob { command } => boxed_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get {
                 format,
@@ -15942,6 +15942,61 @@ fn render_mob_events(events: Vec<meerkat_mob::MobEvent>, json: bool) -> anyhow::
 }
 
 #[cfg(feature = "mob")]
+fn boxed_mob_command(
+    command: MobCommands,
+    scope: &RuntimeScope,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + '_>> {
+    // Logs must not enter the oversized poll frame of the full mob dispatcher.
+    // Both branches still poll and drop synchronously in the calling task.
+    match command {
+        MobCommands::Logs {
+            mob_id,
+            after_cursor,
+            limit,
+            json,
+        } => Box::pin(async move {
+            let state = load_cli_mob_state(scope).await?;
+            show_cli_mob_logs(&state, mob_id, after_cursor, limit, json).await
+        }),
+        command => Box::pin(handle_mob_command(command, scope)),
+    }
+}
+
+#[cfg(feature = "mob")]
+async fn load_cli_mob_state(
+    scope: &RuntimeScope,
+) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
+    let (config, _) = load_config(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let surface =
+        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)
+            .await?;
+    hydrate_cli_mob_state_cached(
+        scope,
+        Arc::clone(&surface.service),
+        Arc::clone(&surface.runtime_adapter),
+        Arc::clone(&surface.mob_state_cache),
+    )
+    .await
+}
+
+#[cfg(feature = "mob")]
+async fn show_cli_mob_logs(
+    state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: String,
+    after_cursor: u64,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    let events = state
+        .mob_events(&meerkat_mob::MobId::from(mob_id), after_cursor, limit)
+        .await
+        .map_err(mob_anyhow)?;
+    println!("{}", render_mob_events(events, json)?);
+    Ok(())
+}
+
+#[cfg(feature = "mob")]
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     #[cfg(all(feature = "comms", feature = "schedule", feature = "rpc-surface"))]
     if let MobCommands::Host {
@@ -16091,18 +16146,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         return Ok(());
     }
 
-    let (config, _) = load_config(scope).await?;
-    let (manifest, persistence) = create_persistence_bundle(scope).await?;
-    let surface =
-        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)
-            .await?;
-    let state = hydrate_cli_mob_state_cached(
-        scope,
-        Arc::clone(&surface.service),
-        Arc::clone(&surface.runtime_adapter),
-        Arc::clone(&surface.mob_state_cache),
-    )
-    .await?;
+    let state = load_cli_mob_state(scope).await?;
     let result = match command {
         MobCommands::RunFlow {
             mob_id,
@@ -16249,14 +16293,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             after_cursor,
             limit,
             json,
-        } => {
-            let events = state
-                .mob_events(&meerkat_mob::MobId::from(mob_id), after_cursor, limit)
-                .await
-                .map_err(mob_anyhow)?;
-            println!("{}", render_mob_events(events, json)?);
-            Ok(())
-        }
+        } => show_cli_mob_logs(&state, mob_id, after_cursor, limit, json).await,
         MobCommands::Attach {
             mob_id,
             run_id,
@@ -18550,6 +18587,65 @@ mod tests {
         caller
             .join()
             .expect("mobpack run future must move off the compact caller and fit the two MiB worker contract");
+    }
+
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[test]
+    fn warm_mob_logs_with_populated_history_fits_compact_caller_stack() {
+        const STACK_BUDGET: usize = 2 * 1024 * 1024;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(temp.path().to_path_buf(), "mob-logs-stack-budget");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_stack_size(STACK_BUDGET)
+            .enable_all()
+            .build()
+            .expect("compact-stack runtime");
+        let mob_id = runtime.block_on(async {
+            let state = load_cli_mob_state(&scope).await.expect("hydrate mob state");
+            let definition = serde_json::from_value(serde_json::json!({
+                "id": "logs-stack-budget",
+                "profiles": {
+                    "worker": {
+                        "model": "gpt-5.5",
+                        "tools": {"comms": true}
+                    }
+                }
+            }))
+            .expect("mob definition");
+            let mob_id = state
+                .mob_create_definition(definition)
+                .await
+                .expect("create mob");
+            assert!(
+                !state
+                    .mob_events(&mob_id, 0, 100)
+                    .await
+                    .expect("populated history")
+                    .is_empty(),
+                "the Logs regression must read real committed events"
+            );
+            mob_id
+        });
+        std::thread::Builder::new()
+            .name("mob-logs-compact-caller".to_string())
+            .stack_size(STACK_BUDGET)
+            .spawn(move || {
+                runtime
+                    .block_on(boxed_mob_command(
+                        MobCommands::Logs {
+                            mob_id: mob_id.to_string(),
+                            after_cursor: 0,
+                            limit: 100,
+                            json: true,
+                        },
+                        &scope,
+                    ))
+                    .expect("render populated mob logs on the compact caller");
+            })
+            .expect("compact caller")
+            .join()
+            .expect("populated Logs must fit the two MiB caller and worker stacks");
     }
 
     #[test]
@@ -25624,9 +25720,12 @@ capabilities = ["rpc"]
             .expect("captured prompt mutex should not be poisoned")
             .clone()
             .expect("system prompt must be captured");
-        assert!(system_prompt.contains("mob_list"));
-        assert!(system_prompt.contains("mob_create"));
-        assert!(system_prompt.contains("delegate"));
+        for tool in ["mob_list", "mob_create", "delegate"] {
+            assert!(
+                !system_prompt.contains(&format!("## {tool}\n")),
+                "mob tools must reach provider tool definitions without duplicated prompt inventory"
+            );
+        }
     }
 
     // The formal lifecycle model cannot express native Rust future size or a

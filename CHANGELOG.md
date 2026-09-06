@@ -224,6 +224,11 @@ them.
 
 ### Fixed
 
+- **Mob logs stack usage:** `rkat mob logs` polls a separate command future
+  instead of entering the oversized general mob dispatcher frame, preventing
+  stack overflow when reading durable events after detached or canceled runs.
+  The same-task path preserves admission, rendering, and cancellation behavior.
+
 - **WASM test-support compilation:** the remote member operator schema helper
   and its re-export now share the native `runtime-adapter` guard of
   `member_upcall`, preserving the native schema matrix without referencing an

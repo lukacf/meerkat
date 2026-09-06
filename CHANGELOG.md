@@ -127,6 +127,29 @@ them.
   structured detail carries no `executed` or `retryable` claim; those require
   runtime-owned admission evidence.
 
+- **Profile parsing adds `meerkat_mob::MobError::DefinitionParse(toml::de::Error)`,
+  `MobError::UnsupportedProfileKey { profile, key }`, and
+  `meerkat_mob::validate::DiagnosticCode::UnknownProfileKey`** (three
+  `enum_variant_added` findings). Exact-pinned consumers must update exhaustive
+  error and diagnostic matches. Definition parsing now reports malformed TOML
+  and unsupported platform profile keys as distinct typed errors; other unknown
+  profile keys produce warning diagnostics.
+- **New variants also shift implicit Rust enum discriminants compared with
+  0.8.33** (`enum_no_repr_variant_discriminant_changed`); consumers must not
+  treat these numbers as stable wire values:
+  - `meerkat_contracts::wire::WireProviderMeta::Unknown`: 6 -> 7.
+  - `meerkat_core::error::LlmProviderErrorKind`: `ContentFiltered` 3 -> 4,
+    `ServerError` 4 -> 6, `ServerOverloaded` 5 -> 7, `ConnectionReset` 6 -> 8,
+    `Unknown` 7 -> 9, `StreamParseError` 8 -> 10, and `IncompleteResponse`
+    9 -> 11.
+  - `meerkat_llm_core::LlmError`: `ContextLengthExceeded` 12 -> 13,
+    `ModelNotFound` 13 -> 14, `InvalidApiKey` 14 -> 15, `Unknown` 15 -> 17,
+    `StreamParseError` 16 -> 18, and `IncompleteResponse` 17 -> 19.
+  - `meerkat_llm_core::LlmEvent`: `TextDelta` 0 -> 1, `ReasoningDelta` 1 -> 2,
+    `ReasoningComplete` 2 -> 3, `ToolCallDelta` 3 -> 4, `ToolCallComplete`
+    4 -> 5, `ServerToolContent` 5 -> 6, `UsageUpdate` 6 -> 7, `WireLiveness`
+    7 -> 8, and `Done` 8 -> 9.
+
 ### Billing-affecting default change
 
 - **Anthropic prompt caching is automatic by default again on the Anthropic

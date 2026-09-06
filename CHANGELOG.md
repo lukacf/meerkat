@@ -224,6 +224,11 @@ them.
 
 ### Fixed
 
+- **Member event tap handoff:** same-residency pump replacements retain live
+  subscribers while joining the old task, so a concurrently installed successor
+  inherits them before its first page is emitted. Cancelled replacements close
+  abandoned resources without disturbing a newer pump.
+
 - **Mob logs stack usage:** `rkat mob logs` polls a separate command future
   instead of entering the oversized general mob dispatcher frame, preventing
   stack overflow when reading durable events after detached or canceled runs.

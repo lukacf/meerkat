@@ -237,6 +237,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
         "//meerkat:meerkat_with_runtime_test_support",
         "//meerkat:meerkat_atif_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",

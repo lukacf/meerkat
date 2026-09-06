@@ -73,6 +73,8 @@ tokio_with_wasm = { workspace = true }
 meerkat = { workspace = true, features = ["jsonl-store", "session-store"] }
 
 [dev-dependencies]
+# Cold-restart fixtures need these helpers even in package-scoped test lanes.
+meerkat-mob = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 toml = { workspace = true }

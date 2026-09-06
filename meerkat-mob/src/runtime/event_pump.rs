@@ -783,10 +783,9 @@ struct PumpEntry {
     /// Full host/member residency authority. No subset of this tuple is a
     /// valid pump, waiter, cursor, fold, fan-out, or ACK boundary.
     expected_member: BridgeMemberIncarnation,
-    /// The task has left its polling loop and is waiting to publish its exit
-    /// under `pump_transition`. An exiting entry is not a live pump lease:
-    /// an ensure racing that final barrier must replace it instead of
-    /// returning success just before the old task removes the entry.
+    /// The live lease was withdrawn for task exit or replacement. An ensure
+    /// racing the final barrier must replace it, not accept the dying lease.
+    /// A cancelled entry retains its taps until its replacement takes them.
     exiting: bool,
     runtime_id: AgentRuntimeId,
     peer: meerkat_core::comms::TrustedPeerDescriptor,
@@ -802,6 +801,33 @@ struct PumpEntry {
 
 struct ManagerState {
     pumps: BTreeMap<AgentIdentity, PumpEntry>,
+}
+
+/// Owns cleanup of the cancelled entry while its replacement awaits a join.
+/// The entry stays in manager state so a concurrent successor can take its
+/// resources before polling; cancellation of the replacing future closes them.
+struct PumpReplacement<'a> {
+    manager: &'a MemberEventPumpManager,
+    identity: &'a AgentIdentity,
+    incarnation: u64,
+}
+
+impl Drop for PumpReplacement<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .manager
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = state.pumps.get(self.identity)
+            && entry.incarnation == self.incarnation
+            && entry.exiting
+            && entry.cancel.is_cancelled()
+        {
+            self.manager.waiters.fail_all_for(&entry.expected_member);
+            state.pumps.remove(self.identity);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -835,10 +861,9 @@ pub(crate) struct MemberEventPumpManager {
     /// are pruned by the pump loop and do not retain departed host lifecycles.
     priority_host_poll_lanes: StdMutex<BTreeMap<String, Weak<Semaphore>>>,
     observation_host_poll_lanes: StdMutex<BTreeMap<String, Weak<Semaphore>>>,
-    /// Serializes pump install/replacement/stop barriers. A replacement is
-    /// not published until the previous task has been aborted and joined
-    /// (bounded), but the barrier is never held across that join: the join
-    /// is member-local work and the barrier is mob-wide.
+    /// Serializes pump install/replacement/stop barriers. A cancelled entry
+    /// retains its resources across the bounded join until a successor takes
+    /// them. The barrier is never held across that member-local join.
     pump_transition: tokio::sync::Mutex<()>,
     state: StdMutex<ManagerState>,
     /// Every spawned pump remains join-owned until it has completed or the
@@ -1099,27 +1124,43 @@ impl MemberEventPumpManager {
             .retain(|_, task| !task.is_finished());
     }
 
+    fn prepare_pump_replacement<'a>(
+        &'a self,
+        material: &'a MemberPumpMaterial,
+        tap: &mut Option<mpsc::Sender<AttributedEvent>>,
+    ) -> Option<PumpReplacement<'a>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state.pumps.get_mut(&material.agent_identity)?;
+        entry.exiting = true;
+        entry.cancel.cancel();
+        if entry.expected_member == material.expected_member {
+            entry.taps.extend(tap.take());
+        }
+        Some(PumpReplacement {
+            manager: self,
+            identity: &material.agent_identity,
+            incarnation: entry.incarnation,
+        })
+    }
+
     /// After a replacement released `pump_transition` for the bounded join,
     /// another install may have published a pump for the same member. Adopt
     /// it when it matches `material` (the join was redundant), yield to it
     /// when it does not (a newer incarnation won the barrier), and return the
-    /// caller's tap in `Err` only when the slot is still vacant so the caller
-    /// may install.
+    /// caller's tap in `Err` when no live successor exists so the caller may
+    /// install. An intervening installer already took the cancelled entry's
+    /// taps/keep-alive (or failed its changed-residency waiters) before spawn.
     ///
-    /// Whichever pump now owns the slot inherits what the replaced entry
-    /// carried, exactly as a barrier-serialized replacement would have: its
-    /// live taps and completion keep-alive when the expected member is the
-    /// same (an address-only refresh), or its waiters are failed when the
-    /// incarnation changed. Nothing the old pump held is dropped on the
-    /// floor because the barrier was released.
-    ///
-    /// `tap` is the tap-lane subscription to attach on an exact match; the
-    /// completion lane passes `None` and publishes its keep-alive instead.
+    /// A same-residency tap was attached before the join; other tap requests
+    /// attach on an exact match. Only the completion lane publishes keep-alive.
     fn adopt_pump_installed_while_barrier_released(
         &self,
         material: &MemberPumpMaterial,
-        replaced: &mut PumpEntry,
         tap: Option<mpsc::Sender<AttributedEvent>>,
+        obligation_keepalive: bool,
     ) -> Result<(), Option<mpsc::Sender<AttributedEvent>>> {
         let mut state = self
             .state
@@ -1129,27 +1170,15 @@ impl MemberEventPumpManager {
             return Err(tap);
         };
         if existing.exiting {
-            // An exiting entry publishes its own removal under the barrier;
-            // it is not a live lease and must not block this install.
-            state.pumps.remove(&material.agent_identity);
+            // Keep the cancelled entry available for the caller to inherit.
             return Err(tap);
-        }
-        let same_residency = existing.expected_member == replaced.expected_member;
-        if same_residency {
-            let inherited = std::mem::take(&mut replaced.taps);
-            existing
-                .taps
-                .extend(inherited.into_iter().filter(|tap| !tap.is_closed()));
-            existing.obligation_keepalive |= replaced.obligation_keepalive;
         }
         let exact_match = existing.expected_member == material.expected_member
             && existing.runtime_id == material.runtime_id
             && existing.peer == material.peer;
         if exact_match {
-            match tap {
-                Some(tap) => existing.taps.push(tap),
-                None => existing.obligation_keepalive = true,
-            }
+            existing.taps.extend(tap);
+            existing.obligation_keepalive |= obligation_keepalive;
         } else {
             tracing::debug!(
                 agent_identity = %material.agent_identity,
@@ -1157,9 +1186,6 @@ impl MemberEventPumpManager {
             );
         }
         drop(state);
-        if !same_residency {
-            self.waiters.fail_all_for(&replaced.expected_member);
-        }
         self.liveness_changed.notify_waiters();
         Ok(())
     }
@@ -1253,7 +1279,7 @@ impl MemberEventPumpManager {
         {
             return;
         }
-        let replaced = {
+        {
             let mut state = self
                 .state
                 .lock()
@@ -1273,32 +1299,44 @@ impl MemberEventPumpManager {
                 self.liveness_changed.notify_waiters();
                 return;
             }
-            state.pumps.remove(&material.agent_identity)
-        };
-        let (mut inherited_taps, rewind_same_residency) = if let Some(mut entry) = replaced {
-            entry.cancel.cancel();
+        }
+        let replacement = self.prepare_pump_replacement(&material, &mut None);
+        if let Some(replacement) = &replacement {
             let task = self
                 .pump_tasks
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&entry.incarnation);
+                .remove(&replacement.incarnation);
             if let Some(task) = task {
                 // The replaced task is member-local; the barrier is mob-wide.
                 // Release it across the bounded join so one member's slow
                 // pump exit cannot stall every other member's pump
                 // transition (and the actor loop calling this inline).
                 drop(transition);
-                join_replaced_pump_task_bounded(&material.agent_identity, entry.incarnation, task)
-                    .await;
+                join_replaced_pump_task_bounded(
+                    &material.agent_identity,
+                    replacement.incarnation,
+                    task,
+                )
+                .await;
                 transition = self.pump_transition.lock().await;
                 self.reap_finished_pump_tasks();
                 if self
-                    .adopt_pump_installed_while_barrier_released(&material, &mut entry, None)
+                    .adopt_pump_installed_while_barrier_released(&material, None, true)
                     .is_ok()
                 {
                     return;
                 }
             }
+        }
+        let replaced = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pumps
+            .remove(&material.agent_identity);
+        drop(replacement);
+        let (mut inherited_taps, rewind_same_residency) = if let Some(entry) = replaced {
             if entry.expected_member == material.expected_member {
                 (entry.taps, true)
             } else {
@@ -1435,7 +1473,7 @@ impl MemberEventPumpManager {
         {
             return rx;
         }
-        let replaced = {
+        {
             let mut state = self
                 .state
                 .lock()
@@ -1451,38 +1489,43 @@ impl MemberEventPumpManager {
                 self.liveness_changed.notify_waiters();
                 return rx;
             }
-            state.pumps.remove(&material.agent_identity)
-        };
+        }
         let mut tx = Some(tx);
-        let (mut inherited_taps, inherited_keepalive, rewind_same_residency) =
-            if let Some(mut entry) = replaced {
-                entry.cancel.cancel();
-                let task = self
-                    .pump_tasks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&entry.incarnation);
-                if let Some(task) = task {
-                    // See `ensure_pump`: never hold the mob-wide barrier
-                    // across a member-local task join.
-                    drop(transition);
-                    join_replaced_pump_task_bounded(
-                        &material.agent_identity,
-                        entry.incarnation,
-                        task,
-                    )
-                    .await;
-                    transition = self.pump_transition.lock().await;
-                    self.reap_finished_pump_tasks();
-                    match self.adopt_pump_installed_while_barrier_released(
-                        &material,
-                        &mut entry,
-                        tx.take(),
-                    ) {
-                        Ok(()) => return rx,
-                        Err(returned_tap) => tx = returned_tap,
-                    }
+        let replacement = self.prepare_pump_replacement(&material, &mut tx);
+        if let Some(replacement) = &replacement {
+            let task = self
+                .pump_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&replacement.incarnation);
+            if let Some(task) = task {
+                // See `ensure_pump`: never hold the mob-wide barrier
+                // across a member-local task join.
+                drop(transition);
+                join_replaced_pump_task_bounded(
+                    &material.agent_identity,
+                    replacement.incarnation,
+                    task,
+                )
+                .await;
+                transition = self.pump_transition.lock().await;
+                self.reap_finished_pump_tasks();
+                match self.adopt_pump_installed_while_barrier_released(&material, tx.take(), false)
+                {
+                    Ok(()) => return rx,
+                    Err(returned_tap) => tx = returned_tap,
                 }
+            }
+        }
+        let replaced = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pumps
+            .remove(&material.agent_identity);
+        drop(replacement);
+        let (mut inherited_taps, inherited_keepalive, rewind_same_residency) =
+            if let Some(entry) = replaced {
                 if entry.expected_member == material.expected_member {
                     (entry.taps, entry.obligation_keepalive, true)
                 } else {
@@ -1738,7 +1781,10 @@ impl MemberEventPumpManager {
         let Some(entry) = state.pumps.get_mut(identity) else {
             return;
         };
-        if entry.incarnation != incarnation || &entry.expected_member != expected_member {
+        if entry.exiting
+            || entry.incarnation != incarnation
+            || &entry.expected_member != expected_member
+        {
             return;
         }
         entry.taps.retain(|tap| match tap.try_send(event.clone()) {
@@ -1855,6 +1901,7 @@ impl MemberEventPumpManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = state.pumps.get_mut(identity)
+            && !entry.exiting
             && entry.incarnation == incarnation
             && &entry.expected_member == expected_member
         {
@@ -2640,12 +2687,16 @@ async fn run_member_pump(
     // proves the task's final poll has returned (or an owner aborted+joined
     // it while holding the barrier).
     let _transition = manager.pump_transition.lock().await;
-    manager.remove_entry(&identity, incarnation);
     // A dying pump fails its exact-tuple waiters unless a replacement pump
     // with the same runtime+fence is already current (address-only refresh):
     // that replacement inherits the waiters. Different-fence/generation or
     // no-replacement exits fail only the old tuple.
-    manager.fail_waiters_if_no_matching_pump(&identity, &material.expected_member);
+    // Cancellation hands entry cleanup and waiter transfer to the replacement
+    // owner (or explicit stop). Task exit must not drop resources during join.
+    if !cancel.is_cancelled() {
+        manager.remove_entry(&identity, incarnation);
+        manager.fail_waiters_if_no_matching_pump(&identity, &material.expected_member);
+    }
 }
 
 /// Upper bound on joining a replaced pump task after `abort()`. A pump that
@@ -5196,15 +5247,25 @@ mod tests {
     /// replacement always inherited it) and the new tap must be attached too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tap_subscribed_during_replacement_join_survives_on_the_successor() {
-        struct SlowExitThenPagePageSource {
+        assert_taps_survive_replacement_join(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tap_initiating_replacement_join_survives_on_the_successor() {
+        assert_taps_survive_replacement_join(true).await;
+    }
+
+    async fn assert_taps_survive_replacement_join(replace_with_tap: bool) {
+        struct GatedExitThenPageSource {
             stale_endpoint: String,
             entered_stale_poll: Notify,
+            release_stale_poll: StdMutex<std::sync::mpsc::Receiver<()>>,
             page: BridgeMemberEventsPage,
             successor_polls: AtomicUsize,
         }
 
         #[async_trait]
-        impl MemberEventPageSource for SlowExitThenPagePageSource {
+        impl MemberEventPageSource for GatedExitThenPageSource {
             async fn poll(
                 &self,
                 material: &MemberPumpMaterial,
@@ -5213,11 +5274,14 @@ mod tests {
                 _wait_ms: u32,
             ) -> Result<BridgeMemberEventsPage, MobError> {
                 if material.peer.address.endpoint() == self.stale_endpoint {
-                    // The stale pump cannot observe its abort while it is
-                    // inside this synchronous wait, so the replacement's join
-                    // takes at least this long: the barrier-released window.
+                    // A synchronous poll cannot observe abort until released.
+                    // Dropping the test's sender also releases it on failure.
                     self.entered_stale_poll.notify_one();
-                    std::thread::sleep(Duration::from_millis(400));
+                    let _ = self
+                        .release_stale_poll
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv();
                     return std::future::pending().await;
                 }
                 if self.successor_polls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -5245,6 +5309,8 @@ mod tests {
             store,
             accepting_host_runtime_observer(),
         ));
+        let sink = Arc::new(RecordingOutcomeSink::default());
+        manager.install_outcome_sink(Arc::clone(&sink) as Arc<dyn RemoteTurnOutcomeSink>);
         let identity = AgentIdentity::from("w-tap-survivor");
         let runtime_id = AgentRuntimeId::initial(identity.clone());
         let fence_token = FenceToken::new(7);
@@ -5255,9 +5321,11 @@ mod tests {
             meerkat_core::comms::PeerTransport::Tcp,
             "127.0.0.1:4102",
         );
-        let page_source = Arc::new(SlowExitThenPagePageSource {
+        let (release_stale_poll, stale_poll_release) = std::sync::mpsc::channel();
+        let page_source = Arc::new(GatedExitThenPageSource {
             stale_endpoint: stale_peer.address.endpoint().to_string(),
             entered_stale_poll: Notify::new(),
+            release_stale_poll: StdMutex::new(stale_poll_release),
             page: BridgeMemberEventsPage {
                 runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
                 generation: expected_member.generation,
@@ -5301,45 +5369,101 @@ mod tests {
         )
         .await
         .expect("stale pump enters its synchronous poll");
+        let completion = manager
+            .remote_completion_context(&identity, &expected_member)
+            .expect("old completion lease");
+        let mut waiter = completion.register(interaction(9001)).expect("old waiter");
+        let stale_cancel = manager
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pumps
+            .get(&identity)
+            .expect("stale pump")
+            .cancel
+            .clone();
 
-        // The replacement removes the stale entry, then releases the barrier
-        // for the bounded join.
+        // Cancellation withdraws the stale lease before the replacement
+        // releases the barrier for its member-local join.
         let replacement = tokio::spawn({
             let manager = Arc::clone(&manager);
             let material = refreshed_material.clone();
-            async move { manager.ensure_pump(material).await }
-        });
-        let vacated = tokio::time::timeout(Duration::from_secs(2), async {
-            while manager.pump_exists(&identity) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+            async move {
+                if replace_with_tap {
+                    Some(manager.ensure_pump_with_tap(material).await)
+                } else {
+                    manager.ensure_pump(material).await;
+                    None
+                }
             }
-        })
-        .await;
-        vacated.expect("replacement removes the stale pump before joining it");
+        });
+        tokio::time::timeout(Duration::from_secs(2), stale_cancel.cancelled())
+            .await
+            .expect("replacement cancels the stale pump before joining it");
+        assert!(
+            completion.register(interaction(9002)).is_err(),
+            "the cancelled predecessor no longer accepts completion registrations"
+        );
 
         // A handle-side subscriber lands inside the join window and installs
         // the successor first.
         let mut new_tap = manager.ensure_pump_with_tap(refreshed_material).await;
-        tokio::time::timeout(Duration::from_secs(3), replacement)
+        // Prevent post-join adoption until the successor has fanned out its
+        // only page. The poll's host permit is released when the old task exits;
+        // fanout itself does not need the transition barrier.
+        let transition = manager.pump_transition.lock().await;
+        release_stale_poll.send(()).expect("release stale poll");
+        let attached = tokio::time::timeout(Duration::from_secs(2), new_tap.recv())
             .await
-            .expect("replacement completes after the bounded join")
-            .expect("replacement task");
+            .expect("new tap receives before post-join adoption")
+            .expect("new tap attached to the successor");
+        assert!(matches!(
+            attached.envelope.payload,
+            AgentEvent::TurnStarted { turn_number: 1 }
+        ));
+        assert!(!replacement.is_finished(), "adoption is still blocked");
+        assert_eq!(
+            sink.rewinds.load(Ordering::SeqCst),
+            1,
+            "the successor rewinds the same-residency fold before its first page"
+        );
+        assert!(matches!(
+            waiter.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
 
-        let inherited = tokio::time::timeout(Duration::from_secs(2), old_tap.recv())
-            .await
-            .expect("old tap receives from the successor pump")
+        let inherited = old_tap
+            .try_recv()
             .expect("old tap must be inherited by the successor, not closed");
         assert!(matches!(
             inherited.envelope.payload,
             AgentEvent::TurnStarted { turn_number: 1 }
         ));
-        let attached = tokio::time::timeout(Duration::from_secs(2), new_tap.recv())
+        drop(transition);
+        let mut initiating_tap = tokio::time::timeout(Duration::from_secs(3), replacement)
             .await
-            .expect("new tap receives from the successor pump")
-            .expect("new tap attached to the successor");
+            .expect("replacement completes after the bounded join")
+            .expect("replacement task");
+        if let Some(tap) = &mut initiating_tap {
+            let event = tap
+                .try_recv()
+                .expect("the initiating tap also receives before adoption");
+            assert!(matches!(
+                event.envelope.payload,
+                AgentEvent::TurnStarted { turn_number: 1 }
+            ));
+            assert!(matches!(
+                tap.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
         assert!(matches!(
-            attached.envelope.payload,
-            AgentEvent::TurnStarted { turn_number: 1 }
+            old_tap.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            new_tap.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
         ));
         let taps_on_successor = manager
             .state
@@ -5350,9 +5474,98 @@ mod tests {
             .map(|entry| entry.taps.len());
         assert_eq!(
             taps_on_successor,
-            Some(2),
-            "both taps live on the one successor pump"
+            Some(if replace_with_tap { 3 } else { 2 }),
+            "all taps live on the one successor pump without duplicate senders"
         );
         manager.stop_all_and_join().await;
+        assert!(old_tap.recv().await.is_none());
+        assert!(new_tap.recv().await.is_none());
+        if let Some(tap) = &mut initiating_tap {
+            assert!(tap.recv().await.is_none());
+        }
+        assert!(
+            waiter.await.is_err(),
+            "shutdown closes the inherited waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_replacement_closes_only_its_retained_resources() {
+        let manager = completion_test_manager("pump-dropped-replacement").await;
+        let identity = AgentIdentity::from("w-dropped-replacement");
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        let fence_token = FenceToken::new(7);
+        let peer = completion_test_peer("w-dropped-replacement", "127.0.0.1:4110");
+        let expected_member = install_test_pump(
+            &manager,
+            &identity,
+            &runtime_id,
+            fence_token,
+            1,
+            peer.clone(),
+        );
+        let mut tap = manager.subscribe_tap(&identity).expect("old tap");
+        let waiter = manager
+            .waiters
+            .register(&expected_member, interaction(9003));
+        let other_member = test_member(
+            &AgentIdentity::from("w-unrelated"),
+            &runtime_id,
+            fence_token,
+        );
+        let mut unrelated = manager.waiters.register(&other_member, interaction(9004));
+        let material = MemberPumpMaterial {
+            agent_identity: identity.clone(),
+            host_id: TEST_HOST_ID.to_string(),
+            expected_member: expected_member.clone(),
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            role: ProfileName::from("worker"),
+            peer,
+        };
+        let (sender, mut initiating_tap) = mpsc::channel(TAP_CAPACITY);
+        let mut sender = Some(sender);
+        let replacement = manager
+            .prepare_pump_replacement(&material, &mut sender)
+            .expect("replacement guard");
+        assert!(
+            sender.is_none(),
+            "entry owns the initiating tap during join"
+        );
+        assert!(manager.subscribe_tap(&identity).is_none());
+        assert!(
+            manager
+                .remote_completion_context(&identity, &expected_member)
+                .is_none()
+        );
+        manager.fan_out(
+            &identity,
+            &expected_member,
+            1,
+            &AttributedEvent {
+                source: runtime_id,
+                source_fence_token: fence_token,
+                role: ProfileName::from("worker"),
+                envelope: EventEnvelope::new(
+                    identity.to_string(),
+                    1,
+                    None,
+                    AgentEvent::TurnStarted { turn_number: 1 },
+                ),
+            },
+        );
+        assert!(
+            matches!(tap.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the cancelled entry cannot fan out a stale page"
+        );
+        drop(replacement);
+        assert!(!manager.pump_exists(&identity));
+        assert!(tap.recv().await.is_none());
+        assert!(initiating_tap.recv().await.is_none());
+        assert!(waiter.await.is_err());
+        assert!(matches!(
+            unrelated.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
     }
 }

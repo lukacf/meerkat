@@ -110,12 +110,19 @@ Claims are revision-based. Mutating tools require the current `expected_revision
 Optional leases allow abandoned work to become recoverable through machine-
 approved transitions.
 
-Omit both `lease_seconds` and `lease_expires_at` for no expiry. Otherwise use
-exactly one. Relative leases are 1-31,536,000 seconds; absolute leases must be
-strictly later than the store observation time. Wall-clock expiry does not
-mutate a claim. A trusted observer, normally a Schedule-owned sweep, asks
-WorkGraph to validate the row and atomically commit release plus the
-`lease_expired` fact.
+The model-facing `workgraph_claim` schema advertises only `lease_seconds`:
+1-31,536,000 seconds from the store's claim observation time. Omit it for no
+expiry. Advertising a single representation avoids ambiguous calls on
+providers whose tool schemas cannot express root-level exclusivity.
+
+The Rust `ClaimWorkItemRequest` and existing tool dispatch still accept an
+absolute `lease_expires_at` instead of `lease_seconds`; it must be strictly
+later than the store observation time. Supplying both remains an error, with
+no inferred precedence or silent argument removal.
+
+Wall-clock expiry does not mutate a claim. A trusted observer, normally a
+Schedule-owned sweep, asks WorkGraph to validate the row and atomically commit
+release plus the `lease_expired` fact.
 
 ## Evidence Refs
 

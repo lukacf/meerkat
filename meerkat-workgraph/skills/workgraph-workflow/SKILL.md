@@ -17,8 +17,9 @@ scratch space and not semantic memory.
 - Use `workgraph_ready` to find eligible work. Do not infer readiness from item
   fields, blocker counts, due times, or edges yourself.
 - Claim an item before doing durable or shared work with `workgraph_claim`.
-  Include your typed owner and the current `expected_revision`. Choose either
-  `lease_seconds` or `lease_expires_at`, never both.
+  Include your typed owner and the current `expected_revision`. Set
+  `lease_seconds` for a lease, or omit it for no expiry. The tool computes
+  expiry from the store's claim observation time.
 - If a write fails with a stale revision, reload the item with `workgraph_get`
   or `workgraph_snapshot`, reconsider the current state, then retry only if the
   work still makes sense.

@@ -28,6 +28,15 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **WorkGraph claim lease ambiguity (#1112):** the model-facing
+  `workgraph_claim` schema now advertises only `lease_seconds`, rather than
+  two optional lease representations whose mutual exclusion cannot be
+  expressed reliably across provider tool schemas. Omission still means no
+  expiry. The Rust request and existing dispatch retain absolute-only lease
+  support and reject dual-lease requests without mutating the item.
+
 ## [0.8.34] - 2026-09-06
 
 ### Breaking

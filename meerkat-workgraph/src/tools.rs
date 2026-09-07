@@ -745,26 +745,14 @@ fn claim_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": crate::types::MAX_WORK_CLAIM_LEASE_SECONDS,
-                "description": "Relative lease duration in seconds. Mutually exclusive \
-                    with lease_expires_at: the claim is rejected when both are supplied."
-            }),
-        ),
-        (
-            "lease_expires_at".to_string(),
-            json!({
-                "type": "string",
-                "format": "date-time",
-                "description": "Absolute RFC3339 lease expiry. Mutually exclusive with \
-                    lease_seconds: the claim is rejected when both are supplied."
+                "description": "Lease duration in seconds from the store's claim observation \
+                    time. Omit for a claim without expiry."
             }),
         ),
     ]);
-    // The lease_seconds/lease_expires_at exclusivity is enforced at runtime by
-    // the claim machine (`normalize_claim_lease`), which is the only
-    // enforcement point: the dispatcher never validates arguments against this
-    // schema. It is deliberately not expressed as a root-level JSON Schema
-    // `not`, because provider function-parameter validators (Gemini's Schema
-    // proto, OpenAI Chat Completions) reject root-level combinators.
+    // Advertise one lease representation: providers cannot reliably express
+    // root-level exclusivity. The domain API still supports absolute leases
+    // and rejects ambiguous requests; do not invent a precedence here.
     object(properties, &["id", "expected_revision", "owner"])
 }
 
@@ -1013,20 +1001,129 @@ mod tests {
         }
     }
 
-    /// The claim lease exclusivity moved from a root-level `not` into the two
-    /// property descriptions; each side must name the other so the model still
-    /// learns the constraint the runtime enforces.
     #[test]
-    fn workgraph_claim_lease_exclusivity_is_stated_in_property_descriptions() {
-        let schema = WorkGraphToolContract::Claim.schema();
-        let lease_seconds = schema["properties"]["lease_seconds"]["description"]
-            .as_str()
-            .expect("lease_seconds carries a description");
-        let lease_expires_at = schema["properties"]["lease_expires_at"]["description"]
-            .as_str()
-            .expect("lease_expires_at carries a description");
-        assert!(lease_seconds.contains("lease_expires_at"));
-        assert!(lease_expires_at.contains("lease_seconds"));
+    fn workgraph_claim_advertises_only_relative_leases() {
+        for tools in [workgraph_tools_list(), unscoped_workgraph_tools_list()] {
+            let claim = tools
+                .iter()
+                .find(|tool| tool["name"] == "workgraph_claim")
+                .expect("claim tool");
+            let schema = &claim["inputSchema"];
+            let properties = schema["properties"].as_object().expect("properties");
+            assert!(!properties.contains_key("lease_expires_at"));
+            assert_eq!(properties["lease_seconds"]["type"], "integer");
+            assert_eq!(properties["lease_seconds"]["minimum"], 1);
+            assert_eq!(
+                properties["lease_seconds"]["maximum"],
+                crate::types::MAX_WORK_CLAIM_LEASE_SECONDS
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .expect("required fields")
+                    .iter()
+                    .any(|field| field == "lease_seconds")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workgraph_claim_advertised_leases_round_trip() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for seconds in [
+            None,
+            Some(1),
+            Some(3600),
+            Some(crate::types::MAX_WORK_CLAIM_LEASE_SECONDS),
+        ] {
+            let created = handle_unscoped_workgraph_tools_call(
+                &service,
+                "workgraph_create",
+                &json!({ "title": "claim lease" }),
+            )
+            .await
+            .expect("create");
+            let mut arguments = json!({
+                "id": created["item"]["id"],
+                "expected_revision": created["item"]["revision"],
+                "owner": { "key": { "kind": "agent", "id": "review-worker" } }
+            });
+            if let Some(seconds) = seconds {
+                arguments["lease_seconds"] = json!(seconds);
+            }
+            let result =
+                handle_unscoped_workgraph_tools_call(&service, "workgraph_claim", &arguments)
+                    .await
+                    .expect("claim with advertised lease");
+            let item: crate::WorkItem =
+                serde_json::from_value(result["item"].clone()).expect("claimed item");
+            assert_eq!(
+                item.revision,
+                created["item"]["revision"].as_u64().expect("revision") + 1
+            );
+            let claim = item.claim.expect("claim");
+            assert_eq!(
+                claim.lease_expires_at,
+                seconds.map(|seconds| {
+                    claim.claimed_at
+                        + chrono::Duration::seconds(
+                            i64::try_from(seconds).expect("bounded seconds"),
+                        )
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workgraph_claim_preserves_absolute_compatibility_without_accepting_dual_leases() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let created = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_create",
+            &json!({ "title": "legacy absolute lease" }),
+        )
+        .await
+        .expect("create");
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let mut arguments = json!({
+            "id": created["item"]["id"],
+            "expected_revision": created["item"]["revision"],
+            "owner": { "key": { "kind": "agent", "id": "review-worker" } },
+            "lease_seconds": 3600,
+            "lease_expires_at": expiry
+        });
+        let error = handle_unscoped_workgraph_tools_call(&service, "workgraph_claim", &arguments)
+            .await
+            .expect_err("ambiguous lease remains invalid");
+        assert_eq!(error.code, WorkGraphToolErrorCode::InvalidArguments);
+        let unchanged = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_get",
+            &json!({ "id": created["item"]["id"] }),
+        )
+        .await
+        .expect("read after rejected claim");
+        assert_eq!(unchanged, created);
+
+        arguments
+            .as_object_mut()
+            .expect("claim arguments")
+            .remove("lease_seconds");
+        let result = handle_unscoped_workgraph_tools_call(&service, "workgraph_claim", &arguments)
+            .await
+            .expect("legacy absolute-only claim");
+        let item: crate::WorkItem =
+            serde_json::from_value(result["item"].clone()).expect("claimed item");
+        assert_eq!(item.claim.expect("claim").lease_expires_at, Some(expiry));
     }
 
     #[test]

@@ -73154,8 +73154,29 @@ async fn test_running_steer_without_override_resolves_applied_identity_as_none()
 /// deliveries, and the member registration reload primitive.
 mod actor_isolation;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-#[path = "../../tests/support/mod.rs"]
+use crate as fixture_mob;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[path = "../../tests/support/shared.rs"]
 mod placement_support;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[test]
+fn placement_fixture_uses_local_mob_authority_types() {
+    fn function_type_id<F: 'static>(_: F) -> std::any::TypeId {
+        std::any::TypeId::of::<F>()
+    }
+    assert_eq!(
+        placement_support::mob_authority_type_ids(),
+        [
+            std::any::TypeId::of::<crate::runtime::host_actor::MobHostActorConfig>(),
+            std::any::TypeId::of::<crate::runtime::host_actor::MobHostActorHandle>(),
+            std::any::TypeId::of::<crate::runtime::HostBindRequest>(),
+            function_type_id(crate::runtime::host_actor::spawn_mob_host_actor),
+            function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
+            function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
+        ],
+        "shared unit fixtures must not import the separately compiled self-dev-dependency",
+    );
+}
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;

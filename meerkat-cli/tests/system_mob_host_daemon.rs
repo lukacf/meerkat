@@ -21,6 +21,17 @@
 #[path = "../../meerkat-mob/tests/support/probe.rs"]
 mod probe;
 
+#[test]
+fn raw_host_probe_uses_external_mob_bridge_owner() {
+    fn function_type_id<F: 'static>(_: F) -> std::any::TypeId {
+        std::any::TypeId::of::<F>()
+    }
+    assert_eq!(
+        probe::mob_bridge_function_type_id(),
+        function_type_id(meerkat_mob::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
+    );
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

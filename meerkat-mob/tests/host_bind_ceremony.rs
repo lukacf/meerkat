@@ -71,6 +71,24 @@ use support::{
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[test]
+fn placement_fixture_uses_external_mob_authority_types() {
+    fn function_type_id<F: 'static>(_: F) -> std::any::TypeId {
+        std::any::TypeId::of::<F>()
+    }
+    assert_eq!(
+        support::mob_authority_type_ids(),
+        [
+            std::any::TypeId::of::<meerkat_mob::runtime::host_actor::MobHostActorConfig>(),
+            std::any::TypeId::of::<meerkat_mob::runtime::host_actor::MobHostActorHandle>(),
+            std::any::TypeId::of::<meerkat_mob::runtime::HostBindRequest>(),
+            function_type_id(meerkat_mob::runtime::host_actor::spawn_mob_host_actor),
+            function_type_id(meerkat_mob::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
+            function_type_id(meerkat_mob::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
+        ],
+    );
+}
+
 // ===========================================================================
 // Full ceremony walk (§11: "full bind ceremony over the two-host fixture")
 // ===========================================================================

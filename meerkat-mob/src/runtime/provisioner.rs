@@ -7194,6 +7194,7 @@ fn schedule_pending_attachment_teardown(
 // Exact B + sidecar-map + pending-attachment publication boundary; the added
 // argument is the retained teardown custody, which must not be hidden behind a
 // bag that would let a caller forget to join it.
+#[cfg(feature = "runtime-adapter")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_pending_runtime_session_state_for_publication(
     _adapter: &Arc<MeerkatMachine>,

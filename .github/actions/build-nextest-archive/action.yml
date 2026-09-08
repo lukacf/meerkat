@@ -9,6 +9,10 @@ inputs:
     description: Upload the archive for execution on another runner.
     required: false
     default: "true"
+  reuse_exact_ci:
+    description: Reuse a digest-verified unit-mob archive from successful CI at the identical commit.
+    required: false
+    default: "false"
 
 outputs:
   path:
@@ -18,15 +22,32 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Restore exact-commit CI unit archive
+      if: ${{ inputs.reuse_exact_ci == 'true' && inputs.family == 'unit-mob' }}
+      id: reuse
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        python3 scripts/restore-ci-unit-mob-archive.py \
+          --repository "${GITHUB_REPOSITORY}" \
+          --commit "${GITHUB_SHA}" \
+          --current-run "${GITHUB_RUN_ID}" \
+          --output "${RUNNER_TEMP}/nextest-unit-mob.tar.zst" >>"${GITHUB_OUTPUT}"
+
     - name: Build portable test archive
       id: archive
       shell: bash
       env:
         ARCHIVE_FAMILY: ${{ inputs.family }}
+        ARCHIVE_REUSED: ${{ steps.reuse.outputs.reused }}
       run: |
         set -euo pipefail
         archive_path="${RUNNER_TEMP}/nextest-${ARCHIVE_FAMILY}.tar.zst"
-        scripts/ci-nextest-archive.sh build "${ARCHIVE_FAMILY}" "${archive_path}"
+        if [[ "${ARCHIVE_REUSED}" != "true" ]]; then
+          scripts/ci-nextest-archive.sh build "${ARCHIVE_FAMILY}" "${archive_path}"
+        fi
         ls -lh "${archive_path}"
         echo "path=${archive_path}" >>"${GITHUB_OUTPUT}"
 

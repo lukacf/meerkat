@@ -54,6 +54,7 @@ jobs:
         uses: ./.github/actions/build-nextest-archive
         with:
           family: unit-mob
+          reuse_exact_ci: "true"
 
   dense-topology:
     name: 300 members x 150 peers

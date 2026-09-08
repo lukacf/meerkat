@@ -184,6 +184,8 @@ assert_file_contains "$BUILD_ACTION" "name: ${stable_artifact_name}"
 assert_file_contains "$BUILD_ACTION" 'overwrite: true'
 assert_file_contains "$BUILD_ACTION" "if: \${{ inputs.publish == 'true' }}"
 assert_file_contains "$BUILD_ACTION" 'value: ${{ steps.archive.outputs.path }}'
+assert_file_contains "$BUILD_ACTION" 'python3 scripts/restore-ci-unit-mob-archive.py'
+assert_file_contains "$BUILD_ACTION" 'if [[ "${ARCHIVE_REUSED}" != "true" ]]; then'
 assert_file_contains "$RUN_ACTION" "name: ${stable_artifact_name}"
 assert_file_contains "$RUN_ACTION" 'uses: ./.github/actions/setup-rust-ci'
 assert_file_contains "$RUN_ACTION" 'components: rustfmt'
@@ -231,6 +233,7 @@ assert_file_contains "$WORKFLOW" '      - dense-topology'
 assert_file_contains "$WORKFLOW" '${{ needs.dense-topology.result }}'
 assert_file_contains "$DENSE_WORKFLOW" '  workflow_call:'
 assert_file_contains "$DENSE_WORKFLOW" '          family: unit-mob'
+assert_file_contains "$DENSE_WORKFLOW" '          reuse_exact_ci: "true"'
 assert_file_contains "$DENSE_WORKFLOW" '    timeout-minutes: 15'
 assert_file_contains "$DENSE_WORKFLOW" '    timeout-minutes: 10'
 assert_file_contains "$DENSE_WORKFLOW" '          cache-on-failure: true'
@@ -246,6 +249,8 @@ assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 3'
 assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "gcp-buildbuddy+github-hosted-dense-mob"'
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.gcp_buildbuddy == "success"'
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.github_hosted_dense_mob == "success"'
+
+python3 "$ROOT/scripts/test_restore_ci_unit_mob_archive.py"
 
 unit_job="$(sed -n '/^  unit:$/,/^  int-archives:$/p' "$WORKFLOW")"
 [[ "$unit_job" == *'      - unit-archive'* ]] || {

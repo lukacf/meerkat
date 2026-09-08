@@ -107,6 +107,9 @@ them.
 - **Native worker stack safety:** retirement stages and local/placed spawn
   branches erase large future construction at their boundaries, preserving the
   existing 2 MiB worker budget during cold restart, respawn, and placed rollback.
+- **Hosted topology CI:** main promotion can reuse a digest-verified unit archive
+  from successful CI at the identical commit, then freshly execute the Linux
+  workload. Archive, execution, and overall CI budgets remain unchanged.
 - **WorkGraph claim lease ambiguity (#1112):** the model-facing
   `workgraph_claim` schema now advertises only `lease_seconds`, rather than
   two optional lease representations whose mutual exclusion cannot be

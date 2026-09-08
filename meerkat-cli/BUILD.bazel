@@ -2743,6 +2743,7 @@ rust_test(
         "src/main.rs",
     ] + [
         "//meerkat-mob:tests/support/probe.rs",
+        "//meerkat-mob:tests/support/probe_shared.rs",
     ],
     srcs = [
         "tests/system_mob_host_daemon.rs",
@@ -2849,6 +2850,7 @@ rust_test(
         "src/main.rs",
     ] + [
         "//meerkat-mob:tests/support/probe.rs",
+        "//meerkat-mob:tests/support/probe_shared.rs",
     ],
     srcs = [
         "tests/system_mob_host_daemon.rs",

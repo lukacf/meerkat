@@ -482,7 +482,8 @@ rust_test(
         "//meerkat-mob-mcp:tests/support/mod.rs",
         "//meerkat-mob:tests/support/live_plane.rs",
         "//meerkat-mob:tests/support/mod.rs",
-        "//meerkat-mob:tests/support/probe.rs",
+        "//meerkat-mob:tests/support/probe_shared.rs",
+        "//meerkat-mob:tests/support/shared.rs",
     ],
     srcs = [
         "tests/e2e_fast/cross_host_live_member.rs",

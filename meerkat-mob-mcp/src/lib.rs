@@ -3543,6 +3543,9 @@ impl MobMcpState {
 
     /// Create MCP state backed by an in-memory local session service.
     ///
+    /// This deterministic dev/test service simulates turns and comms; it is
+    /// not an LLM-backed service or an external peer transport.
+    ///
     /// Mints `Owner` internally: the in-memory dev/test console is a local
     /// single-user surface (A16 posture, DEC-P5E-8).
     pub fn new_in_memory() -> Arc<Self> {
@@ -4006,10 +4009,16 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         ))
     }
 
-    async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
-        Ok(SendReceipt::InputAccepted {
-            interaction_id: InteractionId(uuid::Uuid::nil()),
-            stream_reserved: false,
+    async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        Ok(match cmd {
+            CommsCommand::PeerLifecycle { .. } => SendReceipt::PeerLifecycleSent {
+                envelope_id: uuid::Uuid::new_v4(),
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::Queued,
+            },
+            _ => SendReceipt::InputAccepted {
+                interaction_id: InteractionId(uuid::Uuid::nil()),
+                stream_reserved: false,
+            },
         })
     }
 
@@ -7101,10 +7110,16 @@ mod tests {
             ))
         }
 
-        async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
-            Ok(SendReceipt::InputAccepted {
-                interaction_id: meerkat_core::interaction::InteractionId(uuid::Uuid::nil()),
-                stream_reserved: false,
+        async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+            Ok(match cmd {
+                CommsCommand::PeerLifecycle { .. } => SendReceipt::PeerLifecycleSent {
+                    envelope_id: uuid::Uuid::new_v4(),
+                    delivery: meerkat_core::comms::PeerDeliveryOutcome::Queued,
+                },
+                _ => SendReceipt::InputAccepted {
+                    interaction_id: meerkat_core::interaction::InteractionId(uuid::Uuid::nil()),
+                    stream_reserved: false,
+                },
             })
         }
 

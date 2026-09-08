@@ -130,6 +130,11 @@ impl BridgeProtocolVersion {
         self.0 >= 4
     }
 
+    /// Whether peer-only bind/retire carries exact member incarnation fencing.
+    pub const fn supports_direct_member_fencing(self) -> bool {
+        self.0 >= 5
+    }
+
     /// Whether the peer supports source-owner forked participant operations.
     pub const fn supports_forked_participants(self) -> bool {
         self.0 >= 6
@@ -4755,6 +4760,11 @@ mod tests {
         assert!(BridgeProtocolVersion::V4.supports_multi_host());
         assert!(BridgeProtocolVersion::V5.supports_multi_host());
         assert!(!BridgeProtocolVersion::V3.supports_multi_host());
+        assert!(!BridgeProtocolVersion::V2.supports_direct_member_fencing());
+        assert!(!BridgeProtocolVersion::V3.supports_direct_member_fencing());
+        assert!(!BridgeProtocolVersion::V4.supports_direct_member_fencing());
+        assert!(BridgeProtocolVersion::V5.supports_direct_member_fencing());
+        assert!(BridgeProtocolVersion::V6.supports_direct_member_fencing());
         assert!(BridgeProtocolVersion::from_supported_u32(1).is_err());
         assert_eq!(
             BridgeProtocolVersion::from_supported_u32(5).expect("V5 supported"),

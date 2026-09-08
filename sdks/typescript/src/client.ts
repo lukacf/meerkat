@@ -4448,7 +4448,13 @@ export class MeerkatClient {
       return {
         code: String(parsed.code ?? error.code ?? "UNKNOWN"),
         message: String(parsed.message ?? error.message ?? "Unknown error"),
-        details: parsed.details ?? parsed.reason ?? rawData,
+        // Bare mob/lifecycle structured payloads (no nested "code"/"details"
+        // envelope) are never narrowed to a single "reason" string — that
+        // silently dropped sibling fields like `retryable`/`required_action`/
+        // `kind` for any payload that happened to also carry "reason" (e.g.
+        // `mob_member_reload_required`). The whole object survives as
+        // `details` unless the server explicitly nests one under "details".
+        details: parsed.details ?? rawData,
       };
     }
     // The server's typed error projection is `error.data` ({code, message,

@@ -66,6 +66,7 @@ impl RunlessTerminalConvergenceError {
             error @ (RuntimeDriverError::NotReady { .. }
             | RuntimeDriverError::NotFound { .. }
             | RuntimeDriverError::Destroyed
+            | RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             error @ (RuntimeDriverError::ValidationFailed { .. }
             | RuntimeDriverError::RecoveryCorruption { .. }
@@ -77,6 +78,7 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::RuntimeTerminalPublicationInProgress { .. }
             | RuntimeDriverError::InterruptDispatchPanicked { .. }
             | RuntimeDriverError::RecoveryBackoff { .. }
+            | RuntimeDriverError::MaterializationRegistrationOwned { .. }
             | RuntimeDriverError::Internal(_)) => Self::Retryable { context, error },
         }
     }
@@ -1690,6 +1692,24 @@ mod tests {
 
     #[test]
     fn runless_terminal_errors_classify_transient_stale_and_corrupt() {
+        assert!(matches!(
+            RunlessTerminalConvergenceError::from_driver(
+                "reload",
+                RuntimeDriverError::MaterializationRegistrationNotCurrent {
+                    session_id: meerkat_core::SessionId::new(),
+                },
+            ),
+            RunlessTerminalConvergenceError::StaleAuthority { .. }
+        ));
+        assert!(matches!(
+            RunlessTerminalConvergenceError::from_driver(
+                "reload",
+                RuntimeDriverError::MaterializationRegistrationOwned {
+                    session_id: meerkat_core::SessionId::new(),
+                },
+            ),
+            RunlessTerminalConvergenceError::Retryable { .. }
+        ));
         assert!(matches!(
             RunlessTerminalConvergenceError::from_driver(
                 "test",

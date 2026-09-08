@@ -92,10 +92,30 @@ pub(crate) struct MobOpsAdapter {
 /// Used only when explicit resume has already proved that the corresponding
 /// runtime attachment cannot be reused and must not clear a later binding.
 #[cfg(feature = "runtime-adapter")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct SessionOpsBindingWitness {
     binding_id: uuid::Uuid,
+    registry: Arc<dyn OpsLifecycleRegistry>,
 }
+
+#[cfg(feature = "runtime-adapter")]
+impl std::fmt::Debug for SessionOpsBindingWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionOpsBindingWitness")
+            .field("binding_id", &self.binding_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl PartialEq for SessionOpsBindingWitness {
+    fn eq(&self, other: &Self) -> bool {
+        self.binding_id == other.binding_id && Arc::ptr_eq(&self.registry, &other.registry)
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl Eq for SessionOpsBindingWitness {}
 
 /// Exact authority for migrating one session binding away from a discarded
 /// ReloadRequired runtime registry. The registry Arc is part of the witness:
@@ -351,6 +371,7 @@ impl MobOpsAdapter {
             .get(&MemberOpsKey::Session(child_session_id.clone()))
             .map(|binding| SessionOpsBindingWitness {
                 binding_id: binding.binding_id,
+                registry: Arc::clone(&binding.registry),
             })
     }
 
@@ -486,7 +507,9 @@ impl MobOpsAdapter {
                 "operation-registry binding for session '{child_session_id}' appeared during explicit-resume retirement"
             )));
         };
-        if current.binding_id != expected.binding_id {
+        if current.binding_id != expected.binding_id
+            || !Arc::ptr_eq(&current.registry, &expected.registry)
+        {
             return Err(MobError::Internal(format!(
                 "operation-registry binding for session '{child_session_id}' changed during explicit-resume retirement"
             )));
@@ -2974,7 +2997,7 @@ mod tests {
             .capture_session_binding_witness(&session_id)
             .expect("capture old binding witness");
         adapter
-            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .clear_session_binding_for_explicit_resume(&session_id, Some(old.clone()))
             .expect("clear exact old binding");
 
         adapter
@@ -2997,6 +3020,69 @@ mod tests {
             adapter.capture_session_binding_witness(&session_id),
             Some(replacement),
             "replacement binding remains installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_ops_cleanup_cannot_remove_rebound_registry() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter
+            .bind_session_registry(
+                session_id.clone(),
+                SessionId::new(),
+                Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind original registry");
+        let operation_id = adapter
+            .mark_member_provisioned(&session_id, "mob/member/rebound")
+            .await
+            .expect("publish operation");
+        let old = adapter
+            .capture_session_binding_witness(&session_id)
+            .expect("capture retirement witness");
+        let ReloadRequiredSessionBindingCapture::Witnessed(reload) = adapter
+            .capture_reload_required_session_binding_witness(&session_id)
+            .expect("capture reload witness")
+        else {
+            panic!("expected exact reload witness");
+        };
+        registry
+            .request_retire(&operation_id)
+            .expect("begin exact operation retirement");
+        registry
+            .mark_retired(&operation_id)
+            .expect("retain terminal operation through ordinary cold recovery");
+        let snapshot = registry
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .expect("capture persisted operation");
+        let successor = Arc::new(
+            RuntimeOpsLifecycleRegistry::from_recovered(snapshot)
+                .expect("recover successor registry"),
+        );
+        adapter
+            .prepare_session_registry_rebind_after_reload_discard(
+                &session_id,
+                &reload,
+                successor as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("rebind exact operation to successor registry")
+            .commit();
+        let rebound = adapter
+            .capture_session_binding_witness(&session_id)
+            .expect("capture rebound witness");
+        assert_eq!(old.binding_id, rebound.binding_id);
+        assert_ne!(old, rebound);
+        adapter
+            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .expect_err("old retirement cannot clear rebound registry");
+        assert_eq!(
+            adapter.capture_session_binding_witness(&session_id),
+            Some(rebound)
         );
     }
 

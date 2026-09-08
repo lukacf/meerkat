@@ -36860,6 +36860,71 @@ fn assert_detached_lease_cleanup_removed_session(
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn cleanup_runtime_one_blocked_owner_does_not_starve_other_session_work() {
+    let spawner = crate::RuntimeCleanupTaskSpawner::acquire().expect("cleanup owner");
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    struct ReleaseBlockedOwner(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for ReleaseBlockedOwner {
+        fn drop(&mut self) {
+            let (lock, wake) = self.0.as_ref();
+            *lock.lock().expect("gate") = true;
+            wake.notify_all();
+        }
+    }
+    let release = ReleaseBlockedOwner(Arc::clone(&gate));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    spawner.spawn_detached(async move {
+        entered_tx.send(()).expect("arrival");
+        let (lock, wake) = gate.as_ref();
+        let guard = lock.lock().expect("gate");
+        drop(
+            wake.wait_while(guard, |released| !*released)
+                .expect("release"),
+        );
+        finished_tx.send(()).expect("owner finished");
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("blocked owner entered");
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+    spawner.spawn_detached(async move {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let result = async {
+            machine
+                .register_session_with_executor(
+                    session_id.clone(),
+                    Box::new(RuntimeParityNoopExecutor),
+                )
+                .await?;
+            machine.unregister_session(&session_id).await?;
+            Ok::<(), RuntimeDriverError>(())
+        }
+        .await;
+        let _ = progress_tx.send(result);
+    });
+    let progress = progress_rx.recv_timeout(Duration::from_secs(1));
+    drop(release);
+    finished_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("parked owner released");
+    let made_progress_while_blocked = progress.is_ok();
+    let settled = match progress {
+        Ok(result) => result,
+        Err(_) => progress_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("other work settles after releasing the owner"),
+    };
+    settled.expect("unrelated session work");
+    assert!(
+        made_progress_while_blocked,
+        "one synchronous owner must not monopolize the cleanup dispatcher"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn cleanup_runtime_pending_attachment_drop_survives_origin_shutdown_and_foreign_thread() {
     let origin_runtime = detached_lease_test_runtime();
     let (machine, session_id, pending) = origin_runtime.block_on(async {
@@ -43143,6 +43208,12 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         }
         RuntimeDriverError::StaleAuthority { reason } => {
             format!("stale_authority:{reason}")
+        }
+        RuntimeDriverError::MaterializationRegistrationNotCurrent { session_id } => {
+            format!("materialization_registration_not_current:{session_id}")
+        }
+        RuntimeDriverError::MaterializationRegistrationOwned { session_id } => {
+            format!("materialization_registration_owned:{session_id}")
         }
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }

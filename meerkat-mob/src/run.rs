@@ -651,6 +651,20 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
+            | mob_dsl::MobMachineInput::BeginExplicitResume { .. }
+            | mob_dsl::MobMachineInput::CancelExplicitResume { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumePreparation { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember { .. }
+            | mob_dsl::MobMachineInput::ClassifyExplicitResumeMemberLive { .. }
+            | mob_dsl::MobMachineInput::ClassifyExplicitResumeMemberOutcome { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeMember { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeReadiness { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeTopology { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeTopology { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
             | mob_dsl::MobMachineInput::Destroy
@@ -1909,6 +1923,20 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
             | mob_dsl::MobMachineInput::Stop
             | mob_dsl::MobMachineInput::Resume
+            | mob_dsl::MobMachineInput::BeginExplicitResume { .. }
+            | mob_dsl::MobMachineInput::CancelExplicitResume { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumePreparation { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember { .. }
+            | mob_dsl::MobMachineInput::ClassifyExplicitResumeMemberLive { .. }
+            | mob_dsl::MobMachineInput::ClassifyExplicitResumeMemberOutcome { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeMember { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeReadiness { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeReadiness { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeTopology { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeTopology { .. }
+            | mob_dsl::MobMachineInput::BeginExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::SettleExplicitResumeCleanup { .. }
+            | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
             | mob_dsl::MobMachineInput::Destroy

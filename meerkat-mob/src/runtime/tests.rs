@@ -805,6 +805,7 @@ struct MockCommsRuntime {
     peer_lifecycle_max_in_flight: AtomicU64,
     inbox_notify: Arc<tokio::sync::Notify>,
     mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    trust_mutation_gate: std::sync::RwLock<Option<Arc<TestRuntimeControlBarrier>>>,
     outbound_content_taint: std::sync::RwLock<Option<meerkat_core::comms::SenderContentTaint>>,
 }
 
@@ -849,6 +850,7 @@ impl MockCommsRuntime {
             peer_lifecycle_max_in_flight: AtomicU64::new(0),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
             mob_machine_trust_owner: std::sync::RwLock::new(None),
+            trust_mutation_gate: std::sync::RwLock::new(None),
             outbound_content_taint: std::sync::RwLock::new(None),
         }
     }
@@ -969,6 +971,11 @@ impl MockCommsRuntime {
         }
         TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
             .map_err(SendError::Validation)?;
+        let gate = self.trust_mutation_gate.read().expect("trust gate").clone();
+        if let Some(gate) = gate {
+            gate.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.wait_for_release().await;
+        }
         let peer_id = peer.peer_id.to_string();
         let mut peers = self.trusted_peers.write().await;
         peers.insert(peer_id.clone(), peer);
@@ -1743,6 +1750,7 @@ struct MockSessionService {
     /// Sessions whose archive() call should fail.
     archive_fail_sessions: RwLock<HashSet<SessionId>>,
     archive_calls: RwLock<HashMap<SessionId, u64>>,
+    retirement_archive_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
     archive_post_commit_gate: RwLock<Option<Arc<TestRuntimeControlBarrier>>>,
     archive_post_commit_started: tokio::sync::Notify,
     archive_not_found_sessions: RwLock<HashSet<SessionId>>,
@@ -1819,8 +1827,10 @@ struct MockSessionService {
     interrupt_calls: AtomicU64,
     interrupted_session_ids: std::sync::Mutex<Vec<SessionId>>,
     runtime_control_barrier: RwLock<Option<Arc<TestRuntimeControlBarrier>>>,
+    retirement_runtime_control_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
     turn_finalization_delays_once: RwLock<HashMap<SessionId, u64>>,
+    turn_finalization_entry_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
     turn_finalization_acquire_started: AtomicU64,
     turn_finalization_acquire_completed: AtomicU64,
     turn_finalization_acquire_panics_remaining: AtomicU64,
@@ -1844,12 +1854,14 @@ struct MockSessionService {
     load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
     create_session_max_in_flight: AtomicU64,
+    create_session_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     /// #1102 fault seam: sessions whose `live_session_actor_registered`
     /// lookup parks until `release_live_session_lookups` (models a session
     /// actor whose teardown is retained and never answers).
     parked_live_session_lookups: RwLock<HashSet<SessionId>>,
+    live_session_admission_lookups: AtomicU64,
     release_live_session_lookups: tokio::sync::Notify,
     /// #1102 fault seam: artificial latency on the next N `comms_runtime`
     /// reads (models slow SDK-hosted continuity loads during resume
@@ -1930,6 +1942,7 @@ impl MockSessionService {
             archive_precommit_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_calls: RwLock::new(HashMap::new()),
+            retirement_archive_gates: RwLock::new(HashMap::new()),
             archive_post_commit_gate: RwLock::new(None),
             archive_post_commit_started: tokio::sync::Notify::new(),
             archive_not_found_sessions: RwLock::new(HashSet::new()),
@@ -1965,8 +1978,10 @@ impl MockSessionService {
             interrupt_calls: AtomicU64::new(0),
             interrupted_session_ids: std::sync::Mutex::new(Vec::new()),
             runtime_control_barrier: RwLock::new(None),
+            retirement_runtime_control_gates: RwLock::new(HashMap::new()),
             turn_finalization_gate: std::sync::RwLock::new(None),
             turn_finalization_delays_once: RwLock::new(HashMap::new()),
+            turn_finalization_entry_gates: RwLock::new(HashMap::new()),
             turn_finalization_acquire_started: AtomicU64::new(0),
             turn_finalization_acquire_completed: AtomicU64::new(0),
             turn_finalization_acquire_panics_remaining: AtomicU64::new(0),
@@ -1990,9 +2005,11 @@ impl MockSessionService {
             load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
             create_session_max_in_flight: AtomicU64::new(0),
+            create_session_gates: RwLock::new(HashMap::new()),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             parked_live_session_lookups: RwLock::new(HashSet::new()),
+            live_session_admission_lookups: AtomicU64::new(0),
             release_live_session_lookups: tokio::sync::Notify::new(),
             comms_runtime_delay_ms: AtomicU64::new(0),
             comms_runtime_delayed_calls_remaining: AtomicU64::new(0),
@@ -2555,6 +2572,15 @@ impl MockSessionService {
             .store(delay_ms, Ordering::Relaxed);
     }
 
+    async fn park_session_creation(&self, session_id: SessionId) -> Arc<TestRuntimeControlBarrier> {
+        let gate = Arc::new(TestRuntimeControlBarrier::new());
+        self.create_session_gates
+            .write()
+            .await
+            .insert(session_id, Arc::clone(&gate));
+        gate
+    }
+
     fn set_load_persisted_session_delay_ms(&self, delay_ms: u64) {
         self.load_persisted_session_delay_ms
             .store(delay_ms, Ordering::Relaxed);
@@ -2908,6 +2934,16 @@ impl MockSessionService {
             .and_then(|build| build.resume_session.clone())
             .unwrap_or_default();
         let session_id = session.id().clone();
+        let creation_gate = self
+            .create_session_gates
+            .read()
+            .await
+            .get(&session_id)
+            .cloned();
+        if let Some(gate) = creation_gate {
+            gate.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.wait_for_release().await;
+        }
         if self.create_fail_sessions.read().await.contains(&session_id) {
             self.create_fail_attempts
                 .write()
@@ -3602,6 +3638,11 @@ impl SessionService for MockSessionService {
             .await
             .entry(id.clone())
             .or_default() += 1;
+        let gate = self.retirement_archive_gates.read().await.get(id).cloned();
+        if let Some(gate) = gate {
+            gate.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.wait_for_release().await;
+        }
         if self.archive_not_found_sessions.read().await.contains(id) {
             return Err(SessionError::NotFound { id: id.clone() });
         }
@@ -3987,6 +4028,20 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn start_turn_with_admission_notification(
+        &self,
+        session_id: &SessionId,
+        request: StartTurnRequest,
+        admitted: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<RunResult, SessionError> {
+        if !self.actor_registry.contains(session_id) {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        let _ = admitted.send(());
+        SessionService::start_turn(self, session_id, request).await
+    }
     #[cfg(feature = "experimental-gpt-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
@@ -4234,6 +4289,15 @@ impl MobSessionService for MockSessionService {
     {
         self.turn_finalization_acquire_started
             .fetch_add(1, Ordering::Release);
+        let entry_gate = self
+            .turn_finalization_entry_gates
+            .write()
+            .await
+            .remove(session_id);
+        if let Some(gate) = entry_gate {
+            gate.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.wait_for_release().await;
+        }
         let delay_ms = self
             .turn_finalization_delays_once
             .write()
@@ -4270,6 +4334,8 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionError> {
+        self.live_session_admission_lookups
+            .fetch_add(1, Ordering::Release);
         loop {
             let released = self.release_live_session_lookups.notified();
             if !self
@@ -4306,7 +4372,16 @@ impl MobSessionService for MockSessionService {
         expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<bool, SessionError> {
-        let barrier = { self.runtime_control_barrier.read().await.clone() };
+        let barrier = match self
+            .retirement_runtime_control_gates
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+        {
+            Some(barrier) => Some(barrier),
+            None => self.runtime_control_barrier.read().await.clone(),
+        };
         if let Some(barrier) = barrier {
             barrier.hard_calls.fetch_add(1, Ordering::Relaxed);
             barrier.wait_for_release().await;
@@ -4340,7 +4415,16 @@ impl MobSessionService for MockSessionService {
         expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
-        let barrier = { self.runtime_control_barrier.read().await.clone() };
+        let barrier = match self
+            .retirement_runtime_control_gates
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+        {
+            Some(barrier) => Some(barrier),
+            None => self.runtime_control_barrier.read().await.clone(),
+        };
         if let Some(barrier) = barrier {
             barrier.boundary_calls.fetch_add(1, Ordering::Relaxed);
             barrier.wait_for_release().await;
@@ -5546,6 +5630,7 @@ impl MobRunStore for RecordingRunStore {
 
 struct FaultInjectedRuntimeMetadataStore {
     inner: InMemoryMobRuntimeMetadataStore,
+    observed_direct_fences: std::sync::Mutex<Vec<super::bridge_protocol::BridgeDirectMemberFence>>,
     fail_load_supervisor: AtomicBool,
     fail_next_load_supervisor: AtomicBool,
     fail_put_supervisor_countdown: AtomicUsize,
@@ -5562,6 +5647,7 @@ impl FaultInjectedRuntimeMetadataStore {
     fn new() -> Self {
         Self {
             inner: InMemoryMobRuntimeMetadataStore::new(),
+            observed_direct_fences: std::sync::Mutex::new(Vec::new()),
             fail_load_supervisor: AtomicBool::new(false),
             fail_next_load_supervisor: AtomicBool::new(false),
             fail_put_supervisor_countdown: AtomicUsize::new(0),
@@ -6126,9 +6212,17 @@ impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
         desired: &ExternalBindingOverlayRecord,
     ) -> Result<bool, MobStoreError> {
         self.maybe_fail_overlay_write()?;
-        self.inner
+        let updated = self
+            .inner
             .compare_and_set_external_direct_bind(mob_id, expected, desired)
-            .await
+            .await?;
+        if updated && let Some(fence) = desired.direct_member_fence.as_ref() {
+            self.observed_direct_fences
+                .lock()
+                .expect("bound receipt history")
+                .push(fence.clone());
+        }
+        Ok(updated)
     }
 
     async fn compare_and_delete_external_direct_bind(
@@ -19445,6 +19539,58 @@ async fn test_v5_cold_resume_refreshes_bound_fence_and_stale_none_rebinds_before
 }
 
 #[tokio::test]
+async fn test_explicit_resume_rebind_ambiguity_converges_on_the_same_remote_incarnation() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "explicit-resume-uncertain-bind",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let identity = AgentIdentity::from("w-uncertain-resume");
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", identity.as_str())).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+    let original = external
+        .direct_member_fence()
+        .await
+        .expect("original fence");
+    handle.stop().await.expect("stop before explicit resume");
+    external.forget_supervisor().await;
+    external.garble_next_bind_reply();
+    let binds_before = external.bind_protocol_versions().await.len();
+
+    tokio::time::timeout(Duration::from_secs(10), handle.resume())
+        .await
+        .expect("retained rebind converges within the observation window")
+        .expect("a post-send unknown outcome must not prematurely settle resume as failed");
+    let current = external.direct_member_fence().await.expect("resumed fence");
+    let binds_after = external.bind_protocol_versions().await.len();
+    let phase = handle.status().await.expect("resume phase");
+    handle
+        .retire(identity)
+        .await
+        .expect("settled topology releases retirement");
+    handle.shutdown().await.expect("shutdown");
+
+    assert_eq!(phase, MobState::Running);
+    assert_eq!(current.incarnation(), original.incarnation());
+    assert_eq!(
+        binds_after,
+        binds_before + 2,
+        "the exact bind must be replayed to obtain its fence, without minting another incarnation"
+    );
+}
+
+#[tokio::test]
 async fn test_resume_rebind_ambiguity_retains_outer_trust_for_exact_retry() {
     let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
@@ -20015,8 +20161,10 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
             );
         }
         if command == "Complete" {
+            let retirement = include_str!("actor/retirement_io.rs");
             assert!(
-                arm.contains("self.handle_complete()")
+                arm.contains("self.begin_retirement_batch(")
+                    && retirement.contains("self.handle_complete()")
                     && source.contains(
                         "prepare_dsl_input_transition(mob_dsl::MobMachineInput::Complete",
                     ),
@@ -20109,7 +20257,7 @@ fn test_pending_spawn_insertion_requires_generated_start_authority() {
             && source.contains("EmitMemberLifecycleNotice")
             && insert_body.contains("started: AuthorizedMobSpawnStarted")
             && pending_start_count >= 2
-            && source.contains(".start(&respawn_pending)"),
+            && include_str!("actor/retirement_io.rs").contains(".enqueue_spawn_with_origin("),
         "mob pending-spawn insertion and completion must consume generated StageSpawn/CompleteSpawn authorities"
     );
 }
@@ -38872,6 +39020,295 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
         signal_surface.log.lock().await.is_empty(),
         "member provisioning must not publish RuntimeBound with the session runtime id; the routed mob binding owns that signal"
     );
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn retained_resume_receipt_fixture() -> (
+    Arc<super::provisioner::SessionBackend>,
+    Arc<MockSessionService>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+    super::handle::MemberSpawnReceipt,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    service.set_runtime_adapter(Arc::clone(&adapter));
+    let backend = Arc::new(super::provisioner::SessionBackend::new(
+        service.clone(),
+        Some(Arc::clone(&adapter)),
+        None,
+    ));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    service.replace_live_session(session).await;
+    service
+        .discard_live_session(&session_id)
+        .await
+        .expect("discard fixture actor");
+    let request = retained_resume_request(&service, &session_id).await;
+    let receipt = backend
+        .provision_member(request)
+        .await
+        .expect("real resumed provision");
+    assert_eq!(
+        receipt.session_origin,
+        super::provisioner::ProvisionSessionOrigin::ResumedDurable
+    );
+    (backend, service, adapter, receipt)
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn retained_resume_request(
+    service: &MockSessionService,
+    session_id: &SessionId,
+) -> super::provisioner::ProvisionMemberRequest {
+    let authorized_resume = service
+        .materialize_session_resume_verdict(session_id)
+        .await
+        .expect("owner resume verdict")
+        .into_authorized()
+        .expect("authorized durable fixture");
+    let session = authorized_resume.session.as_ref().clone();
+    super::provisioner::ProvisionMemberRequest {
+        authorized_resume: Some(authorized_resume),
+        direct_member_incarnation: None,
+        session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
+        create_session: CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-opus-5".to_string(),
+            prompt: "retained resume fixture".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                comms_name: Some("retained-resume/worker".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        },
+        binding: crate::RuntimeBinding::Session,
+        peer_name: "retained-resume-worker".to_string(),
+        owner_bridge_session_id: None,
+        ops_registry: None,
+        generated_self_owned_operation_owner: Some(session_id.clone()),
+        runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn receipt_backed_resume_cleanup_retries_draining_and_removed_sidecar() {
+    let (backend, service, adapter, receipt) = retained_resume_receipt_fixture().await;
+    let session_id = receipt
+        .member_ref
+        .bridge_session_id()
+        .expect("session")
+        .clone();
+    let authority = receipt
+        .rollback_authority
+        .clone()
+        .expect("exact rollback authority");
+    let member_ref = receipt.member_ref.clone();
+    let operation_id = receipt.operation_id.clone();
+    let origin = receipt.session_origin;
+    let witness = adapter
+        .current_executor_attachment_witness(&session_id)
+        .await
+        .expect("witness");
+    service
+        .discard_actor_failures_remaining
+        .store(100, Ordering::Release);
+    adapter
+        .unregister_executor_attachment_if_current(&witness)
+        .await
+        .expect_err("hold exact retirement in Draining");
+    assert!(
+        adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .is_none()
+    );
+    assert!(adapter.contains_session(&session_id).await);
+    let guard = super::provision_guard::PendingProvision::new(
+        receipt.member_ref,
+        AgentIdentity::from("retained-worker"),
+        backend.clone(),
+        receipt.operation_id,
+        receipt.session_origin,
+        receipt.rollback_authority,
+    );
+    let retained = guard
+        .rollback_retaining_custody()
+        .await
+        .expect_err("retain failed cleanup");
+    service
+        .discard_actor_failures_remaining
+        .store(0, Ordering::Release);
+    retained
+        .retry()
+        .await
+        .expect("retry the actual receipt-backed Draining path");
+    assert!(!adapter.contains_session(&session_id).await);
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("live observation")
+    );
+    backend
+        .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+        .await
+        .expect("completed predecessor receipt remains retryable after sidecar removal");
+    assert!(service.persisted_session_clone(&session_id).await.is_some());
+    assert!(
+        !service
+            .archived_session_ids
+            .read()
+            .await
+            .contains(&session_id)
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_resume_revalidates_after_boundary_wait_and_preserves_successor() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("meerkat_mob=debug,meerkat_runtime=debug")
+        .with_test_writer()
+        .try_init();
+    let (backend, service, adapter, receipt) = retained_resume_receipt_fixture().await;
+    let session_id = receipt
+        .member_ref
+        .bridge_session_id()
+        .expect("session")
+        .clone();
+    let authority = receipt
+        .rollback_authority
+        .clone()
+        .expect("rollback authority");
+    let member_ref = receipt.member_ref.clone();
+    let operation_id = receipt.operation_id.clone();
+    let origin = receipt.session_origin;
+    backend
+        .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+        .await
+        .expect("retire predecessor");
+    let _boundary = service.install_non_reentrant_turn_finalization_gate();
+    let gate = Arc::new(TestRuntimeControlBarrier::new());
+    struct ReleaseEntryGate(Arc<TestRuntimeControlBarrier>);
+    impl Drop for ReleaseEntryGate {
+        fn drop(&mut self) {
+            self.0.release_all();
+        }
+    }
+    let release = ReleaseEntryGate(Arc::clone(&gate));
+    service
+        .turn_finalization_entry_gates
+        .write()
+        .await
+        .insert(session_id.clone(), Arc::clone(&gate));
+    let predecessor_retry = tokio::spawn({
+        let backend = Arc::clone(&backend);
+        async move {
+            backend
+                .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gate.boundary_calls.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("predecessor passed initial observation and is paused before reacquiring B");
+    tracing::info!("predecessor paused; preparing successor request");
+    let successor_request = tokio::time::timeout(
+        Duration::from_secs(5),
+        retained_resume_request(&service, &session_id),
+    )
+    .await
+    .expect("successor request must not need the paused predecessor's boundary");
+    let successor_backend =
+        super::provisioner::SessionBackend::new(service.clone(), Some(Arc::clone(&adapter)), None);
+    let successor_backend = Arc::new(successor_backend);
+    let mut successor_task = tokio::spawn({
+        let successor_backend = Arc::clone(&successor_backend);
+        async move { successor_backend.provision_member(successor_request).await }
+    });
+    let published = tokio::time::timeout(Duration::from_secs(5), &mut successor_task).await;
+    let published_before_release = published.is_ok();
+    if !published_before_release {
+        gate.release_all();
+    }
+    let successor = match published {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(5), successor_task)
+            .await
+            .expect("successor settles after releasing predecessor"),
+    }
+    .expect("successor task")
+    .expect("publish successor");
+    tracing::info!("successor published; releasing predecessor");
+    let current = adapter
+        .current_executor_attachment_witness(&session_id)
+        .await
+        .expect("successor witness");
+    drop(release);
+    let retried = tokio::time::timeout(Duration::from_secs(5), predecessor_retry)
+        .await
+        .expect("predecessor retry finishes")
+        .expect("predecessor retry task");
+    let successor_live = service
+        .has_live_session(&session_id)
+        .await
+        .expect("successor live");
+    let archived = service
+        .archived_session_ids
+        .read()
+        .await
+        .contains(&session_id);
+    let after_retry = adapter
+        .current_executor_attachment_witness(&session_id)
+        .await;
+    let successor_authority = successor
+        .rollback_authority
+        .as_ref()
+        .expect("successor authority");
+    tracing::info!("predecessor rejected; cleaning successor");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        successor_backend.restore_resumed_member(
+            &successor.member_ref,
+            &successor.operation_id,
+            successor.session_origin,
+            successor_authority,
+        ),
+    )
+    .await
+    .expect("successor cleanup completes")
+    .expect("clean successor with its own authority");
+    assert!(
+        published_before_release,
+        "fixture must publish successor while predecessor remains outside B"
+    );
+    assert!(
+        retried.is_err(),
+        "old cleanup must refuse the successor published before it acquired B"
+    );
+    assert!(successor_live);
+    assert!(!archived);
+    assert_eq!(after_retry, Some(current.clone()));
+    assert!(
+        adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .is_none()
+    );
+    assert_eq!(current.session_id(), &session_id);
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -64832,7 +65269,44 @@ async fn mob_runtime_parity_snapshot_summary(
         .expect("serialize coordinator_bound"),
     );
     if let Some(dsl) = dsl_t2.as_ref() {
+        let resume = handle.machine_state_watch_rx.borrow();
         for (name, value) in [
+            (
+                "explicit_resume_attempt",
+                serde_json::to_value(&resume.explicit_resume_attempt),
+            ),
+            (
+                "explicit_resume_cancel_requested",
+                serde_json::to_value(resume.explicit_resume_cancel_requested),
+            ),
+            (
+                "explicit_resume_preparation_pending",
+                serde_json::to_value(resume.explicit_resume_preparation_pending),
+            ),
+            (
+                "explicit_resume_member_work",
+                serde_json::to_value(&resume.explicit_resume_member_work),
+            ),
+            (
+                "explicit_resume_readiness_pending",
+                serde_json::to_value(resume.explicit_resume_readiness_pending),
+            ),
+            (
+                "explicit_resume_readiness_settled",
+                serde_json::to_value(resume.explicit_resume_readiness_settled),
+            ),
+            (
+                "explicit_resume_topology_pending",
+                serde_json::to_value(resume.explicit_resume_topology_pending),
+            ),
+            (
+                "explicit_resume_topology_settled",
+                serde_json::to_value(resume.explicit_resume_topology_settled),
+            ),
+            (
+                "explicit_resume_cleanup_pending",
+                serde_json::to_value(resume.explicit_resume_cleanup_pending),
+            ),
             (
                 "member_kickoff_objective_ids",
                 serde_json::to_value(&dsl.member_kickoff_objective_ids),
@@ -65695,6 +66169,7 @@ enum MobRuntimeParityExprValue {
     String(String),
     Set(BTreeSet<String>),
     Map(BTreeMap<String, u64>),
+    Structured(serde_json::Value),
     None,
 }
 
@@ -65703,6 +66178,25 @@ fn mob_runtime_parity_field_value(
     field: &str,
 ) -> Option<MobRuntimeParityExprValue> {
     match field {
+        "explicit_resume_attempt"
+        | "explicit_resume_cancel_requested"
+        | "explicit_resume_preparation_pending"
+        | "explicit_resume_member_work"
+        | "explicit_resume_readiness_pending"
+        | "explicit_resume_readiness_settled"
+        | "explicit_resume_topology_pending"
+        | "explicit_resume_topology_settled"
+        | "explicit_resume_cleanup_pending" => {
+            let raw = snapshot.formal_available_fields.get(field)?;
+            Some(
+                match serde_json::from_str(raw).expect("serialized resume authority") {
+                    serde_json::Value::Null => MobRuntimeParityExprValue::None,
+                    serde_json::Value::Bool(value) => MobRuntimeParityExprValue::Bool(value),
+                    serde_json::Value::String(value) => MobRuntimeParityExprValue::String(value),
+                    value => MobRuntimeParityExprValue::Structured(value),
+                },
+            )
+        }
         "destroy_admitted" => Some(MobRuntimeParityExprValue::Bool(snapshot.destroy_admitted)),
         "flow_authority_schema_version" => Some(MobRuntimeParityExprValue::U64(
             snapshot.flow_authority_schema_version,
@@ -67276,6 +67770,23 @@ async fn mob_runtime_parity_execute_probe(
 }
 
 async fn execute_mob_runtime_parity_probe(
+    phase: MobRuntimeParityPhase,
+    probe: MobRuntimeParityProbeInput,
+) -> Result<MobRuntimeParityInvocationReport, String> {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        execute_mob_runtime_parity_probe_inner(phase, probe),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "complete {} {probe:?} probe, including observations and cleanup, timed out",
+            phase.schema_name()
+        )
+    })?
+}
+
+async fn execute_mob_runtime_parity_probe_inner(
     phase: MobRuntimeParityPhase,
     probe: MobRuntimeParityProbeInput,
 ) -> Result<MobRuntimeParityInvocationReport, String> {
@@ -72642,3 +73153,19 @@ async fn test_running_steer_without_override_resolves_applied_identity_as_none()
 /// #1102 actor-loop isolation, per-member admission lanes, bounded
 /// deliveries, and the member registration reload primitive.
 mod actor_isolation;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[path = "../../tests/support/mod.rs"]
+mod placement_support;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod resume_bind_custody;
+mod retirement_isolation;
+/// #1105 spawn-activation isolation: a parked activation must not stall the
+/// loop, a failed one must compensate exactly, and a stale one must be
+/// declined instead of touching its successor.
+mod spawn_activation_isolation;
+mod spawn_rollback;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod submit_work_pump;
+/// #1105 wiring effect isolation: parked trust installs and peer-lifecycle
+/// notices must not park the actor loop or unrelated members.
+mod wiring_isolation;

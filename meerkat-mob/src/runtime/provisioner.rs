@@ -794,9 +794,516 @@ impl ResumedMemberRollbackAuthority {
         self.state.as_ref()
     }
 
+    pub(super) fn attachment_witness(&self) -> Option<&RuntimeExecutorAttachmentWitness> {
+        self.state.as_ref().map(|state| state.witness())
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self { state: None }
+    }
+}
+
+/// What a failed provisioning attempt proved about its OWN effects.
+///
+/// A provisioning error is never evidence of absence. Only
+/// [`Self::ReleasedByOwner`] is a settled negative outcome; every other value
+/// means owner-created resources may still be serving, so a cancelling caller
+/// must keep its cancellation pending and retry the exact compensation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisionEffectSettlement {
+    /// The process-owned materialization task ran to completion and its exact
+    /// cleanup succeeded before the error was returned. No serving attachment
+    /// or transient actor resource from this attempt survives. Durable writes
+    /// are not undone by this receipt: session documents remain retained and
+    /// explicitly resumable.
+    ReleasedByOwner,
+    /// The owner task reported that exact cleanup did not complete, or the
+    /// cleanup was detached without an awaited settlement. Effects may still
+    /// be serving.
+    RetainedUncertain,
+    /// This provisioner cannot prove either outcome. Callers must treat it
+    /// exactly like [`Self::RetainedUncertain`]; it is never proof of absence.
+    Unproven,
+}
+
+impl ProvisionEffectSettlement {
+    /// Whether the caller must keep compensation open. True for everything
+    /// except a proven owner-side release.
+    pub fn requires_further_cleanup(self) -> bool {
+        !matches!(self, Self::ReleasedByOwner)
+    }
+}
+
+/// Whether a failed attempt had minted its exact ops provision row at the
+/// moment it recorded a retained effect.
+///
+/// This is an ORDERING fact taken from the attempt's own ledger, never an
+/// inference from a missing value. The mint (`prepare_member_provision_operation`)
+/// and the attachment commit that can leave a retained witness are strictly
+/// ordered inside one provisioning attempt, so the ledger can state which side
+/// of the mint an effect landed on — or refuse to state it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetainedOperationAnchor {
+    /// The attempt minted this exact operation BEFORE the retained effect was
+    /// recorded. Compensation must abort this row as part of the retry.
+    Minted(OperationId),
+    /// The retained effect was recorded while the attempt had not minted an
+    /// operation, and no mint followed it. There is no ops row to abort.
+    NotMintedBeforeEffect,
+    /// The recording owner cannot order a mint against the effect (a mint
+    /// landed after custody was recorded). Retry must refuse rather than
+    /// guess; this is not proven absence and never authorizes a fabricated id.
+    Unproven,
+}
+
+/// Exact, caller-actionable custody for effects a failed provisioning attempt
+/// could not release.
+///
+/// The carrier holds the same authority a successful [`MemberSpawnReceipt`]
+/// would have carried, so a caller compensates a failed attempt with the
+/// ordinary rollback mechanics instead of a second attempt registry: the
+/// member ref addresses the exact resource, and `rollback_authority` is the
+/// attachment witness `restore_resumed_member` re-validates before touching
+/// anything. Retry stays fail-closed — a successor incarnation makes the retry
+/// refuse rather than retire the successor.
+///
+/// Custody is never issued without a real witness, so the authority is not
+/// optional. The ops row is a separate fact and carries its own typed anchor;
+/// callers must NOT convert this into a [`super::provision_guard::PendingProvision`]
+/// unless the anchor is [`RetainedOperationAnchor::Minted`]. Use
+/// [`MobProvisioner::retry_retained_provision_cleanup`] instead: the owner that
+/// issued the custody knows which compensation its anchor authorizes.
+#[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+#[derive(Debug)]
+pub struct RetainedProvisionEffects {
+    member_ref: MemberRef,
+    session_origin: ProvisionSessionOrigin,
+    operation_anchor: RetainedOperationAnchor,
+    rollback_authority: ResumedMemberRollbackAuthority,
+    detail: String,
+}
+
+impl RetainedProvisionEffects {
+    pub fn member_ref(&self) -> &MemberRef {
+        &self.member_ref
+    }
+
+    pub fn session_origin(&self) -> ProvisionSessionOrigin {
+        self.session_origin
+    }
+
+    /// The typed ops-row ordering fact. There is deliberately no
+    /// `Option<OperationId>` accessor: a missing id is a classification, not a
+    /// value the caller may substitute.
+    pub fn operation_anchor(&self) -> &RetainedOperationAnchor {
+        &self.operation_anchor
+    }
+
+    /// The exact attachment authority a retry must present.
+    pub fn rollback_authority(&self) -> &ResumedMemberRollbackAuthority {
+        &self.rollback_authority
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// Split into the exact retry authority. Only a
+    /// [`RetainedOperationAnchor::Minted`] anchor yields an operation id;
+    /// the other variants intentionally have none to hand out.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn into_parts(
+        self,
+    ) -> (
+        MemberRef,
+        ProvisionSessionOrigin,
+        RetainedOperationAnchor,
+        ResumedMemberRollbackAuthority,
+    ) {
+        (
+            self.member_ref,
+            self.session_origin,
+            self.operation_anchor,
+            self.rollback_authority,
+        )
+    }
+}
+
+/// A retained-cleanup retry that did not settle. The exact custody is returned
+/// unchanged alongside the NEW failure, so the caller keeps ownership and can
+/// retry again; nothing is released, archived, or forgotten by the failure.
+#[must_use = "retained cleanup custody must be retried again or explicitly surfaced"]
+#[derive(Debug)]
+pub struct RetainedProvisionCleanupFailure {
+    retained: RetainedProvisionEffects,
+    error: MobError,
+    unsupported: bool,
+}
+
+impl RetainedProvisionCleanupFailure {
+    /// This provisioner cannot compensate the custody it was handed. Explicit
+    /// refusal, never a default success.
+    pub fn unsupported(retained: RetainedProvisionEffects, reason: impl Into<String>) -> Self {
+        Self {
+            retained,
+            error: MobError::LifecycleOperationPending {
+                intent: format!(
+                    "retained provisioning cleanup is unsupported: {}",
+                    reason.into()
+                ),
+            },
+            unsupported: true,
+        }
+    }
+
+    /// The compensation was attempted against the exact witness and failed.
+    pub fn failed(retained: RetainedProvisionEffects, error: MobError) -> Self {
+        Self {
+            retained,
+            error,
+            unsupported: false,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn retained(&self) -> &RetainedProvisionEffects {
+        &self.retained
+    }
+
+    pub fn error(&self) -> &MobError {
+        &self.error
+    }
+
+    /// Whether the refusal was "this owner cannot compensate" rather than
+    /// "the compensation ran and failed". Both keep custody open.
+    pub fn is_unsupported(&self) -> bool {
+        self.unsupported
+    }
+
+    /// Take back the exact custody plus the newest error.
+    pub fn into_parts(self) -> (RetainedProvisionEffects, MobError) {
+        (self.retained, self.error)
+    }
+}
+
+impl std::fmt::Display for RetainedProvisionCleanupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "retained provision cleanup did not settle: {} (custody retained: {:?}, anchor {:?})",
+            self.error,
+            self.retained.member_ref(),
+            self.retained.operation_anchor()
+        )
+    }
+}
+
+/// The compensation one retained custody authorizes, decided from the recorded
+/// facts alone. Nothing here reads live runtime state; the chosen verb is then
+/// executed against the exact witness, which re-validates fail-closed.
+#[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RetainedCleanupPlan {
+    /// Resume compensation that must also abort this exact ops row.
+    RestoreResumedWithOperation(OperationId),
+    /// Resume compensation for an attempt that provably never minted an ops
+    /// row: the same before-receipt helper, minus an abort it has nothing to
+    /// abort. No operation id is invented.
+    RestoreResumedWithoutOperation,
+    /// Explicit refusal. Custody stays with the caller.
+    Refuse(&'static str),
+}
+
+/// Decide the compensation for one retained custody.
+///
+/// Fresh-origin custody is refused on purpose: its compensation is the
+/// session-wide retire/archive authority, and broadening this witness-exact
+/// seam to that verb could remove a successor incarnation.
+#[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+pub(super) fn plan_retained_cleanup(retained: &RetainedProvisionEffects) -> RetainedCleanupPlan {
+    match retained.session_origin() {
+        ProvisionSessionOrigin::Fresh => RetainedCleanupPlan::Refuse(
+            "fresh-attempt compensation needs session-wide retire/archive authority; this witness-exact retained-cleanup seam refuses to broaden into successor cleanup",
+        ),
+        ProvisionSessionOrigin::ResumedDurable | ProvisionSessionOrigin::RevivedRetired => {
+            match retained.operation_anchor() {
+                RetainedOperationAnchor::Minted(operation_id) => {
+                    RetainedCleanupPlan::RestoreResumedWithOperation(operation_id.clone())
+                }
+                RetainedOperationAnchor::NotMintedBeforeEffect => {
+                    RetainedCleanupPlan::RestoreResumedWithoutOperation
+                }
+                RetainedOperationAnchor::Unproven => RetainedCleanupPlan::Refuse(
+                    "retained custody could not order its ops mint against the retained effect; retry refuses rather than abort or skip an unproven operation row",
+                ),
+            }
+        }
+    }
+}
+
+/// Typed failure of one provisioning attempt: the error, what the attempt
+/// proved about its own effects, and any exact retained custody.
+#[derive(Debug)]
+pub struct ProvisionAttemptFailure {
+    error: MobError,
+    settlement: ProvisionEffectSettlement,
+    retained: Option<RetainedProvisionEffects>,
+}
+
+impl ProvisionAttemptFailure {
+    /// The attempt failed and its effects were NOT proven released.
+    pub fn unproven(error: MobError) -> Self {
+        Self {
+            error,
+            settlement: ProvisionEffectSettlement::Unproven,
+            retained: None,
+        }
+    }
+
+    #[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
+    /// The attempt reported that its own compensation could not be certified,
+    /// without exposing exact local custody (for example an external
+    /// provisioner that quarantined its reservation on its own side).
+    pub fn retained_without_custody(error: MobError) -> Self {
+        Self {
+            error,
+            settlement: ProvisionEffectSettlement::RetainedUncertain,
+            retained: None,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn error(&self) -> &MobError {
+        &self.error
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn settlement(&self) -> ProvisionEffectSettlement {
+        self.settlement
+    }
+
+    /// Whether the caller must keep cancellation pending and retry cleanup.
+    pub fn requires_further_cleanup(&self) -> bool {
+        self.settlement.requires_further_cleanup()
+    }
+
+    pub fn retained_effects(&self) -> Option<&RetainedProvisionEffects> {
+        self.retained.as_ref()
+    }
+
+    pub fn into_error(self) -> MobError {
+        self.error
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        MobError,
+        ProvisionEffectSettlement,
+        Option<RetainedProvisionEffects>,
+    ) {
+        (self.error, self.settlement, self.retained)
+    }
+}
+
+impl std::fmt::Display for ProvisionAttemptFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (settlement: {:?})",
+            self.error, self.settlement
+        )
+    }
+}
+
+/// Project a peer-only provisioning failure onto typed settlement.
+///
+/// The external lane owns no local materialization task, so the only typed
+/// evidence it can offer is its own uncertain-compensation error. Everything
+/// else stays `Unproven`; nothing here may be read as proof of absence.
+#[cfg(feature = "runtime-adapter")]
+fn classify_external_provision_failure(error: MobError) -> ProvisionAttemptFailure {
+    if matches!(error, MobError::ExternalMemberCleanupUncertain { .. }) {
+        ProvisionAttemptFailure::retained_without_custody(error)
+    } else {
+        ProvisionAttemptFailure::unproven(error)
+    }
+}
+
+/// Settlement facts recorded by the process-owned tasks of ONE provisioning
+/// attempt.
+///
+/// The ledger is written by the owner tasks themselves (including after the
+/// observing caller has gone away) and read once by the settled provisioning
+/// entry point. `RetainedUncertain` is sticky: a later success cannot erase an
+/// earlier failure to certify cleanup within this attempt.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Default)]
+pub(super) struct ProvisionSettlementLedger {
+    facts: std::sync::Mutex<ProvisionSettlementFacts>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Default)]
+struct ProvisionSettlementFacts {
+    owner_releases: usize,
+    retained_details: Vec<String>,
+    retained_attachment: Option<(SessionId, ResumedMemberRollbackAuthority)>,
+    /// Ops anchor captured AT the moment custody was first recorded.
+    retained_anchor: Option<RetainedOperationAnchor>,
+    /// A mint that landed after custody was recorded cannot be ordered against
+    /// that effect, so the anchor degrades to `Unproven`.
+    mint_after_retained_record: bool,
+    attempt_origin: Option<ProvisionSessionOrigin>,
+    attempt_operation_id: Option<OperationId>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl ProvisionSettlementLedger {
+    fn with_facts<R>(&self, apply: impl FnOnce(&mut ProvisionSettlementFacts) -> R) -> R {
+        let mut facts = self
+            .facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        apply(&mut facts)
+    }
+
+    /// Record the attempt's CURRENT session origin. A resumed attempt that
+    /// crosses the revival lifecycle restamps this, so retained custody names
+    /// the compensation the parent must actually run.
+    pub(super) fn set_attempt_origin(&self, origin: ProvisionSessionOrigin) {
+        self.with_facts(|facts| facts.attempt_origin = Some(origin));
+    }
+
+    /// Record the exact ops operation id once the attempt has minted one.
+    ///
+    /// The mint is ordered against any already-recorded retained effect: a
+    /// mint that lands afterwards cannot be attributed to that effect, so the
+    /// anchor degrades to `Unproven` instead of silently claiming the row.
+    pub(super) fn set_attempt_operation_id(&self, operation_id: OperationId) {
+        self.with_facts(|facts| {
+            if facts.retained_attachment.is_some() {
+                facts.mint_after_retained_record = true;
+            }
+            facts.attempt_operation_id = Some(operation_id);
+        });
+    }
+
+    /// An owner task proved its exact cleanup completed.
+    pub(super) fn record_owner_release(&self) {
+        self.with_facts(|facts| facts.owner_releases += 1);
+    }
+
+    /// `RetainedUncertain` is sticky: a later release inside the same attempt
+    /// cannot erase an earlier failure to certify compensation.
+    fn settlement_of(facts: &ProvisionSettlementFacts) -> ProvisionEffectSettlement {
+        if !facts.retained_details.is_empty() {
+            ProvisionEffectSettlement::RetainedUncertain
+        } else if facts.owner_releases > 0 {
+            ProvisionEffectSettlement::ReleasedByOwner
+        } else {
+            ProvisionEffectSettlement::Unproven
+        }
+    }
+
+    /// Read the current classification without consuming retained custody.
+    #[cfg(test)]
+    pub(crate) fn settlement_for_test(&self) -> ProvisionEffectSettlement {
+        self.with_facts(|facts| Self::settlement_of(facts))
+    }
+
+    /// An owner task could not certify cleanup. Callers keep compensating.
+    pub(super) fn record_retained(&self, detail: impl Into<String>) {
+        self.with_facts(|facts| facts.retained_details.push(detail.into()));
+    }
+
+    /// Record exact attachment retry custody alongside the retained
+    /// classification. The first recorded custody wins: it belongs to the
+    /// innermost owner that actually failed to release the attachment.
+    pub(super) fn record_retained_attachment(
+        &self,
+        session_id: &SessionId,
+        rollback_authority: ResumedMemberRollbackAuthority,
+        detail: impl Into<String>,
+    ) {
+        self.with_facts(|facts| {
+            facts.retained_details.push(detail.into());
+            if facts.retained_attachment.is_none() {
+                // Capture the ops ordering AT the effect, not at projection
+                // time: this is the only moment the two facts are comparable.
+                facts.retained_anchor = Some(match facts.attempt_operation_id.clone() {
+                    Some(operation_id) => RetainedOperationAnchor::Minted(operation_id),
+                    None => RetainedOperationAnchor::NotMintedBeforeEffect,
+                });
+                facts.retained_attachment = Some((session_id.clone(), rollback_authority));
+            }
+        });
+    }
+
+    /// Project the recorded facts onto a typed failure for `error`.
+    pub(super) fn settle_failure(&self, error: MobError) -> ProvisionAttemptFailure {
+        self.with_facts(|facts| {
+            let settlement = Self::settlement_of(facts);
+            let detail = facts.retained_details.join("; ");
+            let anchor = if facts.mint_after_retained_record {
+                RetainedOperationAnchor::Unproven
+            } else {
+                facts
+                    .retained_anchor
+                    .take()
+                    .unwrap_or(RetainedOperationAnchor::Unproven)
+            };
+            // Custody is emitted only when the attempt's own origin is known.
+            // Without it the compensation verb would be a guess, and a guessed
+            // verb is worse than an explicit "no exact custody".
+            let retained = match (facts.attempt_origin, facts.retained_attachment.take()) {
+                (Some(session_origin), Some((session_id, rollback_authority))) => {
+                    Some(RetainedProvisionEffects {
+                        member_ref: MemberRef::from_bridge_session_id(session_id),
+                        session_origin,
+                        operation_anchor: anchor,
+                        rollback_authority,
+                        detail,
+                    })
+                }
+                _ => None,
+            };
+            ProvisionAttemptFailure {
+                error,
+                settlement,
+                retained,
+            }
+        })
+    }
+}
+
+/// Physical registration-reload settlement, before the actor authorizes its
+/// live materialization. A discarded registration carries its exact successor
+/// so later publication cannot be certified by a session-id-only observation.
+pub enum MemberRegistrationReload {
+    NotCurrent,
+    NotDegraded,
+    Discarded {
+        #[cfg(feature = "runtime-adapter")]
+        successor: meerkat_runtime::RuntimeSessionRegistrationWitness,
+    },
+    #[cfg(feature = "runtime-adapter")]
+    Published {
+        successor: meerkat_runtime::RuntimeSessionRegistrationWitness,
+        publication: ResumedMemberRollbackAuthority,
+    },
+}
+
+impl MemberRegistrationReload {
+    pub(super) fn disposition(&self) -> super::handle::MemberReloadDisposition {
+        match self {
+            Self::NotCurrent => super::handle::MemberReloadDisposition::NotCurrent,
+            Self::NotDegraded => super::handle::MemberReloadDisposition::NotDegraded,
+            Self::Discarded { .. } => super::handle::MemberReloadDisposition::Discarded,
+            #[cfg(feature = "runtime-adapter")]
+            Self::Published { .. } => super::handle::MemberReloadDisposition::Discarded,
+        }
     }
 }
 
@@ -815,6 +1322,64 @@ pub trait MobProvisioner: Send + Sync {
         &self,
         req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError>;
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn provision_member_from_reload_claim(
+        &self,
+        _req: ProvisionMemberRequest,
+        prepared: PreparedSessionMaterialization,
+    ) -> Result<MemberSpawnReceipt, MobError> {
+        Err(MobError::MemberReloadRefused {
+            session_id: prepared.session_id().clone(),
+            reason: "provisioner cannot materialize an exact reload registration".to_string(),
+        })
+    }
+
+    /// Provision a member and, on failure, report typed settlement of the
+    /// attempt's own effects.
+    ///
+    /// This is the cold-resume cancellation seam: an observer deadline or a
+    /// dropped caller future never means "did not happen". A caller that is
+    /// cancelling must keep cancellation pending until this call reports
+    /// [`ProvisionEffectSettlement::ReleasedByOwner`], or until it has
+    /// compensated the returned [`RetainedProvisionEffects`] with an
+    /// acknowledged rollback.
+    ///
+    /// The default implementation delegates to [`Self::provision_member`] and
+    /// reports [`ProvisionEffectSettlement::Unproven`]: a provisioner that does
+    /// not own the local materialization seam cannot certify that its owner
+    /// tasks settled. That is deliberately not a claim of "no resources"; it is
+    /// the explicit "this provisioner cannot prove it" answer.
+    async fn provision_member_settled(
+        &self,
+        req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, ProvisionAttemptFailure> {
+        self.provision_member(req)
+            .await
+            .map_err(ProvisionAttemptFailure::unproven)
+    }
+
+    /// Retry the exact owner-side compensation for the effects a failed
+    /// attempt retained, WITHOUT the caller reconstructing a provision guard.
+    ///
+    /// The custody carries a real attachment witness and a typed ops anchor;
+    /// the owner that issued it is the only party that knows which
+    /// compensation that anchor authorizes. `Ok(())` means the exact retained
+    /// effect is settled. `Err` returns the same custody unchanged plus the
+    /// newest error, so the caller keeps ownership and stays cancelling.
+    ///
+    /// The default implementation refuses explicitly: a provisioner that did
+    /// not issue this custody cannot compensate it, and a default `Ok` would
+    /// be a fabricated settlement.
+    async fn retry_retained_provision_cleanup(
+        &self,
+        retained: RetainedProvisionEffects,
+    ) -> Result<(), RetainedProvisionCleanupFailure> {
+        Err(RetainedProvisionCleanupFailure::unsupported(
+            retained,
+            "this provisioner does not own the local materialization seam that issued the retained custody",
+        ))
+    }
     async fn abort_member_provision(
         &self,
         member_ref: &MemberRef,
@@ -1032,12 +1597,35 @@ pub trait MobProvisioner: Send + Sync {
         &self,
         member_ref: &MemberRef,
         deadline: Instant,
-    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+    ) -> Result<MemberRegistrationReload, MobError> {
         let _ = (member_ref, deadline);
         Err(MobError::UnsupportedForMode {
             mode: crate::MobRuntimeMode::TurnDriven,
             reason: "runtime registration reload is not supported by this provisioner".to_string(),
         })
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn record_reload_publication(
+        &self,
+        _member_ref: &MemberRef,
+        _successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+        _publication: ResumedMemberRollbackAuthority,
+    ) -> Result<(), MobError> {
+        Err(MobError::Internal(
+            "provisioner cannot retain reload publication custody".to_string(),
+        ))
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn finish_reload_restoration(
+        &self,
+        _member_ref: &MemberRef,
+        _successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+    ) -> Result<(), MobError> {
+        Err(MobError::Internal(
+            "provisioner cannot settle reload restoration custody".to_string(),
+        ))
     }
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
     async fn trusted_peer_spec(
@@ -1238,16 +1826,112 @@ pub struct SessionBackend {
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
     explicit_resume_retirements:
         Arc<StdMutex<HashMap<SessionId, ExplicitResumeAttachmentRetirement>>>,
+    reload_registrations: Arc<Mutex<HashMap<SessionId, Arc<Mutex<ReloadRegistrationCustody>>>>>,
+    reload_materialization_claim: Option<Arc<Mutex<Option<PreparedSessionMaterialization>>>>,
     // DEC-P3H-5: the extracted disposal arc, sharing this backend's
     // `runtime_sessions` sidecar map. The backend delegates its disposal
     // verbs here (one implementation, two instance owners).
     disposal: MemberSessionDisposalArc,
+    // Per-attempt settlement ledger installed by `provision_member_settled`
+    // on a cheap clone of this backend. `None` on the shared instance: the
+    // ordinary `provision_member` contract records nothing.
+    settlement_ledger: Option<Arc<ProvisionSettlementLedger>>,
 }
 
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
 struct ExplicitResumeAttachmentRetirement {
     completion: Arc<Mutex<oneshot::Receiver<Result<bool, MobError>>>>,
+}
+
+/// Exact physical capabilities retained across retryable cold-recovery
+/// failures, independently of the live sidecar index cleared by teardown.
+#[cfg(feature = "runtime-adapter")]
+struct ReloadRegistrationCustody {
+    registration: meerkat_runtime::RuntimeSessionRegistrationWitness,
+    attachment: RuntimeExecutorAttachmentWitness,
+    actor: meerkat_session::LiveSessionActorWitness,
+    ops_binding: Option<super::ops_adapter::ReloadRequiredSessionOpsBindingWitness>,
+    phase: ReloadRegistrationPhase,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone)]
+enum ReloadRegistrationPhase {
+    Degraded,
+    ColdSuccessor(meerkat_runtime::RuntimeSessionRegistrationWitness),
+    Restoring(meerkat_runtime::RuntimeSessionRegistrationWitness),
+    Published {
+        successor: meerkat_runtime::RuntimeSessionRegistrationWitness,
+        publication: ResumedMemberRollbackAuthority,
+    },
+    ClaimCleanup {
+        successor: meerkat_runtime::RuntimeSessionRegistrationWitness,
+        retained: Arc<Mutex<Option<RetainedReloadClaimCleanup>>>,
+    },
+}
+
+#[cfg(feature = "runtime-adapter")]
+struct RetainedReloadClaimCleanup {
+    prepared: PreparedSessionMaterialization,
+    failure: ProvisionAttemptFailure,
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+type ReloadWarmClaimTestHook = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+static RELOAD_WARM_CLAIM_TEST_HOOKS: std::sync::LazyLock<
+    StdMutex<HashMap<SessionId, ReloadWarmClaimTestHook>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+static RELOAD_UNUSED_CLAIM_TEST_HOOKS: std::sync::LazyLock<
+    StdMutex<HashMap<SessionId, ReloadWarmClaimTestHook>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_reload_unused_claim_cleanup_for_test(
+    session_id: SessionId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    assert!(
+        RELOAD_UNUSED_CLAIM_TEST_HOOKS
+            .lock()
+            .expect("unused claim hook")
+            .insert(session_id, (entered_tx, release_rx))
+            .is_none()
+    );
+    (entered_rx, release_tx)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_reload_before_warm_claim_for_test(
+    session_id: SessionId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    assert!(
+        RELOAD_WARM_CLAIM_TEST_HOOKS
+            .lock()
+            .expect("reload test hook")
+            .insert(session_id, (entered_tx, release_rx))
+            .is_none()
+    );
+    (entered_rx, release_tx)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+async fn pause_reload_before_warm_claim_for_test(session_id: &SessionId) {
+    let hook = RELOAD_WARM_CLAIM_TEST_HOOKS
+        .lock()
+        .expect("reload test hook")
+        .remove(session_id);
+    if let Some((entered, release)) = hook {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3179,12 +3863,6 @@ pub(super) fn trusted_peer_spec_from_runtime(
 }
 
 #[cfg(feature = "runtime-adapter")]
-pub(super) enum FailedResumeRuntimeAuthority<'a> {
-    ExactAttachment(&'a Arc<RuntimeSessionState>),
-    ExactPrepared(&'a mut PreparedSessionMaterialization),
-}
-
-#[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
     #[cfg(test)]
     pub(super) async fn pending_turn_finalization_boundary_followers(
@@ -3406,22 +4084,77 @@ impl SessionBackend {
         }
     }
 
-    #[cfg(feature = "runtime-adapter")]
-    pub(super) async fn restore_failed_resume_before_receipt(
+    /// Converge one retained exact resume attachment for a compensation retry.
+    ///
+    /// A retained effect is recorded precisely when the owned retirement did
+    /// NOT settle, so the machine may already be inside its exact unregister
+    /// saga — and Draining hides the serving projection. Requiring a current
+    /// serving witness there made every retry fail closed even with no
+    /// successor, so this classifies first and then runs the ordinary
+    /// before-receipt cleanup, JOINS the exact in-flight retirement, or
+    /// refuses. No operation id is invented, no SessionId-blind discard is
+    /// performed, and a successor is never removed.
+    async fn converge_retained_resume_attachment(
         &self,
         session_id: &SessionId,
         restore_retired: bool,
-        mut authority: FailedResumeRuntimeAuthority<'_>,
-        boundary: &mut RuntimeTurnFinalizationBoundaryLease,
+        expected_state: &Arc<RuntimeSessionState>,
     ) -> Result<(), MobError> {
-        boundary.require_session(session_id)?;
         let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
             MobError::Internal(format!(
-                "resume rollback for '{session_id}' requires runtime authority"
+                "retained resume compensation for '{session_id}' requires runtime authority"
             ))
         })?;
-        match &mut authority {
-            FailedResumeRuntimeAuthority::ExactAttachment(expected_state) => {
+        if !adapter.owns_executor_attachment_witness(expected_state.witness()) {
+            return Err(MobError::Internal(format!(
+                "retained resume compensation for '{session_id}' has a foreign runtime witness"
+            )));
+        }
+        let sidecar = self.runtime_sessions.read().await.get(session_id).cloned();
+        match sidecar {
+            Some(current) if !same_runtime_attachment(&current, expected_state) => {
+                return Err(MobError::Internal(format!(
+                    "retained resume compensation for '{session_id}' found a successor sidecar"
+                )));
+            }
+            None if !expected_state.actor_cleanup_completed() => {
+                return Err(MobError::Internal(format!(
+                    "retained resume compensation for '{session_id}' has no exact sidecar or owner cleanup receipt"
+                )));
+            }
+            Some(_) | None => {}
+        }
+        let registration = adapter
+            .current_session_registration_witness(session_id)
+            .await;
+        if let Some(registration) = registration.as_ref()
+            && !adapter
+                .executor_attachment_cleanup_is_current_for_registration(
+                    expected_state.witness(),
+                    registration,
+                )
+                .await
+        {
+            return Err(MobError::Internal(format!(
+                "retained resume compensation for '{session_id}' found a replacement registration"
+            )));
+        }
+        let current = adapter
+            .current_executor_attachment_witness(session_id)
+            .await;
+        let convergence = classify_retained_attachment_convergence(
+            current.as_ref(),
+            expected_state.witness(),
+            registration.is_some(),
+        );
+        match convergence {
+            RetainedAttachmentConvergence::ServingExact => {
+                let boundary = RuntimeTurnFinalizationBoundaryLease::acquire(
+                    &self.session_service,
+                    session_id,
+                )
+                .await?;
+                boundary.require_session(session_id)?;
                 let operation_guard = expected_state.operation_guard().await;
                 let current = adapter
                     .current_executor_attachment_witness(session_id)
@@ -3434,42 +4167,166 @@ impl SessionBackend {
                     .is_some_and(|current| same_runtime_attachment(current, expected_state));
                 if current.as_ref() != Some(expected_state.witness()) || !exact_sidecar {
                     return Err(MobError::Internal(format!(
-                        "resume rollback for '{session_id}' lost its exact runtime attachment or sidecar before durable convergence"
+                        "retained resume compensation for '{session_id}' lost its exact serving attachment under the boundary"
                     )));
                 }
                 expected_state.mark_cleanup_scheduled();
                 expected_state.clear_queued_turns().await;
-                // Admission takes R before asking the machine for M. Marking
-                // this exact sidecar Retiring while R is held prevents every
-                // later admission from reaching M; release R before acquiring
-                // the exact retirement lease so an already-admitted R -> M
-                // operation can finish and the post-stop callback can acquire
-                // R without either inversion or self-deadlock.
                 drop(operation_guard);
+                if restore_retired {
+                    match self
+                        .session_service
+                        .archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+                            session_id,
+                        )
+                        .await
+                    {
+                        Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                        Err(error) => return Err(MobError::SessionError(error)),
+                    }
+                    let restored = self
+                        .session_service
+                        .observe_session_resume_authority(session_id)
+                        .await
+                        .map_err(MobError::SessionError)?;
+                    if !matches!(
+                        restored.lifecycle(),
+                        super::session_service::SessionResumeLifecycle::Archived {
+                            runtime_state: Some(meerkat_runtime::RuntimeState::Retired),
+                            ..
+                        }
+                    ) {
+                        return Err(MobError::Internal(format!(
+                            "retained resume compensation for '{session_id}' did not restore Archived+Retired authority"
+                        )));
+                    }
+                }
+                let retirement = adapter
+                    .prepare_executor_attachment_retirement_under_runtime_turn_boundary(
+                        expected_state.witness(),
+                    )
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?;
+                // The executor loop itself may need B to hand off. Retaining
+                // B while awaiting unregister deadlocks even if actor cleanup
+                // was already performed under that boundary.
+                drop(boundary);
+                let retired = match retirement {
+                    Some(retirement) => retirement.commit()
+                        .map_err(|error| MobError::Internal(error.to_string()))?
+                        .wait().await,
+                    None => adapter.unregister_executor_attachment_if_current(expected_state.witness()).await,
+                }
+                .map_err(|error| MobError::Internal(format!(
+                    "retained resume compensation for '{session_id}' left retirement pending: {error}"
+                )))?;
+                if !retired {
+                    self.finish_retained_resume_durable_convergence(
+                        session_id,
+                        false,
+                        expected_state,
+                    )
+                    .await?;
+                }
+                Ok(())
             }
-            FailedResumeRuntimeAuthority::ExactPrepared(prepared) => {
-                if prepared.session_id() != session_id
-                    || !prepared.owns_current_materialization_claim().await
+            RetainedAttachmentConvergence::JoinInFlightRetirement => {
+                expected_state.mark_cleanup_scheduled();
+                expected_state.clear_queued_turns().await;
+                // B is deliberately NOT held here: the machine-owned saga's
+                // post-stop cleanup reacquires that boundary.
+                match adapter
+                    .unregister_executor_attachment_if_current(expected_state.witness())
+                    .await
                 {
-                    return Err(MobError::Internal(format!(
-                        "resume rollback for '{session_id}' lost its exact prepared materialization claim before durable convergence"
-                    )));
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if !expected_state.actor_cleanup_completed() {
+                            return Err(MobError::Internal(format!(
+                                "retained resume compensation for '{session_id}' could not join its exact in-progress retirement"
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        return Err(MobError::Internal(format!(
+                            "retained resume compensation for '{session_id}' left exact in-progress retirement uncertain: {error}"
+                        )));
+                    }
                 }
-                if self.runtime_sessions.read().await.contains_key(session_id) {
-                    return Err(MobError::Internal(format!(
-                        "resume rollback for '{session_id}' found a sidecar without a committed exact attachment"
-                    )));
-                }
+                self.finish_retained_resume_durable_convergence(
+                    session_id,
+                    restore_retired,
+                    expected_state,
+                )
+                .await
+            }
+            RetainedAttachmentConvergence::AlreadyRetired => {
+                expected_state.mark_cleanup_scheduled();
+                expected_state.clear_queued_turns().await;
+                self.finish_retained_resume_durable_convergence(
+                    session_id,
+                    restore_retired,
+                    expected_state,
+                )
+                .await
+            }
+            RetainedAttachmentConvergence::SupersededByNewerAttachment => {
+                Err(MobError::Internal(format!(
+                    "retained resume compensation for '{session_id}' found a successor attachment; the retained custody refuses rather than retire it"
+                )))
             }
         }
+    }
+
+    /// Durable half of a retained resume compensation whose exact runtime
+    /// attachment is already gone or was just joined to completion.
+    ///
+    /// Restore Archived+Retired for a revived attempt only after revalidating
+    /// the retired predecessor under the service boundary.
+    async fn finish_retained_resume_durable_convergence(
+        &self,
+        session_id: &SessionId,
+        restore_retired: bool,
+        expected_state: &Arc<RuntimeSessionState>,
+    ) -> Result<(), MobError> {
+        let boundary =
+            RuntimeTurnFinalizationBoundaryLease::acquire(&self.session_service, session_id)
+                .await?;
+        boundary.require_session(session_id)?;
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            MobError::Internal(format!(
+                "retained resume compensation for '{session_id}' lost runtime authority"
+            ))
+        })?;
+        // The join deliberately released B. Validate again under B before
+        // any durable write: a successor may have published in that interval.
+        if !adapter.owns_executor_attachment_witness(expected_state.witness())
+            || !expected_state.actor_cleanup_completed()
+            || adapter
+                .current_session_registration_witness(session_id)
+                .await
+                .is_some()
+            || self
+                .runtime_sessions
+                .read()
+                .await
+                .get(session_id)
+                .is_some_and(|current| !same_runtime_attachment(current, expected_state))
+        {
+            return Err(MobError::Internal(format!(
+                "retained resume compensation for '{session_id}' cannot prove its retired predecessor without touching a successor"
+            )));
+        }
+        match self.session_service.has_live_session(session_id).await {
+            Ok(false) | Err(SessionError::NotFound { .. }) => {}
+            Ok(true) => {
+                return Err(MobError::Internal(format!(
+                    "retained resume compensation for '{session_id}' found a successor actor"
+                )));
+            }
+            Err(error) => return Err(MobError::SessionError(error)),
+        }
         if restore_retired {
-            // A retired-session revival crosses two durable authorities before
-            // executor attachment: Archived -> Active, then Retired -> Idle.
-            // Archive owns the ordered durable convergence: write the Active
-            // document back to Archived first, then retire the same machine
-            // runtime while B still excludes actor replacement. Do not fully
-            // unregister the exact attachment before this protocol consumes
-            // its runtime authority.
             match self
                 .session_service
                 .archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(session_id)
@@ -3483,58 +4340,8 @@ impl SessionBackend {
                 }
             }
         }
-
-        match authority {
-            FailedResumeRuntimeAuthority::ExactAttachment(expected_state) => {
-                let retirement = adapter
-                    .prepare_executor_attachment_retirement_under_runtime_turn_boundary(
-                        expected_state.witness(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "failed to acquire exact resumed attachment retirement for '{session_id}': {error}"
-                        ))
-                    })?;
-                if let Some(retirement) = retirement {
-                    let removed = retirement
-                        .commit_under_runtime_turn_finalization_boundary()
-                        .await
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "failed to retire exact resumed attachment for '{session_id}': {error}"
-                            ))
-                        })?;
-                    if !removed {
-                        return Err(MobError::Internal(format!(
-                            "resumed attachment for '{session_id}' changed during exact retirement"
-                        )));
-                    }
-                } else if adapter
-                    .current_executor_attachment_witness(session_id)
-                    .await
-                    .as_ref()
-                    == Some(expected_state.witness())
-                {
-                    return Err(MobError::Internal(format!(
-                        "resumed attachment for '{session_id}' remained current but could not be retired"
-                    )));
-                }
-                self.remove_runtime_session_state(session_id, Some(expected_state))
-                    .await;
-            }
-            FailedResumeRuntimeAuthority::ExactPrepared(_) => {
-                match self
-                    .session_service
-                    .discard_live_session_under_runtime_turn_boundary(session_id)
-                    .await
-                {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-
+        self.remove_runtime_session_state(session_id, Some(expected_state))
+            .await;
         if restore_retired {
             let restored = self
                 .session_service
@@ -3549,12 +4356,11 @@ impl SessionBackend {
                 }
             ) {
                 return Err(MobError::Internal(format!(
-                    "revived session rollback did not restore exact Archived+Retired authority for '{session_id}'"
+                    "retained resume compensation did not restore exact Archived+Retired authority for '{session_id}'"
                 )));
             }
-
-            return Ok(());
         }
+        drop(boundary);
         Ok(())
     }
 
@@ -3578,8 +4384,21 @@ impl SessionBackend {
             ops_adapter,
             runtime_sessions,
             explicit_resume_retirements: Arc::new(StdMutex::new(HashMap::new())),
+            reload_registrations: Arc::new(Mutex::new(HashMap::new())),
+            reload_materialization_claim: None,
             disposal,
+            settlement_ledger: None,
         }
+    }
+
+    /// A cheap clone of this backend scoped to ONE provisioning attempt's
+    /// settlement ledger. Every owner task that attempt spawns writes its
+    /// exact cleanup outcome into the ledger, including after the observing
+    /// caller has gone away.
+    fn scoped_to_settlement_ledger(&self, ledger: Arc<ProvisionSettlementLedger>) -> Self {
+        let mut scoped = self.clone();
+        scoped.settlement_ledger = Some(ledger);
+        scoped
     }
 
     /// Share the session-operation binding authority with the actor's
@@ -3716,6 +4535,96 @@ impl SessionBackend {
         session_id: &SessionId,
     ) -> Option<Arc<RuntimeSessionState>> {
         self.runtime_sessions.read().await.get(session_id).cloned()
+    }
+
+    async fn remove_reload_custody(
+        &self,
+        session_id: &SessionId,
+        expected: &Arc<Mutex<ReloadRegistrationCustody>>,
+    ) {
+        let mut retained = self.reload_registrations.lock().await;
+        if retained
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            retained.remove(session_id);
+        }
+    }
+
+    async fn prepare_member_materialization(
+        &self,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: SessionId,
+        mode: meerkat_runtime::LocalSessionMaterializationMode,
+    ) -> Result<PreparedSessionMaterialization, meerkat_runtime::RuntimeBindingsError> {
+        match self.reload_materialization_claim.as_ref() {
+            Some(slot) => slot.lock().await.take().ok_or_else(|| {
+                meerkat_runtime::RuntimeBindingsError::PrepareFailed(
+                    session_id,
+                    "reload materialization claim was already consumed".to_string(),
+                )
+            }),
+            None => {
+                adapter
+                    .prepare_local_session_materialization_with_mode(session_id, mode)
+                    .await
+            }
+        }
+    }
+
+    async fn admit_direct_session_turn(
+        &self,
+        session_id: SessionId,
+        req: StartTurnRequest,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ) -> Result<(), MobError> {
+        let (admitted_tx, admitted_rx) = oneshot::channel();
+        let service = Arc::clone(&self.session_service);
+        let task_session_id = session_id.clone();
+        let task = tokio::spawn(async move {
+            service
+                .start_turn_with_admission_notification(&task_session_id, req, admitted_tx)
+                .await
+        });
+        if admitted_rx.await.is_err() {
+            return match task.await {
+                Ok(Err(error)) => Err(session_turn_error_to_mob_error(&session_id, error)),
+                Ok(Ok(_)) => Err(MobError::Internal(
+                    "standalone turn completed without its required admission acknowledgment"
+                        .to_string(),
+                )),
+                Err(error) => Err(MobError::Internal(format!(
+                    "standalone admission owner exited before acknowledgment: {error}"
+                ))),
+            };
+        }
+        if let Some(applied_tx) = llm_identity_applied_tx {
+            let _ = applied_tx.send(Ok(None));
+        }
+        tokio::spawn(async move {
+            let terminal = match task.await {
+                Ok(Ok(result)) => Ok(super::handle::ExactTurnCompletion {
+                    session_id: session_id.clone(),
+                    terminal: super::handle::ExactTurnTerminal::Runtime(
+                        meerkat_runtime::completion::CompletionOutcome::Completed(Box::new(result)),
+                    ),
+                }),
+                Ok(Err(error)) => Ok(super::handle::ExactTurnCompletion {
+                    session_id: session_id.clone(),
+                    terminal: super::handle::ExactTurnTerminal::DirectSessionError(error),
+                }),
+                Err(error) => Err(MobError::Internal(format!(
+                    "standalone admitted-turn owner failed: {error}"
+                ))),
+            };
+            if let Some(completion_tx) = completion_tx {
+                let _ = completion_tx.send(terminal);
+            } else if let Err(error) = terminal.and_then(super::handle::legacy_exact_turn_result) {
+                tracing::warn!(%session_id, %error, "standalone admitted turn failed");
+            }
+        });
+        Ok(())
     }
 
     async fn remove_runtime_session_state(
@@ -3936,115 +4845,9 @@ impl SessionBackend {
         let (queued_event_tx, deferred_delivery) =
             defer_turn_events_until_machine_completion(session_id, event_tx);
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Browser WASM runs the mob actor and runtime adapter on the same
-            // single-thread executor. Polling this admission while the actor
-            // command is still active starves the spawned runtime task, so the
-            // standalone browser substrate schedules admission across the
-            // actor boundary. Native runtime-backed paths keep the stricter
-            // synchronous admission result below.
-            let adapter = Arc::clone(adapter);
-            let session_service = Arc::clone(&self.session_service);
-            let state = Arc::clone(&state);
-            let task_session_id = session_id.clone();
-            let task_input_id = requested_input_id;
-            let resolves_llm_identity_at_admission =
-                input.handling_mode() == Some(meerkat_core::types::HandlingMode::Steer);
-            tokio::spawn(async move {
-                let admission = async {
-                    let operation_guard = state
-                        .exact_operation_guard(&adapter, &task_session_id)
-                        .await?;
-                    let mut queued_context = state.register_turn_context(
-                        task_input_id.clone(),
-                        queued_event_tx,
-                        llm_identity_applied_tx,
-                    )?;
-                    let (outcome, handle) = adapter
-                        .accept_input_with_completion_for_attachment(state.witness(), input)
-                        .await
-                        .map_err(|error| MobError::Internal(error.to_string()))?;
-                    if let Some(queued_context) = queued_context.as_mut() {
-                        let canonical_input_id = match &outcome {
-                            meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => {
-                                Some(input_id)
-                            }
-                            meerkat_runtime::AcceptOutcome::Deduplicated {
-                                existing_id, ..
-                            } => Some(existing_id),
-                            _ => None,
-                        };
-                        if let Some(input_id) = canonical_input_id
-                            && input_id != &task_input_id
-                        {
-                            let _ = queued_context.rekey(input_id.clone());
-                        }
-                        if resolves_llm_identity_at_admission {
-                            queued_context.resolve_llm_identity_at_admission(None);
-                        }
-                    }
-                    drop(operation_guard);
-                    Ok::<_, MobError>((handle, queued_context, outcome.is_accepted()))
-                }
-                .await;
-
-                let (result, delivery_outcome) = match admission {
-                    Ok((Some(handle), queued_context, owns_committed_parent_projection)) => {
-                        let completion = handle.wait().await;
-                        drop(queued_context);
-                        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
-                        let committed_projection =
-                            enqueue_committed_parent_projection_after_runtime_completion(
-                                session_service.as_ref(),
-                                adapter.as_ref(),
-                                &task_session_id,
-                                owns_committed_parent_projection,
-                                &completion,
-                            )
-                            .await;
-                        let result = runtime_completion_to_exact_turn(&task_session_id, completion);
-                        observe_committed_parent_projection_result(
-                            &task_session_id,
-                            &committed_projection,
-                        );
-                        (result, delivery_outcome)
-                    }
-                    Ok((None, mut queued_context, _)) => {
-                        if let Some(queued_context) = queued_context.as_mut() {
-                            queued_context.resolve_without_execution(None);
-                        }
-                        drop(queued_context);
-                        (
-                            Ok(super::handle::ExactTurnCompletion {
-                                session_id: task_session_id.clone(),
-                                terminal: super::handle::ExactTurnTerminal::Runtime(
-                                    meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult,
-                                ),
-                            }),
-                            DeferredTurnEventOutcome::Succeeded,
-                        )
-                    }
-                    Err(error) => (Err(error), DeferredTurnEventOutcome::Failed),
-                };
-                if let Some(delivery) = deferred_delivery {
-                    delivery.release(delivery_outcome);
-                }
-                if let Some(completion_tx) = completion_tx {
-                    let _ = completion_tx.send(result);
-                } else if let Err(error) = result {
-                    tracing::warn!(
-                        session_id = %task_session_id,
-                        input_id = %task_input_id,
-                        %error,
-                        "background WASM runtime turn failed"
-                    );
-                }
-            });
-            Ok(())
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
+        // Every runtime-backed target awaits this same authoritative
+        // admission. Terminal observation remains detached below; the member
+        // lane already runs off the actor loop, including on WASM.
         {
             let resolves_llm_identity_at_admission =
                 input.handling_mode() == Some(meerkat_core::types::HandlingMode::Steer);
@@ -4730,6 +5533,15 @@ impl RuntimeSessionState {
                 == RUNTIME_ATTACHMENT_ACTIVE
     }
 
+    /// Recorded by this exact attachment's post-stop cleanup after its actor,
+    /// sidecar slot, and queued contexts have been removed. This does not by
+    /// itself certify the runtime registration's retirement.
+    fn actor_cleanup_completed(&self) -> bool {
+        self.attachment_phase
+            .load(std::sync::atomic::Ordering::Acquire)
+            == RUNTIME_ATTACHMENT_RETIRED
+    }
+
     pub(super) fn mark_cleanup_scheduled(&self) -> bool {
         loop {
             let phase = self
@@ -5098,6 +5910,16 @@ pub(super) struct PreparedServiceActorTransaction {
     // owner as B makes cancellation after oneshot send but before receive
     // retire the exact attachment before actor cleanup.
     committed_runtime_attachment: Option<(Arc<MeerkatMachine>, Arc<RuntimeSessionState>)>,
+    // Optional per-attempt settlement ledger. When present, every terminal
+    // cleanup this transaction performs — awaited abort or detached
+    // cancellation cleanup — records whether the exact resources were
+    // released, and hands back exact retry custody when they were not.
+    settlement_ledger: Option<Arc<ProvisionSettlementLedger>>,
+    // Teardowns this transaction handed to the process-owned cleanup runtime
+    // but has NOT observed. They are joined only after B is released, because
+    // the teardown reacquires that boundary. Until every one of them settles,
+    // this transaction has released nothing.
+    pending_attachment_teardowns: PendingAttachmentTeardowns,
     armed: bool,
 }
 
@@ -5126,8 +5948,30 @@ impl PreparedServiceActorTransaction {
             actor_witness_slot,
             cleanup_spawner,
             committed_runtime_attachment: None,
+            settlement_ledger: None,
+            pending_attachment_teardowns: PendingAttachmentTeardowns::new(),
             armed: true,
         })
+    }
+
+    /// Attach the caller's per-attempt settlement ledger. Transactions built
+    /// for surfaces that do not track provisioning settlement leave it unset;
+    /// recording is then a no-op and behavior is unchanged.
+    pub(super) fn record_settlement_into(
+        &mut self,
+        ledger: Option<Arc<ProvisionSettlementLedger>>,
+    ) {
+        self.settlement_ledger = ledger;
+    }
+
+    /// Take over teardowns an inner commit step handed off while this
+    /// transaction still held B. They travel with the transaction so its
+    /// cleanup joins them after releasing B.
+    pub(super) fn adopt_pending_attachment_teardowns(
+        &mut self,
+        teardowns: PendingAttachmentTeardowns,
+    ) {
+        self.pending_attachment_teardowns.extend(teardowns);
     }
 
     fn prepared(&self) -> Result<&PreparedSessionMaterialization, MobError> {
@@ -5366,6 +6210,9 @@ impl PreparedServiceActorTransaction {
         let (result_tx, result_rx) = oneshot::channel();
         cleanup_spawner.spawn_detached(async move {
             let mut transaction = self;
+            // Teardowns handed off while B is still held. They are adopted by
+            // the transaction below and joined only after B is released.
+            let mut teardowns = PendingAttachmentTeardowns::new();
             let commit_result = async {
                 let actor_witness = transaction.actor_witness()?;
                 let session_service = Arc::clone(&transaction.session_service);
@@ -5398,6 +6245,7 @@ impl PreparedServiceActorTransaction {
                         workgraph_service,
                         Arc::clone(&runtime_sessions),
                         boundary,
+                        &mut teardowns,
                     )
                     .await?
                 };
@@ -5405,7 +6253,7 @@ impl PreparedServiceActorTransaction {
                 let callback_slot = Arc::clone(&committed_operation_slot);
                 let committed_state = match transaction.boundary.as_mut() {
                     Some(boundary) => {
-                        commit_pending_runtime_session_state(
+                        commit_pending_runtime_session_state_with_teardown_custody(
                             &adapter,
                             &session_id,
                             &runtime_sessions,
@@ -5413,6 +6261,7 @@ impl PreparedServiceActorTransaction {
                             replaced_state.as_ref(),
                             pending,
                             boundary,
+                            &mut teardowns,
                             move |_| {
                                 let committed = prepared_operation.commit()?;
                                 *callback_slot
@@ -5447,6 +6296,9 @@ impl PreparedServiceActorTransaction {
                 Ok::<_, MobError>((committed_state, committed_operation))
             }
             .await;
+            // Scheduling is not settlement: whatever the inner future handed
+            // off is now this transaction's retained custody.
+            transaction.adopt_pending_attachment_teardowns(teardowns);
 
             match commit_result {
                 Ok((committed_state, committed_operation)) => {
@@ -5512,6 +6364,7 @@ impl PreparedServiceActorTransaction {
         let (result_tx, result_rx) = oneshot::channel();
         cleanup_spawner.spawn_detached(async move {
             let mut transaction = self;
+            let mut teardowns = PendingAttachmentTeardowns::new();
             let prepare_result = async {
                 let actor_witness = transaction.actor_witness()?;
                 let session_service = Arc::clone(&transaction.session_service);
@@ -5525,6 +6378,7 @@ impl PreparedServiceActorTransaction {
                         None,
                         Arc::clone(&runtime_sessions),
                         boundary,
+                        &mut teardowns,
                     )
                     .await?
                 };
@@ -5533,13 +6387,12 @@ impl PreparedServiceActorTransaction {
                     .run_executor_attach_post_ensure_test_hook(&session_id)
                     .await
                 {
-                    let cleanup = pending
-                        .abort_under_runtime_turn_finalization_boundary()
-                        .await;
+                    let cleanup =
+                        schedule_pending_attachment_teardown(pending, &mut teardowns);
                     return Err(MobError::Internal(match cleanup {
-                        Ok(()) => format!("pre-commit attachment hook failed: {error}"),
-                        Err(cleanup_error) => format!(
-                            "pre-commit attachment hook failed: {error}; exact pending-attachment cleanup failed: {cleanup_error}"
+                        None => format!("pre-commit attachment hook failed: {error}"),
+                        Some(cleanup_error) => format!(
+                            "pre-commit attachment hook failed: {error}; exact pending-attachment teardown could not be handed off: {cleanup_error}"
                         ),
                     }));
                 }
@@ -5552,12 +6405,14 @@ impl PreparedServiceActorTransaction {
                     candidate,
                     pending,
                     transaction.boundary_slot_mut()?,
+                    &mut teardowns,
                 )
                 .await?;
                 transaction.commit();
                 Ok::<_, MobError>(publication)
             }
             .await;
+            transaction.adopt_pending_attachment_teardowns(teardowns);
 
             match prepare_result {
                 Ok(publication) => {
@@ -5585,13 +6440,58 @@ impl PreparedServiceActorTransaction {
         })?
     }
 
+    /// Own the complete terminal cleanup for one transaction: the retained
+    /// parts under B, then — only after this future has dropped B — every
+    /// teardown that was handed off while B was held. The terminal settlement
+    /// fact is recorded HERE, inside the owning task, before any observer can
+    /// see the result: a dropped observer must not be able to erase or
+    /// fabricate an owner settlement.
+    #[allow(clippy::too_many_arguments)]
     async fn cleanup_owned_parts(
+        session_id: SessionId,
+        session_service: Arc<dyn MobSessionService>,
+        prepared: Option<PreparedSessionMaterialization>,
+        boundary: Option<RuntimeTurnFinalizationBoundaryLease>,
+        actor_witness_slot: meerkat_session::LiveSessionActorWitnessSlot,
+        committed_runtime_attachment: Option<(Arc<MeerkatMachine>, Arc<RuntimeSessionState>)>,
+        pending_attachment_teardowns: PendingAttachmentTeardowns,
+        settlement_ledger: Option<Arc<ProvisionSettlementLedger>>,
+    ) -> Result<(), MobError> {
+        // Every path inside this call releases B when its future completes.
+        let retained = Self::cleanup_retained_parts_under_boundary(
+            session_id.clone(),
+            session_service,
+            prepared,
+            boundary,
+            actor_witness_slot,
+            committed_runtime_attachment,
+            settlement_ledger.clone(),
+        )
+        .await;
+        // B is released now, so the machine-owned teardowns that reacquire it
+        // can be joined. Until they answer, nothing here is released.
+        let mut teardown_errors = Vec::new();
+        for teardown in pending_attachment_teardowns {
+            if let Err(error) = teardown.wait().await {
+                teardown_errors.push(format!(
+                    "exact pending-attachment teardown for '{session_id}': {error}"
+                ));
+            }
+        }
+        let outcome = merge_owned_cleanup_outcome(&session_id, retained, teardown_errors);
+        record_owned_cleanup_settlement(settlement_ledger.as_ref(), &outcome);
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cleanup_retained_parts_under_boundary(
         session_id: SessionId,
         session_service: Arc<dyn MobSessionService>,
         mut prepared: Option<PreparedSessionMaterialization>,
         boundary: Option<RuntimeTurnFinalizationBoundaryLease>,
         actor_witness_slot: meerkat_session::LiveSessionActorWitnessSlot,
         committed_runtime_attachment: Option<(Arc<MeerkatMachine>, Arc<RuntimeSessionState>)>,
+        settlement_ledger: Option<Arc<ProvisionSettlementLedger>>,
     ) -> Result<(), MobError> {
         let mut boundary = Some(boundary.ok_or_else(|| {
             MobError::Internal(format!(
@@ -5605,6 +6505,19 @@ impl PreparedServiceActorTransaction {
         let mut errors = Vec::new();
         if let Some((adapter, state)) = committed_runtime_attachment {
             let attachment_witness = state.witness().clone();
+            // Every failure below leaves this exact attachment retained. Hand
+            // the caller the same witness-exact authority a successful receipt
+            // would have carried, so the retry compensates this incarnation
+            // and fails closed against any successor.
+            let retain = |detail: String| {
+                if let Some(ledger) = settlement_ledger.as_ref() {
+                    ledger.record_retained_attachment(
+                        &session_id,
+                        ResumedMemberRollbackAuthority::new(Arc::clone(&state)),
+                        detail,
+                    );
+                }
+            };
             match adapter
                 .prepare_executor_attachment_retirement_under_runtime_turn_boundary(
                     &attachment_witness,
@@ -5617,22 +6530,35 @@ impl PreparedServiceActorTransaction {
                     // assembly available, but fail admission closed until the
                     // saga has durably entered Draining, stopped the executor,
                     // and invoked canonical actor/sidecar cleanup.
-                    let completion = retirement.commit().map_err(|error| {
-                        state.mark_retirement_uncertain();
-                        MobError::Internal(format!(
-                            "actor transaction cleanup for '{session_id}' could not transfer exact attachment retirement: {error}"
-                        ))
-                    })?;
+                    let completion = match retirement.commit() {
+                        Ok(completion) => completion,
+                        Err(error) => {
+                            state.mark_retirement_uncertain();
+                            let detail = format!(
+                                "actor transaction cleanup for '{session_id}' could not transfer exact attachment retirement: {error}"
+                            );
+                            retain(detail.clone());
+                            return Err(MobError::Internal(detail));
+                        }
+                    };
                     state.mark_retirement_uncertain();
                     drop(boundary.take());
                     return match completion.wait().await {
                         Ok(true) => Ok(()),
-                        Ok(false) => Err(MobError::Internal(format!(
-                            "actor transaction cleanup for '{session_id}' lost its exact attachment after retirement transfer"
-                        ))),
-                        Err(error) => Err(MobError::Internal(format!(
-                            "actor transaction cleanup for '{session_id}' left exact attachment retirement uncertain: {error}"
-                        ))),
+                        Ok(false) => {
+                            let detail = format!(
+                                "actor transaction cleanup for '{session_id}' lost its exact attachment after retirement transfer"
+                            );
+                            retain(detail.clone());
+                            Err(MobError::Internal(detail))
+                        }
+                        Err(error) => {
+                            let detail = format!(
+                                "actor transaction cleanup for '{session_id}' left exact attachment retirement uncertain: {error}"
+                            );
+                            retain(detail.clone());
+                            Err(MobError::Internal(detail))
+                        }
                     };
                 }
                 // A terminal runtime may already have completed the machine's
@@ -5647,21 +6573,31 @@ impl PreparedServiceActorTransaction {
                         .await
                     {
                         Ok(true) => Ok(()),
-                        Ok(false) => Err(MobError::Internal(format!(
-                            "actor transaction cleanup for '{session_id}' could not join its exact in-progress retirement"
-                        ))),
-                        Err(error) => Err(MobError::Internal(format!(
-                            "actor transaction cleanup for '{session_id}' left exact in-progress retirement uncertain: {error}"
-                        ))),
+                        Ok(false) => {
+                            let detail = format!(
+                                "actor transaction cleanup for '{session_id}' could not join its exact in-progress retirement"
+                            );
+                            retain(detail.clone());
+                            Err(MobError::Internal(detail))
+                        }
+                        Err(error) => {
+                            let detail = format!(
+                                "actor transaction cleanup for '{session_id}' left exact in-progress retirement uncertain: {error}"
+                            );
+                            retain(detail.clone());
+                            Err(MobError::Internal(detail))
+                        }
                     };
                 }
                 Ok(None) => {}
                 Err(error) => {
                     state.mark_retirement_uncertain();
                     drop(boundary.take());
-                    return Err(MobError::Internal(format!(
+                    let detail = format!(
                         "actor transaction cleanup for '{session_id}' could not prepare exact attachment retirement; actor and sidecar were preserved fail-closed: {error}"
-                    )));
+                    );
+                    retain(detail.clone());
+                    return Err(MobError::Internal(detail));
                 }
             }
         }
@@ -5692,6 +6628,13 @@ impl PreparedServiceActorTransaction {
         }
     }
 
+    /// Await the exact owner-side cleanup of every part this transaction still
+    /// holds.
+    ///
+    /// Returning from this call IS the settlement observation: `Ok` means the
+    /// owner task proved release, `Err` means the resources are retained. When
+    /// a settlement ledger is attached, both outcomes are recorded there, so a
+    /// caller that only sees the error still learns which one happened.
     pub(super) async fn abort(mut self) -> Result<(), MobError> {
         let session_id = self.session_id.clone();
         let session_service = Arc::clone(&self.session_service);
@@ -5699,9 +6642,13 @@ impl PreparedServiceActorTransaction {
         let boundary = self.boundary.take();
         let actor_witness_slot = self.actor_witness_slot.clone();
         let committed_runtime_attachment = self.committed_runtime_attachment.take();
+        let pending_attachment_teardowns = std::mem::take(&mut self.pending_attachment_teardowns);
+        let settlement_ledger = self.settlement_ledger.take();
         let cleanup_spawner = self.cleanup_spawner.clone();
         let (result_tx, result_rx) = oneshot::channel();
         cleanup_spawner.spawn_detached(async move {
+            // The owner both performs the cleanup and publishes its terminal
+            // fact. The observer below never writes settlement.
             let result = Self::cleanup_owned_parts(
                 session_id,
                 session_service,
@@ -5709,16 +6656,22 @@ impl PreparedServiceActorTransaction {
                 boundary,
                 actor_witness_slot,
                 committed_runtime_attachment,
+                pending_attachment_teardowns,
+                settlement_ledger,
             )
             .await;
             let _ = result_tx.send(result);
         });
         self.armed = false;
-        result_rx.await.map_err(|error| {
-            MobError::Internal(format!(
+        match result_rx.await {
+            Ok(result) => result,
+            // Channel closure is not a settlement: the owner task's outcome
+            // was never observed here, so this observer reports an error and
+            // publishes no fact of its own.
+            Err(error) => Err(MobError::Internal(format!(
                 "owned actor materialization abort ended without a result: {error}"
-            ))
-        })?
+            ))),
+        }
     }
 
     pub(super) fn commit(&mut self) {
@@ -5740,6 +6693,18 @@ impl Drop for PreparedServiceActorTransaction {
         let boundary = self.boundary.take();
         let actor_witness_slot = self.actor_witness_slot.clone();
         let committed_runtime_attachment = self.committed_runtime_attachment.take();
+        let pending_attachment_teardowns = std::mem::take(&mut self.pending_attachment_teardowns);
+        let settlement_ledger = self.settlement_ledger.take();
+        if let Some(ledger) = settlement_ledger.as_ref() {
+            // Cancellation cleanup runs in a detached owner task. At THIS
+            // instant nothing is settled, and the observing caller may return
+            // before the task finishes, so the attempt is recorded as
+            // retained-uncertain rather than optimistically released.
+            ledger.record_retained(format!(
+                "cancelled actor materialization cleanup for '{}' was detached without an awaited settlement",
+                self.session_id
+            ));
+        }
         self.cleanup_spawner.spawn_detached(async move {
             if let Err(error) = PreparedServiceActorTransaction::cleanup_owned_parts(
                 session_id.clone(),
@@ -5748,6 +6713,8 @@ impl Drop for PreparedServiceActorTransaction {
                 boundary,
                 actor_witness_slot,
                 committed_runtime_attachment,
+                pending_attachment_teardowns,
+                settlement_ledger,
             )
             .await
             {
@@ -6113,6 +7080,121 @@ impl Drop for CommittedRuntimeSessionPublicationLease {
 }
 
 #[cfg(feature = "runtime-adapter")]
+/// Exact teardown completions retained by one owner while it still holds the
+/// turn-finalization boundary. Every entry is a teardown that has been handed
+/// to the process-owned cleanup runtime but NOT yet observed.
+#[cfg(feature = "runtime-adapter")]
+pub(super) type PendingAttachmentTeardowns =
+    Vec<meerkat_runtime::PendingExecutorAttachmentAbortCompletion>;
+
+/// Hand one pending attachment to its process-owned teardown while KEEPING the
+/// exact completion.
+///
+/// The teardown reacquires the turn-finalization boundary, so it cannot be
+/// awaited here. Retaining the completion is what makes the difference between
+/// "cleanup was scheduled" and "cleanup settled" observable: the owner joins
+/// these after releasing B and only then may report a release.
+/// Merge the boundary-held cleanup result with the joined teardown outcomes.
+///
+/// A teardown failure is never absorbed by a successful retained-parts
+/// cleanup: the transaction only released everything when BOTH halves
+/// answered `Ok`.
+#[cfg(feature = "runtime-adapter")]
+fn merge_owned_cleanup_outcome(
+    session_id: &SessionId,
+    retained: Result<(), MobError>,
+    teardown_errors: Vec<String>,
+) -> Result<(), MobError> {
+    match (retained, teardown_errors.is_empty()) {
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(MobError::Internal(format!(
+            "actor transaction cleanup for '{session_id}' released its retained parts but its exact pending-attachment teardown did not settle: {}",
+            teardown_errors.join("; ")
+        ))),
+        (Err(error), true) => Err(error),
+        (Err(error), false) => Err(MobError::Internal(format!(
+            "{error}; exact pending-attachment teardown also did not settle: {}",
+            teardown_errors.join("; ")
+        ))),
+    }
+}
+
+/// Publish one owner's terminal cleanup fact.
+///
+/// Only the task that performed the cleanup calls this, and it calls it BEFORE
+/// handing the result to any observer. A release is recorded only for a fully
+/// settled cleanup, which now includes every joined teardown.
+#[cfg(feature = "runtime-adapter")]
+fn record_owned_cleanup_settlement(
+    settlement_ledger: Option<&Arc<ProvisionSettlementLedger>>,
+    outcome: &Result<(), MobError>,
+) {
+    let Some(ledger) = settlement_ledger else {
+        return;
+    };
+    match outcome {
+        Ok(()) => ledger.record_owner_release(),
+        Err(error) => ledger.record_retained(error.to_string()),
+    }
+}
+
+/// How a retained exact attachment stands against the machine when a
+/// compensation retry arrives.
+///
+/// The machine hides a serving projection as soon as its unregister saga
+/// enters Draining, so "no current witness" is NOT proof that the exact
+/// incarnation is gone — and it is never proof that a successor took over.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetainedAttachmentConvergence {
+    /// Our exact attachment is still the serving projection.
+    ServingExact,
+    /// Ours is no longer projected, but the machine still holds this session:
+    /// its exact unregister saga is in flight. The retry joins that saga
+    /// instead of pretending authority was lost.
+    JoinInFlightRetirement,
+    /// The machine holds nothing for this session; the exact attachment is
+    /// already gone and only durable convergence remains.
+    AlreadyRetired,
+    /// A different incarnation serves this session. Compensation refuses; a
+    /// successor is never removed by a predecessor's retained custody.
+    SupersededByNewerAttachment,
+}
+
+#[cfg(feature = "runtime-adapter")]
+pub(super) fn classify_retained_attachment_convergence(
+    current: Option<&RuntimeExecutorAttachmentWitness>,
+    ours: &RuntimeExecutorAttachmentWitness,
+    machine_holds_session: bool,
+) -> RetainedAttachmentConvergence {
+    match current {
+        Some(current) if current == ours => RetainedAttachmentConvergence::ServingExact,
+        Some(_) => RetainedAttachmentConvergence::SupersededByNewerAttachment,
+        None if machine_holds_session => RetainedAttachmentConvergence::JoinInFlightRetirement,
+        None => RetainedAttachmentConvergence::AlreadyRetired,
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn schedule_pending_attachment_teardown(
+    pending: PendingRuntimeExecutorAttachment,
+    teardowns: &mut PendingAttachmentTeardowns,
+) -> Option<MobError> {
+    match pending.abort_under_runtime_turn_finalization_boundary_with_completion() {
+        Ok(completion) => {
+            teardowns.push(completion);
+            None
+        }
+        Err(error) => Some(MobError::Internal(format!(
+            "exact pending attachment teardown could not be handed off: {error}"
+        ))),
+    }
+}
+
+// Exact B + sidecar-map + pending-attachment publication boundary; the added
+// argument is the retained teardown custody, which must not be hidden behind a
+// bag that would let a caller forget to join it.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_pending_runtime_session_state_for_publication(
     _adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
@@ -6121,6 +7203,7 @@ pub(super) async fn commit_pending_runtime_session_state_for_publication(
     candidate: Arc<RuntimeSessionState>,
     mut pending: PendingRuntimeExecutorAttachment,
     boundary: &mut Option<RuntimeTurnFinalizationBoundaryLease>,
+    teardowns: &mut PendingAttachmentTeardowns,
 ) -> Result<CommittedRuntimeSessionPublicationLease, MobError> {
     boundary
         .as_ref()
@@ -6131,29 +7214,26 @@ pub(super) async fn commit_pending_runtime_session_state_for_publication(
         })?
         .require_session(session_id)?;
     if abort_actor_witness.session_id() != session_id {
-        pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .map_err(|error| MobError::Internal(error.to_string()))?;
+        if let Some(error) = schedule_pending_attachment_teardown(pending, teardowns) {
+            return Err(error);
+        }
         return Err(MobError::Internal(format!(
             "live actor witness for '{}' cannot authorize host attachment publication for '{session_id}'",
             abort_actor_witness.session_id()
         )));
     }
     if !candidate.attachment_matches(pending.witness()) {
-        pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .map_err(|error| MobError::Internal(error.to_string()))?;
+        if let Some(error) = schedule_pending_attachment_teardown(pending, teardowns) {
+            return Err(error);
+        }
         return Err(MobError::Internal(format!(
             "runtime sidecar candidate did not match pending host attachment for '{session_id}'"
         )));
     }
     if runtime_sessions.read().await.contains_key(session_id) {
-        pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .map_err(|error| MobError::Internal(error.to_string()))?;
+        if let Some(error) = schedule_pending_attachment_teardown(pending, teardowns) {
+            return Err(error);
+        }
         return Err(MobError::Internal(format!(
             "runtime sidecar slot for '{session_id}' is already owned"
         )));
@@ -6165,13 +7245,11 @@ pub(super) async fn commit_pending_runtime_session_state_for_publication(
     {
         Ok(lease) => lease,
         Err(error) => {
-            let cleanup = pending
-                .abort_under_runtime_turn_finalization_boundary()
-                .await;
+            let cleanup = schedule_pending_attachment_teardown(pending, teardowns);
             return Err(MobError::Internal(match cleanup {
-                Ok(()) => error.to_string(),
-                Err(cleanup_error) => format!(
-                    "{error}; exact pending host attachment cleanup failed: {cleanup_error}"
+                None => error.to_string(),
+                Some(cleanup_error) => format!(
+                    "{error}; exact pending host attachment cleanup could not be handed off: {cleanup_error}"
                 ),
             }));
         }
@@ -6213,9 +7291,14 @@ pub(super) async fn commit_pending_runtime_session_state_for_publication(
     })
 }
 
+/// Legacy shape for callers that do not track teardown settlement.
+///
+/// Any teardown started on a failure path is handed off and then DROPPED
+/// unobserved, so this shape can never support a release claim. Owners that
+/// report settlement must use
+/// [`commit_pending_runtime_session_state_with_teardown_custody`] and join the
+/// retained completions after releasing B.
 #[cfg(feature = "runtime-adapter")]
-// This is the exact B + sidecar-map + pending-attachment commit boundary;
-// a params bag would duplicate the transaction authority already carried here.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_pending_runtime_session_state(
     adapter: &Arc<MeerkatMachine>,
@@ -6223,16 +7306,43 @@ pub(super) async fn commit_pending_runtime_session_state(
     runtime_sessions: &Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
     candidate: Arc<RuntimeSessionState>,
     replaced_state: Option<&Arc<RuntimeSessionState>>,
+    pending: PendingRuntimeExecutorAttachment,
+    boundary: &mut RuntimeTurnFinalizationBoundaryLease,
+    on_committed: impl FnOnce(&RuntimeExecutorAttachmentWitness) -> Result<(), MobError>,
+) -> Result<Arc<RuntimeSessionState>, MobError> {
+    let mut teardowns = PendingAttachmentTeardowns::new();
+    commit_pending_runtime_session_state_with_teardown_custody(
+        adapter,
+        session_id,
+        runtime_sessions,
+        candidate,
+        replaced_state,
+        pending,
+        boundary,
+        &mut teardowns,
+        on_committed,
+    )
+    .await
+}
+
+#[cfg(feature = "runtime-adapter")]
+// This is the exact B + sidecar-map + pending-attachment commit boundary;
+// a params bag would duplicate the transaction authority already carried here.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn commit_pending_runtime_session_state_with_teardown_custody(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    runtime_sessions: &Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
+    candidate: Arc<RuntimeSessionState>,
+    replaced_state: Option<&Arc<RuntimeSessionState>>,
     mut pending: PendingRuntimeExecutorAttachment,
     boundary: &mut RuntimeTurnFinalizationBoundaryLease,
+    teardowns: &mut PendingAttachmentTeardowns,
     on_committed: impl FnOnce(&RuntimeExecutorAttachmentWitness) -> Result<(), MobError>,
 ) -> Result<Arc<RuntimeSessionState>, MobError> {
     boundary.require_session(session_id)?;
     if !candidate.attachment_matches(pending.witness()) {
-        let abort_error = pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .err();
+        let abort_error = schedule_pending_attachment_teardown(pending, teardowns);
         return Err(MobError::Internal(match abort_error {
             Some(error) => format!(
                 "runtime sidecar candidate did not match the pending attachment for session '{session_id}', and attachment abort failed: {error}"
@@ -6244,10 +7354,7 @@ pub(super) async fn commit_pending_runtime_session_state(
     }
 
     if !candidate.queued_turn_owner.is_owned_by(candidate.witness()) {
-        let abort_error = pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .err();
+        let abort_error = schedule_pending_attachment_teardown(pending, teardowns);
         return Err(MobError::Internal(match abort_error {
             Some(error) => format!(
                 "sidecar for '{session_id}' did not own its exact attachment-local queue, and attachment abort failed: {error}"
@@ -6259,10 +7366,7 @@ pub(super) async fn commit_pending_runtime_session_state(
     }
     if let Some(replaced) = replaced_state {
         if !replaced.attachment_is_active(replaced.witness()) || replaced.cleanup_scheduled() {
-            let abort_error = pending
-                .abort_under_runtime_turn_finalization_boundary()
-                .await
-                .err();
+            let abort_error = schedule_pending_attachment_teardown(pending, teardowns);
             return Err(MobError::Internal(match abort_error {
                 Some(error) => format!(
                     "missing-live sidecar replacement for '{session_id}' lost exact A attachment authority, and B abort failed: {error}"
@@ -6284,10 +7388,7 @@ pub(super) async fn commit_pending_runtime_session_state(
         replaced_state,
     ) {
         drop(runtime_sessions_guard);
-        let abort_error = pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .err();
+        let abort_error = schedule_pending_attachment_teardown(pending, teardowns);
         return Err(match abort_error {
             Some(abort_error) => MobError::Internal(format!(
                 "{error}; exact attachment abort also failed: {abort_error}"
@@ -6332,14 +7433,13 @@ pub(super) async fn commit_pending_runtime_session_state(
             drop(staged_activation);
             drop(staged_map_publication);
             drop(runtime_sessions_guard);
-            if let Err(cleanup_error) = pending
-                .abort_under_runtime_turn_finalization_boundary()
-                .await
-            {
+            if let Some(cleanup_error) = schedule_pending_attachment_teardown(pending, teardowns) {
                 return Err(MobError::Internal(format!(
-                    "{error}; exact attachment cleanup failed: {cleanup_error}"
+                    "{error}; exact attachment cleanup could not be handed off: {cleanup_error}"
                 )));
             }
+            // The teardown is now retained custody, not a settled release: the
+            // caller joins it after releasing B before reporting anything.
             return Err(MobError::Internal(error.to_string()));
         }
     };
@@ -6383,6 +7483,9 @@ pub(super) async fn commit_pending_runtime_session_state(
 }
 
 #[cfg(feature = "runtime-adapter")]
+// Same reason as the commit boundary above: the teardown sink is explicit
+// custody, not incidental configuration.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_prepared_runtime_session_state(
     prepared: &mut PreparedSessionMaterialization,
     actor_witness: meerkat_session::LiveSessionActorWitness,
@@ -6391,6 +7494,7 @@ pub(super) async fn prepare_prepared_runtime_session_state(
     workgraph_service: Option<meerkat::WorkGraphService>,
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
     boundary: &mut RuntimeTurnFinalizationBoundaryLease,
+    teardowns: &mut PendingAttachmentTeardowns,
 ) -> Result<(Arc<RuntimeSessionState>, PendingRuntimeExecutorAttachment), MobError> {
     let session_id = prepared.session_id().clone();
     boundary.require_session(&session_id)?;
@@ -6430,10 +7534,7 @@ pub(super) async fn prepare_prepared_runtime_session_state(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let Some(candidate) = candidate else {
-        let abort_error = pending
-            .abort_under_runtime_turn_finalization_boundary()
-            .await
-            .err();
+        let abort_error = schedule_pending_attachment_teardown(pending, teardowns);
         return Err(MobError::Internal(match abort_error {
             Some(error) => format!(
                 "prepared executor factory did not publish an exact sidecar candidate for session '{session_id}', and attachment abort failed: {error}"
@@ -6462,6 +7563,842 @@ mod tests {
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
     use serde_json::json;
+
+    /// Settlement seam for the cold-resume provisioning repair.
+    ///
+    /// These tests pin the contract the parent integrates against: an
+    /// unobserved attempt is never "no effects", an awaited terminal is a real
+    /// settlement, and a failed cleanup hands back exact witness-bound custody.
+    #[cfg(feature = "runtime-adapter")]
+    mod provision_settlement {
+        use super::super::{
+            PendingAttachmentTeardowns, ProvisionEffectSettlement, ProvisionSessionOrigin,
+            ProvisionSettlementLedger, ResumedMemberRollbackAuthority,
+            RetainedAttachmentConvergence, RetainedCleanupPlan, RetainedOperationAnchor,
+            RetainedProvisionEffects, RuntimeSessionState, classify_external_provision_failure,
+            classify_retained_attachment_convergence, merge_owned_cleanup_outcome,
+            plan_retained_cleanup, record_owned_cleanup_settlement,
+            schedule_pending_attachment_teardown,
+        };
+        use crate::error::MobError;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
+        use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+        use meerkat_core::ops::OperationId;
+        use meerkat_core::types::SessionId;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::Notify;
+
+        struct InertExecutor;
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for InertExecutor {
+            async fn apply(
+                &mut self,
+                _run_id: meerkat_core::RunId,
+                _primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                Err(CoreExecutorError::Internal(
+                    "settlement fixture must not apply turns".to_string(),
+                ))
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn unrecorded_attempt_is_unproven_and_never_reads_as_no_effects() {
+            let ledger = ProvisionSettlementLedger::default();
+            let failure = ledger.settle_failure(MobError::Internal("provision failed".to_string()));
+
+            assert_eq!(failure.settlement(), ProvisionEffectSettlement::Unproven);
+            assert!(failure.requires_further_cleanup());
+            assert!(failure.retained_effects().is_none());
+        }
+
+        #[test]
+        fn awaited_owner_release_is_the_only_settled_negative_outcome() {
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.record_owner_release();
+            let failure = ledger.settle_failure(MobError::Internal("provision failed".to_string()));
+
+            assert_eq!(
+                failure.settlement(),
+                ProvisionEffectSettlement::ReleasedByOwner
+            );
+            assert!(!failure.requires_further_cleanup());
+            assert!(failure.retained_effects().is_none());
+        }
+
+        #[tokio::test]
+        async fn failed_cleanup_retains_exact_witness_bound_custody_and_stays_sticky() {
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            machine
+                .register_session_with_executor(session_id.clone(), Box::new(InertExecutor))
+                .await
+                .expect("register settlement fixture");
+            let witness = machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .expect("registered fixture must expose its serving attachment");
+            let state = Arc::new(RuntimeSessionState::for_attachment_without_actor_witness(
+                witness.clone(),
+            ));
+
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.set_attempt_origin(ProvisionSessionOrigin::RevivedRetired);
+            let operation_id = OperationId::new();
+            ledger.set_attempt_operation_id(operation_id.clone());
+            ledger.record_retained_attachment(
+                &session_id,
+                ResumedMemberRollbackAuthority::new(Arc::clone(&state)),
+                "exact attachment retirement uncertain",
+            );
+            // A later owner release inside the SAME attempt must not erase an
+            // already-failed compensation.
+            ledger.record_owner_release();
+
+            let failure = ledger.settle_failure(MobError::Internal("provision failed".to_string()));
+            assert_eq!(
+                failure.settlement(),
+                ProvisionEffectSettlement::RetainedUncertain
+            );
+            let effects = failure
+                .retained_effects()
+                .expect("failed cleanup must hand back exact custody");
+            assert_eq!(effects.member_ref().bridge_session_id(), Some(&session_id));
+            assert_eq!(
+                effects.session_origin(),
+                ProvisionSessionOrigin::RevivedRetired,
+                "custody must name the compensation the parent has to run"
+            );
+            assert_eq!(
+                effects.operation_anchor(),
+                &RetainedOperationAnchor::Minted(operation_id),
+                "the ops row minted before the effect is the exact row a retry must abort"
+            );
+            assert!(
+                effects.rollback_authority().state().is_some(),
+                "retry must present the exact attachment witness, not a session id"
+            );
+            assert!(
+                effects
+                    .detail()
+                    .contains("exact attachment retirement uncertain")
+            );
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean settlement fixture");
+        }
+
+        #[test]
+        fn custody_is_withheld_when_the_attempt_origin_is_unknown() {
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.record_retained("cleanup detached without an awaited settlement");
+            let failure = ledger.settle_failure(MobError::Internal("provision failed".to_string()));
+
+            assert_eq!(
+                failure.settlement(),
+                ProvisionEffectSettlement::RetainedUncertain
+            );
+            assert!(
+                failure.retained_effects().is_none(),
+                "a guessed compensation verb is worse than an explicit absence of custody"
+            );
+        }
+
+        #[tokio::test]
+        async fn owned_cleanup_settles_after_its_observer_is_dropped() {
+            let spawner = meerkat_runtime::RuntimeCleanupTaskSpawner::acquire()
+                .expect("cleanup runtime must be available");
+            let ledger = Arc::new(ProvisionSettlementLedger::default());
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let settled = Arc::new(AtomicBool::new(false));
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel::<()>();
+
+            {
+                let ledger = Arc::clone(&ledger);
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                let settled = Arc::clone(&settled);
+                spawner.spawn_detached(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    ledger.record_owner_release();
+                    settled.store(true, Ordering::Release);
+                    // Observer loss must not change what the owner recorded.
+                    let _ = result_tx.send(());
+                });
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                .await
+                .expect("owner cleanup must start");
+            drop(result_rx);
+            assert_eq!(
+                ledger.settlement_for_test(),
+                ProvisionEffectSettlement::Unproven,
+                "an in-flight owner task has not settled anything yet"
+            );
+
+            release.notify_one();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !settled.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "owner cleanup must run to completion after observer drop"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                ledger.settlement_for_test(),
+                ProvisionEffectSettlement::ReleasedByOwner
+            );
+        }
+
+        #[test]
+        fn external_uncertain_cleanup_projects_retained_and_others_stay_unproven() {
+            let retained =
+                classify_external_provision_failure(MobError::ExternalMemberCleanupUncertain {
+                    reason: "peer reservation quarantined".to_string(),
+                });
+            assert_eq!(
+                retained.settlement(),
+                ProvisionEffectSettlement::RetainedUncertain
+            );
+            assert!(retained.requires_further_cleanup());
+
+            let unproven =
+                classify_external_provision_failure(MobError::Internal("transport".to_string()));
+            assert_eq!(unproven.settlement(), ProvisionEffectSettlement::Unproven);
+            assert!(unproven.requires_further_cleanup());
+        }
+
+        /// Build a real attachment witness + sidecar for custody fixtures.
+        async fn exact_attachment(
+            machine: &Arc<meerkat_runtime::MeerkatMachine>,
+            session_id: &SessionId,
+        ) -> Arc<RuntimeSessionState> {
+            machine
+                .register_session_with_executor(session_id.clone(), Box::new(InertExecutor))
+                .await
+                .expect("register anchor fixture");
+            let witness = machine
+                .current_executor_attachment_witness(session_id)
+                .await
+                .expect("registered fixture must expose its serving attachment");
+            Arc::new(RuntimeSessionState::for_attachment_without_actor_witness(
+                witness,
+            ))
+        }
+
+        async fn custody_with(
+            machine: &Arc<meerkat_runtime::MeerkatMachine>,
+            session_id: &SessionId,
+            origin: ProvisionSessionOrigin,
+            mint_before: Option<OperationId>,
+            mint_after: Option<OperationId>,
+        ) -> RetainedProvisionEffects {
+            let state = exact_attachment(machine, session_id).await;
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.set_attempt_origin(origin);
+            if let Some(operation_id) = mint_before {
+                ledger.set_attempt_operation_id(operation_id);
+            }
+            ledger.record_retained_attachment(
+                session_id,
+                ResumedMemberRollbackAuthority::new(state),
+                "exact attachment retirement uncertain",
+            );
+            if let Some(operation_id) = mint_after {
+                ledger.set_attempt_operation_id(operation_id);
+            }
+            ledger
+                .settle_failure(MobError::Internal("provision failed".to_string()))
+                .into_parts()
+                .2
+                .expect("a recorded witness must yield custody")
+        }
+
+        #[tokio::test]
+        async fn anchor_is_minted_when_the_ops_row_existed_before_the_effect() {
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let operation_id = OperationId::new();
+            let custody = custody_with(
+                &machine,
+                &session_id,
+                ProvisionSessionOrigin::ResumedDurable,
+                Some(operation_id.clone()),
+                None,
+            )
+            .await;
+
+            assert_eq!(
+                custody.operation_anchor(),
+                &RetainedOperationAnchor::Minted(operation_id.clone())
+            );
+            assert_eq!(
+                plan_retained_cleanup(&custody),
+                RetainedCleanupPlan::RestoreResumedWithOperation(operation_id)
+            );
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean anchor fixture");
+        }
+
+        #[tokio::test]
+        async fn anchor_is_not_minted_when_the_effect_preceded_every_mint() {
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let custody = custody_with(
+                &machine,
+                &session_id,
+                ProvisionSessionOrigin::RevivedRetired,
+                None,
+                None,
+            )
+            .await;
+
+            assert_eq!(
+                custody.operation_anchor(),
+                &RetainedOperationAnchor::NotMintedBeforeEffect,
+                "a pre-mint effect is a positive ordering fact, not a missing value"
+            );
+            assert_eq!(
+                plan_retained_cleanup(&custody),
+                RetainedCleanupPlan::RestoreResumedWithoutOperation
+            );
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean anchor fixture");
+        }
+
+        #[tokio::test]
+        async fn a_mint_after_the_effect_degrades_the_anchor_to_unproven() {
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let custody = custody_with(
+                &machine,
+                &session_id,
+                ProvisionSessionOrigin::ResumedDurable,
+                None,
+                Some(OperationId::new()),
+            )
+            .await;
+
+            assert_eq!(
+                custody.operation_anchor(),
+                &RetainedOperationAnchor::Unproven,
+                "an unordered mint must never be attributed to an earlier effect"
+            );
+            assert!(matches!(
+                plan_retained_cleanup(&custody),
+                RetainedCleanupPlan::Refuse(_)
+            ));
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean anchor fixture");
+        }
+
+        /// P1(1) regression: a scheduled pending-attachment teardown is NOT a
+        /// release. The seam hands back a joinable completion, and joining it
+        /// is what proves the exact attachment is gone.
+        #[tokio::test]
+        async fn pending_attachment_teardown_is_only_settled_once_its_completion_is_joined() {
+            use meerkat_runtime::EnsureRuntimeExecutorAttachment;
+
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            machine
+                .register_session(session_id.clone())
+                .await
+                .expect("register teardown-completion session");
+            let pending = match machine
+                .ensure_session_with_executor_factory(session_id.clone(), |_| {
+                    Box::new(InertExecutor)
+                })
+                .await
+                .expect("prepare pending attachment")
+            {
+                EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+                EnsureRuntimeExecutorAttachment::Existing(witness) => {
+                    panic!("fresh session unexpectedly found committed attachment {witness:?}")
+                }
+            };
+
+            let mut teardowns = PendingAttachmentTeardowns::new();
+            assert!(
+                schedule_pending_attachment_teardown(pending, &mut teardowns).is_none(),
+                "handoff must succeed and retain custody"
+            );
+            assert_eq!(
+                teardowns.len(),
+                1,
+                "the teardown completion is retained custody, not a discarded handle"
+            );
+
+            let completion = teardowns.pop().expect("retained teardown completion");
+            assert_eq!(completion.session_id(), &session_id);
+            completion
+                .wait()
+                .await
+                .expect("joined teardown must report its exact outcome");
+            assert!(
+                machine
+                    .current_executor_attachment_witness(&session_id)
+                    .await
+                    .is_none(),
+                "the joined teardown is the terminal for that exact attachment"
+            );
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean teardown-completion fixture");
+        }
+
+        /// P1(1) regression: a teardown that does not settle can never be
+        /// projected as `ReleasedByOwner`, even when the boundary-held parts
+        /// cleaned up successfully.
+        #[test]
+        fn unsettled_teardown_cannot_be_reported_as_an_owner_release() {
+            let session_id = SessionId::new();
+            let merged = merge_owned_cleanup_outcome(
+                &session_id,
+                Ok(()),
+                vec!["exact pending-attachment teardown failed".to_string()],
+            );
+            let error = merged
+                .as_ref()
+                .expect_err("an unsettled teardown must not be absorbed by a clean retained half");
+            assert!(error.to_string().contains("did not settle"));
+
+            let retained_ledger = Arc::new(ProvisionSettlementLedger::default());
+            record_owned_cleanup_settlement(Some(&retained_ledger), &merged);
+            assert_eq!(
+                retained_ledger.settlement_for_test(),
+                ProvisionEffectSettlement::RetainedUncertain,
+                "scheduling is not completion: a teardown that did not settle stays retained"
+            );
+
+            let released_ledger = Arc::new(ProvisionSettlementLedger::default());
+            record_owned_cleanup_settlement(
+                Some(&released_ledger),
+                &merge_owned_cleanup_outcome(&session_id, Ok(()), Vec::new()),
+            );
+            assert_eq!(
+                released_ledger.settlement_for_test(),
+                ProvisionEffectSettlement::ReleasedByOwner,
+                "only a fully joined, fully successful cleanup is a release"
+            );
+        }
+
+        /// P1(2) regression: a retained exact retirement that already entered
+        /// Draining must be JOINABLE. The machine hides the serving projection
+        /// there, which previously made every retry fail closed even with no
+        /// successor — while a real successor must still be refused.
+        #[tokio::test]
+        async fn draining_exact_retirement_is_joinable_and_successors_are_refused() {
+            use meerkat_core::lifecycle::core_executor::CoreExecutorPostStopCleanupHandle;
+            use tokio::sync::Notify;
+
+            struct BlockingCleanupHandle {
+                entered: Arc<Notify>,
+                release: Arc<Notify>,
+            }
+
+            #[async_trait::async_trait]
+            impl CoreExecutorPostStopCleanupHandle for BlockingCleanupHandle {
+                async fn cleanup_after_runtime_stop_terminalized(
+                    &self,
+                ) -> Result<(), CoreExecutorError> {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(())
+                }
+            }
+
+            struct BlockingCleanupExecutor {
+                entered: Arc<Notify>,
+                release: Arc<Notify>,
+            }
+
+            #[async_trait::async_trait]
+            impl CoreExecutor for BlockingCleanupExecutor {
+                fn machine_managed_post_stop_unregister(&self) -> bool {
+                    true
+                }
+
+                fn post_stop_cleanup_handle(
+                    &self,
+                ) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+                    Some(Arc::new(BlockingCleanupHandle {
+                        entered: Arc::clone(&self.entered),
+                        release: Arc::clone(&self.release),
+                    }))
+                }
+
+                async fn apply(
+                    &mut self,
+                    _run_id: meerkat_core::RunId,
+                    _primitive: RunPrimitive,
+                ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                    Err(CoreExecutorError::Internal(
+                        "draining fixture must not apply turns".to_string(),
+                    ))
+                }
+
+                async fn cancel_after_boundary(
+                    &mut self,
+                    _reason: String,
+                ) -> Result<(), CoreExecutorError> {
+                    Ok(())
+                }
+
+                async fn stop_runtime_executor(
+                    &mut self,
+                    _reason: String,
+                ) -> Result<(), CoreExecutorError> {
+                    Ok(())
+                }
+            }
+
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            machine
+                .register_session_with_executor(
+                    session_id.clone(),
+                    Box::new(BlockingCleanupExecutor {
+                        entered: Arc::clone(&entered),
+                        release: Arc::clone(&release),
+                    }),
+                )
+                .await
+                .expect("register draining fixture");
+            let ours = machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .expect("registered fixture must expose its serving attachment");
+
+            assert_eq!(
+                classify_retained_attachment_convergence(Some(&ours), &ours, true),
+                RetainedAttachmentConvergence::ServingExact
+            );
+
+            let unregister = {
+                let machine = Arc::clone(&machine);
+                let ours = ours.clone();
+                tokio::spawn(async move {
+                    machine
+                        .unregister_executor_attachment_if_current(&ours)
+                        .await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                .await
+                .expect("canonical unregister must enter retained post-stop cleanup");
+
+            let current = machine
+                .current_executor_attachment_witness(&session_id)
+                .await;
+            assert!(current.is_none(), "Draining hides the serving projection");
+            assert!(machine.contains_session(&session_id).await);
+            assert_eq!(
+                classify_retained_attachment_convergence(
+                    current.as_ref(),
+                    &ours,
+                    machine.contains_session(&session_id).await,
+                ),
+                RetainedAttachmentConvergence::JoinInFlightRetirement,
+                "a retained custody with no successor must be able to join its exact retirement"
+            );
+
+            let successor_machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let successor_session = SessionId::new();
+            successor_machine
+                .register_session_with_executor(successor_session.clone(), Box::new(InertExecutor))
+                .await
+                .expect("register successor fixture");
+            let successor = successor_machine
+                .current_executor_attachment_witness(&successor_session)
+                .await
+                .expect("successor fixture must expose its serving attachment");
+            assert_eq!(
+                classify_retained_attachment_convergence(Some(&successor), &ours, true),
+                RetainedAttachmentConvergence::SupersededByNewerAttachment,
+                "a successor is refused, never retired by a predecessor's custody"
+            );
+            successor_machine
+                .unregister_session(&successor_session)
+                .await
+                .expect("clean successor fixture");
+
+            release.notify_one();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), unregister)
+                    .await
+                    .expect("released unregister must complete")
+                    .expect("unregister task must not panic")
+                    .expect("unregister must retain exact authority")
+            );
+            assert!(!machine.contains_session(&session_id).await);
+            assert_eq!(
+                classify_retained_attachment_convergence(None, &ours, false),
+                RetainedAttachmentConvergence::AlreadyRetired,
+                "once the machine holds nothing, only durable convergence remains"
+            );
+        }
+
+        /// P2(3) regression: the OWNER of the cleanup publishes its terminal
+        /// settlement fact. Dropping the abort observer after the owned task
+        /// has started must not erase it — the pre-fix code recorded the fact
+        /// in the observer, so a dropped observer left the attempt with no
+        /// owner fact at all.
+        #[tokio::test]
+        async fn dropped_abort_observer_still_gets_the_owner_terminal_fact() {
+            use meerkat_core::service::SessionError;
+            use meerkat_core::types::SessionId as CoreSessionId;
+
+            fn unused() -> SessionError {
+                SessionError::Unsupported(
+                    "abort-observer-drop fixture service must not be called".to_string(),
+                )
+            }
+
+            struct StubService;
+
+            #[async_trait::async_trait]
+            impl meerkat_core::service::SessionService for StubService {
+                async fn create_session(
+                    &self,
+                    _req: meerkat_core::service::CreateSessionRequest,
+                ) -> Result<meerkat_core::RunResult, SessionError> {
+                    Err(unused())
+                }
+
+                async fn start_turn(
+                    &self,
+                    _id: &CoreSessionId,
+                    _req: meerkat_core::service::StartTurnRequest,
+                ) -> Result<meerkat_core::RunResult, SessionError> {
+                    Err(unused())
+                }
+
+                async fn interrupt(&self, _id: &CoreSessionId) -> Result<(), SessionError> {
+                    Err(unused())
+                }
+
+                async fn read(
+                    &self,
+                    _id: &CoreSessionId,
+                ) -> Result<meerkat_core::service::SessionView, SessionError> {
+                    Err(unused())
+                }
+
+                async fn list(
+                    &self,
+                    _query: meerkat_core::service::SessionQuery,
+                ) -> Result<Vec<meerkat_core::service::SessionSummary>, SessionError>
+                {
+                    Err(unused())
+                }
+
+                async fn archive(&self, _id: &CoreSessionId) -> Result<(), SessionError> {
+                    Err(unused())
+                }
+            }
+
+            #[async_trait::async_trait]
+            impl meerkat_core::service::SessionServiceCommsExt for StubService {}
+
+            #[async_trait::async_trait]
+            impl meerkat_core::service::SessionServiceControlExt for StubService {
+                async fn append_system_context(
+                    &self,
+                    _id: &CoreSessionId,
+                    _req: meerkat_core::service::AppendSystemContextRequest,
+                ) -> Result<
+                    meerkat_core::service::AppendSystemContextResult,
+                    meerkat_core::service::SessionControlError,
+                > {
+                    Err(unused().into())
+                }
+            }
+
+            #[async_trait::async_trait]
+            impl meerkat_core::service::SessionServiceHistoryExt for StubService {
+                async fn read_history(
+                    &self,
+                    _id: &CoreSessionId,
+                    _query: meerkat_core::service::SessionHistoryQuery,
+                ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError>
+                {
+                    Err(unused())
+                }
+            }
+
+            #[async_trait::async_trait]
+            impl crate::runtime::session_service::MobSessionService for StubService {
+                async fn create_session_under_runtime_turn_boundary(
+                    &self,
+                    _req: meerkat_core::service::CreateSessionRequest,
+                ) -> Result<meerkat_core::RunResult, SessionError> {
+                    Err(unused())
+                }
+
+                async fn load_session_for_resume(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<crate::runtime::session_service::ResumeSessionLoad, SessionError>
+                {
+                    Ok(crate::runtime::session_service::ResumeSessionLoad::Absent)
+                }
+
+                async fn observe_session_resume_authority(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<crate::SessionResumeAuthority, SessionError> {
+                    Ok(crate::SessionResumeAuthority::default())
+                }
+
+                async fn materialize_session_resume_verdict(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<crate::SessionResumeVerdict, SessionError> {
+                    Err(unused())
+                }
+
+                async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<(), SessionError> {
+                    Err(unused())
+                }
+
+                async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+                    &self,
+                    _session_id: &CoreSessionId,
+                    _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+                ) -> Result<(), SessionError> {
+                    Err(unused())
+                }
+
+                async fn enqueue_committed_parent_session_boundary_after_runtime_turn(
+                    &self,
+                    _session_id: &CoreSessionId,
+                    _runtime_adapter: &meerkat_runtime::MeerkatMachine,
+                ) -> Result<usize, SessionError> {
+                    Ok(0)
+                }
+
+                async fn discard_live_session_under_runtime_turn_boundary(
+                    &self,
+                    _session_id: &CoreSessionId,
+                ) -> Result<(), SessionError> {
+                    Ok(())
+                }
+            }
+
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let service: Arc<dyn crate::runtime::session_service::MobSessionService> =
+                Arc::new(StubService);
+            let prepared = machine
+                .prepare_local_session_materialization_with_mode(
+                    session_id.clone(),
+                    meerkat_runtime::LocalSessionMaterializationMode::Ordinary,
+                )
+                .await
+                .expect("prepare local materialization for the abort fixture");
+            let boundary =
+                super::super::RuntimeTurnFinalizationBoundaryLease::acquire(&service, &session_id)
+                    .await
+                    .expect("acquire turn-finalization boundary");
+            let mut transaction = super::super::PreparedServiceActorTransaction::new(
+                session_id.clone(),
+                Arc::clone(&service),
+                prepared,
+                boundary,
+                meerkat_session::LiveSessionActorWitnessSlot::default(),
+            )
+            .expect("construct actor transaction");
+            let ledger = Arc::new(ProvisionSettlementLedger::default());
+            transaction.record_settlement_into(Some(Arc::clone(&ledger)));
+
+            // Start the real abort and then drop its observer future. The
+            // owned cleanup task keeps running; only the observation is gone.
+            let mut abort_future = Box::pin(transaction.abort());
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut abort_future).await;
+            drop(abort_future);
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if ledger.settlement_for_test() != ProvisionEffectSettlement::Unproven {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the owning cleanup task must publish its terminal settlement fact even when \
+                     the abort observer was dropped"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn fresh_origin_custody_is_refused_instead_of_broadening_cleanup() {
+            let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            let custody = custody_with(
+                &machine,
+                &session_id,
+                ProvisionSessionOrigin::Fresh,
+                Some(OperationId::new()),
+                None,
+            )
+            .await;
+
+            match plan_retained_cleanup(&custody) {
+                RetainedCleanupPlan::Refuse(reason) => {
+                    assert!(reason.contains("successor"));
+                }
+                plan => panic!("fresh custody must not authorize {plan:?}"),
+            }
+
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("clean anchor fixture");
+        }
+    }
 
     #[cfg(feature = "runtime-adapter")]
     #[test]
@@ -8272,6 +10209,143 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
+    async fn record_reload_publication(
+        &self,
+        member_ref: &MemberRef,
+        successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+        publication: ResumedMemberRollbackAuthority,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "retain reload publication for")?;
+        let custody = self
+            .reload_registrations
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                MobError::Internal("reload publication lost its custody owner".to_string())
+            })?;
+        let mut owned = custody.lock().await;
+        if !matches!(&owned.phase, ReloadRegistrationPhase::Restoring(expected) if expected == successor)
+        {
+            return Err(MobError::Internal(
+                "reload publication has stale restoration custody".to_string(),
+            ));
+        }
+        owned.phase = ReloadRegistrationPhase::Published {
+            successor: successor.clone(),
+            publication,
+        };
+        Ok(())
+    }
+
+    async fn finish_reload_restoration(
+        &self,
+        member_ref: &MemberRef,
+        successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "settle reload restoration for")?;
+        let Some(custody) = self
+            .reload_registrations
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let owned = custody.lock().await;
+        let current = match &owned.phase {
+            ReloadRegistrationPhase::Restoring(expected)
+            | ReloadRegistrationPhase::Published {
+                successor: expected,
+                ..
+            } => expected == successor,
+            _ => false,
+        };
+        if !current {
+            return Err(MobError::Internal(
+                "reload settlement has stale restoration custody".to_string(),
+            ));
+        }
+        self.remove_reload_custody(&session_id, &custody).await;
+        Ok(())
+    }
+
+    async fn provision_member_from_reload_claim(
+        &self,
+        req: ProvisionMemberRequest,
+        prepared: PreparedSessionMaterialization,
+    ) -> Result<MemberSpawnReceipt, MobError> {
+        let session_id = prepared.session_id().clone();
+        let transfer = Arc::new(Mutex::new(Some(prepared)));
+        let mut scoped = self.clone();
+        scoped.reload_materialization_claim = Some(Arc::clone(&transfer));
+        #[cfg(test)]
+        let cleanup_hook = RELOAD_UNUSED_CLAIM_TEST_HOOKS
+            .lock()
+            .expect("unused claim hook")
+            .remove(&session_id);
+        #[cfg(test)]
+        let req = {
+            let mut req = req;
+            if cleanup_hook.is_some() {
+                // Fail the real initial validator after transfer, before consume.
+                req.session_origin = ProvisionSessionOrigin::Fresh;
+            }
+            req
+        };
+        let result = scoped.provision_member(req).await;
+        let unused = transfer.lock().await.take();
+        if let Some(mut prepared) = unused {
+            #[cfg(test)]
+            if let Some((entered, release)) = cleanup_hook {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            // The provisioning future has returned and released B. Do not
+            // hold the transfer-slot mutex across exact runtime rollback.
+            if let Err(error) = prepared.rollback_now().await {
+                let detail = format!("unused reload claim cleanup remains pending: {error}");
+                let failure = ProvisionAttemptFailure::retained_without_custody(
+                    MobError::MemberReloadRefused {
+                        session_id: session_id.clone(),
+                        reason: detail.clone(),
+                    },
+                );
+                let custody = self
+                    .reload_registrations
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned()
+                    .ok_or_else(|| MobError::MemberReloadRefused {
+                        session_id: session_id.clone(),
+                        reason: format!("{detail}; restoration custody owner is unavailable"),
+                    })?;
+                let mut owned = custody.lock().await;
+                let ReloadRegistrationPhase::Restoring(successor) = &owned.phase else {
+                    return Err(MobError::MemberReloadRefused {
+                        session_id,
+                        reason: format!("{detail}; restoration phase changed"),
+                    });
+                };
+                owned.phase = ReloadRegistrationPhase::ClaimCleanup {
+                    successor: successor.clone(),
+                    retained: Arc::new(Mutex::new(Some(RetainedReloadClaimCleanup {
+                        prepared,
+                        failure,
+                    }))),
+                };
+                return Err(MobError::MemberReloadRefused {
+                    session_id,
+                    reason: detail,
+                });
+            }
+        }
+        result
+    }
+
     fn supports_member_turn_llm_reconfigure(&self, member_ref: &MemberRef) -> bool {
         matches!(member_ref, MemberRef::Session { .. })
             && self.session_service.supports_runtime_turn_apply()
@@ -8432,13 +10506,14 @@ impl MobProvisioner for SessionBackend {
                 bridge_session_id = %member_bridge_session_id,
                 "SessionBackend::provision_member preparing local session bindings"
             );
-            let current_attachment = if missing_live_revival {
-                adapter
-                    .current_executor_attachment_witness(&member_bridge_session_id)
-                    .await
-            } else {
-                None
-            };
+            let current_attachment =
+                if missing_live_revival && backend.reload_materialization_claim.is_none() {
+                    adapter
+                        .current_executor_attachment_witness(&member_bridge_session_id)
+                        .await
+                } else {
+                    None
+                };
             if let Some(witness) = current_attachment {
                 let state = backend
                     .runtime_sessions
@@ -8484,11 +10559,13 @@ impl MobProvisioner for SessionBackend {
                 #[cfg(target_arch = "wasm32")]
                 let mut prepared = {
                     let adapter = Arc::clone(adapter);
+                    let backend = backend.clone();
                     let bridge_session_id = member_bridge_session_id.clone();
                     let (reply_tx, reply_rx) = oneshot::channel();
                     tokio::spawn(async move {
-                        let result = adapter
-                            .prepare_local_session_materialization_with_mode(
+                        let result = backend
+                            .prepare_member_materialization(
+                                &adapter,
                                 bridge_session_id,
                                 local_materialization_mode,
                             )
@@ -8505,8 +10582,9 @@ impl MobProvisioner for SessionBackend {
                     MobError::Internal(format!("prepare local session bindings failed: {e}"))
                 })?;
                 #[cfg(not(target_arch = "wasm32"))]
-                let mut prepared = adapter
-                    .prepare_local_session_materialization_with_mode(
+                let mut prepared = backend
+                    .prepare_member_materialization(
+                        adapter,
                         member_bridge_session_id.clone(),
                         local_materialization_mode,
                     )
@@ -8584,13 +10662,17 @@ impl MobProvisioner for SessionBackend {
                         "runtime-backed provision for '{pre_registered_session_id}' lost B before actor creation"
                     ))
                 })?;
-                Some(PreparedServiceActorTransaction::new(
+                let mut transaction = PreparedServiceActorTransaction::new(
                     pre_registered_session_id.clone(),
                     Arc::clone(&backend.session_service),
                     prepared,
                     boundary,
                     actor_witness_slot.clone(),
-                )?)
+                )?;
+                // Every owner task this transaction spawns now records its
+                // exact cleanup outcome for `provision_member_settled`.
+                transaction.record_settlement_into(backend.settlement_ledger.clone());
+                Some(transaction)
             }
         } else {
             None
@@ -8718,9 +10800,21 @@ impl MobProvisioner for SessionBackend {
                 .as_ref()
                 .is_some_and(|prepared| prepared != &created_bridge_session_id)
         {
-            return Err(MobError::Internal(format!(
+            // The transaction below owns an exact actor/materialization for
+            // the PREPARED identity. Await its cleanup instead of dropping it
+            // into a detached task, so the caller's error is a settled
+            // observation rather than an unsettled cancellation.
+            let mismatch = MobError::Internal(format!(
                 "session service returned unexpected bridge session '{created_bridge_session_id}'; refusing SessionId-wide cleanup of the unexpected identity"
-            )));
+            ));
+            if let Some(transaction) = actor_transaction.take()
+                && let Err(cleanup_error) = transaction.abort().await
+            {
+                return Err(MobError::Internal(format!(
+                    "{mismatch}; exact actor/materialization cleanup failed: {cleanup_error}"
+                )));
+            }
+            return Err(mismatch);
         }
         let finalize_result = async {
         // Runtime-backed paths retain the exact prepared materialization for
@@ -8733,6 +10827,11 @@ impl MobProvisioner for SessionBackend {
                 // for the provision receipt; it does not perform a second
                 // lifecycle mutation.
                 session_origin = ProvisionSessionOrigin::RevivedRetired;
+                if let Some(ledger) = backend.settlement_ledger.as_ref() {
+                    // Retained custody must name the compensation the parent
+                    // has to run; a revived attempt is restored, not archived.
+                    ledger.set_attempt_origin(session_origin);
+                }
             }
             tracing::debug!(
                 bridge_session_id = %created_bridge_session_id,
@@ -8808,6 +10907,10 @@ impl MobProvisioner for SessionBackend {
             .prepare_member_provision_operation(&created_bridge_session_id, &req.peer_name)
             .await?;
         let exact_operation_id = prepared_operation.operation_id().clone();
+        if let Some(ledger) = backend.settlement_ledger.as_ref() {
+            // Retained custody carries the exact ops row a retry must abort.
+            ledger.set_attempt_operation_id(exact_operation_id.clone());
+        }
         tracing::debug!(
             bridge_session_id = %created_bridge_session_id,
             operation_id = %exact_operation_id,
@@ -8883,6 +10986,110 @@ impl MobProvisioner for SessionBackend {
             return Err(error);
         }
         finalize_result
+    }
+
+    /// Settled variant of [`Self::provision_member`].
+    ///
+    /// The attempt runs against a clone of this backend scoped to a private
+    /// settlement ledger. Every process-owned materialization task that clone
+    /// spawns writes its exact cleanup outcome there — including tasks that
+    /// outlive a dropped caller — so a failure is returned together with the
+    /// typed proof of whether its effects were released, and with exact
+    /// witness-bound custody when they were not.
+    async fn provision_member_settled(
+        &self,
+        req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, ProvisionAttemptFailure> {
+        let ledger = Arc::new(ProvisionSettlementLedger::default());
+        ledger.set_attempt_origin(req.session_origin);
+        let scoped = self.scoped_to_settlement_ledger(Arc::clone(&ledger));
+        match scoped.provision_member(req).await {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => Err(ledger.settle_failure(error)),
+        }
+    }
+
+    /// Compensate custody this backend's own materialization owner issued.
+    ///
+    /// The plan is decided from the recorded facts only
+    /// ([`plan_retained_cleanup`]); the chosen verb then runs against the exact
+    /// attachment witness, which re-validates fail-closed and refuses if a
+    /// successor incarnation owns the session. Nothing here widens into
+    /// session-wide retire/archive authority, and no operation id is invented.
+    async fn retry_retained_provision_cleanup(
+        &self,
+        retained: RetainedProvisionEffects,
+    ) -> Result<(), RetainedProvisionCleanupFailure> {
+        let plan = plan_retained_cleanup(&retained);
+        if let RetainedCleanupPlan::Refuse(reason) = &plan {
+            return Err(RetainedProvisionCleanupFailure::unsupported(
+                retained, *reason,
+            ));
+        }
+        let outcome = async {
+            let session_id =
+                Self::require_session(retained.member_ref(), "retry retained cleanup for")?;
+            let expected_state = retained.rollback_authority().state().ok_or_else(|| {
+                MobError::Internal(format!(
+                    "retained custody for '{session_id}' carries no runtime attachment authority"
+                ))
+            })?;
+            if expected_state.witness().session_id() != &session_id {
+                return Err(MobError::Internal(format!(
+                    "retained custody authority for '{}' cannot compensate session '{session_id}'",
+                    expected_state.witness().session_id()
+                )));
+            }
+            // Runtime convergence first: it tolerates an exact retirement that
+            // the failed owner had already driven into Draining, and refuses a
+            // successor.
+            let ops_binding = self
+                .ops_adapter
+                .capture_session_binding_witness(&session_id);
+            self.converge_retained_resume_attachment(
+                &session_id,
+                retained.session_origin() == ProvisionSessionOrigin::RevivedRetired,
+                expected_state,
+            )
+            .await?;
+            match &plan {
+                RetainedCleanupPlan::RestoreResumedWithOperation(operation_id) => {
+                    // Same ops tail as `restore_resumed_member`: abort only a
+                    // still-provisioning, non-terminal row.
+                    if matches!(
+                        self.ops_adapter
+                            .operation_status_with_terminality(&session_id, operation_id)?,
+                        Some((OperationStatus::Provisioning, false))
+                    ) {
+                        self.ops_adapter
+                            .abort_member_provision(
+                                &session_id,
+                                operation_id,
+                                Some(
+                                    "retained resume provisioning rolled back without archive"
+                                        .to_string(),
+                                ),
+                            )
+                            .await?;
+                    }
+                    Ok(())
+                }
+                // The attempt provably minted no row, so there is nothing to
+                // abort and nothing may be invented.
+                RetainedCleanupPlan::RestoreResumedWithoutOperation => Ok(()),
+                // Refusals returned before this future was built.
+                RetainedCleanupPlan::Refuse(reason) => Err(MobError::Internal(format!(
+                    "retained cleanup refusal reached execution: {reason}"
+                ))),
+            }?;
+            self.ops_adapter
+                .clear_session_binding_for_explicit_resume(&session_id, ops_binding)
+        }
+        .await;
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(error) => Err(RetainedProvisionCleanupFailure::failed(retained, error)),
+        }
     }
 
     async fn abort_member_provision(
@@ -8989,14 +11196,13 @@ impl MobProvisioner for SessionBackend {
                 expected_state.witness().session_id()
             )));
         }
-        let mut boundary =
-            RuntimeTurnFinalizationBoundaryLease::acquire(&self.session_service, &session_id)
-                .await?;
-        self.restore_failed_resume_before_receipt(
+        let ops_binding = self
+            .ops_adapter
+            .capture_session_binding_witness(&session_id);
+        self.converge_retained_resume_attachment(
             &session_id,
             original_origin == ProvisionSessionOrigin::RevivedRetired,
-            FailedResumeRuntimeAuthority::ExactAttachment(expected_state),
-            &mut boundary,
+            expected_state,
         )
         .await?;
 
@@ -9013,7 +11219,8 @@ impl MobProvisioner for SessionBackend {
                 )
                 .await?;
         }
-        Ok(())
+        self.ops_adapter
+            .clear_session_binding_for_explicit_resume(&session_id, ops_binding)
     }
 
     async fn retire_member(
@@ -9220,24 +11427,8 @@ impl MobProvisioner for SessionBackend {
                     .to_string(),
             });
         }
-        let session_service = self.session_service.clone();
-        let task_session_id = session_id.clone();
-        let mut task = tokio::spawn(async move {
-            session_service
-                .start_turn(&task_session_id, req)
-                .await
-                .map(|_| ())
-                .map_err(|error| session_turn_error_to_mob_error(&task_session_id, error))
-        });
-
-        tokio::select! {
-            result = &mut task => {
-                result.map_err(|error| {
-                    MobError::Internal(format!("turn admission task failed: {error}"))
-                })?
-            }
-            () = tokio::task::yield_now() => Ok(()),
-        }
+        self.admit_direct_session_turn(session_id, req, None, None)
+            .await
     }
 
     async fn admit_tracked_turn(
@@ -9271,26 +11462,13 @@ impl MobProvisioner for SessionBackend {
                     .to_string(),
             });
         }
-        if let Some(llm_identity_applied_tx) = llm_identity_applied_tx {
-            let _ = llm_identity_applied_tx.send(Ok(None));
-        }
-        let session_service = self.session_service.clone();
-        tokio::spawn(async move {
-            let completion = match session_service.start_turn(&session_id, req).await {
-                Ok(result) => super::handle::ExactTurnCompletion {
-                    session_id: session_id.clone(),
-                    terminal: super::handle::ExactTurnTerminal::Runtime(
-                        meerkat_runtime::completion::CompletionOutcome::Completed(Box::new(result)),
-                    ),
-                },
-                Err(error) => super::handle::ExactTurnCompletion {
-                    session_id: session_id.clone(),
-                    terminal: super::handle::ExactTurnTerminal::DirectSessionError(error),
-                },
-            };
-            let _ = completion_tx.send(Ok(completion));
-        });
-        Ok(())
+        self.admit_direct_session_turn(
+            session_id,
+            req,
+            Some(completion_tx),
+            llm_identity_applied_tx,
+        )
+        .await
     }
 
     async fn admit_turn_for_operation(
@@ -9427,7 +11605,7 @@ impl MobProvisioner for SessionBackend {
         &self,
         member_ref: &MemberRef,
         deadline: Instant,
-    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+    ) -> Result<MemberRegistrationReload, MobError> {
         let session_id = Self::require_session(member_ref, "reload runtime registration for")?;
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Err(MobError::UnsupportedForMode {
@@ -9435,21 +11613,120 @@ impl MobProvisioner for SessionBackend {
                 reason: "runtime registration reload requires a runtime-backed member".to_string(),
             });
         };
-        let Some(registration) = adapter
-            .current_session_registration_witness(&session_id)
+        let retained = self
+            .reload_registrations
+            .lock()
             .await
-        else {
-            return Ok(super::handle::MemberReloadDisposition::NotCurrent);
+            .get(&session_id)
+            .cloned();
+        let custody = match retained {
+            Some(custody) => custody,
+            None => {
+                let Some(registration) = adapter
+                    .current_session_registration_witness(&session_id)
+                    .await
+                else {
+                    return Ok(MemberRegistrationReload::NotCurrent);
+                };
+                if adapter.is_durability_ready(&session_id).await {
+                    return Ok(MemberRegistrationReload::NotDegraded);
+                }
+                let sidecar = self
+                    .capture_runtime_session_state(&session_id)
+                    .await
+                    .ok_or_else(|| MobError::MemberReloadRefused {
+                        session_id: session_id.clone(),
+                        reason: "degraded registration has no exact owned reload custody"
+                            .to_string(),
+                    })?;
+                if !adapter
+                    .executor_attachment_cleanup_is_current_for_registration(
+                        sidecar.witness(),
+                        &registration,
+                    )
+                    .await
+                {
+                    return Ok(MemberRegistrationReload::NotCurrent);
+                }
+                let actor =
+                    sidecar
+                        .actor_witness()
+                        .ok_or_else(|| MobError::MemberReloadRefused {
+                            session_id: session_id.clone(),
+                            reason: "degraded attachment has no exact actor witness".to_string(),
+                        })?;
+                let ops_binding = MemberSessionDisposalArc::recoverable_ops_binding_witness(
+                    Some(&self.ops_adapter),
+                    &session_id,
+                )
+                .map_err(|error| session_turn_error_to_mob_error(&session_id, error))?;
+                let candidate = Arc::new(Mutex::new(ReloadRegistrationCustody {
+                    registration,
+                    attachment: sidecar.witness().clone(),
+                    actor,
+                    ops_binding,
+                    phase: ReloadRegistrationPhase::Degraded,
+                }));
+                self.reload_registrations
+                    .lock()
+                    .await
+                    .entry(session_id.clone())
+                    .or_insert(candidate)
+                    .clone()
+            }
         };
-        if adapter.is_durability_ready(&session_id).await {
-            // Never quiesce a healthy shell: reload is repair, not retirement.
-            return Ok(super::handle::MemberReloadDisposition::NotDegraded);
+        let mut owned = custody.lock().await;
+        if let ReloadRegistrationPhase::ClaimCleanup {
+            successor,
+            retained,
+        } = owned.phase.clone()
+        {
+            let mut pending =
+                retained
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| MobError::MemberReloadRefused {
+                        session_id: session_id.clone(),
+                        reason: "exact reload claim cleanup is already owned".to_string(),
+                    })?;
+            match pending.prepared.rollback_now().await {
+                Ok(_) => {
+                    owned.phase = ReloadRegistrationPhase::Restoring(successor);
+                }
+                Err(error) => {
+                    let reason =
+                        format!("{}; exact rollback retry failed: {error}", pending.failure);
+                    *retained.lock().await = Some(pending);
+                    return Err(MobError::MemberReloadRefused { session_id, reason });
+                }
+            }
         }
-        // The discard is in-process and succeeds whatever the store's state;
-        // the revival that follows can only rebuild from durable authority.
-        // Probe it first so a store that is still failing refuses the reload
-        // typed instead of turning a repairable degraded member into a Broken
-        // one through a revival that was bound to fail.
+        match &owned.phase {
+            ReloadRegistrationPhase::Restoring(successor) => {
+                return Ok(MemberRegistrationReload::Discarded {
+                    successor: successor.clone(),
+                });
+            }
+            ReloadRegistrationPhase::Published {
+                successor,
+                publication,
+            } => {
+                return Ok(MemberRegistrationReload::Published {
+                    successor: successor.clone(),
+                    publication: publication.clone(),
+                });
+            }
+            ReloadRegistrationPhase::Degraded | ReloadRegistrationPhase::ColdSuccessor(_) => {}
+            ReloadRegistrationPhase::ClaimCleanup { .. } => {
+                return Err(MobError::MemberReloadRefused {
+                    session_id,
+                    reason: "exact reload claim cleanup remains owned".to_string(),
+                });
+            }
+        }
+        // The durable probe precedes cleanup. A failed cold preparation later
+        // retains these same capabilities even after the sidecar was removed.
         if !self.session_service.supports_persistent_sessions() {
             return Err(MobError::MemberReloadRefused {
                 session_id: session_id.clone(),
@@ -9476,15 +11753,6 @@ impl MobProvisioner for SessionBackend {
                 });
             }
         }
-        // The exact bound operation identity must ride the replacement as a
-        // durable retention request so the later finalization-boundary
-        // rebind finds it in the successor registry (same contract as the
-        // pre-retire quiesce path).
-        let prior_ops_binding = MemberSessionDisposalArc::recoverable_ops_binding_witness(
-            Some(&self.ops_adapter),
-            &session_id,
-        )
-        .map_err(|error| session_turn_error_to_mob_error(&session_id, error))?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(MobError::MemberReloadTimedOut {
@@ -9492,34 +11760,79 @@ impl MobProvisioner for SessionBackend {
                 stage: "durability_reload_discard",
             });
         }
-        let disposition = tokio::time::timeout(
-            remaining,
-            adapter.recover_or_discard_reload_required_registration_with_operation_if_current(
-                &registration,
-                prior_ops_binding
-                    .as_ref()
-                    .map(|witness| witness.retention_request()),
-            ),
-        )
-        .await
-        .map_err(|_| MobError::MemberReloadTimedOut {
-            session_id: session_id.clone(),
-            stage: "durability_reload_discard",
-        })?
-        .map_err(|error| {
-            MobError::Internal(format!(
-                "durability-reload disposal failed for {session_id}: {error}"
-            ))
-        })?;
-        let disposition = match disposition {
-            meerkat_runtime::ReloadRequiredRegistrationDisposition::Discarded => {
-                super::handle::MemberReloadDisposition::Discarded
+        // The actor bounds the caller's observation while retaining its
+        // admission lane. Await actual runtime settlement: timing out this
+        // observer would leave the process-owned discard running after the
+        // member's lane was released.
+        let successor = match owned.phase.clone() {
+            ReloadRegistrationPhase::ColdSuccessor(successor) => successor,
+            ReloadRegistrationPhase::Degraded => {
+                let settlement = adapter
+                    .reload_required_registration_until_settled_if_current(
+                        &owned.registration,
+                        &owned.attachment,
+                        owned
+                            .ops_binding
+                            .as_ref()
+                            .map(|witness| witness.retention_request()),
+                    )
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "durability-reload disposal failed for {session_id}: {error}"
+                        ))
+                    })?;
+                match settlement {
+                    meerkat_runtime::ReloadRequiredRegistrationSettlement::Discarded {
+                        successor,
+                    } => {
+                        owned.phase = ReloadRegistrationPhase::ColdSuccessor(successor.clone());
+                        successor
+                    }
+                    meerkat_runtime::ReloadRequiredRegistrationSettlement::NotDegraded => {
+                        self.remove_reload_custody(&session_id, &custody).await;
+                        return Ok(MemberRegistrationReload::NotDegraded);
+                    }
+                    meerkat_runtime::ReloadRequiredRegistrationSettlement::NotCurrent => {
+                        self.remove_reload_custody(&session_id, &custody).await;
+                        return Ok(MemberRegistrationReload::NotCurrent);
+                    }
+                }
             }
-            meerkat_runtime::ReloadRequiredRegistrationDisposition::NotDegraded => {
-                return Ok(super::handle::MemberReloadDisposition::NotDegraded);
+            ReloadRegistrationPhase::Restoring(_)
+            | ReloadRegistrationPhase::Published { .. }
+            | ReloadRegistrationPhase::ClaimCleanup { .. } => {
+                return Err(MobError::Internal(
+                    "reload restoration advanced during exclusive custody".to_string(),
+                ));
             }
-            meerkat_runtime::ReloadRequiredRegistrationDisposition::NotCurrent => {
-                return Ok(super::handle::MemberReloadDisposition::NotCurrent);
+        };
+        // Runtime teardown is already terminal before B is acquired. Fence
+        // both executor publication and registration replacement while the
+        // service compares/removes the captured predecessor actor. The order
+        // is B -> T -> optional L -> M -> persistent service R; no runtime
+        // teardown join is permitted while these cleanup guards are held.
+        let boundary = self
+            .session_service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await
+            .map_err(MobError::SessionError)?;
+        let registration_lease = match adapter
+            .lock_ownerless_registration_for_actor_cleanup(&successor)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!("reload successor cleanup admission: {error}"))
+            })? {
+            meerkat_runtime::RuntimeOwnerlessRegistrationAdmission::Acquired(lease) => lease,
+            meerkat_runtime::RuntimeOwnerlessRegistrationAdmission::NotCurrent => {
+                self.remove_reload_custody(&session_id, &custody).await;
+                return Ok(MemberRegistrationReload::NotCurrent);
+            }
+            meerkat_runtime::RuntimeOwnerlessRegistrationAdmission::CurrentButOwned => {
+                return Err(MobError::MemberReloadRefused {
+                    session_id: session_id.clone(),
+                    reason: "the exact recovered registration has another owner; reload custody is retained".to_string(),
+                });
             }
         };
         // The member keeps its adapter-local operation binding across the
@@ -9528,15 +11841,7 @@ impl MobProvisioner for SessionBackend {
         // which the retention request reloaded the operation. Without this
         // rebind the re-materialization would find a binding pinned to the
         // discarded registry and refuse it as a different incarnation.
-        if let Some(prior_ops_binding) = prior_ops_binding.as_ref() {
-            let successor = adapter
-                .current_session_registration_witness(&session_id)
-                .await
-                .ok_or_else(|| {
-                    MobError::Internal(format!(
-                        "durability-reload replacement for {session_id} published no exact successor witness"
-                    ))
-                })?;
+        let prepared_ops_rebind = if let Some(prior_ops_binding) = owned.ops_binding.as_ref() {
             let successor_registry = adapter
                 .ops_lifecycle_registry_if_current_registration(&successor)
                 .await
@@ -9545,26 +11850,31 @@ impl MobProvisioner for SessionBackend {
                         "durability-reload cold successor registration for {session_id} changed before its operation registry could be rebound"
                     ))
                 })?;
-            let prepared_ops_rebind = self
-                .ops_adapter
-                .prepare_session_registry_rebind_after_reload_discard(
-                    &session_id,
-                    prior_ops_binding,
-                    successor_registry as Arc<dyn OpsLifecycleRegistry>,
-                )?;
-            if adapter
-                .current_session_registration_witness(&session_id)
-                .await
-                .as_ref()
-                != Some(&successor)
-            {
-                return Err(MobError::Internal(format!(
-                    "durability-reload cold successor registration for {session_id} changed during operation-registry rebinding"
-                )));
-            }
+            Some(
+                self.ops_adapter
+                    .prepare_session_registry_rebind_after_reload_discard(
+                        &session_id,
+                        prior_ops_binding,
+                        successor_registry as Arc<dyn OpsLifecycleRegistry>,
+                    )?,
+            )
+        } else {
+            None
+        };
+        self.session_service
+            .discard_live_session_actor_after_durability_reload_required(&owned.actor)
+            .await
+            .map_err(MobError::SessionError)?;
+        if let Some(prepared_ops_rebind) = prepared_ops_rebind {
             prepared_ops_rebind.commit();
         }
-        Ok(disposition)
+        owned.phase = ReloadRegistrationPhase::Restoring(successor.clone());
+        drop(registration_lease);
+        drop(boundary);
+        drop(owned);
+        #[cfg(test)]
+        pause_reload_before_warm_claim_for_test(&session_id).await;
+        Ok(MemberRegistrationReload::Discarded { successor })
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
@@ -11263,12 +13573,83 @@ impl MultiBackendProvisioner {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
+    async fn record_reload_publication(
+        &self,
+        member_ref: &MemberRef,
+        successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+        publication: ResumedMemberRollbackAuthority,
+    ) -> Result<(), MobError> {
+        self.session
+            .record_reload_publication(member_ref, successor, publication)
+            .await
+    }
+
+    async fn finish_reload_restoration(
+        &self,
+        member_ref: &MemberRef,
+        successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+    ) -> Result<(), MobError> {
+        self.session
+            .finish_reload_restoration(member_ref, successor)
+            .await
+    }
+
+    async fn provision_member_from_reload_claim(
+        &self,
+        req: ProvisionMemberRequest,
+        prepared: PreparedSessionMaterialization,
+    ) -> Result<MemberSpawnReceipt, MobError> {
+        self.session
+            .provision_member_from_reload_claim(req, prepared)
+            .await
+    }
+
     fn supports_member_turn_llm_reconfigure(&self, member_ref: &MemberRef) -> bool {
         match member_ref {
             MemberRef::Session { .. } => self
                 .session
                 .supports_member_turn_llm_reconfigure(member_ref),
             MemberRef::BackendPeer { .. } => false,
+        }
+    }
+
+    /// Route the settled provisioning seam to the owner that can prove
+    /// settlement. Session-bound provisioning delegates to the session backend
+    /// (which certifies its own owner tasks). Peer-only provisioning has no
+    /// local materialization owner, so its typed
+    /// [`MobError::ExternalMemberCleanupUncertain`] is projected onto
+    /// `RetainedUncertain` and every other failure stays `Unproven` — never a
+    /// fabricated "no effects".
+    async fn provision_member_settled(
+        &self,
+        mut req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, ProvisionAttemptFailure> {
+        if matches!(req.binding, RuntimeBinding::Session) {
+            req.direct_member_incarnation = None;
+            return self.session.provision_member_settled(req).await;
+        }
+        self.provision_member(req)
+            .await
+            .map_err(classify_external_provision_failure)
+    }
+
+    /// Retained custody is only ever issued by the session backend's local
+    /// materialization owner, so route it back there. Peer-only member refs
+    /// have no such owner and are refused explicitly.
+    async fn retry_retained_provision_cleanup(
+        &self,
+        retained: RetainedProvisionEffects,
+    ) -> Result<(), RetainedProvisionCleanupFailure> {
+        match retained.member_ref() {
+            MemberRef::Session { .. } => {
+                self.session
+                    .retry_retained_provision_cleanup(retained)
+                    .await
+            }
+            MemberRef::BackendPeer { .. } => Err(RetainedProvisionCleanupFailure::unsupported(
+                retained,
+                "peer-only members have no local materialization owner; their compensation belongs to the external release path",
+            )),
         }
     }
 
@@ -12910,7 +15291,7 @@ impl MobProvisioner for MultiBackendProvisioner {
         &self,
         member_ref: &MemberRef,
         deadline: Instant,
-    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+    ) -> Result<MemberRegistrationReload, MobError> {
         self.session
             .reload_degraded_runtime_registration(member_ref, deadline)
             .await

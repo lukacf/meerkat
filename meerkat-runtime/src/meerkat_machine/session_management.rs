@@ -4953,6 +4953,70 @@ impl MeerkatMachine {
             && materialization_is_vacant
     }
 
+    /// Fence exact service-actor cleanup after a reload has published an
+    /// ownerless cold registration. This never joins runtime teardown; an
+    /// attached, draining, or claimed registration returns `CurrentButOwned`;
+    /// only an exact registration mismatch returns `NotCurrent`. Callers must
+    /// not discard retained retry custody on `CurrentButOwned`.
+    pub async fn lock_ownerless_registration_for_actor_cleanup(
+        &self,
+        witness: &RuntimeSessionRegistrationWitness,
+    ) -> Result<RuntimeOwnerlessRegistrationAdmission, RuntimeDriverError> {
+        if !witness.belongs_to(self) {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::NotCurrent);
+        }
+        let registration_guard = self
+            .lock_session_registration_transaction(witness.session_id())
+            .await;
+        if self
+            .current_session_registration_witness(witness.session_id())
+            .await
+            .as_ref()
+            != Some(witness)
+        {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::NotCurrent);
+        }
+        if !self
+            .registration_is_current_without_runtime_owner(witness)
+            .await
+        {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::CurrentButOwned);
+        }
+        #[cfg(feature = "live")]
+        let Some(live_lifecycle_lease) = self
+            .acquire_unregister_live_lifecycle_lease(witness.session_id())
+            .await?
+        else {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::NotCurrent);
+        };
+        let Some(gate) = witness.registration_gate() else {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::NotCurrent);
+        };
+        let mutation_guard = gate.lock_owned().await;
+        if self
+            .current_session_registration_witness(witness.session_id())
+            .await
+            .as_ref()
+            != Some(witness)
+        {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::NotCurrent);
+        }
+        if !self
+            .registration_is_current_without_runtime_owner(witness)
+            .await
+        {
+            return Ok(RuntimeOwnerlessRegistrationAdmission::CurrentButOwned);
+        }
+        Ok(RuntimeOwnerlessRegistrationAdmission::Acquired(
+            RuntimeOwnerlessRegistrationLease {
+                _registration_guard: registration_guard,
+                #[cfg(feature = "live")]
+                _live_lifecycle_lease: live_lifecycle_lease,
+                _mutation_guard: mutation_guard,
+            },
+        ))
+    }
+
     /// Quiesce and discard only the exact process-local registration whose
     /// persistent shell has entered `ReloadRequired`.
     ///
@@ -4980,8 +5044,36 @@ impl MeerkatMachine {
         witness: &RuntimeSessionRegistrationWitness,
         operation_preservation: Option<meerkat_core::OperationRetentionRequest>,
     ) -> Result<ReloadRequiredRegistrationDisposition, RuntimeDriverError> {
+        self.join_or_start_reload_required_registration(witness, None, operation_preservation)
+            .await
+            .map(|settlement| settlement.disposition())
+    }
+
+    /// Await the owned reload's actual terminal result and the successor
+    /// witness minted by its atomic publication. Dropping this observer does
+    /// not cancel the coordinator or release its physical cleanup custody.
+    pub async fn reload_required_registration_until_settled_if_current(
+        &self,
+        witness: &RuntimeSessionRegistrationWitness,
+        attachment: &RuntimeExecutorAttachmentWitness,
+        operation_preservation: Option<meerkat_core::OperationRetentionRequest>,
+    ) -> Result<ReloadRequiredRegistrationSettlement, RuntimeDriverError> {
+        self.join_or_start_reload_required_registration(
+            witness,
+            Some(attachment),
+            operation_preservation,
+        )
+        .await
+    }
+
+    async fn join_or_start_reload_required_registration(
+        &self,
+        witness: &RuntimeSessionRegistrationWitness,
+        attachment: Option<&RuntimeExecutorAttachmentWitness>,
+        operation_preservation: Option<meerkat_core::OperationRetentionRequest>,
+    ) -> Result<ReloadRequiredRegistrationSettlement, RuntimeDriverError> {
         if !witness.belongs_to(self) {
-            return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+            return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
         }
         let (mut result_rx, start) = {
             let registration_transaction_guard = self
@@ -4989,13 +5081,22 @@ impl MeerkatMachine {
                 .await;
             let mut sessions = self.sessions.write().await;
             let Some(entry) = sessions.get_mut(witness.session_id()) else {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             };
             if entry.epoch_id != *witness.epoch_id() || !witness.matches_entry(entry) {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
+            }
+            if let Some(attachment) = attachment
+                && (!attachment.belongs_to(self)
+                    || attachment.session_id() != witness.session_id()
+                    || attachment.epoch_id() != witness.epoch_id()
+                    || !(entry.owns_runtime_loop_attachment(attachment.attachment_id)
+                        || entry.post_stop_cleanup_attachment_id == Some(attachment.attachment_id)))
+            {
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             if entry.require_durability_ready().is_ok() {
-                return Ok(ReloadRequiredRegistrationDisposition::NotDegraded);
+                return Ok(ReloadRequiredRegistrationSettlement::NotDegraded);
             }
             if let Some(coordinator) = entry.reload_required_discard_coordinator.as_ref() {
                 (coordinator.result_rx.clone(), None)
@@ -5083,7 +5184,7 @@ impl MeerkatMachine {
                 };
                 if !matches!(
                     &result,
-                    Ok(ReloadRequiredRegistrationDisposition::Discarded)
+                    Ok(ReloadRequiredRegistrationSettlement::Discarded { .. })
                 ) {
                     supervisor_machine
                         .clear_reload_required_discard_coordinator(
@@ -5134,7 +5235,7 @@ impl MeerkatMachine {
         coordinator_id: uuid::Uuid,
         teardown_slot: Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
         operation_preservation: Option<meerkat_core::OperationRetentionRequest>,
-    ) -> Result<ReloadRequiredRegistrationDisposition, RuntimeDriverError> {
+    ) -> Result<ReloadRequiredRegistrationSettlement, RuntimeDriverError> {
         // A machine-managed stop handoff may retain this registration's M in
         // its exact executor. Claiming and discarding the already-published
         // handoff is the only operation allowed before M: it releases that
@@ -5147,16 +5248,16 @@ impl MeerkatMachine {
             .acquire_unregister_live_lifecycle_lease(witness.session_id())
             .await?
         else {
-            return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+            return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
         };
         let Some(registration_gate) = witness.registration_gate() else {
-            return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+            return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
         };
         let mutation_guard = Arc::clone(&registration_gate).lock_owned().await;
         {
             let mut sessions = self.sessions.write().await;
             let Some(entry) = sessions.get_mut(witness.session_id()) else {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             };
             if entry.epoch_id != *epoch_id
                 || !witness.matches_entry(entry)
@@ -5172,11 +5273,11 @@ impl MeerkatMachine {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &teardown_slot))
             {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             #[cfg(feature = "live")]
             if !live_lifecycle_lease.matches_gate(&entry.live_lifecycle_gate) {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             entry.close_handle_teardown_gate();
             entry.provisional_interrupt_handle = None;
@@ -5220,7 +5321,7 @@ impl MeerkatMachine {
         ) = {
             let mut sessions = self.sessions.write().await;
             let Some(entry) = sessions.get_mut(witness.session_id()) else {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             };
             if entry.epoch_id != *epoch_id
                 || !witness.matches_entry(entry)
@@ -5236,11 +5337,11 @@ impl MeerkatMachine {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &teardown_slot))
             {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             #[cfg(feature = "live")]
             if !live_lifecycle_lease.matches_gate(&entry.live_lifecycle_gate) {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             // Seal before taking the worker handle. A seal failure leaves the
             // join authority entry-owned for a later exact retry.
@@ -5482,13 +5583,13 @@ impl MeerkatMachine {
             .acquire_unregister_live_lifecycle_lease(witness.session_id())
             .await?
         else {
-            return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+            return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
         };
         let mutation_guard = Arc::clone(&registration_gate).lock_owned().await;
-        let replaced = {
+        let (replaced, successor) = {
             let mut sessions = self.sessions.write().await;
             let Some(entry) = sessions.get(witness.session_id()) else {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             };
             if entry.epoch_id != *epoch_id
                 || !witness.matches_entry(entry)
@@ -5504,11 +5605,11 @@ impl MeerkatMachine {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &teardown_slot))
             {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             #[cfg(feature = "live")]
             if !live_lifecycle_lease.matches_gate(&entry.live_lifecycle_gate) {
-                return Ok(ReloadRequiredRegistrationDisposition::NotCurrent);
+                return Ok(ReloadRequiredRegistrationSettlement::NotCurrent);
             }
             if !matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
                 || entry.ops_lifecycle_persistence_worker.is_some()
@@ -5544,7 +5645,16 @@ impl MeerkatMachine {
                     )));
                 }
             };
-            sessions.insert(recovered_session_id, recovered_entry)
+            let successor = RuntimeSessionRegistrationWitness::new(
+                Arc::downgrade(&self.shared),
+                recovered_session_id.clone(),
+                recovered_entry.epoch_id.clone(),
+                Arc::downgrade(&recovered_entry.mutation_gate),
+            );
+            (
+                sessions.insert(recovered_session_id, recovered_entry),
+                successor,
+            )
         };
         drop(mutation_guard);
         #[cfg(feature = "live")]
@@ -5561,7 +5671,7 @@ impl MeerkatMachine {
             witness.session_id(),
         )
         .await;
-        Ok(ReloadRequiredRegistrationDisposition::Discarded)
+        Ok(ReloadRequiredRegistrationSettlement::Discarded { successor })
     }
 
     /// Unregister only when `witness` still names this machine's exact current
@@ -5625,9 +5735,18 @@ impl MeerkatMachine {
         .require_completed()
     }
 
-    /// Unregister only when `witness` still names this machine's exact current
-    /// attachment. A stale attachment is an idempotent `Ok(false)` and can
-    /// never open the drain window for a same-SessionId replacement.
+    /// Check the issuer of an attachment witness. This says nothing about
+    /// whether the attachment is still current or its retirement has finished.
+    pub fn owns_executor_attachment_witness(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+    ) -> bool {
+        witness.belongs_to(self)
+    }
+
+    /// Unregister only this machine's exact attachment, including joining its
+    /// owned retirement. A stale witness is an idempotent `Ok(false)` and
+    /// cannot retire a same-session replacement.
     pub async fn unregister_executor_attachment_if_current(
         self: &Arc<Self>,
         witness: &RuntimeExecutorAttachmentWitness,

@@ -202,6 +202,20 @@ pub enum MobMachineCatalogInput {
     ResolveAdaptiveFinish,
     RequestAdaptiveCancel,
     RecordDeadlineObserved,
+    BeginExplicitResume,
+    CancelExplicitResume,
+    SettleExplicitResumePreparation,
+    AuthorizeExplicitResumeMember,
+    ClassifyExplicitResumeMemberLive,
+    ClassifyExplicitResumeMemberOutcome,
+    SettleExplicitResumeMember,
+    BeginExplicitResumeReadiness,
+    SettleExplicitResumeReadiness,
+    BeginExplicitResumeTopology,
+    SettleExplicitResumeTopology,
+    BeginExplicitResumeCleanup,
+    SettleExplicitResumeCleanup,
+    FinishExplicitResume,
 }
 
 impl MobMachineCatalogInput {
@@ -404,6 +418,20 @@ impl MobMachineCatalogInput {
         Self::ResolveAdaptiveFinish,
         Self::RequestAdaptiveCancel,
         Self::RecordDeadlineObserved,
+        Self::BeginExplicitResume,
+        Self::CancelExplicitResume,
+        Self::SettleExplicitResumePreparation,
+        Self::AuthorizeExplicitResumeMember,
+        Self::ClassifyExplicitResumeMemberLive,
+        Self::ClassifyExplicitResumeMemberOutcome,
+        Self::SettleExplicitResumeMember,
+        Self::BeginExplicitResumeReadiness,
+        Self::SettleExplicitResumeReadiness,
+        Self::BeginExplicitResumeTopology,
+        Self::SettleExplicitResumeTopology,
+        Self::BeginExplicitResumeCleanup,
+        Self::SettleExplicitResumeCleanup,
+        Self::FinishExplicitResume,
     ];
 
     #[must_use]
@@ -609,6 +637,20 @@ impl MobMachineCatalogInput {
             Self::ResolveAdaptiveFinish => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveAdaptiveFinish,
             Self::RequestAdaptiveCancel => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RequestAdaptiveCancel,
             Self::RecordDeadlineObserved => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordDeadlineObserved,
+            Self::BeginExplicitResume => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginExplicitResume,
+            Self::CancelExplicitResume => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CancelExplicitResume,
+            Self::SettleExplicitResumePreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumePreparation,
+            Self::AuthorizeExplicitResumeMember => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeExplicitResumeMember,
+            Self::ClassifyExplicitResumeMemberLive => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyExplicitResumeMemberLive,
+            Self::ClassifyExplicitResumeMemberOutcome => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyExplicitResumeMemberOutcome,
+            Self::SettleExplicitResumeMember => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumeMember,
+            Self::BeginExplicitResumeReadiness => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginExplicitResumeReadiness,
+            Self::SettleExplicitResumeReadiness => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumeReadiness,
+            Self::BeginExplicitResumeTopology => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginExplicitResumeTopology,
+            Self::SettleExplicitResumeTopology => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumeTopology,
+            Self::BeginExplicitResumeCleanup => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginExplicitResumeCleanup,
+            Self::SettleExplicitResumeCleanup => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleExplicitResumeCleanup,
+            Self::FinishExplicitResume => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::FinishExplicitResume,
         }
     }
 
@@ -837,6 +879,20 @@ impl MobMachineCatalogInput {
             Self::ResolveAdaptiveFinish => "ResolveAdaptiveFinish",
             Self::RequestAdaptiveCancel => "RequestAdaptiveCancel",
             Self::RecordDeadlineObserved => "RecordDeadlineObserved",
+            Self::BeginExplicitResume => "BeginExplicitResume",
+            Self::CancelExplicitResume => "CancelExplicitResume",
+            Self::SettleExplicitResumePreparation => "SettleExplicitResumePreparation",
+            Self::AuthorizeExplicitResumeMember => "AuthorizeExplicitResumeMember",
+            Self::ClassifyExplicitResumeMemberLive => "ClassifyExplicitResumeMemberLive",
+            Self::ClassifyExplicitResumeMemberOutcome => "ClassifyExplicitResumeMemberOutcome",
+            Self::SettleExplicitResumeMember => "SettleExplicitResumeMember",
+            Self::BeginExplicitResumeReadiness => "BeginExplicitResumeReadiness",
+            Self::SettleExplicitResumeReadiness => "SettleExplicitResumeReadiness",
+            Self::BeginExplicitResumeTopology => "BeginExplicitResumeTopology",
+            Self::SettleExplicitResumeTopology => "SettleExplicitResumeTopology",
+            Self::BeginExplicitResumeCleanup => "BeginExplicitResumeCleanup",
+            Self::SettleExplicitResumeCleanup => "SettleExplicitResumeCleanup",
+            Self::FinishExplicitResume => "FinishExplicitResume",
         }
     }
 }

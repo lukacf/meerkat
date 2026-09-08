@@ -64,7 +64,7 @@ struct StoredWholeBlobProvisionalTail {
     compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type InputStateBatchCasTestBlock = (
     Arc<crate::tokio::sync::Notify>,
     Arc<crate::tokio::sync::Notify>,
@@ -492,7 +492,7 @@ pub struct InMemoryRuntimeStore {
     machine_lifecycle_commit_errors_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_commit_ack_losses_remaining: Arc<AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     direct_member_high_water_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     /// Candidate bytes shipped into the snapshot byte-equality compare.
     /// Observability seam for the length-gate regression tests only.
@@ -523,7 +523,7 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_commit_errors_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_commit_ack_losses_remaining: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             direct_member_high_water_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             snapshot_byte_probe_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -550,8 +550,10 @@ impl InMemoryRuntimeStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
 
-    #[cfg(test)]
-    pub(crate) fn block_next_direct_member_high_water_admission(
+    /// Pause one real receiver admission for cross-crate custody regressions.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn block_next_direct_member_high_water_admission(
         &self,
         entered: Arc<crate::tokio::sync::Notify>,
         release: Arc<crate::tokio::sync::Notify>,
@@ -3580,13 +3582,13 @@ impl RuntimeStore for InMemoryRuntimeStore {
         RuntimeStoreError,
     > {
         super::validate_direct_member_high_water_candidate(member_session_id, candidate)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let test_block = self
             .direct_member_high_water_before
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((entered, release)) = test_block {
             entered.notify_one();
             release.notified().await;

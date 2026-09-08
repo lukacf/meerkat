@@ -5685,11 +5685,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Discard only process-local session material after the runtime store has
     /// lost durable write authority.
     ///
-    /// The caller already owns the machine's exact degraded-registration
-    /// coordinator and mutation fence. This path therefore must not acquire
-    /// the turn-finalization boundary or publish archive/stop/retire state. It
-    /// serializes only against same-session actor recovery before removing the
-    /// actor and its checkpointer sidecars.
+    /// The caller owns either the exact degraded-registration coordinator and
+    /// mutation fence, or (after that coordinator has terminally settled) B
+    /// plus an exact ownerless-successor lease holding T, optional L, and M.
+    /// This path acquires only the same-session recovery gate R; it must not
+    /// acquire B or publish archive/stop/retire state. The latter call order is
+    /// B -> T -> optional L -> M -> R. Actor removal compares the retained
+    /// service-issued witness before clearing its checkpointer sidecars.
     pub async fn discard_live_session_actor_after_durability_reload_required(
         &self,
         witness: &LiveSessionActorWitness,

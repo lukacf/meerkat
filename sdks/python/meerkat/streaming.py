@@ -250,9 +250,17 @@ class _StdoutDispatcher:
                             if isinstance(raw_nested_code, str):
                                 nested_code = raw_nested_code
                             nested_message = nested_details.get("message")
+                            # Bare mob/lifecycle structured payloads (no
+                            # nested "code"/"details" envelope) are never
+                            # narrowed to a single "reason" string — that
+                            # silently dropped sibling fields like
+                            # `retryable`/`required_action`/`kind` for any
+                            # payload that happened to also carry "reason"
+                            # (e.g. `mob_member_reload_required`). The whole
+                            # dict survives as `details` unless the server
+                            # explicitly nests one under "details".
                             nested_details = nested_details.get(
-                                "details",
-                                nested_details.get("reason", nested_details),
+                                "details", nested_details
                             )
                         future.set_exception(
                             meerkat_error_from_jsonrpc_code(

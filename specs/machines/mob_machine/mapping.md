@@ -3858,6 +3858,75 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveCoordinationResourceClaimOverlap`
   - anchors: `mob_coordination_board_authority`
   - scenarios: `coordination-board-records-and-overlap`
+- `BeginExplicitResumeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelExplicitResumeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelExplicitResumeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumePreparationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExplicitResumeMemberRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExplicitResumeMemberLiveRevivable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExplicitResumeMemberLiveMissing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExplicitResumeMemberOutcomeCurrent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExplicitResumeMemberOutcomeRollback`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeMemberRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeMemberReplacedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginExplicitResumeReadinessStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginExplicitResumeReadinessRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeReadinessStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeReadinessRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginExplicitResumeTopologyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeTopologyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginExplicitResumeCleanupStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginExplicitResumeCleanupRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeCleanupStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleExplicitResumeCleanupRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishExplicitResumeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishExplicitResumeCancelledStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `DefinitionEpochAdvanced`
@@ -4284,6 +4353,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `GrantRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExplicitResumeMemberOutcomeClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExplicitResumeFinished`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

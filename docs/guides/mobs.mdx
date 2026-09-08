@@ -916,6 +916,36 @@ tests and WASM/browser-embedded paths. The mob store is realm-scoped in the
 runtime-backed surfaces, so a process restart can recover mob state, members,
 events, flow snapshots, and work records.
 
+### Cold resume and cancellation
+
+Reconstructing a stopped mob does not implicitly start its members. Explicit
+resume prepares the exact session attachments, commits the lifecycle
+transition, reconstructs members, and then reconciles readiness, topology, and
+operation bindings. Member construction and external reconciliation run
+outside the actor loop; status queries and unrelated members do not wait
+behind one member's constructor.
+
+The public `running` phase can precede completion of this sequence. Await the
+resume operation's result rather than treating that phase alone as a readiness
+receipt. An observer timeout or dropped caller does not cancel process-owned
+construction or prove that it did not execute.
+
+Lifecycle cancellation retains ownership until admitted work settles.
+Retirement, respawn, and registration reload wait behind the affected member's
+in-flight resume work. Cleanup failures retain exact retry authority; an
+unproven cleanup is not a successful cancellation. Compensation preserves
+durable session documents and refuses to remove a successor attachment.
+
+### Admission in custom Rust session services
+
+A custom `MobSessionService` that executes standalone turns must implement
+`start_turn_with_admission_notification`. Send its notification only after
+generated admission and command handoff; spawning a task or waiting for
+terminal completion is not a substitute. The built-in ephemeral service
+provides this contract. The default custom-service implementation returns
+`Unsupported`, rather than allowing a later delivery or retirement to overtake
+an unacknowledged admission.
+
 ## Supervisor Rotation
 
 `mob/rotate_supervisor` is a synchronous-looking view over a durable

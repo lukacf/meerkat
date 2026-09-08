@@ -2756,6 +2756,12 @@ pub struct MemberReloadOutcome {
 pub struct MemberAdmissionBacklogSnapshot {
     pub parked: BTreeMap<AgentIdentity, usize>,
     pub peak_parked: usize,
+    #[cfg(test)]
+    pub reload_invocations: BTreeMap<AgentIdentity, usize>,
+    #[cfg(test)]
+    pub topology_parked_reloads: BTreeMap<AgentIdentity, usize>,
+    #[cfg(test)]
+    pub settled_reload_invocations: BTreeMap<AgentIdentity, usize>,
 }
 
 /// Maximum deliveries parked behind one member's in-flight admission before
@@ -2769,11 +2775,10 @@ pub const MEMBER_ADMISSION_LANE_CAPACITY: usize = 256;
 #[cfg(test)]
 pub const MEMBER_ADMISSION_LANE_CAPACITY: usize = 8;
 
-/// End-to-end bound for [`MobHandle::reload_member_registration`]: the durable
-/// authority probe, the registration discard, the machine-authorized revival
-/// and the readiness re-arm must all land within it, else the typed
-/// [`MobError::MemberReloadTimedOut`] names the stage that did not. Distinct
-/// from the member retirement bound: a reload keeps the member.
+/// Observation bound for [`MobHandle::reload_member_registration`], including
+/// lane queueing, durable authority probe, discard, revival and readiness.
+/// [`MobError::MemberReloadTimedOut`] names the unfinished stage; started
+/// effects retain their member lane until actual settlement.
 #[cfg(not(test))]
 pub const MEMBER_RELOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(test)]
@@ -2790,6 +2795,39 @@ pub struct MemberAdmissionBacklogGauge {
 }
 
 impl MemberAdmissionBacklogGauge {
+    #[cfg(test)]
+    pub(super) fn record_reload_settlement(&self, agent_identity: &AgentIdentity) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settled_reload_invocations
+            .entry(agent_identity.clone())
+            .or_default() += 1;
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_topology_reload_park(&self, agent_identity: &AgentIdentity) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .topology_parked_reloads
+            .entry(agent_identity.clone())
+            .or_default() += 1;
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_reload_invocation(&self, agent_identity: &AgentIdentity) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reload_invocations
+            .entry(agent_identity.clone())
+            .or_default() += 1;
+    }
+
     pub(super) fn record(&self, agent_identity: &AgentIdentity, depth: usize) {
         let mut snapshot = self
             .snapshot
@@ -11203,16 +11241,16 @@ impl MobHandle {
     /// no-op. Placed members are reloaded by their member host and are
     /// rejected typed.
     ///
-    /// The work runs detached from the actor loop; only the roster and
-    /// placement reads and the revival authority transition are serialized.
-    /// It is bounded end to end by [`MEMBER_RELOAD_TOTAL_TIMEOUT`]
+    /// Reload shares the member's single-flight admission lane with delivery,
+    /// while other members remain independent. Caller observation is bounded
+    /// by [`MEMBER_RELOAD_TOTAL_TIMEOUT`]
     /// (`MemberReloadTimedOut` names the stage that missed it). Before the
     /// live shell is discarded the durable session authority is probed; when
     /// it is unreadable the reload is refused typed (`MemberReloadRefused`)
     /// and the member stays degraded rather than becoming Broken. If the
-    /// actor round trip itself misses the deadline (`ActorCommandTimedOut`
-    /// with stage `actor_command_reply`), the worker may still be finishing;
-    /// a repeat call observes its result.
+    /// caller times out or leaves after effects start, cleanup and revival
+    /// continue with lane custody until actual settlement. A repeated call
+    /// queues behind that work and observes the resulting registration.
     pub async fn reload_member_registration(
         &self,
         member: &AgentIdentity,

@@ -28,6 +28,9 @@ use crate::ids::WorkOrigin;
 use crate::runtime::handle::{MEMBER_ADMISSION_LANE_CAPACITY, MemberReloadDisposition};
 use crate::runtime::state::MobCommand;
 
+#[path = "reload_lane.rs"]
+mod reload_lane;
+
 /// `InMemoryRuntimeStore` decorator with per-session fault switches.
 struct FaultInjectingRuntimeStore {
     inner: Arc<InMemoryRuntimeStore>,
@@ -40,6 +43,8 @@ struct FaultInjectingRuntimeStore {
     release_commits: Notify,
     parked_commit_arrivals: std::sync::Mutex<HashMap<LogicalRuntimeId, usize>>,
     failed_commits: AtomicU64,
+    failed_ops_loads: AtomicU64,
+    fail_ops_load: std::sync::Mutex<HashSet<LogicalRuntimeId>>,
 }
 
 impl FaultInjectingRuntimeStore {
@@ -54,6 +59,8 @@ impl FaultInjectingRuntimeStore {
             release_commits: Notify::new(),
             parked_commit_arrivals: std::sync::Mutex::new(HashMap::new()),
             failed_commits: AtomicU64::new(0),
+            failed_ops_loads: AtomicU64::new(0),
+            fail_ops_load: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -585,6 +592,17 @@ impl RuntimeStore for FaultInjectingRuntimeStore {
         Option<meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot>,
         meerkat_runtime::store::RuntimeStoreError,
     > {
+        if self
+            .fail_ops_load
+            .lock()
+            .expect("ops-load failure switch")
+            .contains(runtime_id)
+        {
+            self.failed_ops_loads.fetch_add(1, Ordering::Relaxed);
+            return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                "injected cold recovery ops read after sidecar cleanup".to_string(),
+            ));
+        }
         self.inner.load_ops_lifecycle(runtime_id).await
     }
 
@@ -1211,6 +1229,513 @@ async fn resume_readiness_fanout_keeps_the_loop_responsive() {
         .await
         .expect("delivery after resume is admitted");
     mob.wait_for_executed_prompts(3, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_stopped_resume_preparation_keeps_query_phase_responsive() {
+    let storage = MobStorage::in_memory();
+    let events = Arc::clone(&storage.events);
+    let runtime_metadata = Arc::clone(&storage.runtime_metadata);
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(turn_driven_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    for index in 0..17 {
+        handle
+            .spawn(
+                ProfileName::from("worker"),
+                AgentIdentity::from(format!("cold-{index}")),
+                None,
+            )
+            .await
+            .expect("spawn durable member");
+    }
+    handle.stop().await.expect("stop original mob");
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("reconstruct stopped mob");
+    assert_eq!(
+        resumed.status().await.expect("initial phase"),
+        MobState::Stopped
+    );
+
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let held_gate = gate.lock_owned().await;
+    let baseline = service.turn_finalization_acquire_counts();
+    let resume = tokio::spawn({
+        let resumed = resumed.clone();
+        async move { resumed.resume().await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while service.turn_finalization_acquire_counts().0 == baseline.0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("exact attachment preparation entered the held boundary");
+
+    let query = tokio::time::timeout(Duration::from_millis(250), resumed.status()).await;
+    let replied_early = resume.is_finished();
+    drop(held_gate);
+    let completion = tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("released preparation converges")
+        .expect("resume task");
+    completion.expect("resume completes after exact preparation settles");
+
+    let final_phase = resumed.status().await.expect("final phase");
+    resumed.stop().await.expect("stop resumed mob");
+    resumed.shutdown().await.expect("shutdown resumed mob");
+    assert!(
+        !replied_early,
+        "Resume must remain pending behind the owner boundary"
+    );
+    assert_eq!(
+        query
+            .expect("QueryPhase must not wait for member attachment preparation")
+            .expect("QueryPhase"),
+        MobState::Stopped,
+    );
+    assert_eq!(final_phase, MobState::Running);
+}
+
+async fn reconstructed_isolation_mob(member_count: usize) -> IsolationMob {
+    reconstructed_isolation_mob_with_definition(member_count, turn_driven_definition()).await
+}
+
+async fn reconstructed_isolation_mob_with_definition(
+    member_count: usize,
+    definition: MobDefinition,
+) -> IsolationMob {
+    let mut mob = create_isolation_mob_with_definition(member_count, definition).await;
+    let storage = MobStorage::with_events_and_runtime_metadata(
+        Arc::clone(&mob.handle.events),
+        Arc::clone(&mob.handle.runtime_metadata),
+    );
+    mob.handle.stop().await.expect("stop original");
+    crash_stop_and_release_routes(mob.handle).await;
+    mob.handle = MobBuilder::for_resume(storage)
+        .with_session_service(mob.service.clone())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("reconstruct stopped actor");
+    mob
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_preserves_the_exact_host_compaction_curator() {
+    struct CuratorCustomizer(Arc<dyn meerkat_core::CompactionCurator>);
+    impl SpawnMemberCustomizer for CuratorCustomizer {
+        fn customize_spawn(
+            &self,
+            context: &SpawnCustomizationContext,
+            spec: &mut SpawnMemberSpec,
+        ) -> Result<(), MobError> {
+            if context.spawn_source == SpawnSource::Resume {
+                spec.compaction_curator_override = Some(Arc::clone(&self.0));
+            }
+            Ok(())
+        }
+    }
+
+    let mut mob = create_isolation_mob(1).await;
+    let storage = MobStorage::with_events_and_runtime_metadata(
+        Arc::clone(&mob.handle.events),
+        Arc::clone(&mob.handle.runtime_metadata),
+    );
+    mob.handle.stop().await.expect("stop original");
+    crash_stop_and_release_routes(mob.handle).await;
+    let curator: Arc<dyn meerkat_core::CompactionCurator> = Arc::new(TestCompactionCurator);
+    mob.handle = MobBuilder::for_resume(storage)
+        .with_session_service(mob.service.clone())
+        .with_spawn_member_customizer(Arc::new(CuratorCustomizer(Arc::clone(&curator))))
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("reconstruct stopped actor");
+    let before = mob.service.recorded_compaction_curators().await.len();
+    tokio::time::timeout(Duration::from_secs(10), mob.handle.resume())
+        .await
+        .expect("resume is bounded")
+        .expect("resume");
+    let recorded = mob.service.recorded_compaction_curators().await;
+    mob.handle.stop().await.expect("stop");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert_eq!(recorded.len(), before + 1, "one cold member construction");
+    assert!(
+        recorded[before]
+            .as_ref()
+            .is_some_and(|actual| Arc::ptr_eq(actual, &curator)),
+        "off-actor construction must preserve the exact host-owned curator"
+    );
+}
+
+struct ReleaseConstructionGate(Arc<TestRuntimeControlBarrier>);
+
+impl Drop for ReleaseConstructionGate {
+    fn drop(&mut self) {
+        self.0.release_all();
+    }
+}
+
+async fn held_reconstructed_resume_topology() -> (
+    IsolationMob,
+    tokio::task::JoinHandle<Result<(), MobError>>,
+    ReleaseConstructionGate,
+) {
+    let mut definition = turn_driven_definition();
+    definition.wiring.role_wiring = vec![RoleWiringRule {
+        a: ProfileName::from("worker"),
+        b: ProfileName::from("worker"),
+    }];
+    let mob = reconstructed_isolation_mob_with_definition(2, definition).await;
+    let construction = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release_construction = ReleaseConstructionGate(Arc::clone(&construction));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    wait_until(
+        "cold constructor entered before topology",
+        Duration::from_secs(5),
+        || {
+            let gate = Arc::clone(&construction);
+            async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+        },
+    )
+    .await;
+    wait_until(
+        "other runtime available before topology",
+        Duration::from_secs(5),
+        || {
+            let service = Arc::clone(&mob.service);
+            let id = mob.session(1).clone();
+            async move { service.sessions.read().await.contains_key(&id) }
+        },
+    )
+    .await;
+    let runtime = mob
+        .service
+        .sessions
+        .read()
+        .await
+        .get(mob.session(1))
+        .cloned()
+        .expect("runtime");
+    let gate = Arc::new(TestRuntimeControlBarrier::new());
+    let release_topology = ReleaseConstructionGate(Arc::clone(&gate));
+    *runtime.trust_mutation_gate.write().expect("trust gate") = Some(Arc::clone(&gate));
+    drop(release_construction);
+    wait_until("topology mutation entered", Duration::from_secs(5), || {
+        let gate = Arc::clone(&gate);
+        async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+    })
+    .await;
+    (mob, resume, release_topology)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_topology_mutation_keeps_queries_responsive_and_stop_pending() {
+    let (mob, resume, release_topology) = held_reconstructed_resume_topology().await;
+    let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
+    let resume_finished_early = resume.is_finished();
+    let mut stop = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.stop().await }
+    });
+    let stop_early = tokio::time::timeout(Duration::from_millis(250), &mut stop).await;
+    let stopped_early = stop_early.is_ok();
+    drop(release_topology);
+    let stopped = match stop_early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("stop settles after topology"),
+    };
+    let resumed = tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume observes cancellation")
+        .expect("resume task");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert_eq!(
+        phase.expect("query during topology").expect("phase"),
+        MobState::Running
+    );
+    assert!(!resume_finished_early);
+    assert!(
+        !stopped_early,
+        "Stop cannot finish while topology owns mutation"
+    );
+    stopped.expect("stop task").expect("stop");
+    assert!(resumed.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_retire_waits_for_granted_topology_without_blocking_peer_turn() {
+    let (mob, resume, release_topology) = held_reconstructed_resume_topology().await;
+    let mut retire = tokio::spawn({
+        let handle = mob.handle.clone();
+        let identity = mob.member(1).clone();
+        async move { handle.retire(identity).await }
+    });
+    let early = tokio::time::timeout(Duration::from_millis(250), &mut retire).await;
+    let retired_early = early.is_ok();
+    let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
+    let mut peer = internal_turn_task(
+        &mob.handle,
+        mob.member(0),
+        "peer turn while granted topology is held".to_string(),
+    );
+    let early_peer = tokio::time::timeout(Duration::from_secs(5), &mut peer).await;
+    let peer_finished_early = early_peer.is_ok();
+    drop(release_topology);
+    let peer = match early_peer {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(5), peer)
+            .await
+            .expect("peer settles after topology release"),
+    };
+    let retired = match early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), retire)
+            .await
+            .expect("retirement settles after topology release"),
+    };
+    let resumed = tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume settles")
+        .expect("resume task");
+    let member = mob.handle.get_member(mob.member(1)).await.expect("roster");
+    mob.handle.stop().await.expect("stop");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert!(
+        !retired_early,
+        "retirement must await the granted trust mutation"
+    );
+    assert!(
+        peer_finished_early,
+        "ordinary peer work must remain independent"
+    );
+    assert_eq!(
+        phase.expect("query stays responsive").expect("phase"),
+        MobState::Running
+    );
+    peer.expect("peer task").expect("peer turn");
+    retired.expect("retirement task").expect("retirement");
+    resumed.expect("resume");
+    assert!(
+        member.is_none(),
+        "late topology work must not resurrect the retired member"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_construction_keeps_peers_and_queries_responsive() {
+    let mob = reconstructed_isolation_mob(17).await;
+    let gate = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release = ReleaseConstructionGate(Arc::clone(&gate));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    wait_until(
+        "member construction entered",
+        Duration::from_secs(5),
+        || {
+            let gate = Arc::clone(&gate);
+            async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+        },
+    )
+    .await;
+    let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
+    wait_until("other members constructed", Duration::from_secs(5), || {
+        let service = Arc::clone(&mob.service);
+        let sessions = mob
+            .members
+            .iter()
+            .skip(1)
+            .map(|(_, id)| id.clone())
+            .collect::<Vec<_>>();
+        async move {
+            let live = service.sessions.read().await;
+            sessions.iter().all(|session| live.contains_key(session))
+        }
+    })
+    .await;
+    let mut peer_task = internal_turn_task(
+        &mob.handle,
+        mob.member(1),
+        "peer during cold resume".to_string(),
+    );
+    let peer = tokio::time::timeout(Duration::from_secs(5), &mut peer_task).await;
+    let peer_finished_early = peer.is_ok();
+    let replied_early = resume.is_finished();
+    drop(release);
+    let completion = tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume owner settles")
+        .expect("resume task");
+    let peer_result = match peer {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(5), peer_task)
+            .await
+            .expect("peer settles after releasing construction"),
+    };
+    mob.handle.stop().await.expect("stop");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert_eq!(
+        phase.expect("responsive query").expect("phase"),
+        MobState::Running
+    );
+    assert!(
+        peer_finished_early,
+        "peer must not await the parked constructor"
+    );
+    peer_result.expect("peer task").expect("peer turn");
+    assert!(!replied_early, "Resume must await every constructor");
+    completion.expect("resume completes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_stop_waits_for_owned_construction_and_preserves_durable_sessions() {
+    let mob = reconstructed_isolation_mob(17).await;
+    let gate = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release = ReleaseConstructionGate(Arc::clone(&gate));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    wait_until(
+        "constructor entered before stop",
+        Duration::from_secs(5),
+        || {
+            let gate = Arc::clone(&gate);
+            async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+        },
+    )
+    .await;
+    let mut stop = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.stop().await }
+    });
+    let early_stop = tokio::time::timeout(Duration::from_millis(250), &mut stop).await;
+    let stopped_early = early_stop.is_ok();
+    let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
+    drop(release);
+    let stop_result = match early_stop {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("stop settles after construction"),
+    };
+    let resume_result = tokio::time::timeout(Duration::from_secs(5), resume)
+        .await
+        .expect("resume observation settles")
+        .expect("resume task");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert!(
+        !stopped_early,
+        "Stop cannot certify cleanup while construction is owned"
+    );
+    assert_eq!(
+        phase.expect("query during cancellation").expect("phase"),
+        MobState::Running
+    );
+    stop_result.expect("stop task").expect("stop");
+    assert!(
+        resume_result.is_err(),
+        "superseded resume must not report success"
+    );
+    assert_eq!(
+        mob.service.create_session_in_flight.load(Ordering::Acquire),
+        0
+    );
+    assert!(mob.service.archived_session_ids.read().await.is_empty());
+    let retained = mob.service.persisted_sessions.read().await;
+    assert!(mob.members.iter().all(|(_, id)| retained.contains_key(id)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconstructed_resume_retire_waits_for_its_constructor_without_blocking_queries() {
+    let mob = reconstructed_isolation_mob(2).await;
+    let gate = mob
+        .service
+        .park_session_creation(mob.session(0).clone())
+        .await;
+    let release = ReleaseConstructionGate(Arc::clone(&gate));
+    let resume = tokio::spawn({
+        let handle = mob.handle.clone();
+        async move { handle.resume().await }
+    });
+    wait_until(
+        "constructor entered before retirement",
+        Duration::from_secs(5),
+        || {
+            let gate = Arc::clone(&gate);
+            async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+        },
+    )
+    .await;
+    let mut retire = tokio::spawn({
+        let handle = mob.handle.clone();
+        let identity = mob.member(0).clone();
+        async move { handle.retire(identity).await }
+    });
+    let early = tokio::time::timeout(Duration::from_millis(250), &mut retire).await;
+    let retired_early = early.is_ok();
+    let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
+    drop(release);
+    let retired = match early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), retire)
+            .await
+            .expect("retirement after constructor settlement"),
+    };
+    let resumed = tokio::time::timeout(Duration::from_secs(10), resume)
+        .await
+        .expect("resume settles with current roster")
+        .expect("resume task");
+    let current = mob
+        .handle
+        .get_member(mob.member(0))
+        .await
+        .expect("member lookup");
+    mob.handle.stop().await.expect("stop");
+    mob.handle.shutdown().await.expect("shutdown");
+    assert!(
+        !retired_early,
+        "retirement must not race an owned constructor"
+    );
+    assert_eq!(
+        phase.expect("query while retirement waits").expect("phase"),
+        MobState::Running
+    );
+    retired.expect("retirement task").expect("retirement");
+    resumed.expect("resume respects the subsequent retirement");
+    assert!(
+        current.is_none(),
+        "late construction must not resurrect the retired member"
+    );
 }
 
 /// Load: 48 members, 200 concurrent deliveries, member 0's durable

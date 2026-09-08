@@ -228,6 +228,129 @@ class TestStdoutDispatcher:
         )
         assert type(mismatch) is MeerkatError
 
+    def test_member_reload_required_semantic_factory_is_generic_and_distinct(self):
+        """#1105: `MEMBER_RELOAD_REQUIRED` reuses the generic `MeerkatError`
+        transport (no dedicated subclass, unlike the four multi-host codes)
+        while preserving its full structured details, and is distinct from
+        `SESSION_BUSY` in both code and category-relevant shape."""
+        details = {
+            "kind": "mob_member_reload_required",
+            "member_id": "m1",
+            "reason": "durable commit could not be reconciled with the live shell",
+            "retryable": False,
+            "authority_retained": True,
+            "required_action": "reload_member_registration",
+        }
+        reload_required = meerkat_error_from_semantic_code(
+            "MEMBER_RELOAD_REQUIRED", "typed message", details
+        )
+        assert type(reload_required) is MeerkatError
+        assert reload_required.code == "MEMBER_RELOAD_REQUIRED"
+        assert reload_required.details == details
+        assert reload_required.details["retryable"] is False
+        assert reload_required.details["required_action"] == "reload_member_registration"
+
+        # Same shape via the numeric-code factory (as a corrected transport
+        # that threads the semantic code alongside the JSON-RPC number would
+        # call it) — the dedicated code is still generic MeerkatError, still
+        # distinct from SessionBusy, and its own projections are pinned.
+        via_numeric = meerkat_error_from_jsonrpc_code(
+            -32029, "MEMBER_RELOAD_REQUIRED", "typed message", details
+        )
+        assert type(via_numeric) is MeerkatError
+        assert via_numeric.code == "MEMBER_RELOAD_REQUIRED"
+        assert via_numeric.details == details
+
+        session_busy = meerkat_error_from_semantic_code(
+            "SESSION_BUSY", "turn already in progress", {"stage": "turn_active"}
+        )
+        assert type(session_busy) is MeerkatError
+        assert session_busy.code == "SESSION_BUSY"
+        assert session_busy.code != reload_required.code
+        assert not isinstance(reload_required, type(session_busy)) or type(
+            session_busy
+        ) is MeerkatError
+
+    @pytest.mark.asyncio
+    async def test_member_reload_required_dispatches_with_full_details_preserved(self):
+        """End-to-end over the real `_StdoutDispatcher`, using the exact bare
+        `structured_data()` wire shape `MobError::MemberReloadRequired`
+        actually sends (`error.data` is the bare dict, no `code`/`details`
+        wrapper — see `meerkat-mob/src/error.rs`). Proves the dispatcher no
+        longer narrows a payload that happens to carry both `reason` and
+        richer sibling fields (`retryable`, `required_action`, `kind`) down
+        to a bare `reason` string."""
+        details = {
+            "kind": "mob_member_reload_required",
+            "member_id": "m1",
+            "reason": "durable commit could not be reconciled with the live shell",
+            "retryable": False,
+            "authority_retained": True,
+            "required_action": "reload_member_registration",
+        }
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32029,
+                "message": (
+                    "member m1 requires a runtime reload before it can accept "
+                    "work: durable commit could not be reconciled with the "
+                    "live shell"
+                ),
+                "data": details,
+            },
+        }
+        reader = make_reader([jline(payload)])
+        dispatcher = _StdoutDispatcher(reader)
+        dispatcher.start()
+        future = dispatcher.expect_response(1)
+        with pytest.raises(MeerkatError) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        err = exc_info.value
+        assert type(err) is MeerkatError
+        assert err.code == "-32029"
+        assert err.details == details
+        assert err.details["retryable"] is False
+        assert err.details["required_action"] == "reload_member_registration"
+        assert err.details["kind"] == "mob_member_reload_required"
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_session_busy_mob_dispatch_unchanged_by_reload_required_fix(self):
+        """Baseline regression: a SessionBusy-mapped mob lifecycle error
+        (`RetirementInProgress`, no `reason` key) must dispatch exactly as
+        before the `MemberReloadRequired`-motivated details-preservation fix
+        — same code string, same full details dict."""
+        details = {
+            "kind": "mob_retirement_in_progress",
+            "session_id": "s1",
+            "stage": "session_archive_and_unregister",
+            "deadline_reached": True,
+            "retryable": True,
+            "authority_retained": True,
+        }
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32002,
+                "message": "retirement in progress",
+                "data": details,
+            },
+        }
+        reader = make_reader([jline(payload)])
+        dispatcher = _StdoutDispatcher(reader)
+        dispatcher.start()
+        future = dispatcher.expect_response(1)
+        with pytest.raises(MeerkatError) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        err = exc_info.value
+        assert type(err) is MeerkatError
+        assert err.code == "-32002"
+        assert err.details == details
+        await dispatcher.stop()
+
     @pytest.mark.asyncio
     async def test_response_dispatched_to_correct_future(self):
         reader = make_reader([response(1, {"text": "hello"})])

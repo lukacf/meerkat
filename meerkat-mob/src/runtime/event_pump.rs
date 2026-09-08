@@ -593,6 +593,114 @@ impl RemoteCompletionContext {
     }
 }
 
+/// A temporary subscriber owned by one pre-Record SubmitWork preparation.
+/// Dropping it withdraws only that subscriber, never another pump or waiter.
+pub(crate) struct PreparedRemoteCompletionPump {
+    manager: Arc<MemberEventPumpManager>,
+    material: MemberPumpMaterial,
+    tap: mpsc::Receiver<AttributedEvent>,
+}
+
+#[cfg(test)]
+type CompletionPreparationTestHolds =
+    BTreeMap<(crate::MobId, AgentIdentity), Arc<CompletionPreparationTestGate>>;
+#[cfg(test)]
+static COMPLETION_PREPARATION_TEST_HOLDS: std::sync::LazyLock<
+    StdMutex<CompletionPreparationTestHolds>,
+> = std::sync::LazyLock::new(|| StdMutex::new(BTreeMap::new()));
+
+#[cfg(test)]
+struct CompletionPreparationTestGate {
+    entered: Notify,
+    release: tokio::sync::watch::Sender<bool>,
+    manager: OnceLock<Weak<MemberEventPumpManager>>,
+}
+
+#[cfg(test)]
+pub(crate) struct CompletionPreparationTestHold {
+    key: (crate::MobId, AgentIdentity),
+    gate: Arc<CompletionPreparationTestGate>,
+}
+
+#[cfg(test)]
+impl CompletionPreparationTestHold {
+    pub(crate) async fn entered(&self) {
+        self.gate.entered.notified().await;
+    }
+
+    pub(crate) fn manager(&self) -> Option<Arc<MemberEventPumpManager>> {
+        self.gate.manager.get().and_then(Weak::upgrade)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CompletionPreparationTestHold {
+    fn drop(&mut self) {
+        let mut holds = COMPLETION_PREPARATION_TEST_HOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if holds
+            .get(&self.key)
+            .is_some_and(|gate| Arc::ptr_eq(gate, &self.gate))
+        {
+            holds.remove(&self.key);
+        }
+        self.gate.release.send_replace(true);
+    }
+}
+
+impl PreparedRemoteCompletionPump {
+    pub(crate) fn context_for(
+        &self,
+        material: &MemberPumpMaterial,
+    ) -> Result<RemoteCompletionContext, MobError> {
+        if !self.material.same_route_as(material) {
+            return Err(MobError::StaleMemberOperatorAuthority {
+                member_id: material.agent_identity.clone(),
+                reason: "placed completion pump preparation no longer names the exact route".into(),
+            });
+        }
+        let state = self
+            .manager
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active = state
+            .pumps
+            .get(&material.agent_identity)
+            .is_some_and(|entry| {
+                !entry.exiting
+                    && entry.expected_member == material.expected_member
+                    && entry.runtime_id == material.runtime_id
+                    && entry.peer == material.peer
+            });
+        if !self
+            .manager
+            .accepting_pumps
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.tap.is_closed()
+            || !active
+        {
+            return Err(MobError::Internal(format!(
+                "placed completion pump preparation for '{}' has no exact active pump",
+                material.agent_identity,
+            )));
+        }
+        Ok(RemoteCompletionContext {
+            manager: Arc::clone(&self.manager),
+            agent_identity: material.agent_identity.clone(),
+            expected_member: material.expected_member.clone(),
+        })
+    }
+}
+
+impl Drop for PreparedRemoteCompletionPump {
+    fn drop(&mut self) {
+        self.tap.close();
+        self.manager.liveness_changed.notify_waiters();
+    }
+}
+
 /// A17 obligation liveness probe: does the MACHINE (`pending_remote_turn_
 /// outcomes`) still hold an outstanding remote-turn obligation for this
 /// member? The pump must keep polling until the obligation RESOLVES — an
@@ -773,6 +881,18 @@ pub(crate) struct MemberPumpMaterial {
     pub fence_token: FenceToken,
     pub role: ProfileName,
     pub peer: meerkat_core::comms::TrustedPeerDescriptor,
+}
+
+impl MemberPumpMaterial {
+    pub(crate) fn same_route_as(&self, other: &Self) -> bool {
+        self.agent_identity == other.agent_identity
+            && self.host_id == other.host_id
+            && self.expected_member == other.expected_member
+            && self.runtime_id == other.runtime_id
+            && self.fence_token == other.fence_token
+            && self.role == other.role
+            && self.peer == other.peer
+    }
 }
 
 struct PumpEntry {
@@ -1211,6 +1331,71 @@ impl MemberEventPumpManager {
             agent_identity: identity.clone(),
             expected_member: expected_member.clone(),
         })
+    }
+
+    /// Own an actual tap through installation and the actor's Record/waiter
+    /// handoff. A closed manager or a superseding installer is not readiness.
+    pub(crate) async fn prepare_completion_pump(
+        self: &Arc<Self>,
+        material: MemberPumpMaterial,
+    ) -> Result<PreparedRemoteCompletionPump, MobError> {
+        #[cfg(test)]
+        {
+            let held = COMPLETION_PREPARATION_TEST_HOLDS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&(self.mob_id.clone(), material.agent_identity.clone()))
+                .cloned();
+            if let Some(held) = held {
+                let _ = held.manager.set(Arc::downgrade(self));
+                let mut release = held.release.subscribe();
+                held.entered.notify_one();
+                while !*release.borrow_and_update() {
+                    if release.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let tap = self.ensure_pump_with_tap(material.clone()).await;
+        let prepared = PreparedRemoteCompletionPump {
+            manager: Arc::clone(self),
+            material,
+            tap,
+        };
+        prepared.context_for(&prepared.material)?;
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_completion_preparation_for_test(
+        mob: crate::MobId,
+        member: AgentIdentity,
+    ) -> CompletionPreparationTestHold {
+        let (release, _) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(CompletionPreparationTestGate {
+            entered: Notify::new(),
+            release,
+            manager: OnceLock::new(),
+        });
+        let key = (mob, member);
+        COMPLETION_PREPARATION_TEST_HOLDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), Arc::clone(&gate));
+        CompletionPreparationTestHold { key, gate }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_tap_count_for_test(&self, member: &AgentIdentity) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pumps
+            .get(member)
+            .map_or(0, |entry| {
+                entry.taps.iter().filter(|tap| !tap.is_closed()).count()
+            })
     }
 
     /// Atomically validate the pre-send pump lease and register its waiter

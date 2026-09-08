@@ -5664,6 +5664,88 @@ impl std::fmt::Display for RespawnTopologyRestoreResultKind {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ResumeAttemptId(pub String);
+impl From<String> for ResumeAttemptId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ResumeAttemptId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for ResumeAttemptId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+pub type ResumeMemberBinding =
+    meerkat_machine_schema::catalog::dsl::mob_machine::ResumeMemberBinding;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ResumeMemberOutcomeDisposition {
+    #[default]
+    #[serde(rename = "Current")]
+    Current,
+    #[serde(rename = "RollbackRequired")]
+    RollbackRequired,
+}
+impl ResumeMemberOutcomeDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Current => "Current",
+            Self::RollbackRequired => "RollbackRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ResumeMemberOutcomeDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Current" => Ok(Self::Current),
+            "RollbackRequired" => Ok(Self::RollbackRequired),
+            other => Err(format!(
+                "invalid ResumeMemberOutcomeDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ResumeMemberOutcomeDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ResumeMemberOutcomeDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type RouteInstallObligation =
     meerkat_machine_schema::catalog::dsl::mob_machine::RouteInstallObligation;
 #[derive(
@@ -6529,6 +6611,15 @@ pub struct State {
     pub remote_runtime_retired_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub remote_supervisor_revoked_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub explicit_resume_attempt: Option<ResumeAttemptId>,
+    pub explicit_resume_cancel_requested: bool,
+    pub explicit_resume_preparation_pending: bool,
+    pub explicit_resume_member_work: std::collections::BTreeMap<AgentIdentity, ResumeMemberBinding>,
+    pub explicit_resume_readiness_pending: bool,
+    pub explicit_resume_readiness_settled: bool,
+    pub explicit_resume_topology_pending: bool,
+    pub explicit_resume_topology_settled: bool,
+    pub explicit_resume_cleanup_pending: bool,
     pub member_run_open: std::collections::BTreeMap<AgentIdentity, bool>,
     pub member_in_flight_work: std::collections::BTreeMap<AgentIdentity, u64>,
     pub member_progress_tokens: std::collections::BTreeMap<AgentIdentity, String>,
@@ -8012,6 +8103,72 @@ pub mod inputs {
         pub adaptive_run_id: AdaptiveRunId,
         pub observed_at_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginExplicitResume {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelExplicitResume {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleExplicitResumePreparation {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExplicitResumeMember {
+        pub attempt: ResumeAttemptId,
+        pub agent_identity: AgentIdentity,
+        pub binding: ResumeMemberBinding,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyExplicitResumeMemberLive {
+        pub attempt: ResumeAttemptId,
+        pub agent_identity: AgentIdentity,
+        pub binding: ResumeMemberBinding,
+        pub observation: MemberLiveMaterializationObservationKind,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyExplicitResumeMemberOutcome {
+        pub attempt: ResumeAttemptId,
+        pub agent_identity: AgentIdentity,
+        pub binding: ResumeMemberBinding,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleExplicitResumeMember {
+        pub attempt: ResumeAttemptId,
+        pub agent_identity: AgentIdentity,
+        pub binding: ResumeMemberBinding,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginExplicitResumeReadiness {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleExplicitResumeReadiness {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginExplicitResumeTopology {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleExplicitResumeTopology {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginExplicitResumeCleanup {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleExplicitResumeCleanup {
+        pub attempt: ResumeAttemptId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishExplicitResume {
+        pub attempt: ResumeAttemptId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8222,6 +8379,20 @@ pub enum Input {
     ResolveAdaptiveFinish(inputs::ResolveAdaptiveFinish),
     RequestAdaptiveCancel(inputs::RequestAdaptiveCancel),
     RecordDeadlineObserved(inputs::RecordDeadlineObserved),
+    BeginExplicitResume(inputs::BeginExplicitResume),
+    CancelExplicitResume(inputs::CancelExplicitResume),
+    SettleExplicitResumePreparation(inputs::SettleExplicitResumePreparation),
+    AuthorizeExplicitResumeMember(inputs::AuthorizeExplicitResumeMember),
+    ClassifyExplicitResumeMemberLive(inputs::ClassifyExplicitResumeMemberLive),
+    ClassifyExplicitResumeMemberOutcome(inputs::ClassifyExplicitResumeMemberOutcome),
+    SettleExplicitResumeMember(inputs::SettleExplicitResumeMember),
+    BeginExplicitResumeReadiness(inputs::BeginExplicitResumeReadiness),
+    SettleExplicitResumeReadiness(inputs::SettleExplicitResumeReadiness),
+    BeginExplicitResumeTopology(inputs::BeginExplicitResumeTopology),
+    SettleExplicitResumeTopology(inputs::SettleExplicitResumeTopology),
+    BeginExplicitResumeCleanup(inputs::BeginExplicitResumeCleanup),
+    SettleExplicitResumeCleanup(inputs::SettleExplicitResumeCleanup),
+    FinishExplicitResume(inputs::FinishExplicitResume),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -8502,6 +8673,24 @@ impl Input {
             Self::ResolveAdaptiveFinish(_) => InputKind::ResolveAdaptiveFinish,
             Self::RequestAdaptiveCancel(_) => InputKind::RequestAdaptiveCancel,
             Self::RecordDeadlineObserved(_) => InputKind::RecordDeadlineObserved,
+            Self::BeginExplicitResume(_) => InputKind::BeginExplicitResume,
+            Self::CancelExplicitResume(_) => InputKind::CancelExplicitResume,
+            Self::SettleExplicitResumePreparation(_) => InputKind::SettleExplicitResumePreparation,
+            Self::AuthorizeExplicitResumeMember(_) => InputKind::AuthorizeExplicitResumeMember,
+            Self::ClassifyExplicitResumeMemberLive(_) => {
+                InputKind::ClassifyExplicitResumeMemberLive
+            }
+            Self::ClassifyExplicitResumeMemberOutcome(_) => {
+                InputKind::ClassifyExplicitResumeMemberOutcome
+            }
+            Self::SettleExplicitResumeMember(_) => InputKind::SettleExplicitResumeMember,
+            Self::BeginExplicitResumeReadiness(_) => InputKind::BeginExplicitResumeReadiness,
+            Self::SettleExplicitResumeReadiness(_) => InputKind::SettleExplicitResumeReadiness,
+            Self::BeginExplicitResumeTopology(_) => InputKind::BeginExplicitResumeTopology,
+            Self::SettleExplicitResumeTopology(_) => InputKind::SettleExplicitResumeTopology,
+            Self::BeginExplicitResumeCleanup(_) => InputKind::BeginExplicitResumeCleanup,
+            Self::SettleExplicitResumeCleanup(_) => InputKind::SettleExplicitResumeCleanup,
+            Self::FinishExplicitResume(_) => InputKind::FinishExplicitResume,
         }
     }
 }
@@ -8705,6 +8894,20 @@ pub enum InputKind {
     ResolveAdaptiveFinish,
     RequestAdaptiveCancel,
     RecordDeadlineObserved,
+    BeginExplicitResume,
+    CancelExplicitResume,
+    SettleExplicitResumePreparation,
+    AuthorizeExplicitResumeMember,
+    ClassifyExplicitResumeMemberLive,
+    ClassifyExplicitResumeMemberOutcome,
+    SettleExplicitResumeMember,
+    BeginExplicitResumeReadiness,
+    SettleExplicitResumeReadiness,
+    BeginExplicitResumeTopology,
+    SettleExplicitResumeTopology,
+    BeginExplicitResumeCleanup,
+    SettleExplicitResumeCleanup,
+    FinishExplicitResume,
 }
 
 pub mod signals {
@@ -10193,6 +10396,18 @@ pub mod effects {
         pub revoked: std::collections::BTreeSet<ControlScope>,
         pub remaining: std::collections::BTreeSet<ControlScope>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExplicitResumeMemberOutcomeClassified {
+        pub attempt: ResumeAttemptId,
+        pub agent_identity: AgentIdentity,
+        pub binding: ResumeMemberBinding,
+        pub disposition: ResumeMemberOutcomeDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExplicitResumeFinished {
+        pub attempt: ResumeAttemptId,
+        pub cancelled: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10343,6 +10558,8 @@ pub enum Effect {
     AuthorizeExternalAgentEventSubscription(effects::AuthorizeExternalAgentEventSubscription),
     GrantRecorded(effects::GrantRecorded),
     GrantRevoked(effects::GrantRevoked),
+    ExplicitResumeMemberOutcomeClassified(effects::ExplicitResumeMemberOutcomeClassified),
+    ExplicitResumeFinished(effects::ExplicitResumeFinished),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -10488,6 +10705,8 @@ pub enum EffectKind {
     AuthorizeExternalAgentEventSubscription,
     GrantRecorded,
     GrantRevoked,
+    ExplicitResumeMemberOutcomeClassified,
+    ExplicitResumeFinished,
 }
 
 pub mod command_capabilities {
@@ -11903,6 +12122,29 @@ pub enum TransitionId {
     UpdateCoordinationResourceClaimExpired,
     UpdateCoordinationResourceClaimCancelled,
     ObserveCoordinationResourceClaimOverlap,
+    BeginExplicitResumeStopped,
+    CancelExplicitResumeStopped,
+    CancelExplicitResumeRunning,
+    SettleExplicitResumePreparationStopped,
+    AuthorizeExplicitResumeMemberRunning,
+    ClassifyExplicitResumeMemberLiveRevivable,
+    ClassifyExplicitResumeMemberLiveMissing,
+    ClassifyExplicitResumeMemberOutcomeCurrent,
+    ClassifyExplicitResumeMemberOutcomeRollback,
+    SettleExplicitResumeMemberRunning,
+    SettleExplicitResumeMemberReplacedRunning,
+    BeginExplicitResumeReadinessStopped,
+    BeginExplicitResumeReadinessRunning,
+    SettleExplicitResumeReadinessStopped,
+    SettleExplicitResumeReadinessRunning,
+    BeginExplicitResumeTopologyRunning,
+    SettleExplicitResumeTopologyRunning,
+    BeginExplicitResumeCleanupStopped,
+    BeginExplicitResumeCleanupRunning,
+    SettleExplicitResumeCleanupStopped,
+    SettleExplicitResumeCleanupRunning,
+    FinishExplicitResumeRunning,
+    FinishExplicitResumeCancelledStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12079,6 +12321,15 @@ pub fn initial_state() -> State {
         remote_runtime_retired_ids: Default::default(),
         remote_supervisor_revoked_ids: Default::default(),
         member_revival_pending: Default::default(),
+        explicit_resume_attempt: None,
+        explicit_resume_cancel_requested: false,
+        explicit_resume_preparation_pending: false,
+        explicit_resume_member_work: Default::default(),
+        explicit_resume_readiness_pending: false,
+        explicit_resume_readiness_settled: false,
+        explicit_resume_topology_pending: false,
+        explicit_resume_topology_settled: false,
+        explicit_resume_cleanup_pending: false,
         member_run_open: Default::default(),
         member_in_flight_work: Default::default(),
         member_progress_tokens: Default::default(),

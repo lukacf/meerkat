@@ -110,6 +110,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `remote_runtime_retired_ids`: `Set<AgentRuntimeId>`
 - `remote_supervisor_revoked_ids`: `Set<AgentRuntimeId>`
 - `member_revival_pending`: `Set<AgentIdentity>`
+- `explicit_resume_attempt`: `Option<ResumeAttemptId>`
+- `explicit_resume_cancel_requested`: `Bool`
+- `explicit_resume_preparation_pending`: `Bool`
+- `explicit_resume_member_work`: `Map<AgentIdentity, ResumeMemberBinding>`
+- `explicit_resume_readiness_pending`: `Bool`
+- `explicit_resume_readiness_settled`: `Bool`
+- `explicit_resume_topology_pending`: `Bool`
+- `explicit_resume_topology_settled`: `Bool`
+- `explicit_resume_cleanup_pending`: `Bool`
 - `member_run_open`: `Map<AgentIdentity, Bool>`
 - `member_in_flight_work`: `Map<AgentIdentity, u64>`
 - `member_progress_tokens`: `Map<AgentIdentity, String>`
@@ -491,6 +500,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdaptiveFinish`(adaptive_run_id: AdaptiveRunId, final_result_digest: String)
 - `RequestAdaptiveCancel`(adaptive_run_id: AdaptiveRunId)
 - `RecordDeadlineObserved`(adaptive_run_id: AdaptiveRunId, observed_at_ms: u64)
+- `BeginExplicitResume`(attempt: ResumeAttemptId)
+- `CancelExplicitResume`(attempt: ResumeAttemptId)
+- `SettleExplicitResumePreparation`(attempt: ResumeAttemptId)
+- `AuthorizeExplicitResumeMember`(attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding)
+- `ClassifyExplicitResumeMemberLive`(attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, observation: MemberLiveMaterializationObservationKind, reason: String)
+- `ClassifyExplicitResumeMemberOutcome`(attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding)
+- `SettleExplicitResumeMember`(attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding)
+- `BeginExplicitResumeReadiness`(attempt: ResumeAttemptId)
+- `SettleExplicitResumeReadiness`(attempt: ResumeAttemptId)
+- `BeginExplicitResumeTopology`(attempt: ResumeAttemptId)
+- `SettleExplicitResumeTopology`(attempt: ResumeAttemptId)
+- `BeginExplicitResumeCleanup`(attempt: ResumeAttemptId)
+- `SettleExplicitResumeCleanup`(attempt: ResumeAttemptId)
+- `FinishExplicitResume`(attempt: ResumeAttemptId)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -710,6 +733,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeExternalAgentEventSubscription`(agent_identity: AgentIdentity, host: HostId)
 - `GrantRecorded`(principal: PrincipalId, scopes: Set<ControlScope>, expires_at_ms: Option<u64>)
 - `GrantRevoked`(principal: PrincipalId, revoked: Set<ControlScope>, remaining: Set<ControlScope>)
+- `ExplicitResumeMemberOutcomeClassified`(attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, disposition: ResumeMemberOutcomeDisposition)
+- `ExplicitResumeFinished`(attempt: ResumeAttemptId, cancelled: Bool)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -7736,6 +7761,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_present`
   - `session_binding_present`
   - `not_broken`
+  - `revival_not_pending`
+  - `no_explicit_resume_work`
   - `durable_snapshot_present`
 - Emits: `MemberLiveMaterializationClassified`
 - To: `Running`
@@ -7747,6 +7774,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `identity_present`
   - `session_binding_present`
   - `not_broken`
+  - `revival_not_pending`
+  - `no_explicit_resume_work`
   - `durable_snapshot_missing`
 - Emits: `MemberLiveMaterializationClassified`
 - To: `Running`
@@ -7962,6 +7991,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Stop`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
   - `no_active_runs`
   - `placed_completion_quiesce_started`
@@ -7976,6 +8006,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `Resume`()
 - Guards:
+  - `explicit_resume_preparation_settled`
+  - `explicit_resume_not_cancelled`
   - `placed_completion_stop_intent`
 - Emits: `PersistPlacedCompletionLifecycleIntent`, `AppendLifecycleJournal`, `EmitRunLifecycleNotice`
 - To: `Running`
@@ -7984,6 +8016,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Complete`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
   - `placed_completion_quiesce_started`
   - `placed_completion_complete_intent`
@@ -7997,6 +8030,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`, `Completed`
 - On: `Reset`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
   - `remote_turn_pending_drained`
   - `remote_turn_committed_drained`
@@ -8339,6 +8373,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_peer_id_matches_expected`
   - `overlay_member_endpoints_complete`
   - `overlay_peer_ids_unique`
+  - `overlay_member_not_retiring`
+  - `overlay_member_not_broken`
 - Emits: `MemberPeerOverlayAuthorized`
 - To: `Running`
 
@@ -8354,8 +8390,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `retiring_generation_matches`
   - `retiring_fence_matches`
   - `retiring_member_marked`
-  - `respawn_topology_preservation_recorded`
-  - `recipient_wired_to_retiring`
+  - `retiring_recipient_or_preserved_respawn_topology`
+  - `retiring_recipient_or_wired_survivor`
   - `filtered_overlay_member_endpoints_complete`
   - `filtered_overlay_peer_ids_unique`
 - Emits: `MemberPeerOverlayAuthorized`
@@ -8371,6 +8407,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `b_member_peer_registered`
   - `a_member_endpoint_registered`
   - `b_member_endpoint_registered`
+  - `a_member_not_retiring`
+  - `b_member_not_retiring`
+  - `a_member_not_broken`
+  - `b_member_not_broken`
 - Emits: `MemberTrustWiringRequested`
 - To: `Running`
 
@@ -11609,6 +11649,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Shutdown`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Stopped`
@@ -11617,6 +11658,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `Shutdown`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Stopped`
@@ -11625,6 +11667,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `Shutdown`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Completed`
@@ -13091,6 +13134,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`, `Completed`
 - On: `Destroy`()
 - Guards:
+  - `explicit_resume_settled`
   - `adaptive_lifecycle_drained`
   - `session_ingress_detaches_closed`
   - `placed_completion_quiesce_started`
@@ -13317,6 +13361,253 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_omitted_overlap`
 - Emits: `ResourceClaimOverlapObserved`
 - To: `Running`
+
+### `BeginExplicitResumeStopped`
+- From: `Stopped`
+- On: `BeginExplicitResume`(attempt)
+- Guards:
+  - `no_resume_attempt`
+  - `stop_intent`
+- To: `Stopped`
+
+### `CancelExplicitResumeStopped`
+- From: `Stopped`
+- On: `CancelExplicitResume`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+- To: `Stopped`
+
+### `CancelExplicitResumeRunning`
+- From: `Running`
+- On: `CancelExplicitResume`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+- To: `Running`
+
+### `SettleExplicitResumePreparationStopped`
+- From: `Stopped`
+- On: `SettleExplicitResumePreparation`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `preparation_pending`
+- To: `Stopped`
+
+### `AuthorizeExplicitResumeMemberRunning`
+- From: `Running`
+- On: `AuthorizeExplicitResumeMember`(attempt, agent_identity, binding)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_not_cancelled`
+  - `preparation_settled`
+  - `readiness_not_started`
+  - `member_work_not_pending`
+  - `current_definition`
+  - `current_runtime`
+  - `current_fence`
+  - `current_session`
+- To: `Running`
+
+### `ClassifyExplicitResumeMemberLiveRevivable`
+- From: `Running`
+- On: `ClassifyExplicitResumeMemberLive`(attempt, agent_identity, binding, observation, reason)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `resume_not_cancelled`
+  - `lifecycle_origin_open`
+  - `current_definition`
+  - `current_runtime`
+  - `current_fence`
+  - `current_session`
+  - `not_broken`
+  - `revival_not_pending`
+  - `durable_snapshot_present`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ClassifyExplicitResumeMemberLiveMissing`
+- From: `Running`
+- On: `ClassifyExplicitResumeMemberLive`(attempt, agent_identity, binding, observation, reason)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `resume_not_cancelled`
+  - `current_definition`
+  - `current_runtime`
+  - `current_fence`
+  - `current_session`
+  - `not_broken`
+  - `revival_not_pending`
+  - `durable_snapshot_missing`
+- Emits: `MemberLiveMaterializationClassified`
+- To: `Running`
+
+### `ClassifyExplicitResumeMemberOutcomeCurrent`
+- From: `Running`
+- On: `ClassifyExplicitResumeMemberOutcome`(attempt, agent_identity, binding)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `resume_not_cancelled`
+  - `current_definition`
+  - `current_runtime`
+  - `current_fence`
+  - `current_session`
+- Emits: `ExplicitResumeMemberOutcomeClassified`
+- To: `Running`
+
+### `ClassifyExplicitResumeMemberOutcomeRollback`
+- From: `Running`
+- On: `ClassifyExplicitResumeMemberOutcome`(attempt, agent_identity, binding)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `cancelled_or_replaced`
+- Emits: `ExplicitResumeMemberOutcomeClassified`
+- To: `Running`
+
+### `SettleExplicitResumeMemberRunning`
+- From: `Running`
+- On: `SettleExplicitResumeMember`(attempt, agent_identity, binding)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `current_runtime`
+  - `current_fence`
+  - `current_session`
+- To: `Running`
+
+### `SettleExplicitResumeMemberReplacedRunning`
+- From: `Running`
+- On: `SettleExplicitResumeMember`(attempt, agent_identity, binding)
+- Guards:
+  - `exact_resume_attempt`
+  - `member_work_pending`
+  - `member_replaced`
+- To: `Running`
+
+### `BeginExplicitResumeReadinessStopped`
+- From: `Stopped`
+- On: `BeginExplicitResumeReadiness`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_not_cancelled`
+  - `preparation_settled`
+  - `member_work_settled`
+  - `readiness_not_pending`
+  - `readiness_not_settled`
+- To: `Stopped`
+
+### `BeginExplicitResumeReadinessRunning`
+- From: `Running`
+- On: `BeginExplicitResumeReadiness`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_not_cancelled`
+  - `preparation_settled`
+  - `member_work_settled`
+  - `readiness_not_pending`
+  - `readiness_not_settled`
+- To: `Running`
+
+### `SettleExplicitResumeReadinessStopped`
+- From: `Stopped`
+- On: `SettleExplicitResumeReadiness`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `readiness_pending`
+- To: `Stopped`
+
+### `SettleExplicitResumeReadinessRunning`
+- From: `Running`
+- On: `SettleExplicitResumeReadiness`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `readiness_pending`
+- To: `Running`
+
+### `BeginExplicitResumeTopologyRunning`
+- From: `Running`
+- On: `BeginExplicitResumeTopology`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_not_cancelled`
+  - `member_work_settled`
+  - `readiness_settled`
+  - `readiness_not_pending`
+  - `topology_not_pending`
+  - `topology_not_settled`
+- To: `Running`
+
+### `SettleExplicitResumeTopologyRunning`
+- From: `Running`
+- On: `SettleExplicitResumeTopology`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `topology_pending`
+- To: `Running`
+
+### `BeginExplicitResumeCleanupStopped`
+- From: `Stopped`
+- On: `BeginExplicitResumeCleanup`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_cancelled`
+  - `cleanup_not_pending`
+- To: `Stopped`
+
+### `BeginExplicitResumeCleanupRunning`
+- From: `Running`
+- On: `BeginExplicitResumeCleanup`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_cancelled`
+  - `cleanup_not_pending`
+- To: `Running`
+
+### `SettleExplicitResumeCleanupStopped`
+- From: `Stopped`
+- On: `SettleExplicitResumeCleanup`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `cleanup_pending`
+- To: `Stopped`
+
+### `SettleExplicitResumeCleanupRunning`
+- From: `Running`
+- On: `SettleExplicitResumeCleanup`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `cleanup_pending`
+- To: `Running`
+
+### `FinishExplicitResumeRunning`
+- From: `Running`
+- On: `FinishExplicitResume`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `preparation_settled`
+  - `member_work_settled`
+  - `readiness_not_pending`
+  - `topology_not_pending`
+  - `cleanup_not_pending`
+  - `completion_or_cancellation_settled`
+- Emits: `ExplicitResumeFinished`
+- To: `Running`
+
+### `FinishExplicitResumeCancelledStopped`
+- From: `Stopped`
+- On: `FinishExplicitResume`(attempt)
+- Guards:
+  - `exact_resume_attempt`
+  - `resume_cancelled`
+  - `preparation_settled`
+  - `member_work_settled`
+  - `readiness_not_pending`
+  - `topology_not_pending`
+  - `cleanup_not_pending`
+- Emits: `ExplicitResumeFinished`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

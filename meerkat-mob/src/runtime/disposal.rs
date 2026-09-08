@@ -2,7 +2,7 @@
 //!
 //! Separates **what** to clean up ([`DisposalStep`]) from **how** to handle
 //! failures ([`ErrorPolicy`]). The pipeline is driven by
-//! `MobActor::dispose_member`.
+//! the staged retirement continuation and the destroy cleanup helpers.
 
 use crate::error::MobError;
 use crate::ids::AgentIdentity;
@@ -33,12 +33,6 @@ impl DisposalStep {
         DisposalStep::CleanupMachineTopology,
         DisposalStep::ArchiveSession,
     ];
-
-    /// Whether this step involves peer communication that is expected to fail
-    /// during concurrent bulk teardown.
-    pub(super) fn is_peer_step(self) -> bool {
-        matches!(self, Self::NotifyPeers)
-    }
 }
 
 impl std::fmt::Display for DisposalStep {
@@ -62,7 +56,6 @@ impl std::fmt::Display for DisposalStep {
 pub(super) struct DisposalContext {
     pub(crate) agent_identity: AgentIdentity,
     pub entry: RosterEntry,
-    pub retiring_key: Option<String>,
     pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub retiring_spec: Option<TrustedPeerDescriptor>,
     pub preserve_machine_topology: bool,
@@ -126,61 +119,6 @@ pub(super) trait ErrorPolicy: Send {
 // Concrete policies
 // ---------------------------------------------------------------------------
 
-/// Best-effort for live side effects, but topology convergence stays critical.
-pub(super) struct WarnAndContinue;
-
-fn is_critical_retirement_cleanup(step: DisposalStep, error: &MobError) -> bool {
-    step == DisposalStep::CleanupMachineTopology
-        || matches!(error, MobError::RetirementTopologyIncomplete(_))
-}
-
-impl ErrorPolicy for WarnAndContinue {
-    fn on_step_error(
-        &mut self,
-        step: DisposalStep,
-        error: &MobError,
-        ctx: &DisposalContext,
-    ) -> bool {
-        tracing::warn!(
-            agent_identity = %ctx.agent_identity,
-            step = %step,
-            error = %error,
-            "retire: step failed (continuing)"
-        );
-        !is_critical_retirement_cleanup(step, error)
-    }
-}
-
-/// Bulk: peer-step failures are logged at debug (expected during concurrent
-/// teardown), others at warn. Topology convergence stays critical.
-pub(super) struct BulkBestEffort;
-
-impl ErrorPolicy for BulkBestEffort {
-    fn on_step_error(
-        &mut self,
-        step: DisposalStep,
-        error: &MobError,
-        ctx: &DisposalContext,
-    ) -> bool {
-        if step.is_peer_step() {
-            tracing::debug!(
-                agent_identity = %ctx.agent_identity,
-                step = %step,
-                error = %error,
-                "retire(bulk): step failed (expected during concurrent teardown)"
-            );
-        } else {
-            tracing::warn!(
-                agent_identity = %ctx.agent_identity,
-                step = %step,
-                error = %error,
-                "retire(bulk): step failed (continuing)"
-            );
-        }
-        !is_critical_retirement_cleanup(step, error)
-    }
-}
-
 /// Strict: abort on first failure.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct AbortOnError;
@@ -230,7 +168,6 @@ mod tests {
                 effective_model_override: None,
                 direct_member_fence: None,
             },
-            retiring_key: None,
             retiring_comms: None,
             retiring_spec: None,
             preserve_machine_topology: false,
@@ -243,49 +180,6 @@ mod tests {
 
     fn test_error() -> MobError {
         MobError::Internal("test error".to_string())
-    }
-
-    #[test]
-    fn test_warn_and_continue_keeps_topology_cleanup_critical() {
-        let mut policy = WarnAndContinue;
-        let ctx = test_ctx();
-        for step in DisposalStep::ORDERED {
-            assert_eq!(
-                policy.on_step_error(step, &test_error(), &ctx),
-                step != DisposalStep::CleanupMachineTopology
-            );
-        }
-        assert!(!policy.on_step_error(
-            DisposalStep::NotifyPeers,
-            &MobError::RetirementTopologyIncomplete("trust removal failed".to_string()),
-            &ctx,
-        ));
-    }
-
-    #[test]
-    fn test_bulk_best_effort_keeps_topology_cleanup_critical() {
-        let mut policy = BulkBestEffort;
-        let ctx = test_ctx();
-        for step in DisposalStep::ORDERED {
-            assert_eq!(
-                policy.on_step_error(step, &test_error(), &ctx),
-                step != DisposalStep::CleanupMachineTopology
-            );
-        }
-        assert!(!policy.on_step_error(
-            DisposalStep::NotifyPeers,
-            &MobError::RetirementTopologyIncomplete("trust removal failed".to_string()),
-            &ctx,
-        ));
-    }
-
-    #[test]
-    fn test_bulk_best_effort_uses_is_peer_step() {
-        // Verify the predicate classifies steps correctly.
-        assert!(!DisposalStep::StopHostLoop.is_peer_step());
-        assert!(DisposalStep::NotifyPeers.is_peer_step());
-        assert!(!DisposalStep::CleanupMachineTopology.is_peer_step());
-        assert!(!DisposalStep::ArchiveSession.is_peer_step());
     }
 
     #[test]

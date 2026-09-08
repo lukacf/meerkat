@@ -2224,6 +2224,7 @@ pub struct ScriptedPeerTrustState {
     reject_remove_for_identity: Option<(String, BridgeRejectionCause, String)>,
     drop_next_remove_replies: u32,
     remove_received: Vec<BridgePeerTrustPayload>,
+    hold_next_remove: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Scripted V6 forked-participant responder state.
@@ -2566,6 +2567,14 @@ impl ScriptedHostPeer {
 
     pub fn remove_peer_trust_count(&self) -> u64 {
         self.trust_state().remove_received.len() as u64
+    }
+
+    /// Hold the next exact Remove before mutation or reply. The caller
+    /// releases it with one semaphore permit.
+    pub fn hold_next_remove_peer_trust(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.trust_state().hold_next_remove = Some(Arc::clone(&gate));
+        gate
     }
 
     pub fn received_remove_peer_trust_payloads(&self) -> Vec<BridgePeerTrustPayload> {
@@ -3019,13 +3028,13 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                             TrustedPeerDescriptor::try_from(payload.supervisor.clone())
                                 .expect("valid supervisor spec");
                         responder_endpoint.trust(supervisor_spec).await;
-                        let (reply, apply) =
-                            {
-                                let mut guard = responder_trust
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                let state = &mut *guard;
-                                state.remove_received.push(payload.clone());
+                        let (reply, apply, hold) = {
+                            let mut guard = responder_trust
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let state = &mut *guard;
+                            state.remove_received.push(payload.clone());
+                            let (reply, apply) =
                                 if state.reject_remove_for_identity.as_ref().is_some_and(
                                     |(identity, _, _)| identity == &payload.agent_identity,
                                 ) {
@@ -3039,8 +3048,12 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                                         &mut state.reject_next_remove,
                                         &mut state.drop_next_remove_replies,
                                     )
-                                }
-                            };
+                                };
+                            (reply, apply, state.hold_next_remove.take())
+                        };
+                        if let Some(hold) = hold {
+                            hold.acquire().await.expect("held Remove released").forget();
+                        }
                         if apply {
                             let bound = responder_member_endpoints
                                 .lock()

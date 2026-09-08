@@ -3622,6 +3622,22 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MemberRevivalVerdictKind",
                 &["ReviveAuthorized", "BrokenRecorded"],
             ),
+            NamedTypeBinding::string("ResumeAttemptId"),
+            NamedTypeBinding::u64("MobDefinitionEpoch"),
+            NamedTypeBinding::type_path_struct(
+                "ResumeMemberBinding",
+                "crate::catalog::dsl::mob_machine::ResumeMemberBinding",
+                vec![
+                    TypePathStructField::named("agent_runtime_id", "AgentRuntimeId"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::named("session_id", "SessionId"),
+                    TypePathStructField::named("definition_epoch", "MobDefinitionEpoch"),
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ResumeMemberOutcomeDisposition",
+                &["Current", "RollbackRequired"],
+            ),
             NamedTypeBinding::string_enum(
                 "MobSpawnManyFailureObservationKind",
                 &[
@@ -4178,6 +4194,22 @@ runtime_internal_inputs!(
         SetExternalMemberRebindCapability,
         ClassifyTurnTimeoutDisposition,
         SeedOrphanBudget,
+        // The public Resume probe drives this attempt-fenced internal ladder.
+        // These inputs cannot be invoked as standalone surface commands.
+        BeginExplicitResume,
+        CancelExplicitResume,
+        SettleExplicitResumePreparation,
+        AuthorizeExplicitResumeMember,
+        ClassifyExplicitResumeMemberLive,
+        ClassifyExplicitResumeMemberOutcome,
+        SettleExplicitResumeMember,
+        BeginExplicitResumeReadiness,
+        SettleExplicitResumeReadiness,
+        BeginExplicitResumeTopology,
+        SettleExplicitResumeTopology,
+        BeginExplicitResumeCleanup,
+        SettleExplicitResumeCleanup,
+        FinishExplicitResume,
     ]
 );
 

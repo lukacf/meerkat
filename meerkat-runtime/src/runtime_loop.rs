@@ -754,6 +754,7 @@ impl InteractionTerminalPublicationError {
             crate::RuntimeDriverError::NotReady { .. }
             | crate::RuntimeDriverError::NotFound { .. }
             | crate::RuntimeDriverError::Destroyed
+            | crate::RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             crate::RuntimeDriverError::ValidationFailed { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
@@ -765,6 +766,7 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::RuntimeTerminalPublicationInProgress { .. }
             | crate::RuntimeDriverError::InterruptDispatchPanicked { .. }
             | crate::RuntimeDriverError::RecoveryBackoff { .. }
+            | crate::RuntimeDriverError::MaterializationRegistrationOwned { .. }
             | crate::RuntimeDriverError::Internal(_) => Self::Retryable(detail),
         }
     }
@@ -7409,6 +7411,24 @@ mod tests {
 
     #[test]
     fn terminal_recovery_classifies_stale_and_corrupt_authority_as_non_retryable() {
+        assert!(matches!(
+            InteractionTerminalPublicationError::from_driver(
+                "reload",
+                crate::RuntimeDriverError::MaterializationRegistrationNotCurrent {
+                    session_id: meerkat_core::SessionId::new(),
+                },
+            ),
+            InteractionTerminalPublicationError::StaleAuthority(_)
+        ));
+        assert!(matches!(
+            InteractionTerminalPublicationError::from_driver(
+                "reload",
+                crate::RuntimeDriverError::MaterializationRegistrationOwned {
+                    session_id: meerkat_core::SessionId::new(),
+                },
+            ),
+            InteractionTerminalPublicationError::Retryable(_)
+        ));
         let stale = InteractionTerminalPublicationError::from_driver(
             "phase CAS",
             crate::RuntimeDriverError::StaleAuthority {

@@ -18,6 +18,16 @@ pub(super) enum SessionBindingPreparation {
     LocalSessionResources(LocalSessionMaterializationMode),
 }
 
+enum MaterializationClaimRequest<'a> {
+    ReleaseOnDrop,
+    Owned {
+        claim_id: uuid::Uuid,
+        state_sink: &'a std::sync::Mutex<
+            Option<Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>>,
+        >,
+    },
+}
+
 struct RuntimeCompactionCommitCoordinator {
     session_id: SessionId,
     runtime_binding: std::sync::Mutex<
@@ -1940,8 +1950,7 @@ impl MeerkatMachine {
             session_id,
             preparation,
             attempt,
-            uuid::Uuid::new_v4(),
-            true,
+            MaterializationClaimRequest::ReleaseOnDrop,
             None,
         )
         .await
@@ -1952,16 +1961,17 @@ impl MeerkatMachine {
         session_id: SessionId,
         preparation: SessionBindingPreparation,
         attempt: Option<&mut super::session_management::IdempotentBindingPreparationAttempt>,
-        requested_claim_id: uuid::Uuid,
-        release_materialization_claim_on_drop: bool,
-        claim_state_sink: Option<
-            &Arc<
-                std::sync::Mutex<
-                    Option<Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>>,
-                >,
-            >,
-        >,
+        claim: MaterializationClaimRequest<'_>,
+        expected_registration: Option<&RuntimeSessionRegistrationWitness>,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        let (requested_claim_id, release_materialization_claim_on_drop, claim_state_sink) =
+            match claim {
+                MaterializationClaimRequest::ReleaseOnDrop => (uuid::Uuid::new_v4(), true, None),
+                MaterializationClaimRequest::Owned {
+                    claim_id,
+                    state_sink,
+                } => (claim_id, false, Some(state_sink)),
+            };
         let unique_materialization_transaction = !release_materialization_claim_on_drop;
         let candidate_materialization_claim_state = Arc::new(std::sync::Mutex::new(
             crate::RuntimeActorMaterializationClaimState::new(unique_materialization_transaction),
@@ -1989,13 +1999,36 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings registering session"
         );
-        let (inserted_by_call, registration_guard) =
+        let (inserted_by_call, registration_guard) = if let Some(expected) = expected_registration {
+            let guard = self
+                .lock_session_registration_transaction(&session_id)
+                .await;
+            if expected.session_id() != &session_id
+                || self
+                    .current_session_registration_witness(&session_id)
+                    .await
+                    .as_ref()
+                    != Some(expected)
+            {
+                return Err(RuntimeDriverError::MaterializationRegistrationNotCurrent {
+                    session_id,
+                });
+            }
+            if !self
+                .registration_is_current_without_runtime_owner(expected)
+                .await
+            {
+                return Err(RuntimeDriverError::MaterializationRegistrationOwned { session_id });
+            }
+            (false, guard)
+        } else {
             Box::pin(self.register_session_inner_for_actor_materialization(
                 session_id.clone(),
                 Arc::clone(&candidate_materialization_claim_state),
                 attempt,
             ))
-            .await?;
+            .await?
+        };
         tracing::debug!(
             %session_id,
             inserted_by_call,
@@ -2008,6 +2041,13 @@ impl MeerkatMachine {
         let mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(&session_id)
             .await?;
+        if let Some(expected) = expected_registration
+            && !self
+                .registration_is_current_without_runtime_owner(expected)
+                .await
+        {
+            return Err(RuntimeDriverError::MaterializationRegistrationOwned { session_id });
+        }
         drop(registration_guard);
         let (
             driver_handle,
@@ -2575,6 +2615,7 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: SessionId,
         preparation: SessionBindingPreparation,
+        expected_registration: Option<RuntimeSessionRegistrationWitness>,
     ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
         let cleanup_spawner = MachineCleanupTaskSpawner::acquire().map_err(|error| {
             RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
@@ -2584,7 +2625,11 @@ impl MeerkatMachine {
         let (result_tx, result_rx) = crate::tokio::sync::oneshot::channel();
         cleanup_spawner.spawn(async move {
             let result = machine
-                .prepare_session_materialization_with_mode_owned(owned_session_id, preparation)
+                .prepare_session_materialization_with_mode_owned(
+                    owned_session_id,
+                    preparation,
+                    expected_registration,
+                )
                 .await;
             // The process-owned saga must reach a terminal result before an
             // abandoned caller can drop Prepared and begin exact rollback.
@@ -2606,6 +2651,7 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: SessionId,
         preparation: SessionBindingPreparation,
+        expected_registration: Option<RuntimeSessionRegistrationWitness>,
     ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
         let claim_id = uuid::Uuid::new_v4();
         let mut pending =
@@ -2619,13 +2665,21 @@ impl MeerkatMachine {
                 session_id.clone(),
                 preparation,
                 None,
-                claim_id,
-                false,
-                Some(&claim_state_slot),
+                MaterializationClaimRequest::Owned {
+                    claim_id,
+                    state_sink: &claim_state_slot,
+                },
+                expected_registration.as_ref(),
             )
             .await
-            .map_err(|error| {
-                RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
+            .map_err(|error| match error {
+                RuntimeDriverError::MaterializationRegistrationNotCurrent { session_id } => {
+                    RuntimeBindingsError::RegistrationNotCurrent(session_id)
+                }
+                RuntimeDriverError::MaterializationRegistrationOwned { session_id } => {
+                    RuntimeBindingsError::RegistrationOwned(session_id)
+                }
+                error => RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string()),
             })?;
         let MeerkatMachineCommandResult::Bindings(bindings) = result else {
             return Err(RuntimeBindingsError::SessionNotFound(session_id));
@@ -2652,6 +2706,7 @@ impl MeerkatMachine {
         self.prepare_session_materialization_with_mode(
             session_id,
             SessionBindingPreparation::AuthoritativeRuntimeBinding,
+            None,
         )
         .await
     }
@@ -2679,6 +2734,23 @@ impl MeerkatMachine {
         self.prepare_session_materialization_with_mode(
             session_id,
             SessionBindingPreparation::LocalSessionResources(mode),
+            None,
+        )
+        .await
+    }
+
+    /// Prepare only the exact cold registration produced by a reload. Unlike
+    /// session-id preparation, this never registers or normalizes a successor.
+    pub async fn prepare_local_session_materialization_for_registration(
+        self: &Arc<Self>,
+        registration: RuntimeSessionRegistrationWitness,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        self.prepare_session_materialization_with_mode(
+            registration.session_id().clone(),
+            SessionBindingPreparation::LocalSessionResources(
+                LocalSessionMaterializationMode::Ordinary,
+            ),
+            Some(registration),
         )
         .await
     }

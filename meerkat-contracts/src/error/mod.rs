@@ -53,6 +53,13 @@ pub enum ErrorCode {
     StaleCursor,
     /// Command carried a superseded `(generation, fence)` tuple.
     StaleFence,
+    /// A mob member's runtime registration is durability-degraded and
+    /// refuses ordinary work until an explicit registration-authorized cold
+    /// reload replaces it (`MobError::MemberReloadRequired`). Deliberately
+    /// its own code rather than [`Self::SessionBusy`]: the condition never
+    /// clears on its own, so ordinary busy/backoff retry is never correct —
+    /// only the named `reload_member_registration` repair resolves it.
+    MemberReloadRequired,
 }
 
 impl ErrorCode {
@@ -79,6 +86,7 @@ impl ErrorCode {
             Self::HostUnavailable => -32026,
             Self::StaleCursor => -32027,
             Self::StaleFence => -32028,
+            Self::MemberReloadRequired => -32029,
         }
     }
 
@@ -105,6 +113,7 @@ impl ErrorCode {
             -32026 => Some(Self::HostUnavailable),
             -32027 => Some(Self::StaleCursor),
             -32028 => Some(Self::StaleFence),
+            -32029 => Some(Self::MemberReloadRequired),
             _ => None,
         }
     }
@@ -117,7 +126,8 @@ impl ErrorCode {
             | Self::SessionNotRunning
             | Self::DuplicateInput
             | Self::SupervisorRotationIncomplete
-            | Self::StaleFence => 409,
+            | Self::StaleFence
+            | Self::MemberReloadRequired => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
@@ -154,6 +164,7 @@ impl ErrorCode {
             Self::HostUnavailable => 46,
             Self::StaleCursor => 47,
             Self::StaleFence => 48,
+            Self::MemberReloadRequired => 49,
         }
     }
 }
@@ -193,6 +204,9 @@ impl ErrorCode {
         match self {
             // StaleCursor/StaleFence are conflict-class like SessionBusy;
             // both resolve by re-reading current state and retrying.
+            // MemberReloadRequired is session/conflict-class too, but
+            // deliberately non-retryable — it shares the category, not the
+            // retry semantics.
             Self::SessionNotFound
             | Self::ScheduleNotFound
             | Self::SessionBusy
@@ -200,7 +214,8 @@ impl ErrorCode {
             | Self::DuplicateInput
             | Self::SupervisorRotationIncomplete
             | Self::StaleCursor
-            | Self::StaleFence => ErrorCategory::Session,
+            | Self::StaleFence
+            | Self::MemberReloadRequired => ErrorCategory::Session,
             Self::RequestCancelled => ErrorCategory::Request,
             // Provider is the transient-upstream-failure class (502-family);
             // an unreachable member host is the same retryable class and
@@ -397,6 +412,32 @@ mod tests {
             );
             assert!(cli > 0, "CLI exit code should be positive");
         }
+    }
+
+    /// #1105: `MemberReloadRequired` gets its own dedicated code — exact
+    /// value pins plus a proof that it is neither `SessionBusy` nor one of
+    /// the four multi-host codes, and that `SessionBusy`'s own projections
+    /// are unchanged by the addition.
+    #[test]
+    fn member_reload_required_renders_exact_values_distinct_from_session_busy() {
+        assert_eq!(ErrorCode::MemberReloadRequired.jsonrpc_code(), -32029);
+        assert_eq!(ErrorCode::MemberReloadRequired.http_status(), 409);
+        assert_eq!(ErrorCode::MemberReloadRequired.cli_exit_code(), 49);
+        assert_eq!(
+            ErrorCode::MemberReloadRequired.category(),
+            ErrorCategory::Session
+        );
+        assert_eq!(
+            ErrorCode::from_jsonrpc_code(-32029),
+            Some(ErrorCode::MemberReloadRequired)
+        );
+        assert_ne!(ErrorCode::MemberReloadRequired, ErrorCode::SessionBusy);
+
+        // SessionBusy's own projections are untouched by the new arm.
+        assert_eq!(ErrorCode::SessionBusy.jsonrpc_code(), -32002);
+        assert_eq!(ErrorCode::SessionBusy.http_status(), 409);
+        assert_eq!(ErrorCode::SessionBusy.cli_exit_code(), 11);
+        assert_eq!(ErrorCode::SessionBusy.category(), ErrorCategory::Session);
     }
 
     /// A15/§17.4 exact-value pins for the four multi-host codes — all four

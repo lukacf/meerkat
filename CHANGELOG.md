@@ -30,14 +30,105 @@ them.
 
 ## [0.8.35] - 2026-09-07
 
+### Breaking
+
+- **Rust error vocabulary:** `meerkat_contracts::ErrorCode::MemberReloadRequired`
+  and `meerkat_runtime::RuntimeBindingsError::{RegistrationNotCurrent,
+  RegistrationOwned}` add exhaustive-match cases. The latter distinguish an
+  obsolete registration from an exact registration held by another owner.
+- **Generated resume authority:** `meerkat_machine_kernels::generated::mob::State`
+  and the catalog/production `MobMachineState` gain
+  `explicit_resume_attempt`, `explicit_resume_cancel_requested`,
+  `explicit_resume_preparation_pending`, `explicit_resume_member_work`,
+  `explicit_resume_readiness_pending`, `explicit_resume_readiness_settled`,
+  `explicit_resume_topology_pending`, `explicit_resume_topology_settled`, and
+  `explicit_resume_cleanup_pending`. Update exhaustive struct literals.
+  `Input`, `InputKind`, `MobMachineInput`, `MobMachineInputVariant`, and
+  `MobMachineCatalogInput` gain `BeginExplicitResume`, `CancelExplicitResume`,
+  `SettleExplicitResumePreparation`, `AuthorizeExplicitResumeMember`,
+  `ClassifyExplicitResumeMemberLive`, `ClassifyExplicitResumeMemberOutcome`,
+  `SettleExplicitResumeMember`, `BeginExplicitResumeReadiness`,
+  `SettleExplicitResumeReadiness`, `BeginExplicitResumeTopology`,
+  `SettleExplicitResumeTopology`, `BeginExplicitResumeCleanup`,
+  `SettleExplicitResumeCleanup`, and `FinishExplicitResume`.
+  `Effect`, `EffectKind`, `MobMachineEffect`, and `MobMachineEffectVariant`
+  gain `ExplicitResumeMemberOutcomeClassified` and `ExplicitResumeFinished`.
+  `MobMachineRuntimeInternalReason` gains `ExplicitResumeAuthority`.
+  These are internal stages of the public Resume operation, not new
+  independently callable surface commands.
+- **Generated transition vocabulary:** the mob kernel's `TransitionId` gains
+  `BeginExplicitResumeStopped`, `CancelExplicitResumeStopped`,
+  `CancelExplicitResumeRunning`, `SettleExplicitResumePreparationStopped`,
+  `AuthorizeExplicitResumeMemberRunning`, `ClassifyExplicitResumeMemberLiveRevivable`,
+  `ClassifyExplicitResumeMemberLiveMissing`, `ClassifyExplicitResumeMemberOutcomeCurrent`,
+  `ClassifyExplicitResumeMemberOutcomeRollback`, `SettleExplicitResumeMemberRunning`,
+  `SettleExplicitResumeMemberReplacedRunning`, `BeginExplicitResumeReadinessStopped`,
+  `BeginExplicitResumeReadinessRunning`, `SettleExplicitResumeReadinessStopped`,
+  `SettleExplicitResumeReadinessRunning`, `BeginExplicitResumeTopologyRunning`,
+  `SettleExplicitResumeTopologyRunning`, `BeginExplicitResumeCleanupStopped`,
+  `BeginExplicitResumeCleanupRunning`, `SettleExplicitResumeCleanupStopped`,
+  `SettleExplicitResumeCleanupRunning`, `FinishExplicitResumeRunning`, and
+  `FinishExplicitResumeCancelledStopped`. New declarations are appended so
+  existing enum discriminants and relative ordering are preserved.
+- **Behaviour-only: standalone custom session adapters must acknowledge
+  admission.** Custom `MobSessionService` implementations using standalone
+  turn execution must implement `start_turn_with_admission_notification`.
+  Its default returns `Unsupported`; spawning a task no longer counts as
+  admitting a turn. The notification must follow generated admission and
+  command handoff, independently of terminal completion. The built-in
+  ephemeral service implements this contract.
+- **Behaviour-only: reload-required errors have their own classification.**
+  `MobError::MemberReloadRequired` now uses JSON-RPC `-32029` and CLI exit 49
+  instead of the session-busy codes, and its `MobFailureClass` is
+  `RuntimeRejected` rather than `TargetBusy`. Consumers must handle explicit
+  registration reload separately from ordinary busy retries.
+- **Behaviour-only: SDK error details retain structured payloads.** Python
+  and TypeScript `MeerkatError.details` now preserves a bare mob-error object
+  containing `reason` instead of replacing that object with its reason
+  string. Consumers that need only the reason must read that field.
+
 ### Fixed
 
+- **Cold mob resume no longer performs member construction on the actor
+  loop (#1102):** exact attachment preparation, session reconstruction,
+  topology I/O, operation-binding restoration, and orchestrator notification
+  use owner-tracked asynchronous work. Generated resume custody fences
+  member outcomes and keeps lifecycle completion behind actual settlement.
+  Observer deadlines do not cancel construction; failed compensation retains
+  exact cleanup authority instead of reporting a successful cancellation.
+- **Member lifecycle isolation (#1105):** spawn activation, wiring, retirement,
+  local respawn, and placed event-pump setup use owner-tracked work so unrelated
+  members can progress. Reload and delivery share same-member admission ordering;
+  late cleanup cannot replace or retire a successor incarnation.
+- **Failed-spawn cleanup:** durable resume rollback releases only its exact
+  retired operation-registry binding. Placed rollback preserves the host-session
+  journal and settles remote trust removal before clearing wiring or disposing
+  the failed member; uncertain cleanup retains its retry authority.
+- **Native worker stack safety:** retirement stages and local/placed spawn
+  branches erase large future construction at their boundaries, preserving the
+  existing 2 MiB worker budget during cold restart, respawn, and placed rollback.
 - **WorkGraph claim lease ambiguity (#1112):** the model-facing
   `workgraph_claim` schema now advertises only `lease_seconds`, rather than
   two optional lease representations whose mutual exclusion cannot be
   expressed reliably across provider tool schemas. Omission still means no
   expiry. The Rust request and existing dispatch retain absolute-only lease
   support and reject dual-lease requests without mutating the item.
+- **`MemberReloadRequired` no longer renders as ordinary session busy
+  (#1105):** a mob member whose runtime registration is durability-degraded
+  now reports the dedicated `meerkat_contracts::ErrorCode::MemberReloadRequired`
+  (`MEMBER_RELOAD_REQUIRED`, JSON-RPC `-32029`, HTTP 409, CLI exit 49) and
+  classifies as `MobFailureClass::RuntimeRejected`, instead of the previous
+  `SessionBusy`/`TargetBusy` pairing that implied an ordinary backoff-and-retry
+  condition. The structured payload's `retryable: false` and
+  `required_action: "reload_member_registration"` fields are unchanged; only
+  the caller-visible wire code and mob failure classification are corrected.
+  The Python and TypeScript SDK JSON-RPC dispatchers also no longer narrow a
+  bare mob-error `error.data` payload down to a single `reason` string when it
+  lacks a nested `code`/`details` wrapper: `MemberReloadRequired` (and any
+  other reason-carrying mob error, e.g. `MemberReloadRefused`,
+  `DirectMemberAdoptionPending`) now preserves its full structured details —
+  `kind`, `retryable`, `required_action`, etc. — on the generic `MeerkatError`
+  raised by both SDKs.
 
 ## [0.8.34] - 2026-09-06
 

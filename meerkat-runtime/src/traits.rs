@@ -93,6 +93,12 @@ pub enum RuntimeDriverError {
     #[error("Stale runtime authority: {reason}")]
     StaleAuthority { reason: String },
 
+    #[error("materialization registration for session {session_id} is no longer current")]
+    MaterializationRegistrationNotCurrent { session_id: meerkat_core::SessionId },
+
+    #[error("materialization registration for session {session_id} has another owner")]
+    MaterializationRegistrationOwned { session_id: meerkat_core::SessionId },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

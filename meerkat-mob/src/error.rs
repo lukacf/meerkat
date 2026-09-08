@@ -177,7 +177,10 @@ pub enum MobFailureClass {
     /// A transport/persistence/session/timeout fault prevented delivery.
     Transport,
     /// A runtime accepted the work but parked at an external boundary
-    /// (callback pending) rather than completing.
+    /// (callback pending) rather than completing, OR the runtime refuses
+    /// further ordinary work until an explicit, named repair action closes
+    /// the gap (e.g. `reload_member_registration`, `rotate_supervisor`) —
+    /// never resolved by plain busy/backoff retry.
     RuntimeRejected,
     /// An internal/unexpected-state fault.
     Internal,
@@ -1433,12 +1436,20 @@ impl MobError {
                 | Self::LifecycleOperationProgressStalled { .. }
                 | Self::LifecycleOperationAdmissionPending { .. }
                 | Self::DirectMemberAdoptionPending { .. }
-                | Self::MemberReloadRequired { .. }
                 | Self::MemberAdmissionBacklogFull { .. }
                 | Self::ActorCommandTimedOut { .. }
                 | Self::MemberReloadRefused { .. }
                 | Self::MemberReloadTimedOut { .. } => {
                     Some(meerkat_contracts::ErrorCode::SessionBusy)
+                }
+                // Dedicated code (#1105), deliberately NOT `SessionBusy`:
+                // the degraded registration never clears on its own, so
+                // ordinary busy/backoff retry is never correct here — only
+                // the named `reload_member_registration` repair resolves
+                // it, mirroring `SupervisorProtocolUpgradeRequired`'s own
+                // dedicated non-retryable code below.
+                Self::MemberReloadRequired { .. } => {
+                    Some(meerkat_contracts::ErrorCode::MemberReloadRequired)
                 }
                 Self::SupervisorProtocolUpgradeRequired { .. } => {
                     Some(meerkat_contracts::ErrorCode::SupervisorRotationIncomplete)
@@ -1528,7 +1539,6 @@ impl MobError {
             // `MobFailureClass` is what schedule delivery records.
             Self::MemberAlreadyExists(_)
             | Self::ParticipantNameOccupied { .. }
-            | Self::MemberReloadRequired { .. }
             | Self::MemberAdmissionBacklogFull { .. } => MobFailureClass::TargetBusy,
             Self::StorageError(_)
             | Self::SessionError(_)
@@ -1555,6 +1565,14 @@ impl MobError {
             | Self::LifecycleOperationProgressStalled { .. }
             | Self::LifecycleOperationAdmissionPending { .. }
             | Self::SupervisorProtocolUpgradeRequired { .. }
+            // A degraded registration is not a temporal "busy" collision
+            // (§ TargetBusy's own doc: "target exists but cannot accept
+            // this right now"). It requires the explicit, non-destructive
+            // `reload_member_registration` repair before ordinary work can
+            // resume — the same "runtime accepted no further work until an
+            // explicit action closes the gap" shape as
+            // `SupervisorProtocolUpgradeRequired`, not ordinary backoff.
+            | Self::MemberReloadRequired { .. }
             | Self::DirectMemberAdoptionPending { .. }
             | Self::RuntimeEffectRefused { .. } => MobFailureClass::RuntimeRejected,
             _ => MobFailureClass::MobRejected,
@@ -2360,6 +2378,55 @@ mod tests {
         assert_eq!(adoption_data["supervisor_authority_committed"], true);
         assert_eq!(adoption_data["authority_retained"], true);
         assert_eq!(adoption.failure_class(), MobFailureClass::RuntimeRejected);
+    }
+
+    /// #1105: `MemberReloadRequired` gets its own dedicated wire code and
+    /// `RuntimeRejected` classification instead of the prior
+    /// `SessionBusy`/`TargetBusy` busy-retry pairing — the degraded
+    /// registration never clears on its own, so it must not read as an
+    /// ordinary backoff-and-retry condition. A sibling admission-backlog
+    /// state is checked alongside to prove the reclassification is scoped
+    /// to this one variant and does not leak onto its busy neighbors.
+    #[test]
+    fn member_reload_required_reports_dedicated_code_and_nonretryable_classification() {
+        let reload_required = MobError::MemberReloadRequired {
+            member_id: AgentIdentity::from("m"),
+            reason: "durable commit could not be reconciled with the live shell".to_string(),
+        };
+
+        assert_eq!(
+            reload_required.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::MemberReloadRequired)
+        );
+        assert_ne!(
+            reload_required.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionBusy)
+        );
+        assert_eq!(
+            reload_required.failure_class(),
+            MobFailureClass::RuntimeRejected
+        );
+        assert_ne!(reload_required.failure_class(), MobFailureClass::TargetBusy);
+
+        let data = reload_required
+            .structured_data()
+            .expect("typed reload-required data");
+        assert_eq!(data["kind"], "mob_member_reload_required");
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["authority_retained"], true);
+        assert_eq!(data["required_action"], "reload_member_registration");
+
+        // The neighboring busy backlog state keeps its prior mapping —
+        // this reclassification is scoped to `MemberReloadRequired` alone.
+        let backlog_full = MobError::MemberAdmissionBacklogFull {
+            member_id: AgentIdentity::from("m"),
+            depth: 3,
+        };
+        assert_eq!(
+            backlog_full.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionBusy)
+        );
+        assert_eq!(backlog_full.failure_class(), MobFailureClass::TargetBusy);
     }
 
     /// T-B3 (respawn half): `MobRespawnError::wire_detail` delegates for

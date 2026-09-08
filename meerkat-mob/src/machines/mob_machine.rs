@@ -20,8 +20,9 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     ExternalMemberRebindCapability, FlowFrameReducerCommandKind, FlowRunPublicResultClassKind,
     FlowRunReducerCommandKind, LoopIterationReducerCommandKind, MemberAdmissionVerdictKind,
     MemberHealthClass, MemberProgressEventKind, MobLifecycleJournalKind,
-    PlacedCompletionLifecycleIntentKind, PolicyDecision, SpawnExecPhase, StepFaultDispositionKind,
-    StepOutputFaultKind, SupervisorEscalationFailureCause, TurnTimeoutDisposition,
+    PlacedCompletionLifecycleIntentKind, PolicyDecision, ResumeMemberOutcomeDisposition,
+    SpawnExecPhase, StepFaultDispositionKind, StepOutputFaultKind,
+    SupervisorEscalationFailureCause, TurnTimeoutDisposition,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -34,6 +35,41 @@ pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
 // These types bridge between the DSL's flat representation and the real mob
 // domain types in `crate::ids`. The DSL needs Ord+Hash+Clone for Set/Map;
 // these newtypes satisfy that while providing From/Into mappings.
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ResumeAttemptId(pub String);
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct ResumeMemberBinding {
+    pub agent_runtime_id: AgentRuntimeId,
+    pub fence_token: FenceToken,
+    pub session_id: SessionId,
+    pub definition_epoch: u64,
+}
+
+impl Default for ResumeMemberBinding {
+    fn default() -> Self {
+        Self {
+            agent_runtime_id: AgentRuntimeId(String::new()),
+            fence_token: FenceToken(0),
+            session_id: SessionId(String::new()),
+            definition_epoch: 0,
+        }
+    }
+}
 
 /// Bridging type for agent identity. Maps to `crate::ids::AgentIdentity`.
 #[derive(
@@ -2644,6 +2680,417 @@ mod tests {
         )
         .expect("CommitSpawnActivation should settle the seeded live member");
         bridge_session_id
+    }
+
+    fn explicit_resume_fixture() -> (
+        MobMachineAuthority,
+        ResumeAttemptId,
+        AgentIdentity,
+        ResumeMemberBinding,
+    ) {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("resume-member");
+        let runtime_id = AgentRuntimeId::from("resume-member:0");
+        let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
+        let binding = ResumeMemberBinding {
+            fence_token: *authority
+                .state()
+                .identity_runtime_fence_tokens
+                .get(&identity)
+                .expect("fence"),
+            agent_runtime_id: runtime_id,
+            session_id,
+            definition_epoch: authority.state().definition_epoch,
+        };
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
+        let attempt = ResumeAttemptId("resume-attempt".to_string());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginExplicitResume {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("begin resume");
+        (authority, attempt, identity, binding)
+    }
+
+    fn commit_explicit_resume(authority: &mut MobMachineAuthority, attempt: &ResumeAttemptId) {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SettleExplicitResumePreparation {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("preparation settled");
+        MobMachineMutator::apply(authority, MobMachineInput::Resume).expect("durable resume");
+    }
+
+    #[test]
+    fn explicit_resume_cancellation_retains_preparation_until_settlement() {
+        let (mut authority, attempt, _, _) = explicit_resume_fixture();
+        assert!(MobMachineMutator::apply(&mut authority, MobMachineInput::Resume).is_err());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CancelExplicitResume {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("request cancellation");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::FinishExplicitResume {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::BeginExplicitResume {
+                    attempt: ResumeAttemptId("successor".to_string()),
+                },
+            )
+            .is_err()
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumePreparation {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("owner confirms preparation settled");
+        assert!(MobMachineMutator::apply(&mut authority, MobMachineInput::Resume).is_err());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::FinishExplicitResume {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("cancel only after settlement");
+        assert_eq!(authority.state().lifecycle_phase, MobPhase::Stopped);
+        let successor = ResumeAttemptId("successor".to_string());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::BeginExplicitResume { attempt: successor },
+        )
+        .expect("successor may start");
+        let before = authority.state().clone();
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::SettleExplicitResumePreparation { attempt },
+            )
+            .is_err()
+        );
+        assert_eq!(authority.state(), &before);
+    }
+
+    #[test]
+    fn explicit_resume_member_cancel_requires_exact_cleanup_settlement() {
+        let (mut authority, attempt, identity, binding) = explicit_resume_fixture();
+        commit_explicit_resume(&mut authority, &attempt);
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeExplicitResumeMember {
+                attempt: attempt.clone(),
+                agent_identity: identity.clone(),
+                binding: binding.clone(),
+            },
+        )
+        .expect("authorize exact member");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::BeginExplicitResumeReadiness {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err()
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CancelExplicitResume {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("cancel");
+        let classified = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ClassifyExplicitResumeMemberOutcome {
+                attempt: attempt.clone(),
+                agent_identity: identity.clone(),
+                binding: binding.clone(),
+            },
+        )
+        .expect("classify late outcome");
+        assert!(classified.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeMemberOutcomeClassified {
+                disposition: ResumeMemberOutcomeDisposition::RollbackRequired,
+                ..
+            }
+        )));
+        assert_eq!(
+            authority.state().explicit_resume_member_work.get(&identity),
+            Some(&binding)
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::FinishExplicitResume {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err()
+        );
+        let mut stale = binding.clone();
+        stale.fence_token = FenceToken(binding.fence_token.0 + 1);
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::SettleExplicitResumeMember {
+                    attempt: attempt.clone(),
+                    agent_identity: identity.clone(),
+                    binding: stale,
+                },
+            )
+            .is_err()
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumeMember {
+                attempt: attempt.clone(),
+                agent_identity: identity,
+                binding,
+            },
+        )
+        .expect("exact cleanup receipt");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::FinishExplicitResume { attempt },
+        )
+        .expect("settled cancellation");
+        assert!(authority.state().explicit_resume_attempt.is_none());
+    }
+
+    #[test]
+    fn explicit_resume_success_requires_readiness_and_topology_settlement() {
+        let (mut authority, attempt, _, _) = explicit_resume_fixture();
+        commit_explicit_resume(&mut authority, &attempt);
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::FinishExplicitResume {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err(),
+            "Running is not a completed Resume"
+        );
+        for input in [
+            MobMachineInput::BeginExplicitResumeReadiness {
+                attempt: attempt.clone(),
+            },
+            MobMachineInput::SettleExplicitResumeReadiness {
+                attempt: attempt.clone(),
+            },
+            MobMachineInput::BeginExplicitResumeTopology {
+                attempt: attempt.clone(),
+            },
+        ] {
+            MobMachineMutator::apply(&mut authority, input).expect("advance resume");
+        }
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::FinishExplicitResume {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err(),
+            "topology effects still own work"
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumeTopology {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("topology owner settled");
+        let finished = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::FinishExplicitResume { attempt },
+        )
+        .expect("finish settled resume");
+        assert!(finished.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeFinished {
+                cancelled: false,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn explicit_resume_rollback_retains_authority_until_cleanup_acknowledges() {
+        let (mut authority, attempt, _, _) = explicit_resume_fixture();
+        for input in [
+            MobMachineInput::SettleExplicitResumePreparation {
+                attempt: attempt.clone(),
+            },
+            MobMachineInput::CancelExplicitResume {
+                attempt: attempt.clone(),
+            },
+            MobMachineInput::BeginExplicitResumeCleanup {
+                attempt: attempt.clone(),
+            },
+        ] {
+            MobMachineMutator::apply(&mut authority, input).expect("begin owned rollback");
+        }
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::FinishExplicitResume {
+                    attempt: attempt.clone(),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            MobMachineMutator::apply(&mut authority, MobMachineInput::Shutdown).is_err(),
+            "shutdown must not erase retained cleanup"
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumeCleanup {
+                attempt: attempt.clone(),
+            },
+        )
+        .expect("owner acknowledges cleanup");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::FinishExplicitResume { attempt },
+        )
+        .expect("settled rollback may finish");
+        assert!(authority.state().explicit_resume_attempt.is_none());
+    }
+
+    #[test]
+    fn explicit_resume_stale_binding_can_only_settle_its_own_custody() {
+        let (mut authority, attempt, identity, binding) = explicit_resume_fixture();
+        commit_explicit_resume(&mut authority, &attempt);
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeExplicitResumeMember {
+                attempt: attempt.clone(),
+                agent_identity: identity.clone(),
+                binding: binding.clone(),
+            },
+        )
+        .expect("authorize predecessor work");
+        let successor_session = SessionId::from("successor-session");
+        authority
+            .apply_signal(MobMachineSignal::RecoverMemberSessionBinding {
+                agent_identity: identity.clone(),
+                agent_runtime_id: binding.agent_runtime_id.clone(),
+                bridge_session_id: successor_session.clone(),
+                replacing: Some(binding.session_id.clone()),
+            })
+            .expect("replace the current session binding");
+        let mut successor = binding.clone();
+        successor.session_id = successor_session.clone();
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::AuthorizeExplicitResumeMember {
+                    attempt: attempt.clone(),
+                    agent_identity: identity.clone(),
+                    binding: successor,
+                },
+            )
+            .is_err(),
+            "one identity cannot issue overlapping resume construction permits"
+        );
+        let classified = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ClassifyExplicitResumeMemberOutcome {
+                attempt: attempt.clone(),
+                agent_identity: identity.clone(),
+                binding: binding.clone(),
+            },
+        )
+        .expect("classify old result");
+        assert!(classified.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeMemberOutcomeClassified {
+                disposition: ResumeMemberOutcomeDisposition::RollbackRequired,
+                ..
+            }
+        )));
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleExplicitResumeMember {
+                attempt,
+                agent_identity: identity.clone(),
+                binding,
+            },
+        )
+        .expect("acknowledge old resource cleanup");
+        assert_eq!(
+            authority.state().member_session_bindings.get(&identity),
+            Some(&successor_session)
+        );
+        assert!(
+            !authority
+                .state()
+                .member_restore_failures
+                .contains_key(&identity)
+        );
+    }
+
+    #[test]
+    fn explicit_resume_definition_change_invalidates_earlier_materialization() {
+        let (mut authority, attempt, identity, binding) = explicit_resume_fixture();
+        commit_explicit_resume(&mut authority, &attempt);
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeExplicitResumeMember {
+                attempt: attempt.clone(),
+                agent_identity: identity.clone(),
+                binding: binding.clone(),
+            },
+        )
+        .expect("authorize original definition");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AdvanceDefinitionEpoch {
+                expected_epoch: binding.definition_epoch,
+                next_epoch: binding.definition_epoch + 1,
+            },
+        )
+        .expect("publish a later definition");
+        let classified = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ClassifyExplicitResumeMemberOutcome {
+                attempt,
+                agent_identity: identity,
+                binding,
+            },
+        )
+        .expect("classify stale definition result");
+        assert!(classified.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExplicitResumeMemberOutcomeClassified {
+                disposition: ResumeMemberOutcomeDisposition::RollbackRequired,
+                ..
+            }
+        )));
     }
 
     #[test]

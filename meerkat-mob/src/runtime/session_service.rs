@@ -1099,6 +1099,20 @@ pub trait MobSessionService:
         <Self as SessionService>::has_live_session(self, session_id).await
     }
 
+    /// Standalone turn execution with an owner-issued admission notification,
+    /// separate from the returned terminal result. Send only after generated
+    /// admission and command handoff, never merely after spawning a task.
+    async fn start_turn_with_admission_notification(
+        &self,
+        _session_id: &SessionId,
+        _req: meerkat_core::service::StartTurnRequest,
+        _admitted: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        Err(SessionError::Unsupported(
+            "session service cannot acknowledge standalone turn admission".to_string(),
+        ))
+    }
+
     #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         None
@@ -1604,10 +1618,11 @@ pub trait MobSessionService:
     }
 
     /// Discard only process-local material for one exact actor after the
-    /// runtime store lost durable write authority. The machine's exact
-    /// degraded-registration coordinator owns the caller, so implementations
-    /// must not acquire the turn-finalization boundary or persist terminal
-    /// session or runtime state.
+    /// runtime store lost durable write authority. The caller owns either the
+    /// exact degraded-registration coordinator or, after terminal settlement,
+    /// B plus the exact ownerless-successor T/M lease (also L when enabled).
+    /// Implementations may acquire their recovery gate R, but must not acquire
+    /// B or persist terminal session or runtime state.
     async fn discard_live_session_actor_after_durability_reload_required(
         &self,
         witness: &meerkat_session::LiveSessionActorWitness,
@@ -1698,6 +1713,21 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn start_turn_with_admission_notification(
+        &self,
+        session_id: &SessionId,
+        req: meerkat_core::service::StartTurnRequest,
+        admitted: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::start_turn_with_admission_notification(
+            self,
+            session_id,
+            req,
+            Some(admitted),
+        )
+        .await
+    }
+
     #[cfg(feature = "experimental-gpt-live")]
     async fn commit_live_delegation_final_transcript(
         &self,

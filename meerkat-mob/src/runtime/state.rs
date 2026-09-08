@@ -496,6 +496,9 @@ pub(super) enum LifecycleProgressStage {
     DurableResumeTransition,
     PostRebuildReadiness,
     ResumeTopologyReconciliation,
+    ResumeRollback,
+    ResumeOperationBindings,
+    OrchestratorResumeNotification,
 }
 
 impl LifecycleProgressStage {
@@ -509,6 +512,9 @@ impl LifecycleProgressStage {
             Self::DurableResumeTransition => "durable_resume_transition",
             Self::PostRebuildReadiness => "post_rebuild_readiness",
             Self::ResumeTopologyReconciliation => "resume_topology_reconciliation",
+            Self::ResumeRollback => "resume_rollback",
+            Self::ResumeOperationBindings => "resume_operation_bindings",
+            Self::OrchestratorResumeNotification => "orchestrator_resume_notification",
         }
     }
 
@@ -516,7 +522,10 @@ impl LifecycleProgressStage {
     /// cannot classify opaque host latency as a stall without a host progress
     /// contract; doing so made ordinary cold profile builds fail resume.
     pub(super) const fn uses_host_owned_terminality(self) -> bool {
-        matches!(self, Self::MemberLiveMaterialization)
+        matches!(
+            self,
+            Self::MemberLiveMaterialization | Self::OrchestratorResumeNotification
+        )
     }
 }
 
@@ -699,13 +708,54 @@ pub(super) enum MobCommand {
         payload: Box<SubmitWorkPayload>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
-    /// Internal completion of one detached member turn admission. The actor
+    /// Terminal classification of one policy auto-spawn (#1105). Releases
+    /// the work deliveries parked behind the absent member's auto-spawn.
+    PolicySpawnSettled {
+        agent_identity: AgentIdentity,
+        result: Result<super::handle::MemberSpawnReceipt, MobError>,
+    },
+    /// Test-only census read of the spawn-activation custody sets (#1105).
+    ///
+    /// This is the exact predicate a graph-scoped lifecycle gate waits on, so
+    /// a regression can observe it directly instead of inferring it from
+    /// timing.
+    #[cfg(test)]
+    SpawnActivationCustodyProbe {
+        reply_tx:
+            oneshot::Sender<super::actor::spawn_activation::SpawnActivationQuiescence>,
+    },
+    /// Typed compensation receipt for one pending-spawn cleanup anchor
+    /// (#1105). The anchor stays retained until a typed success arrives.
+    PendingSpawnAnchorSettled {
+        spawn_ticket: u64,
+        result: Result<(), MobError>,
+    },
+    /// Typed compensation receipt for one retained spawn cleanup (#1105).
+    ///
+    /// The obligation stays visible to every lifecycle gate until this ack
+    /// lands; only a typed success settles it. There is no projection
+    /// predicate and no timeout that can clear it.
+    SpawnCleanupSettled {
+        custody: Box<super::actor::spawn_activation::SpawnActivationCustody>,
+        result: Result<(), MobError>,
+    },
+    /// Typed completion of one off-actor spawn activation stage (#1105).
+    ///
+    /// The worker carries the exact incarnation custody it was dispatched
+    /// with; the actor re-verifies it against the live roster before
+    /// committing the stage, so a late completion for a superseded
+    /// incarnation is declined instead of mutating its successor.
+    SpawnActivationStageSettled {
+        ticket: super::actor::spawn_activation::SpawnActivationTicket,
+        outcome: Box<super::actor::spawn_activation::SpawnActivationStageOutcome>,
+    },
+    /// Internal terminal settlement of one member-lane turn or reload. The actor
     /// releases the member's single-flight admission lane and starts the next
     /// parked delivery for that member (skipping abandoned callers). `ticket`
     /// fences a late completion from a superseded lane occupant.
     MemberTurnAdmissionSettled {
         agent_identity: AgentIdentity,
-        ticket: u64,
+        ticket: super::actor::MemberAdmissionTicket,
     },
     /// Internal re-entry from a detached admission task that observed the
     /// member's live session materialization missing (#37). Revival needs
@@ -714,7 +764,8 @@ pub(super) enum MobCommand {
     ReviveMemberLiveMaterialization {
         agent_identity: AgentIdentity,
         bridge_session_id: SessionId,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        scope: super::actor::MemberLiveRevivalScope,
+        reply_tx: oneshot::Sender<Result<super::actor::MemberLiveRevivalOutcome, MobError>>,
     },
     /// Non-destructive cold reload of one member's durability-degraded
     /// runtime registration (same session id, same continuity generation).
@@ -722,9 +773,9 @@ pub(super) enum MobCommand {
     /// discard, re-registration, and readiness run detached.
     ReloadMemberRegistration {
         agent_identity: AgentIdentity,
-        /// End-to-end bound for the detached reload worker (probe, discard,
-        /// revival, readiness). Set by the handle from
-        /// `MEMBER_RELOAD_TOTAL_TIMEOUT`.
+        /// Caller observation bound across lane queueing, probe, discard,
+        /// revival and readiness. Once effects start, expiry does not release
+        /// their lane custody. Set from `MEMBER_RELOAD_TOTAL_TIMEOUT`.
         deadline: meerkat_core::time_compat::Instant,
         reply_tx: oneshot::Sender<Result<super::handle::MemberReloadOutcome, MobError>>,
     },
@@ -732,8 +783,65 @@ pub(super) enum MobCommand {
     /// of one explicit Resume phase. `ticket` fences a stale fan-out from a
     /// superseded resume.
     ResumeLifecycleReadinessResolved {
-        ticket: u64,
+        ticket: super::actor::ResumeStepTicket,
         outcomes: Vec<super::actor::MemberReadinessOutcome>,
+    },
+    ResumeLifecyclePreparationResolved {
+        ticket: super::actor::ResumeStepTicket,
+        result: Result<Vec<super::actor::ExplicitResumeMemberRebuild>, MobError>,
+    },
+    ResumeLifecycleMemberObserved {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        observation: Result<super::actor::ExplicitResumeLiveObservation, MobError>,
+    },
+    ResumeLifecycleMemberReady {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        recovered_endpoint: Option<meerkat_core::comms::TrustedPeerDescriptor>,
+        decision_tx: oneshot::Sender<super::actor::ExplicitResumeMemberDecision>,
+    },
+    ResumeLifecycleMemberSettled {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        completion: super::actor::ExplicitResumeMemberCompletion,
+    },
+    ResumeLifecycleMemberCleanupHeld {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        retry_tx: oneshot::Sender<()>,
+        error: String,
+        attempts: u32,
+        automatic_retry: bool,
+    },
+    ResumeLifecycleMemberUnproven {
+        work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
+        failure: super::provisioner::ProvisionAttemptFailure,
+    },
+    ResumeLifecycleRollbackStep {
+        attempt: mob_dsl::ResumeAttemptId,
+    },
+    ResumeLifecycleRollbackFinalized {
+        attempt: mob_dsl::ResumeAttemptId,
+        outcomes: Vec<super::actor::ResumeRollbackMemberOutcome>,
+    },
+    ResumePostCommitMemberCompleted {
+        attempt: mob_dsl::ResumeAttemptId,
+        step: super::actor::ResumePostCommitStep,
+        identity: AgentIdentity,
+        outcome: super::actor::ResumePostCommitMemberOutcome,
+    },
+    #[cfg(feature = "runtime-adapter")]
+    ResumeTopologyAuthority {
+        request: Box<super::actor::resume_topology::ResumeTopologyAuthorityRequest>,
+    },
+    #[cfg(feature = "runtime-adapter")]
+    ResumeTopologyCompleted {
+        attempt: mob_dsl::ResumeAttemptId,
+        outcome: super::actor::resume_topology::ResumeTopologyOutcome,
+    },
+    #[cfg(feature = "runtime-adapter")]
+    ResumeTopologyEffectHeld {
+        effect: Box<super::actor::resume_topology::ResumeTopologyPendingEffect>,
+        retry_tx: oneshot::Sender<()>,
+        attempts: u32,
+        automatic_retry: bool,
     },
     #[cfg(feature = "experimental-gpt-live")]
     StartLiveBridgeOperation {
@@ -1504,10 +1612,31 @@ impl MobCommand {
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
+            Self::SpawnActivationStageSettled { .. } => "SpawnActivationStageSettled",
+            Self::SpawnCleanupSettled { .. } => "SpawnCleanupSettled",
+            Self::PendingSpawnAnchorSettled { .. } => "PendingSpawnAnchorSettled",
+            #[cfg(test)]
+            Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
+            Self::PolicySpawnSettled { .. } => "PolicySpawnSettled",
             Self::MemberTurnAdmissionSettled { .. } => "MemberTurnAdmissionSettled",
             Self::ReviveMemberLiveMaterialization { .. } => "ReviveMemberLiveMaterialization",
             Self::ReloadMemberRegistration { .. } => "ReloadMemberRegistration",
             Self::ResumeLifecycleReadinessResolved { .. } => "ResumeLifecycleReadinessResolved",
+            Self::ResumeLifecyclePreparationResolved { .. } => "ResumeLifecyclePreparationResolved",
+            Self::ResumeLifecycleMemberObserved { .. } => "ResumeLifecycleMemberObserved",
+            Self::ResumeLifecycleMemberReady { .. } => "ResumeLifecycleMemberReady",
+            Self::ResumeLifecycleMemberSettled { .. } => "ResumeLifecycleMemberSettled",
+            Self::ResumeLifecycleMemberCleanupHeld { .. } => "ResumeLifecycleMemberCleanupHeld",
+            Self::ResumeLifecycleMemberUnproven { .. } => "ResumeLifecycleMemberUnproven",
+            Self::ResumeLifecycleRollbackStep { .. } => "ResumeLifecycleRollbackStep",
+            Self::ResumeLifecycleRollbackFinalized { .. } => "ResumeLifecycleRollbackFinalized",
+            Self::ResumePostCommitMemberCompleted { .. } => "ResumePostCommitMemberCompleted",
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. } => "ResumeTopologyAuthority",
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyCompleted { .. } => "ResumeTopologyCompleted",
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyEffectHeld { .. } => "ResumeTopologyEffectHeld",
             #[cfg(feature = "experimental-gpt-live")]
             Self::StartLiveBridgeOperation { .. } => "StartLiveBridgeOperation",
             #[cfg(feature = "experimental-gpt-live")]

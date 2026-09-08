@@ -4606,7 +4606,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<SessionTurnExecutionOutcome, SessionError> {
-        self.start_turn_execution_with_admission_recovering_not_found(id, req, None, None)
+        self.start_turn_execution_with_admission_recovering_not_found(id, req, None, None, None)
             .await
             .map_err(|(error, _admission)| error)
     }
@@ -4623,6 +4623,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             id,
             req,
             Some(admission),
+            None,
             None,
         )
         .await
@@ -4661,6 +4662,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 req,
                 reserved_admission.take(),
                 None,
+                None,
             )
             .await?;
         outcome
@@ -4674,6 +4676,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         req: StartTurnRequest,
         mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
         mut preclaimed_turn: Option<StartTurnAdmissionClaim>,
+        admission_notification: Option<oneshot::Sender<()>>,
     ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
     {
         let (result_tx, result_rx) = oneshot::channel();
@@ -4762,6 +4765,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ));
             }
             turn_claim.transfer_to_session_task();
+            if let Some(admission_notification) = admission_notification {
+                let _ = admission_notification.send(());
+            }
         }
 
         let result = result_rx.await.map_err(|_| {
@@ -4774,6 +4780,40 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
 
         Ok(result)
+    }
+
+    /// Run an ordinary standalone turn, acknowledging only after generated
+    /// admission and command handoff have transferred execution to the actor.
+    /// The returned future still owns the turn-finalization boundary through
+    /// terminal completion; an admission observer is not its cancellation owner.
+    pub async fn start_turn_with_admission_notification(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission_notification: Option<oneshot::Sender<()>>,
+    ) -> Result<RunResult, SessionError> {
+        let preclaimed_turn = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            let identity = handle.llm_identity_rx.borrow().clone();
+            self.validate_prompt_video_input(&req.prompt, &identity)
+                .await?;
+            Self::claim_start_turn(id, handle, Some(identity))?
+        };
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        self.start_turn_execution_with_admission_recovering_not_found(
+            id,
+            req,
+            None,
+            Some(preclaimed_turn),
+            admission_notification,
+        )
+        .await
+        .map_err(|(error, _admission)| error)?
+        .into_public_result()
+        .map_err(SessionError::Agent)
     }
 
     /// Get the event injector for a session, if available.
@@ -5526,27 +5566,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // on the runtime-finalization mutex. The claim is the canonical Busy
         // decision; the outer mutex protects identity + turn finalization but
         // must never turn overlapping public turns into a queue.
-        let preclaimed_turn = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&req.prompt, &identity)
-                .await?;
-            Self::claim_start_turn(id, handle, Some(identity))?
-        };
-        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-        self.start_turn_execution_with_admission_recovering_not_found(
-            id,
-            req,
-            None,
-            Some(preclaimed_turn),
-        )
-        .await
-        .map_err(|(error, _admission)| error)?
-        .into_public_result()
-        .map_err(SessionError::Agent)
+        self.start_turn_with_admission_notification(id, req, None)
+            .await
     }
 
     async fn reconcile_runtime_compaction_projections(

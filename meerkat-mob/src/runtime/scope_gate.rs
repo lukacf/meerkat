@@ -88,6 +88,10 @@ impl MobCommand {
             Self::StartLiveBridgeOperation { .. }
             | Self::ValidateLiveBridgeMemberEligibility { .. }
             | Self::ValidateLiveDurableSourceAvailability { .. } => Some(ControlScope::Live),
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. }
+            | Self::ResumeTopologyCompleted { .. }
+            | Self::ResumeTopologyEffectHeld { .. } => None,
 
             // ── Cancel ──
             Self::CancelAllWork { .. }
@@ -181,8 +185,21 @@ impl MobCommand {
             // re-entry are actor self-sends; the delivery they belong to was
             // admitted on SubmitWork.
             | Self::MemberTurnAdmissionSettled { .. }
+            | Self::SpawnActivationStageSettled { .. }
+            | Self::SpawnCleanupSettled { .. }
+            | Self::PendingSpawnAnchorSettled { .. }
+            | Self::PolicySpawnSettled { .. }
             | Self::ReviveMemberLiveMaterialization { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
+            | Self::ResumeLifecyclePreparationResolved { .. }
+            | Self::ResumeLifecycleMemberObserved { .. }
+            | Self::ResumeLifecycleMemberReady { .. }
+            | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberCleanupHeld { .. }
+            | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleRollbackStep { .. }
+            | Self::ResumeLifecycleRollbackFinalized { .. }
+            | Self::ResumePostCommitMemberCompleted { .. }
             // The attached-spawn completion is a pure forward of an ordinary
             // spawn outcome back onto the actor task; its principal-class
             // admission already happened on SpawnAttachedForkedParticipant.
@@ -252,6 +269,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::SpawnActivationCustodyProbe { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
     }
@@ -534,9 +552,28 @@ impl MobCommand {
             }
             // Internal-class / non-Result-channel arms have no typed error
             // carrier; log-drop honestly if a fenced handle reaches one.
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. }
+            | Self::ResumeTopologyCompleted { .. }
+            | Self::ResumeTopologyEffectHeld { .. } => {
+                tracing::warn!(%error, "internal resume topology command refused by scope gate");
+            }
             Self::SpawnProvisioned { .. }
             | Self::MemberTurnAdmissionSettled { .. }
+            | Self::SpawnActivationStageSettled { .. }
+            | Self::SpawnCleanupSettled { .. }
+            | Self::PendingSpawnAnchorSettled { .. }
+            | Self::PolicySpawnSettled { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
+            | Self::ResumeLifecyclePreparationResolved { .. }
+            | Self::ResumeLifecycleMemberObserved { .. }
+            | Self::ResumeLifecycleMemberReady { .. }
+            | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberCleanupHeld { .. }
+            | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleRollbackStep { .. }
+            | Self::ResumeLifecycleRollbackFinalized { .. }
+            | Self::ResumePostCommitMemberCompleted { .. }
             | Self::RevivePlacedMember { .. }
             | Self::HostStatusPollCompleted { .. }
             | Self::HostOrphanReleaseCompleted { .. }
@@ -562,6 +599,7 @@ impl MobCommand {
             Self::FlowTrackerCounts { .. }
             | Self::OrchestratorSnapshot { .. }
             | Self::LifecycleSnapshot { .. }
+            | Self::SpawnActivationCustodyProbe { .. }
             | Self::DslT2Snapshot { .. } => {
                 tracing::error!("scope denial reached a test-only command; dropped");
             }

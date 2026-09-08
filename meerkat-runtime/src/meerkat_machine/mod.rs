@@ -310,6 +310,10 @@ pub enum RuntimeBindingsError {
     /// Machine-owned binding preparation failed before bindings were published.
     #[error("failed to prepare runtime bindings for session {0}: {1}")]
     PrepareFailed(SessionId, String),
+    #[error("materialization registration for session {0} is no longer current")]
+    RegistrationNotCurrent(SessionId),
+    #[error("materialization registration for session {0} has another owner")]
+    RegistrationOwned(SessionId),
 }
 
 /// Generated public projection for an input-state seed.
@@ -1152,8 +1156,7 @@ enum CommittedEffectDispatchFailure {
 
 type UnregisterTeardownResult = Result<(), RuntimeDriverError>;
 type RuntimeStopCleanupResult = Result<(), RuntimeDriverError>;
-type ReloadRequiredDiscardResult =
-    Result<ReloadRequiredRegistrationDisposition, RuntimeDriverError>;
+type ReloadRequiredDiscardResult = Result<ReloadRequiredRegistrationSettlement, RuntimeDriverError>;
 
 /// Joinable result channel for the one owned unregister saga of an epoch.
 #[derive(Clone)]
@@ -1938,6 +1941,48 @@ pub enum ReloadRequiredRegistrationDisposition {
     Discarded,
 }
 
+/// Terminal result of a registration reload, including the exact successor
+/// minted at publication. Sampling by session id after settlement could
+/// mistake a later replacement for the registration this reload published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReloadRequiredRegistrationSettlement {
+    NotCurrent,
+    NotDegraded,
+    Discarded {
+        successor: RuntimeSessionRegistrationWitness,
+    },
+}
+
+/// Exclusive physical lease for exact actor cleanup after a cold registration
+/// reload. It carries no lifecycle mutation authority and starts no teardown.
+/// Holding it prevents executor publication and registration replacement.
+/// Service callers acquire B first, then this lease acquires T, optional L,
+/// and exact M. Exact persistent actor cleanup may acquire R while it is held.
+pub struct RuntimeOwnerlessRegistrationLease {
+    _registration_guard: crate::tokio::sync::OwnedMutexGuard<()>,
+    #[cfg(feature = "live")]
+    _live_lifecycle_lease: crate::member_live::MemberLiveLifecycleLease,
+    _mutation_guard: crate::tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub enum RuntimeOwnerlessRegistrationAdmission {
+    Acquired(RuntimeOwnerlessRegistrationLease),
+    /// The exact registration remains current but another physical owner or
+    /// cleanup/claim obligation prevents actor cleanup. Retain retry custody.
+    CurrentButOwned,
+    NotCurrent,
+}
+
+impl ReloadRequiredRegistrationSettlement {
+    pub fn disposition(&self) -> ReloadRequiredRegistrationDisposition {
+        match self {
+            Self::NotCurrent => ReloadRequiredRegistrationDisposition::NotCurrent,
+            Self::NotDegraded => ReloadRequiredRegistrationDisposition::NotDegraded,
+            Self::Discarded { .. } => ReloadRequiredRegistrationDisposition::Discarded,
+        }
+    }
+}
+
 /// Public projection of one registered session's fail-closed durability gate.
 ///
 /// `MeerkatMachine::durability_reload_required` returns this when a persistent
@@ -2246,7 +2291,9 @@ impl MachineCleanupTaskSpawner {
         }
 
         let candidate = crate::tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            // Cleanup and ingress share this dispatcher. One owner's
+            // synchronous poll must not monopolize every session's lane.
+            .worker_threads(2)
             .thread_name("meerkat-machine-cleanup")
             .thread_stack_size(MACHINE_CLEANUP_THREAD_STACK_SIZE)
             .enable_all()
@@ -2820,6 +2867,11 @@ impl PendingRuntimeExecutorAttachment {
     /// The exact mutation guard is transferred to the process-owned unregister
     /// saga. This method returns after handoff so arbitrary post-stop cleanup
     /// runs only after the caller releases B and cannot wedge that caller.
+    ///
+    /// Handoff is NOT settlement: the teardown may still be running, or fail,
+    /// after this returns. Callers that must report settlement use
+    /// [`Self::abort_under_runtime_turn_finalization_boundary_with_completion`]
+    /// and await the returned completion once they have released B.
     pub async fn abort_under_runtime_turn_finalization_boundary(
         mut self,
     ) -> Result<(), RuntimeDriverError> {
@@ -2845,6 +2897,77 @@ impl PendingRuntimeExecutorAttachment {
         });
         self.armed = false;
         Ok(())
+    }
+
+    /// Boundary-aware abort that hands back the teardown's exact completion.
+    ///
+    /// Identical handoff to
+    /// [`Self::abort_under_runtime_turn_finalization_boundary`] — the mutation
+    /// guard moves into the process-owned unregister saga and post-stop
+    /// cleanup only runs once the caller releases B — except that the caller
+    /// keeps a joinable completion. Await it AFTER releasing the boundary: the
+    /// teardown reacquires that boundary, so awaiting while still holding it
+    /// deadlocks.
+    pub fn abort_under_runtime_turn_finalization_boundary_with_completion(
+        mut self,
+    ) -> Result<PendingExecutorAttachmentAbortCompletion, RuntimeDriverError> {
+        let guard = self.mutation_guard.take().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "pending runtime attachment lost its mutation fence before boundary-owned abort"
+                    .to_string(),
+            )
+        })?;
+        let machine = Arc::clone(&self.machine);
+        let witness = self.witness.clone();
+        let session_id = witness.session_id().clone();
+        let completion = self.cleanup_spawner.spawn(async move {
+            machine
+                .abort_pending_executor_attachment(witness, guard)
+                .await
+        });
+        self.armed = false;
+        Ok(PendingExecutorAttachmentAbortCompletion {
+            session_id,
+            completion,
+        })
+    }
+}
+
+/// Joinable completion for one boundary-aware pending-attachment teardown.
+///
+/// The teardown owns the exact mutation guard and runs in the process-owned
+/// cleanup runtime, so dropping this handle does not cancel it — it only
+/// discards the proof. A caller that reports settlement must
+/// [`Self::wait`] instead, after releasing the turn-finalization boundary.
+#[must_use = "a scheduled pending-attachment teardown is not settled until awaited"]
+pub struct PendingExecutorAttachmentAbortCompletion {
+    session_id: SessionId,
+    completion: crate::tokio::task::JoinHandle<Result<(), RuntimeDriverError>>,
+}
+
+impl PendingExecutorAttachmentAbortCompletion {
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Await the exact teardown outcome. Call only after the caller's
+    /// turn-finalization boundary has been released.
+    pub async fn wait(self) -> Result<(), RuntimeDriverError> {
+        let session_id = self.session_id;
+        self.completion.await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owned pending attachment teardown for '{session_id}' ended without a result: {error}"
+            ))
+        })?
+    }
+}
+
+impl std::fmt::Debug for PendingExecutorAttachmentAbortCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingExecutorAttachmentAbortCompletion")
+            .field("session_id", &self.session_id)
+            .finish()
     }
 }
 

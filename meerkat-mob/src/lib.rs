@@ -39,6 +39,10 @@
     )
 )]
 
+// Share the integration host fixtures with in-crate rollback regressions.
+#[cfg(test)]
+extern crate self as meerkat_mob;
+
 /// ATIF trajectory export vocabulary, for hosts that assemble mob member
 /// trajectories into one document. Gated because nothing in this crate consumes
 /// it (feature `atif`).

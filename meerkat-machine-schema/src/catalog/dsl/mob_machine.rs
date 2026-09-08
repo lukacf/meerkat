@@ -158,6 +158,15 @@ macro_rules! mob_catalog_machine_dsl {
             // transition that replaces or clears the member's restore
             // classification. The session-registry cache never owns this fact.
             member_revival_pending: Set<AgentIdentity>,
+            explicit_resume_attempt: Option<ResumeAttemptId>,
+            explicit_resume_cancel_requested: bool,
+            explicit_resume_preparation_pending: bool,
+            explicit_resume_member_work: Map<AgentIdentity, ResumeMemberBinding>,
+            explicit_resume_readiness_pending: bool,
+            explicit_resume_readiness_settled: bool,
+            explicit_resume_topology_pending: bool,
+            explicit_resume_topology_settled: bool,
+            explicit_resume_cleanup_pending: bool,
             // Machine-owned member execution-health projection. The shell
             // supplies raw execution snapshots; MobMachine detects progress
             // token changes, owns the last-progress timestamp, and classifies
@@ -595,6 +604,15 @@ macro_rules! mob_catalog_machine_dsl {
             remote_runtime_retired_ids = EmptySet,
             remote_supervisor_revoked_ids = EmptySet,
             member_revival_pending = EmptySet,
+            explicit_resume_attempt = None,
+            explicit_resume_cancel_requested = false,
+            explicit_resume_preparation_pending = false,
+            explicit_resume_member_work = EmptyMap,
+            explicit_resume_readiness_pending = false,
+            explicit_resume_readiness_settled = false,
+            explicit_resume_topology_pending = false,
+            explicit_resume_topology_settled = false,
+            explicit_resume_cleanup_pending = false,
             member_run_open = EmptyMap,
             member_in_flight_work = EmptyMap,
             member_progress_tokens = EmptyMap,
@@ -1609,6 +1627,20 @@ macro_rules! mob_catalog_machine_dsl {
             },
             RequestAdaptiveCancel { adaptive_run_id: AdaptiveRunId },
             RecordDeadlineObserved { adaptive_run_id: AdaptiveRunId, observed_at_ms: u64 },
+            BeginExplicitResume { attempt: ResumeAttemptId },
+            CancelExplicitResume { attempt: ResumeAttemptId },
+            SettleExplicitResumePreparation { attempt: ResumeAttemptId },
+            AuthorizeExplicitResumeMember { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding },
+            ClassifyExplicitResumeMemberLive { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
+            ClassifyExplicitResumeMemberOutcome { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding },
+            SettleExplicitResumeMember { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding },
+            BeginExplicitResumeReadiness { attempt: ResumeAttemptId },
+            SettleExplicitResumeReadiness { attempt: ResumeAttemptId },
+            BeginExplicitResumeTopology { attempt: ResumeAttemptId },
+            SettleExplicitResumeTopology { attempt: ResumeAttemptId },
+            BeginExplicitResumeCleanup { attempt: ResumeAttemptId },
+            SettleExplicitResumeCleanup { attempt: ResumeAttemptId },
+            FinishExplicitResume { attempt: ResumeAttemptId },
         }
 
         surface_only [
@@ -2037,6 +2069,8 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeExternalAgentEventSubscription { agent_identity: AgentIdentity, host: HostId },
             GrantRecorded { principal: PrincipalId, scopes: Set<Enum<ControlScope>>, expires_at_ms: Option<u64> },
             GrantRevoked { principal: PrincipalId, revoked: Set<Enum<ControlScope>>, remaining: Set<Enum<ControlScope>> },
+            ExplicitResumeMemberOutcomeClassified { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, disposition: Enum<ResumeMemberOutcomeDisposition> },
+            ExplicitResumeFinished { attempt: ResumeAttemptId, cancelled: bool },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -2638,6 +2672,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition OwnerBridgeSessionBound => local seam SurfaceResultAlignment,
         disposition RespawnTopologyRestoreResolved => local seam SurfaceResultAlignment,
         disposition MemberLiveMaterializationClassified => local seam SurfaceResultAlignment,
+        disposition ExplicitResumeMemberOutcomeClassified => local seam SurfaceResultAlignment,
+        disposition ExplicitResumeFinished => local seam SurfaceResultAlignment,
         disposition SpawnManyFailureClassified => local seam SurfaceResultAlignment,
         disposition MemberWaitClassified => local seam SurfaceResultAlignment,
         disposition FlowDelegationEdgeAdmissionResolved => local seam SurfaceResultAlignment,
@@ -7836,6 +7872,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -7869,6 +7910,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.runtime_retire_refusal_codes.remove(agent_runtime_id);
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
@@ -7900,6 +7946,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -8200,6 +8251,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placement_matches" { self.member_placement.get_cloned(agent_identity) == host_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
             }
             to Running
         }
@@ -10013,6 +10069,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10047,6 +10108,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10089,6 +10155,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10119,6 +10190,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10146,6 +10222,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.member_restore_failure_codes.insert(agent_identity, refusal_code);
             }
             to Running
@@ -10355,6 +10436,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
             }
@@ -10392,6 +10478,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
             }
@@ -10429,6 +10520,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10468,6 +10564,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10511,6 +10612,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10544,6 +10650,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -10581,6 +10692,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
             }
             to Running
             emit AppendLifecycleJournal {
@@ -10614,6 +10730,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
             }
             to Stopped
             emit AppendLifecycleJournal {
@@ -12032,6 +12153,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
@@ -12058,6 +12184,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
             guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
             update {
                 self.member_revival_pending.insert(agent_identity);
@@ -12077,10 +12205,17 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "session_binding_present" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
             guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
             update {
                 self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
@@ -12162,6 +12297,11 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
@@ -12582,6 +12722,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition StopRunning {
             on input Stop
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
                     self.adaptive_active_run,
@@ -12615,6 +12756,11 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResumeStopped {
             on input Resume
+            guard "explicit_resume_preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "explicit_resume_not_cancelled" {
+                self.explicit_resume_attempt == None
+                || self.explicit_resume_cancel_requested == false
+            }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "placed_completion_stop_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Stop) }
             update {
@@ -12637,6 +12783,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition CompleteRunning {
             on input Complete
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
                     self.adaptive_active_run,
@@ -12668,6 +12815,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ResetToRunning {
             on input Reset
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
                     self.adaptive_active_run,
@@ -13154,6 +13302,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_peer_id_matches_expected" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(expected_peer_endpoint)) }
             guard "overlay_member_endpoints_complete" { mob_machine_member_peer_overlay_complete(self.wiring_edges, self.member_peer_endpoints, agent_identity) == true }
             guard "overlay_peer_ids_unique" { mob_machine_member_peer_overlay_peer_ids_unique(self.wiring_edges, self.member_peer_endpoints, self.external_peer_edges, agent_identity) == true }
+            guard "overlay_member_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring) }
+            guard "overlay_member_not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
             update {}
             to Running
             emit MemberPeerOverlayAuthorized {
@@ -13175,8 +13325,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "retiring_generation_matches" { self.identity_runtime_generations.get_copied(retiring_identity) == Some(generation) }
             guard "retiring_fence_matches" { self.identity_runtime_fence_tokens.get_copied(retiring_identity) == Some(fence_token) }
             guard "retiring_member_marked" { self.member_state_markers.get_cloned(retiring_runtime_id) == Some(MobMemberState::Retiring) }
-            guard "respawn_topology_preservation_recorded" { self.pending_respawn_topology.contains(retiring_identity) == true }
-            guard "recipient_wired_to_retiring" { mob_machine_wiring_contains_pair(self.wiring_edges, recipient_identity, retiring_identity) }
+            guard "retiring_recipient_or_preserved_respawn_topology" { recipient_identity == retiring_identity || self.pending_respawn_topology.contains(retiring_identity) == true }
+            guard "retiring_recipient_or_wired_survivor" { recipient_identity == retiring_identity || mob_machine_wiring_contains_pair(self.wiring_edges, recipient_identity, retiring_identity) }
             guard "filtered_overlay_member_endpoints_complete" { mob_machine_member_peer_overlay_without_identity_complete(self.wiring_edges, self.member_peer_endpoints, recipient_identity, retiring_identity) == true }
             guard "filtered_overlay_peer_ids_unique" { mob_machine_member_peer_overlay_without_identity_peer_ids_unique(self.wiring_edges, self.member_peer_endpoints, self.external_peer_edges, recipient_identity, retiring_identity) == true }
             update {}
@@ -13198,6 +13348,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
             guard "a_member_endpoint_registered" { self.member_peer_endpoints.contains_key(a_identity) == true }
             guard "b_member_endpoint_registered" { self.member_peer_endpoints.contains_key(b_identity) == true }
+            guard "a_member_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(a_identity).get("value")) != Some(MobMemberState::Retiring) }
+            guard "b_member_not_retiring" { self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(b_identity).get("value")) != Some(MobMemberState::Retiring) }
+            guard "a_member_not_broken" { self.member_restore_failures.contains_key(a_identity) == false }
+            guard "b_member_not_broken" { self.member_restore_failures.contains_key(b_identity) == false }
             update {}
             to Running
             emit MemberTrustWiringRequested {
@@ -16393,6 +16547,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ShutdownRunning {
             on input Shutdown
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard { self.lifecycle_phase == Phase::Running }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
@@ -16412,6 +16567,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ShutdownStopped {
             on input Shutdown
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
@@ -16431,6 +16587,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition ShutdownCompleted {
             on input Shutdown
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard { self.lifecycle_phase == Phase::Completed }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
@@ -18366,6 +18523,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -18397,6 +18559,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_absent" { session_id == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -18597,6 +18764,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -18628,6 +18800,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_absent" { session_id == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                // Trust eligibility just changed: a Retiring member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
@@ -18792,6 +18969,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition DestroyFromAny {
             on input Destroy
+            guard "explicit_resume_settled" { self.explicit_resume_attempt == None }
             guard "adaptive_lifecycle_drained" {
                 mob_machine_adaptive_lifecycle_drained(
                     self.adaptive_active_run,
@@ -19365,6 +19543,355 @@ macro_rules! mob_catalog_machine_dsl {
                 event_kind: MobCoordinationEventKind::ResourceClaimOverlapObserved,
                 sequence: self.coordination_event_next_sequence
             }
+        }
+
+        transition BeginExplicitResumeStopped {
+            on input BeginExplicitResume { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "no_resume_attempt" { self.explicit_resume_attempt == None }
+            guard "stop_intent" { self.placed_completion_lifecycle_intent == Some(PlacedCompletionLifecycleIntentKind::Stop) }
+            update {
+                self.explicit_resume_attempt = Some(attempt);
+                self.explicit_resume_cancel_requested = false;
+                self.explicit_resume_preparation_pending = true;
+                self.explicit_resume_member_work = EmptyMap;
+                self.explicit_resume_readiness_pending = false;
+                self.explicit_resume_readiness_settled = false;
+                self.explicit_resume_topology_pending = false;
+                self.explicit_resume_topology_settled = false;
+                self.explicit_resume_cleanup_pending = false;
+            }
+            to Stopped
+        }
+
+        transition CancelExplicitResumeStopped {
+            on input CancelExplicitResume { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            update { self.explicit_resume_cancel_requested = true; }
+            to Stopped
+        }
+
+        transition CancelExplicitResumeRunning {
+            on input CancelExplicitResume { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            update { self.explicit_resume_cancel_requested = true; }
+            to Running
+        }
+
+        transition SettleExplicitResumePreparationStopped {
+            on input SettleExplicitResumePreparation { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "preparation_pending" { self.explicit_resume_preparation_pending == true }
+            update { self.explicit_resume_preparation_pending = false; }
+            to Stopped
+        }
+
+        transition AuthorizeExplicitResumeMemberRunning {
+            on input AuthorizeExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "readiness_not_started" {
+                self.explicit_resume_readiness_pending == false
+                && self.explicit_resume_readiness_settled == false
+            }
+            guard "member_work_not_pending" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            update { self.explicit_resume_member_work.insert(agent_identity, binding); }
+            to Running
+        }
+
+        transition ClassifyExplicitResumeMemberLiveRevivable {
+            on input ClassifyExplicitResumeMemberLive { attempt, agent_identity, binding, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "durable_snapshot_present" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotPresent }
+            update { self.member_revival_pending.insert(agent_identity); }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::ReviveAuthorized,
+                reason: reason
+            }
+        }
+
+        transition ClassifyExplicitResumeMemberLiveMissing {
+            on input ClassifyExplicitResumeMemberLive { attempt, agent_identity, binding, observation, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "durable_snapshot_missing" { observation == MemberLiveMaterializationObservationKind::DurableSnapshotMissing }
+            update {
+                self.member_restore_failures.insert(agent_identity, reason);
+                // Trust eligibility just changed: a broken member may not be
+                // re-wired or re-overlaid. Advance the canonical topology
+                // epoch so every generated trust permission minted against
+                // the previous eligibility is stale on use.
+                self.topology_epoch += 1;
+                self.member_restore_failure_codes.remove(agent_identity);
+            }
+            to Running
+            emit MemberLiveMaterializationClassified {
+                agent_identity: agent_identity,
+                observation: observation,
+                verdict: MemberRevivalVerdictKind::BrokenRecorded,
+                reason: reason
+            }
+        }
+
+        transition ClassifyExplicitResumeMemberOutcomeCurrent {
+            on input ClassifyExplicitResumeMemberOutcome { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "current_definition" { self.definition_epoch == binding.definition_epoch }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            update {}
+            to Running
+            emit ExplicitResumeMemberOutcomeClassified {
+                attempt: attempt,
+                agent_identity: agent_identity,
+                binding: binding,
+                disposition: ResumeMemberOutcomeDisposition::Current
+            }
+        }
+
+        transition ClassifyExplicitResumeMemberOutcomeRollback {
+            on input ClassifyExplicitResumeMemberOutcome { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "cancelled_or_replaced" {
+                self.explicit_resume_cancel_requested == true
+                || self.definition_epoch != binding.definition_epoch
+                || self.identity_to_runtime.get_cloned(agent_identity) != Some(binding.agent_runtime_id)
+                || self.identity_runtime_fence_tokens.get_copied(agent_identity) != Some(binding.fence_token)
+                || self.member_session_bindings.get_cloned(agent_identity) != Some(binding.session_id)
+            }
+            update {}
+            to Running
+            emit ExplicitResumeMemberOutcomeClassified {
+                attempt: attempt,
+                agent_identity: agent_identity,
+                binding: binding,
+                disposition: ResumeMemberOutcomeDisposition::RollbackRequired
+            }
+        }
+
+        transition SettleExplicitResumeMemberRunning {
+            on input SettleExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "current_runtime" { self.identity_to_runtime.get_cloned(agent_identity) == Some(binding.agent_runtime_id) }
+            guard "current_fence" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(binding.fence_token) }
+            guard "current_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(binding.session_id) }
+            update {
+                self.explicit_resume_member_work.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition SettleExplicitResumeMemberReplacedRunning {
+            on input SettleExplicitResumeMember { attempt, agent_identity, binding }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "member_work_pending" { self.explicit_resume_member_work.get_cloned(agent_identity) == Some(binding) }
+            guard "member_replaced" {
+                self.identity_to_runtime.get_cloned(agent_identity) != Some(binding.agent_runtime_id)
+                || self.identity_runtime_fence_tokens.get_copied(agent_identity) != Some(binding.fence_token)
+                || self.member_session_bindings.get_cloned(agent_identity) != Some(binding.session_id)
+            }
+            update { self.explicit_resume_member_work.remove(agent_identity); }
+            to Running
+        }
+
+        transition BeginExplicitResumeReadinessStopped {
+            on input BeginExplicitResumeReadiness { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "member_work_settled" { self.explicit_resume_member_work == EmptyMap }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "readiness_not_settled" { self.explicit_resume_readiness_settled == false }
+            update {
+                self.explicit_resume_readiness_pending = true;
+                self.explicit_resume_readiness_settled = false;
+            }
+            to Stopped
+        }
+
+        transition BeginExplicitResumeReadinessRunning {
+            on input BeginExplicitResumeReadiness { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "member_work_settled" { self.explicit_resume_member_work == EmptyMap }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "readiness_not_settled" { self.explicit_resume_readiness_settled == false }
+            update {
+                self.explicit_resume_readiness_pending = true;
+                self.explicit_resume_readiness_settled = false;
+            }
+            to Running
+        }
+
+        transition SettleExplicitResumeReadinessStopped {
+            on input SettleExplicitResumeReadiness { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "readiness_pending" { self.explicit_resume_readiness_pending == true }
+            update {
+                self.explicit_resume_readiness_pending = false;
+                self.explicit_resume_readiness_settled = true;
+            }
+            to Stopped
+        }
+
+        transition SettleExplicitResumeReadinessRunning {
+            on input SettleExplicitResumeReadiness { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "readiness_pending" { self.explicit_resume_readiness_pending == true }
+            update {
+                self.explicit_resume_readiness_pending = false;
+                self.explicit_resume_readiness_settled = true;
+            }
+            to Running
+        }
+
+        transition BeginExplicitResumeTopologyRunning {
+            on input BeginExplicitResumeTopology { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_not_cancelled" { self.explicit_resume_cancel_requested == false }
+            guard "member_work_settled" { self.explicit_resume_member_work == EmptyMap }
+            guard "readiness_settled" { self.explicit_resume_readiness_settled == true }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "topology_not_pending" { self.explicit_resume_topology_pending == false }
+            guard "topology_not_settled" { self.explicit_resume_topology_settled == false }
+            update {
+                self.explicit_resume_topology_pending = true;
+                self.explicit_resume_topology_settled = false;
+            }
+            to Running
+        }
+
+        transition SettleExplicitResumeTopologyRunning {
+            on input SettleExplicitResumeTopology { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "topology_pending" { self.explicit_resume_topology_pending == true }
+            update {
+                self.explicit_resume_topology_pending = false;
+                self.explicit_resume_topology_settled = true;
+            }
+            to Running
+        }
+
+        transition BeginExplicitResumeCleanupStopped {
+            on input BeginExplicitResumeCleanup { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_cancelled" { self.explicit_resume_cancel_requested == true }
+            guard "cleanup_not_pending" { self.explicit_resume_cleanup_pending == false }
+            update { self.explicit_resume_cleanup_pending = true; }
+            to Stopped
+        }
+
+        transition BeginExplicitResumeCleanupRunning {
+            on input BeginExplicitResumeCleanup { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_cancelled" { self.explicit_resume_cancel_requested == true }
+            guard "cleanup_not_pending" { self.explicit_resume_cleanup_pending == false }
+            update { self.explicit_resume_cleanup_pending = true; }
+            to Running
+        }
+
+        transition SettleExplicitResumeCleanupStopped {
+            on input SettleExplicitResumeCleanup { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "cleanup_pending" { self.explicit_resume_cleanup_pending == true }
+            update { self.explicit_resume_cleanup_pending = false; }
+            to Stopped
+        }
+
+        transition SettleExplicitResumeCleanupRunning {
+            on input SettleExplicitResumeCleanup { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "cleanup_pending" { self.explicit_resume_cleanup_pending == true }
+            update { self.explicit_resume_cleanup_pending = false; }
+            to Running
+        }
+
+        transition FinishExplicitResumeRunning {
+            on input FinishExplicitResume { attempt }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "member_work_settled" { self.explicit_resume_member_work == EmptyMap }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "topology_not_pending" { self.explicit_resume_topology_pending == false }
+            guard "cleanup_not_pending" { self.explicit_resume_cleanup_pending == false }
+            guard "completion_or_cancellation_settled" {
+                self.explicit_resume_cancel_requested == true
+                || (self.explicit_resume_readiness_settled == true
+                    && self.explicit_resume_topology_settled == true)
+            }
+            update { self.explicit_resume_attempt = None; }
+            to Running
+            emit ExplicitResumeFinished {
+                attempt: attempt,
+                cancelled: self.explicit_resume_cancel_requested
+            }
+        }
+
+        transition FinishExplicitResumeCancelledStopped {
+            on input FinishExplicitResume { attempt }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "exact_resume_attempt" { self.explicit_resume_attempt == Some(attempt) }
+            guard "resume_cancelled" { self.explicit_resume_cancel_requested == true }
+            guard "preparation_settled" { self.explicit_resume_preparation_pending == false }
+            guard "member_work_settled" { self.explicit_resume_member_work == EmptyMap }
+            guard "readiness_not_pending" { self.explicit_resume_readiness_pending == false }
+            guard "topology_not_pending" { self.explicit_resume_topology_pending == false }
+            guard "cleanup_not_pending" { self.explicit_resume_cleanup_pending == false }
+            update { self.explicit_resume_attempt = None; }
+            to Stopped
+            emit ExplicitResumeFinished { attempt: attempt, cancelled: true }
         }
 
     }
@@ -20683,6 +21210,46 @@ pub struct PlacedCarrierCleanupObligation {
 pub struct HostBindingGenerationTombstone {
     pub host_id: HostId,
     pub binding_generation: u64,
+}
+
+/// Correlation for one process-owned explicit resume operation.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ResumeAttemptId(pub String);
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ResumeMemberBinding {
+    pub agent_runtime_id: AgentRuntimeId,
+    pub fence_token: FenceToken,
+    pub session_id: SessionId,
+    pub definition_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResumeMemberOutcomeDisposition {
+    Current,
+    RollbackRequired,
 }
 
 /// Bridging type for agent identity. Maps to `crate::ids::AgentIdentity`.

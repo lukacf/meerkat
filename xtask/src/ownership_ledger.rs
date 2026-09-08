@@ -2262,7 +2262,6 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             handler_methods: vec![
                 "enqueue_spawn",
                 "handle_force_cancel",
-                "handle_retire",
                 "handle_respawn",
                 "handle_submit_work",
                 "handle_cancel_all_work",
@@ -2277,6 +2276,12 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             .into_iter()
             .map(str::to_string)
             .collect(),
+        }, EnumDispatchBoundary {
+            family_name: "mob-command-dispatch".into(),
+            path_suffix: "meerkat-mob/src/runtime/actor/retirement_io.rs".into(),
+            owner_type_name: "MobActor".into(),
+            enum_name: "MobCommand".into(),
+            handler_methods: vec!["start_retirement".into(), "begin_retirement_batch".into()],
         }],
         callbacks: vec![
             CallbackBoundary {
@@ -3696,16 +3701,27 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
-            "handle_retire",
+            "meerkat-mob/src/runtime/actor/retirement_io.rs",
+            "start_retirement",
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["roster", "dsl_authority", "runtime_adapter"],
-            "RosterAuthority + disposal pipeline + SessionBackend retire contract",
+            "MobMachine + RetirementState + SessionBackend retire contract",
             &[
                 "retire command tears down wiring/runtime state and removes the member from the canonical roster projection through disposal sequencing",
             ],
             &["member removal, wiring cleanup, archive, and bridge teardown remain aligned"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "meerkat-mob/src/runtime/actor/retirement_io.rs",
+            "begin_retirement_batch",
+            BoundaryKind::EnumDispatch,
+            "MobActor",
+            &["roster", "dsl_authority", "retirement_batch", "retirements"],
+            "MobMachine lifecycle admission + RetirementBatch member settlement",
+            &["batch lifecycle completion follows the exact admitted member retirement results"],
+            &["a batch cannot certify completion while an admitted member retains cleanup custody"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
@@ -3729,7 +3745,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["runtime_adapter", "pending_spawns", "roster"],
-            "MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract",
+            "MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + PendingSpawnLineage",
             &[
                 "work-lane submission routes external/internal origin legality through MobMachine DSL guards; the shell forwards WorkOrigin verbatim and observes RequestRuntimeIngress before dispatching the turn; auto-spawn remains an external-only policy seam",
             ],

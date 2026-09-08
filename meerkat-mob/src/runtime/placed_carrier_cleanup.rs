@@ -35,6 +35,30 @@ pub(super) async fn release_placed_attempt_or_certify_absent(
     provisioner: &dyn MobProvisioner,
     supervisor_bridge: Arc<MobSupervisorBridge>,
 ) -> Result<(), MobError> {
+    let prepared = prepare_placed_release(mob_id, carrier, authority)?;
+    realize_placed_release(prepared, provisioner, supervisor_bridge).await
+}
+
+pub(super) struct PreparedPlacedRelease {
+    mob_id: MobId,
+    carrier: MobPlacedSpawnCarrierRecord,
+    disposition: PlacedReleaseDisposition,
+}
+
+enum PlacedReleaseDisposition {
+    CertifiedTerminal,
+    Dispatch {
+        host_id: HostId,
+        host_peer: TrustedPeerDescriptor,
+        binding_generation: u64,
+    },
+}
+
+pub(super) fn prepare_placed_release(
+    mob_id: &MobId,
+    carrier: &MobPlacedSpawnCarrierRecord,
+    authority: &MobMachineAuthority,
+) -> Result<PreparedPlacedRelease, MobError> {
     let host_id = HostId::from(carrier.host_id.to_string());
     let state = authority.state();
     let active_binding_generation = state.host_binding_generations.get(&host_id).copied();
@@ -82,7 +106,11 @@ pub(super) async fn release_placed_attempt_or_certify_absent(
                 binding_generation_highwater,
                 "certified stale placed carrier terminal without sending under replacement host authority"
             );
-            return Ok(());
+            return Ok(PreparedPlacedRelease {
+                mob_id: mob_id.clone(),
+                carrier: carrier.clone(),
+                disposition: PlacedReleaseDisposition::CertifiedTerminal,
+            });
         }
         return Err(MobError::Internal(format!(
             "placed carrier '{}' binding generation {} conflicts with host '{}' active={active_binding_generation:?} highwater={binding_generation_highwater}",
@@ -129,6 +157,35 @@ pub(super) async fn release_placed_attempt_or_certify_absent(
             host_id.as_str()
         ))
     })?;
+    Ok(PreparedPlacedRelease {
+        mob_id: mob_id.clone(),
+        carrier: carrier.clone(),
+        disposition: PlacedReleaseDisposition::Dispatch {
+            host_id,
+            host_peer,
+            binding_generation,
+        },
+    })
+}
+
+pub(super) async fn realize_placed_release(
+    prepared: PreparedPlacedRelease,
+    provisioner: &dyn MobProvisioner,
+    supervisor_bridge: Arc<MobSupervisorBridge>,
+) -> Result<(), MobError> {
+    let PreparedPlacedRelease {
+        mob_id,
+        carrier,
+        disposition,
+    } = prepared;
+    let PlacedReleaseDisposition::Dispatch {
+        host_id,
+        host_peer,
+        binding_generation,
+    } = disposition
+    else {
+        return Ok(());
+    };
     let bridge_authority = supervisor_bridge.authority().await;
     let supervisor = supervisor_bridge
         .supervisor_spec_for_authority_and_recipient(&bridge_authority, &host_peer)

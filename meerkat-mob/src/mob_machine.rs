@@ -492,6 +492,8 @@ pub enum MobMachineRuntimeInternalReason {
     /// Multi-host (§15 R6): member-operator upcall admission, driven by the
     /// comms upcall consumer from the verified envelope facts.
     MemberOperatorAdmissionAuthority,
+    /// Attempt-fenced internal stages driven by the public Resume operation.
+    ExplicitResumeAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1241,6 +1243,62 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordDeadlineObserved,
         reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginExplicitResume,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CancelExplicitResume,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SettleExplicitResumePreparation,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeExplicitResumeMember,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ClassifyExplicitResumeMemberLive,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ClassifyExplicitResumeMemberOutcome,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SettleExplicitResumeMember,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginExplicitResumeReadiness,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SettleExplicitResumeReadiness,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginExplicitResumeTopology,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SettleExplicitResumeTopology,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginExplicitResumeCleanup,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::SettleExplicitResumeCleanup,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::FinishExplicitResume,
+        reason: MobMachineRuntimeInternalReason::ExplicitResumeAuthority,
     },
 ];
 

@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.36] - 2026-09-09
+
 ### Added
 
 - **Rust error vocabulary:** `meerkat_runtime::RuntimeStoreError` gains
@@ -10291,7 +10293,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.35...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.36...HEAD
+[0.8.36]: https://github.com/lukacf/meerkat/compare/v0.8.35...v0.8.36
 [0.8.35]: https://github.com/lukacf/meerkat/compare/v0.8.34...v0.8.35
 [0.8.34]: https://github.com/lukacf/meerkat/compare/v0.8.33...v0.8.34
 [0.8.33]: https://github.com/lukacf/meerkat/compare/v0.8.32...v0.8.33

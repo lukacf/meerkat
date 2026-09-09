@@ -125,7 +125,10 @@ requested steer mode. Live realization records it with `RecordBoundarySeq`;
 cold recovery rehydrates it through `RecoverInputCompletionBoundary` only
 after checking the existing receipt's run, sequence, and contributors against
 the consumed input. This uses the existing durable format. An idle steer
-request that actually executed at `RunStart` remains an ordinary run result.
+request can execute a full turn at either `RunStart` or `RunCheckpoint`.
+Its `RunResult` remains an ordinary run completion: the apply boundary is not
+a terminal verdict. Only the exact consumed `CompletedWithoutResult` shape
+uses independent checkpoint completion authority.
 
 The runtime validates the complete durable owner/recipient batch before
 requesting that authority, then finalizes the genuine receipt through the
@@ -133,6 +136,12 @@ existing atomic input-row compare-and-swap. A stale row, changed candidate,
 wrong owner/run, or inconsistent recipient set refuses without rewriting
 the evidence. Multiple checkpoint batches in one run remain distinguished
 by their canonical owner inputs.
+
+The owner-held candidate and its digest are the durable candidate authority.
+The boundary receipt does not independently attest the candidate variant;
+replacing both a candidate and its digest coherently before recovery cannot
+be detected as historical tampering from that receipt alone. Existing row
+fences still reject changes made after a completion witness was captured.
 
 Only a successful receipt commit retires the pending obligation. The
 `runtime_pending_terminal_owners` table is an index over those obligations,

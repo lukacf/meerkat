@@ -147,6 +147,14 @@ impl Fixture {
     }
 
     async fn checkpoint_batch(&self, input_ids: &[InputId]) {
+        self.checkpoint_batch_with_terminal(input_ids, None).await;
+    }
+
+    async fn checkpoint_batch_with_terminal(
+        &self,
+        input_ids: &[InputId],
+        terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
+    ) {
         let mut entry = self.driver.lock().await;
         for input_id in input_ids {
             let input = checkpoint_peer_input(input_id.clone());
@@ -181,7 +189,7 @@ impl Fixture {
             },
             None,
             Vec::new(),
-            None,
+            terminal,
         )
         .await
         .expect("the actual runtime batch boundary must commit");
@@ -381,6 +389,88 @@ fn assert_run_unchanged(before: &mm::MeerkatMachineState, after: &mm::MeerkatMac
     );
     assert_eq!(before.terminal_outcome, after.terminal_outcome);
     assert_eq!(before.terminal_cause_kind, after.terminal_cause_kind);
+}
+
+#[tokio::test]
+async fn checkpoint_apply_with_run_result_uses_run_authority_live_and_after_restart() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+
+    for cold in [false, true] {
+        let fixture = Fixture::with_initial_input(false).await;
+        let input_id = old_input_id();
+        let terminal = CoreApplyTerminal::RunResult(Box::new(meerkat_core::types::RunResult {
+            text: "queued Steer produced a full run result".to_string(),
+            session_id: fixture.session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        }));
+        fixture
+            .checkpoint_batch_with_terminal(std::slice::from_ref(&input_id), Some(&terminal))
+            .await;
+        let driver = if cold {
+            fixture.fresh_driver_from_durable().await.unwrap()
+        } else {
+            fixture.driver.clone()
+        };
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .expect("the actual terminal, not the apply boundary, selects run-result authority");
+        let row = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed)
+        );
+        let completion = row.state.terminal_completion.unwrap();
+        assert!(matches!(
+            completion.phase,
+            InputTerminalCompletionPhase::Finalized { .. }
+        ));
+        let Some(crate::completion::CompletionOutcome::Completed(result)) = completion.outcome
+        else {
+            panic!("full run completion must retain its RunResult");
+        };
+        assert_eq!(result.session_id, fixture.session_id);
+        assert_eq!(result.text, "queued Steer produced a full run result");
+        let finalized = fixture.raw_row(&input_id);
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .unwrap();
+        assert_eq!(finalized, fixture.raw_row(&input_id));
+        assert_eq!(
+            fixture
+                .store
+                .load_session_snapshot(&fixture.runtime_id())
+                .await
+                .unwrap()
+                .unwrap(),
+            fixture.transcript,
+        );
+        assert_eq!(
+            fixture
+                .store
+                .load_whole_blob_store_authority(&fixture.runtime_id())
+                .await
+                .unwrap(),
+            Some(fixture.authority),
+        );
+    }
 }
 
 #[tokio::test]
@@ -789,14 +879,7 @@ async fn checkpoint_recovery_after_restart_settles_then_releases_exact_materiali
 
 #[tokio::test]
 async fn checkpoint_recovery_refuses_wrong_durable_evidence_without_mutating_it() {
-    for defect in [
-        "run",
-        "owner",
-        "recipients",
-        "candidate",
-        "coherent_candidate",
-        "digest",
-    ] {
+    for defect in ["run", "owner", "recipients", "candidate", "digest"] {
         let fixture = Fixture::new().await;
         let input_id = old_input_id();
         fixture.checkpoint(input_id.clone()).await;
@@ -816,47 +899,13 @@ async fn checkpoint_recovery_refuses_wrong_durable_evidence_without_mutating_it(
                     crate::input_state::interaction_terminal_payload_digest(recipients).unwrap();
             }
             "candidate" => completion.candidate = Some(InteractionTerminalCandidate::Cancelled),
-            "coherent_candidate" => {
-                completion.candidate = Some(InteractionTerminalCandidate::RunResult {
-                    result: Box::new(meerkat_core::types::RunResult {
-                        text: "not a checkpoint outcome".to_string(),
-                        session_id: fixture.session_id.clone(),
-                        usage: Default::default(),
-                        turns: 1,
-                        tool_calls: 0,
-                        terminal_cause_kind: None,
-                        structured_output: None,
-                        extraction_error: None,
-                        schema_warnings: None,
-                        skill_diagnostics: None,
-                    }),
-                });
-                completion.candidate_digest =
-                    crate::input_state::interaction_terminal_payload_digest(
-                        completion.candidate.as_ref().unwrap(),
-                    )
-                    .unwrap();
-            }
             "digest" => completion.candidate_digest = "sha256:wrong".to_string(),
             _ => unreachable!(),
         }
         let bytes = serde_json::to_vec(&row).unwrap();
         fixture.replace_fixture_row(&input_id, &bytes);
         let fresh = fixture.fresh_driver_from_durable().await;
-        if defect == "coherent_candidate" {
-            let fresh =
-                fresh.expect("coherently encoded wrong result must reach semantic classification");
-            let error = crate::runtime_loop::test_drain_recovered_input_terminal_completions(
-                &fresh,
-                &mut NoExecution,
-            )
-            .await
-            .expect_err("an inline checkpoint cannot be reclassified as a full RunResult");
-            assert!(
-                error.contains("ClassifyTerminalCompletionCorrelation"),
-                "{error}"
-            );
-        } else if let Ok(fresh) = fresh {
+        if let Ok(fresh) = fresh {
             assert!(
                 crate::runtime_loop::test_drain_recovered_input_terminal_completions(
                     &fresh,

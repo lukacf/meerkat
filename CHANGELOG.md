@@ -113,6 +113,10 @@ them.
 - Batched checkpoint completions validate and retain the complete consumed
   recipient set, so multiple Steer inputs receive their commit-gated completion
   events without competing for ordinary run-result correlation.
+- Full turns executed at a `RunCheckpoint` boundary retain ordinary
+  `RunResult` correlation and cold-recovery semantics. The apply boundary
+  alone no longer causes a full result to be treated as an inline,
+  result-free checkpoint completion.
 - Live-session presence observations re-read transient HeadCanonical revision
   conflicts under the turn-finalization boundary using the existing finite
   observation budget. Callers already holding that boundary use the

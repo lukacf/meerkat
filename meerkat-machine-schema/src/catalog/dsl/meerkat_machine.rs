@@ -31791,7 +31791,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids }
             guard "session_registered" { self.session_id != None }
             guard "ordinary_run_completion" {
-                run_id == None
+                // The apply boundary does not determine the terminal kind:
+                // a queued Steer run can produce a full result at a checkpoint.
+                terminal != Some(RuntimeCompletionTerminalObservation::NoResult)
+                || run_id == None
                 || self.input_phases.get(owner_input_id).get("value") != InputPhase::Consumed
                 || !self.input_runtime_execution_kind.contains_key(owner_input_id)
                 || self.input_runtime_execution_kind.get(owner_input_id).get("value") != RecoveredRuntimeExecutionKind::ContentTurn

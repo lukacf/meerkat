@@ -2417,25 +2417,49 @@ mod tests {
             .find(|plan| plan.name == "AuthorizedRuntimeCompletionResultClosure")
             .expect("runtime completion result closure command plan");
         assert_eq!(
-            completion_closure_plan.effects,
-            vec![EffectVariantId::parse("RuntimeCompletionResultResolved").unwrap()]
-        );
-        assert_eq!(completion_closure_plan.effect_closures.len(), 1);
-        let closure = &completion_closure_plan.effect_closures[0];
-        assert_eq!(closure.effect.as_str(), "RuntimeCompletionResultResolved");
-        assert_eq!(closure.authority_type, "RuntimeCompletionResultAuthority");
-        assert_eq!(closure.closure_policy, "LocalSurfaceResultAlignment");
-        assert_eq!(
-            closure.lifecycle,
+            completion_closure_plan
+                .source_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
             vec![
-                "Authorized",
-                "Attempted",
-                "Realized",
-                "Failed",
-                "Cancelled",
-                "Abandoned"
+                "ResolveRuntimeCompletionResult",
+                "ResolveCheckpointCompletionResult"
             ]
         );
+        assert_eq!(
+            completion_closure_plan.effects,
+            vec![
+                EffectVariantId::parse("RuntimeCompletionResultResolved").unwrap(),
+                EffectVariantId::parse("CheckpointCompletionResultResolved").unwrap(),
+            ]
+        );
+        assert_eq!(
+            completion_closure_plan
+                .effect_closures
+                .iter()
+                .map(|closure| closure.effect.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "RuntimeCompletionResultResolved",
+                "CheckpointCompletionResultResolved"
+            ]
+        );
+        for closure in &completion_closure_plan.effect_closures {
+            assert_eq!(closure.authority_type, "RuntimeCompletionResultAuthority");
+            assert_eq!(closure.closure_policy, "LocalSurfaceResultAlignment");
+            assert_eq!(
+                closure.lifecycle,
+                vec![
+                    "Authorized",
+                    "Attempted",
+                    "Realized",
+                    "Failed",
+                    "Cancelled",
+                    "Abandoned"
+                ]
+            );
+        }
     }
 
     #[test]

@@ -396,8 +396,9 @@ impl MeerkatMachine {
             let terminal_completion_witness = driver_guard
                 .input_terminal_completion_authorization_witness(std::slice::from_ref(&input_id))?;
             let authority =
-                crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+                crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
                     &driver_guard,
+                    &terminal_completion_witness,
                     Some(&run_id),
                     crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
                     finalization,

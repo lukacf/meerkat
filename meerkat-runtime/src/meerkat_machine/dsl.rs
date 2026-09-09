@@ -2291,6 +2291,14 @@ pub enum RuntimeCompletionResultClass {
     RuntimeTerminated,
 }
 
+/// Correlation owner for one validated durable completion batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TerminalCompletionCorrelation {
+    #[default]
+    Run,
+    CheckpointInput,
+}
+
 /// Typed observation of the live-session projection available to generated
 /// runtime-completion cleanup authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

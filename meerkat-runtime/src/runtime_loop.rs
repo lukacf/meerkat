@@ -335,24 +335,6 @@ fn nondirected_completion_input_ids(
         .collect()
 }
 
-async fn runtime_completion_result_class(
-    driver: &crate::meerkat_machine::SharedDriver,
-    run_id: Option<&RunId>,
-    terminal: crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation,
-    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
-) -> Result<
-    crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
-    crate::RuntimeDriverError,
-> {
-    let driver = driver.lock().await;
-    crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
-        &driver,
-        run_id,
-        terminal,
-        finalization,
-    )
-}
-
 /// Persist one generated-authority receipt in an independently owned task.
 ///
 /// Some stores complete their CAS on a blocking worker after the awaiting
@@ -1185,13 +1167,13 @@ async fn publish_authorized_runtime_terminal_batch(
     if interaction_ids.is_empty() {
         let Some(completions) = completions else {
             let _authority_guard = authority_guard;
-            let authority = runtime_completion_result_class(
-                driver,
+            let authority = crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
+                &*driver.lock().await,
+                &terminal_completion_witness,
                 batch_key.run_id(),
                 terminal_observation,
                 finalization,
             )
-            .await
             .map_err(|error| {
                 InteractionTerminalPublicationError::from_generated_authority(
                     "generated non-directed terminal authority missing",
@@ -1238,8 +1220,9 @@ async fn publish_authorized_runtime_terminal_batch(
             let driver_guard = driver.lock_owned().await;
             let completion_guard = completions.lock_owned().await;
             let authority =
-                crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+                crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
                     &driver_guard,
+                    &owned_terminal_completion_witness,
                     owned_run_id.as_ref(),
                     terminal_observation,
                     finalization,
@@ -1285,19 +1268,20 @@ async fn publish_authorized_runtime_terminal_batch(
         })?;
     }
 
-    let authority = runtime_completion_result_class(
-        driver,
-        batch_key.run_id(),
-        terminal_observation,
-        finalization,
-    )
-    .await
-    .map_err(|error| {
-        InteractionTerminalPublicationError::from_generated_authority(
-            "generated interaction terminal authority missing",
-            error,
+    let authority =
+        crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
+            &*driver.lock().await,
+            &terminal_completion_witness,
+            batch_key.run_id(),
+            terminal_observation,
+            finalization,
         )
-    })?;
+        .map_err(|error| {
+            InteractionTerminalPublicationError::from_generated_authority(
+                "generated interaction terminal authority missing",
+                error,
+            )
+        })?;
     let bundle = crate::completion::authorize_runtime_terminal_bundle(
         interaction_ids,
         terminal,
@@ -1705,6 +1689,16 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) async fn test_drain_recovered_input_terminal_completions(
+    driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+) -> Result<(), String> {
+    drain_recovered_input_terminal_completions(driver, None, executor)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Finalize every durable non-directed terminal candidate before startup can
 /// accept work. Directed batches continue through the interaction outbox
 /// below, whose shared authorized bundle finalizes this same receipt before
@@ -1729,7 +1723,9 @@ async fn drain_recovered_input_terminal_completions(
         .into_iter()
         .filter(|batch| !batch.has_interaction_terminal_outbox)
     {
-        if let Some(run_id) = batch.batch_key.run_id() {
+        if batch.correlation == crate::meerkat_machine::dsl::TerminalCompletionCorrelation::Run
+            && let Some(run_id) = batch.batch_key.run_id()
+        {
             let driver_guard = driver.lock().await;
             crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
                 &driver_guard,
@@ -1792,26 +1788,33 @@ async fn drain_recovered_input_terminal_completions(
                 batch.completion_error_metadata.clone(),
             )
         };
-        let authority = runtime_completion_result_class(
-            driver,
-            batch.batch_key.run_id(),
-            batch.terminal_observation,
-            finalization,
-        )
-        .await
-        .map_err(|error| {
-            InteractionTerminalPublicationError::from_generated_authority(
-                "generated terminal completion recovery authority missing",
-                error,
-            )
-        })?;
-        let terminal_completion_witness = driver
+        let current_witness = driver
             .lock()
             .await
             .input_terminal_completion_authorization_witness(&batch.input_ids)
             .map_err(|error| {
                 InteractionTerminalPublicationError::from_driver(
                     "terminal completion recovery batch authorization failed",
+                    error,
+                )
+            })?;
+        if current_witness != batch.witness {
+            return Err(InteractionTerminalPublicationError::StaleAuthority(
+                "recovered completion batch changed during finalization".to_string(),
+            ));
+        }
+        let terminal_completion_witness = batch.witness;
+        let authority =
+            crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
+                &*driver.lock().await,
+                &terminal_completion_witness,
+                batch.batch_key.run_id(),
+                batch.terminal_observation,
+                finalization,
+            )
+            .map_err(|error| {
+                InteractionTerminalPublicationError::from_generated_authority(
+                    "generated terminal completion recovery authority missing",
                     error,
                 )
             })?;

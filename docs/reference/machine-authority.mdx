@@ -104,6 +104,41 @@ only under `GrantRecorded`/`GrantRevoked` transition witnesses and replayed
 on resume through the machine's own `GrantOperatorScopes` input — never a
 second enforcement source.
 
+## Consumed Checkpoint Completion Recovery
+
+A live steer checkpoint can durably consume an input before its completion
+receipt is finalized. Its `CompletedWithoutResult` candidate is not a new
+`RunResult`, and a pending completion does not make the input abandoned.
+
+`MeerkatMachine` owns checkpoint correlation through the consumed input's
+existing run association, independently of the latest run-result slot.
+`ClassifyTerminalCompletionCorrelation` identifies the exact checkpoint
+shape; `ResolveCheckpointCompletionResult` emits authority bound to its
+session, run, owner input, candidate digest, recipient digest, and checkpoint
+requirement. Neither command replaces a newer active run or changes its
+terminal facts.
+
+The boundary is the **committed receipt's** boundary, not merely the input's
+requested steer mode. Live realization records it with `RecordBoundarySeq`;
+cold recovery rehydrates it through `RecoverInputCompletionBoundary` only
+after checking the existing receipt's run, sequence, and contributors against
+the consumed input. This uses the existing durable format. An idle steer
+request that actually executed at `RunStart` remains an ordinary run result.
+
+The runtime validates the complete durable owner/recipient batch before
+requesting that authority, then finalizes the genuine receipt through the
+existing atomic input-row compare-and-swap. A stale row, changed candidate,
+wrong owner/run, or inconsistent recipient set refuses without rewriting
+the evidence. Multiple checkpoint batches in one run remain distinguished
+by their canonical owner inputs.
+
+Only a successful receipt commit retires the pending obligation. The
+`runtime_pending_terminal_owners` table is an index over those obligations,
+not an operator lock table. Clearing it, rewriting an input as abandoned,
+or fabricating a publication receipt is not a recovery operation. Ordinary
+run results and directed interaction publication retain their separate
+generated authority and exact EventStore receipt requirements.
+
 ## Durable-Tail Recovery Ownership
 
 A `Session` is domain state, not a portable proof of persistence. It carries

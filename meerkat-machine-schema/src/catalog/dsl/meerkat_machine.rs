@@ -1278,6 +1278,14 @@ pub enum RuntimeCompletionResultClass {
     RuntimeTerminated,
 }
 
+/// Correlation owner for one validated durable completion batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TerminalCompletionCorrelation {
+    #[default]
+    Run,
+    CheckpointInput,
+}
+
 /// Typed observation of the live-session projection available to generated
 /// runtime-completion cleanup authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -3539,6 +3547,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             max_stage_attempts: u64,
             input_run_associations: Map<String, RunId>,
             input_boundary_sequences: Map<String, u64>,
+            input_completion_boundaries: Map<String, Option<Enum<RecoveredRunApplyBoundary>>>,
             live_boundary_context_sequence_by_run: Map<RunId, u64>,
             next_admission_seq: u64,
             next_priority_admission_seq: u64,
@@ -4164,6 +4173,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             max_stage_attempts = 3,
             input_run_associations = EmptyMap,
             input_boundary_sequences = EmptyMap,
+            input_completion_boundaries = EmptyMap,
             live_boundary_context_sequence_by_run = EmptyMap,
             next_admission_seq = 1000000000,
             next_priority_admission_seq = 999999999,
@@ -5182,7 +5192,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 admission_sequence: Option<u64>,
                 idempotency_key: Option<String>,
             },
-            RecordBoundarySeq { input_id: String, run_id: RunId },
+            RecordBoundarySeq { input_id: String, run_id: RunId, boundary: Option<Enum<RecoveredRunApplyBoundary>> },
             // Ops lifecycle inputs.
             // Terminal transitions carry a typed outcome discriminant plus
             // an opaque `payload` string — the inner payload of the domain
@@ -6197,6 +6207,28 @@ macro_rules! meerkat_catalog_machine_dsl {
             DeclareRecoveredTerminalCompletionUnrecoverable {
                 batch_key: String,
                 reason: Enum<RecoveredTerminalCompletionUnrecoverableReasonKind>,
+            },
+            ClassifyTerminalCompletionCorrelation {
+                owner_input_id: String,
+                run_id: Option<RunId>,
+                terminal: Option<Enum<RuntimeCompletionTerminalObservation>>,
+                recipient_count: u64,
+            },
+            RecoverInputCompletionBoundary {
+                input_id: String,
+                run_id: RunId,
+                sequence: u64,
+                boundary: Option<Enum<RecoveredRunApplyBoundary>>,
+                execution_kind: Enum<RecoveredRuntimeExecutionKind>,
+            },
+            ResolveCheckpointCompletionResult {
+                owner_input_id: String,
+                run_id: RunId,
+                candidate_digest: String,
+                completion_input_ids_digest: String,
+                requires_session_checkpoint: bool,
+                recipient_count: u64,
+                finalization: Enum<RuntimeCompletionFinalizationObservation>,
             },
         }
 
@@ -7360,6 +7392,25 @@ macro_rules! meerkat_catalog_machine_dsl {
                 batch_key: String,
                 reason: Enum<RecoveredTerminalCompletionUnrecoverableReasonKind>,
             },
+            TerminalCompletionCorrelationClassified {
+                owner_input_id: String,
+                run_id: Option<RunId>,
+                correlation: Enum<TerminalCompletionCorrelation>,
+            },
+            CheckpointCompletionResultResolved {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                runtime_generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                run_id: RunId,
+                owner_input_id: String,
+                candidate_digest: String,
+                completion_input_ids_digest: String,
+                requires_session_checkpoint: bool,
+                result_class: Enum<RuntimeCompletionResultClass>,
+                cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
+            },
         }
 
         // =====================================================================
@@ -7388,6 +7439,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RuntimeEffectFact => local seam NoOwnerRealization,
         disposition InteractionTerminalOutboxAdoptionAuthorized => local seam OwnerRealizationOnly,
         disposition RuntimeCompletionResultResolved => local seam SurfaceResultAlignment,
+        disposition TerminalCompletionCorrelationClassified => local seam SurfaceResultAlignment,
+        disposition CheckpointCompletionResultResolved => local seam SurfaceResultAlignment,
         disposition RuntimeCompletionCleanupResolved => local seam NoOwnerRealization,
         disposition RuntimeCompletionWaitFailureResolved => local seam SurfaceResultAlignment,
         disposition RuntimeOpsLifecycleDurabilityResolved => local seam SurfaceResultAlignment,
@@ -14595,7 +14648,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // 26c-bis. ClassifyRecoveredTerminalCompletionBatch: generated
         // disposition authority for durable PENDING terminal-completion
-        // batches found at cold recovery.
+        // batches found at cold recovery. Input-correlated checkpoints are
+        // classified first by ClassifyTerminalCompletionCorrelation and never
+        // compete for the ordinary run-result slot described below.
         //
         // Why a decision is needed at all: the completion correlation is one
         // slot, so at most one recovered batch can be re-bound. Before this
@@ -20677,6 +20732,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     self.input_boundary_sequences.remove(input_id);
                 }
+                self.input_completion_boundaries.remove(input_id);
 
                 if admission_sequence != None {
                     self.input_admission_seq.insert(input_id, admission_sequence.get("value"));
@@ -20877,6 +20933,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
+                self.input_completion_boundaries.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_attempt_counts.increment(input_id, 1);
             }
@@ -21098,15 +21155,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     self.live_boundary_context_sequence_by_run.insert(run_id, 1);
                 }
-                // Same rule as the Prepare family: a live mid-run checkpoint is
-                // not a terminal commit and stages no completion batch, so it
-                // may bind the correlation when nothing is outstanding, but it
-                // may not move it off a run whose durable batch is unresolved.
-                if self.runtime_completion_result_run_id == None
-                    || self.runtime_completion_result_resolved == true {
-                    self.runtime_completion_result_run_id = Some(run_id);
-                    self.runtime_completion_result_resolved = true;
-                }
+                // This checkpoint stages an input-owned completion batch.
+                // input_run_associations retains its correlation until exact
+                // receipt settlement; never resolve or replace the live run's
+                // separate completion-result slot here.
             }
             to Running
             emit LiveBoundaryContextReceiptResolved {
@@ -21202,9 +21254,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         // sequence that owns it.
         transition RecordBoundarySeq {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RecordBoundarySeq { input_id, run_id }
+            on input RecordBoundarySeq { input_id, run_id, boundary }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_run_matches" {
+                self.input_run_associations.contains_key(input_id)
+                && self.input_run_associations.get(input_id).get("value") == run_id
+            }
             update {
+                self.input_completion_boundaries.insert(input_id, boundary);
                 if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
                     self.input_boundary_sequences.insert(input_id, self.live_boundary_context_sequence_by_run.get_cloned(run_id).get("value"));
                 } else {
@@ -21436,6 +21493,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_attempt_counts.remove(input_id);
                 self.input_run_associations.remove(input_id);
                 self.input_boundary_sequences.remove(input_id);
+                self.input_completion_boundaries.remove(input_id);
                 self.input_admission_seq.remove(input_id);
                 self.input_runtime_boundary.remove(input_id);
                 self.input_runtime_execution_kind.remove(input_id);
@@ -31651,6 +31709,179 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
+        }
+
+        // Checkpoint completion belongs to the consumed input, not the latest
+        // run-result slot. The exact candidate/recipient witness is validated
+        // before these inputs and echoed into the non-repairable authority.
+        transition RecoverInputCompletionBoundary {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RecoverInputCompletionBoundary { input_id, run_id, sequence, boundary, execution_kind }
+            guard "session_registered" { self.session_id != None }
+            guard "consumed_input" {
+                self.input_phases.contains_key(input_id)
+                && self.input_phases.get(input_id).get("value") == InputPhase::Consumed
+            }
+            guard "exact_receipt_binding" {
+                self.input_run_associations.contains_key(input_id)
+                && self.input_run_associations.get(input_id).get("value") == run_id
+                && self.input_boundary_sequences.contains_key(input_id)
+                && self.input_boundary_sequences.get(input_id).get("value") == sequence
+            }
+            guard "boundary_absent_or_same" {
+                !self.input_completion_boundaries.contains_key(input_id)
+                || self.input_completion_boundaries.get(input_id).get("value") == boundary
+            }
+            guard "receipt_or_pre_boundary" { boundary != None || sequence == 0 }
+            guard "execution_kind_absent_or_same" {
+                !self.input_runtime_execution_kind.contains_key(input_id)
+                || self.input_runtime_execution_kind.get(input_id).get("value") == execution_kind
+            }
+            update {
+                self.input_completion_boundaries.insert(input_id, boundary);
+                self.input_runtime_execution_kind.insert(input_id, execution_kind);
+            }
+            to Idle
+        }
+
+        transition ClassifyTerminalCompletionCorrelationCheckpoint {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_count }
+            guard "session_registered" { self.session_id != None }
+            guard "checkpoint_input" {
+                self.input_completion_boundaries.contains_key(owner_input_id)
+                && self.input_completion_boundaries.get(owner_input_id).get("value") == Some(RecoveredRunApplyBoundary::RunCheckpoint)
+                && self.input_runtime_execution_kind.contains_key(owner_input_id)
+                && self.input_runtime_execution_kind.get(owner_input_id).get("value") == RecoveredRuntimeExecutionKind::ContentTurn
+            }
+            guard "exact_consumed_checkpoint" {
+                terminal == Some(RuntimeCompletionTerminalObservation::NoResult)
+                && recipient_count == 1
+                && run_id != None
+                && self.input_phases.contains_key(owner_input_id)
+                && self.input_phases.get(owner_input_id).get("value") == InputPhase::Consumed
+                && self.input_terminal_kind.contains_key(owner_input_id)
+                && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
+            }
+            update {}
+            to Idle
+            emit TerminalCompletionCorrelationClassified {
+                owner_input_id: owner_input_id,
+                run_id: run_id,
+                correlation: TerminalCompletionCorrelation::CheckpointInput
+            }
+        }
+
+        transition ClassifyTerminalCompletionCorrelationRun {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_count }
+            guard "session_registered" { self.session_id != None }
+            guard "ordinary_run_completion" {
+                run_id == None
+                || self.input_phases.get(owner_input_id).get("value") != InputPhase::Consumed
+                || !self.input_runtime_execution_kind.contains_key(owner_input_id)
+                || self.input_runtime_execution_kind.get(owner_input_id).get("value") != RecoveredRuntimeExecutionKind::ContentTurn
+                || (
+                    self.input_completion_boundaries.contains_key(owner_input_id)
+                    && self.input_completion_boundaries.get(owner_input_id).get("value") != Some(RecoveredRunApplyBoundary::RunCheckpoint)
+                )
+                || (
+                    !self.input_completion_boundaries.contains_key(owner_input_id)
+                    && (
+                        !self.input_runtime_boundary.contains_key(owner_input_id)
+                        || self.input_runtime_boundary.get(owner_input_id).get("value") != RecoveredRunApplyBoundary::RunCheckpoint
+                    )
+                )
+            }
+            update {}
+            to Idle
+            emit TerminalCompletionCorrelationClassified {
+                owner_input_id: owner_input_id,
+                run_id: run_id,
+                correlation: TerminalCompletionCorrelation::Run
+            }
+        }
+
+        transition ResolveCheckpointCompletionResultSucceeded {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "checkpoint_input" {
+                self.input_completion_boundaries.contains_key(owner_input_id)
+                && self.input_completion_boundaries.get(owner_input_id).get("value") == Some(RecoveredRunApplyBoundary::RunCheckpoint)
+                && self.input_runtime_execution_kind.contains_key(owner_input_id)
+                && self.input_runtime_execution_kind.get(owner_input_id).get("value") == RecoveredRuntimeExecutionKind::ContentTurn
+            }
+            guard "exact_consumed_checkpoint" {
+                recipient_count == 1
+                && candidate_digest != ""
+                && completion_input_ids_digest != ""
+                && self.input_phases.contains_key(owner_input_id)
+                && self.input_phases.get(owner_input_id).get("value") == InputPhase::Consumed
+                && self.input_terminal_kind.contains_key(owner_input_id)
+                && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            update {}
+            to Idle
+            emit CheckpointCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                owner_input_id: owner_input_id,
+                candidate_digest: candidate_digest,
+                completion_input_ids_digest: completion_input_ids_digest,
+                requires_session_checkpoint: requires_session_checkpoint,
+                result_class: RuntimeCompletionResultClass::CompletedWithoutResult,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::CompletedWithoutResult
+            }
+        }
+
+        transition ResolveCheckpointCompletionResultFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "checkpoint_input" {
+                self.input_completion_boundaries.contains_key(owner_input_id)
+                && self.input_completion_boundaries.get(owner_input_id).get("value") == Some(RecoveredRunApplyBoundary::RunCheckpoint)
+                && self.input_runtime_execution_kind.contains_key(owner_input_id)
+                && self.input_runtime_execution_kind.get(owner_input_id).get("value") == RecoveredRuntimeExecutionKind::ContentTurn
+            }
+            guard "exact_consumed_checkpoint" {
+                recipient_count == 1
+                && candidate_digest != ""
+                && completion_input_ids_digest != ""
+                && self.input_phases.contains_key(owner_input_id)
+                && self.input_phases.get(owner_input_id).get("value") == InputPhase::Consumed
+                && self.input_terminal_kind.contains_key(owner_input_id)
+                && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id
+            }
+            guard "finalization_failed" { finalization == RuntimeCompletionFinalizationObservation::Failed }
+            update {}
+            to Idle
+            emit CheckpointCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                owner_input_id: owner_input_id,
+                candidate_digest: candidate_digest,
+                completion_input_ids_digest: completion_input_ids_digest,
+                requires_session_checkpoint: requires_session_checkpoint,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::FinalizationFailed
+            }
         }
     }
         }

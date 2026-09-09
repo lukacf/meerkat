@@ -139,6 +139,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `max_stage_attempts`: `u64`
 - `input_run_associations`: `Map<String, RunId>`
 - `input_boundary_sequences`: `Map<String, u64>`
+- `input_completion_boundaries`: `Map<String, Option<RecoveredRunApplyBoundary>>`
 - `live_boundary_context_sequence_by_run`: `Map<RunId, u64>`
 - `next_admission_seq`: `u64`
 - `next_priority_admission_seq`: `u64`
@@ -607,7 +608,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
 - `ArchiveTerminalInput`(input_id: String, phase: InputPhase, terminal_kind: InputTerminalKind, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: Option<u64>, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, idempotency_key: Option<String>)
-- `RecordBoundarySeq`(input_id: String, run_id: RunId)
+- `RecordBoundarySeq`(input_id: String, run_id: RunId, boundary: Option<RecoveredRunApplyBoundary>)
 - `RegisterOp`(operation_id: String, kind: OperationKind, source: Option<OperationSource>, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)
 - `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: OpTerminalPayload)
@@ -796,6 +797,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeInteractionTerminalOutboxAdoption`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>)
 - `ClassifyRecoveredTerminalCompletionBatch`(batch_key: String, correlatable: Bool, owner_candidate_present: Bool, directed_publication_pending: Bool)
 - `DeclareRecoveredTerminalCompletionUnrecoverable`(batch_key: String, reason: RecoveredTerminalCompletionUnrecoverableReasonKind)
+- `ClassifyTerminalCompletionCorrelation`(owner_input_id: String, run_id: Option<RunId>, terminal: Option<RuntimeCompletionTerminalObservation>, recipient_count: u64)
+- `RecoverInputCompletionBoundary`(input_id: String, run_id: RunId, sequence: u64, boundary: Option<RecoveredRunApplyBoundary>, execution_kind: RecoveredRuntimeExecutionKind)
+- `ResolveCheckpointCompletionResult`(owner_input_id: String, run_id: RunId, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, recipient_count: u64, finalization: RuntimeCompletionFinalizationObservation)
 
 ## Signals
 - `Initialize`
@@ -1031,6 +1035,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionTerminalOutboxAdoptionAuthorized`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_runtime_generation: Generation, next_runtime_epoch_id: Option<RuntimeEpochId>)
 - `RecoveredTerminalCompletionBatchClassified`(batch_key: String, disposition: RecoveredTerminalCompletionDisposition)
 - `RecoveredTerminalCompletionDeclaredUnrecoverable`(batch_key: String, reason: RecoveredTerminalCompletionUnrecoverableReasonKind)
+- `TerminalCompletionCorrelationClassified`(owner_input_id: String, run_id: Option<RunId>, correlation: TerminalCompletionCorrelation)
+- `CheckpointCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1198,8 +1204,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizedRuntimeCompletionResultClosure`
 - Authority: `RuntimeCompletionResultAuthority`
-- Source Inputs: `ResolveRuntimeCompletionResult`
-- Transitions: `ResolveRuntimeCompletionResultCompletedInitializing`, `ResolveRuntimeCompletionResultCompletedIdle`, `ResolveRuntimeCompletionResultCompletedAttached`, `ResolveRuntimeCompletionResultCompletedRunning`, `ResolveRuntimeCompletionResultCompletedRetired`, `ResolveRuntimeCompletionResultCompletedStopped`, `ResolveRuntimeCompletionResultWithoutResultInitializing`, `ResolveRuntimeCompletionResultWithoutResultIdle`, `ResolveRuntimeCompletionResultWithoutResultAttached`, `ResolveRuntimeCompletionResultWithoutResultRunning`, `ResolveRuntimeCompletionResultWithoutResultRetired`, `ResolveRuntimeCompletionResultWithoutResultStopped`, `ResolveRuntimeCompletionResultCallbackPendingInitializing`, `ResolveRuntimeCompletionResultCallbackPendingIdle`, `ResolveRuntimeCompletionResultCallbackPendingAttached`, `ResolveRuntimeCompletionResultCallbackPendingRunning`, `ResolveRuntimeCompletionResultCallbackPendingRetired`, `ResolveRuntimeCompletionResultCallbackPendingStopped`, `ResolveRuntimeCompletionResultCancelledInitializing`, `ResolveRuntimeCompletionResultCancelledIdle`, `ResolveRuntimeCompletionResultCancelledAttached`, `ResolveRuntimeCompletionResultCancelledRunning`, `ResolveRuntimeCompletionResultCancelledRetired`, `ResolveRuntimeCompletionResultCancelledStopped`, `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultMachineFailedInitializing`, `ResolveRuntimeCompletionResultMachineFailedIdle`, `ResolveRuntimeCompletionResultMachineFailedAttached`, `ResolveRuntimeCompletionResultMachineFailedRunning`, `ResolveRuntimeCompletionResultMachineFailedRetired`, `ResolveRuntimeCompletionResultMachineFailedStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`, `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`, `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`, `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`, `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`, `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
+- Source Inputs: `ResolveRuntimeCompletionResult`, `ResolveCheckpointCompletionResult`
+- Transitions: `ResolveRuntimeCompletionResultCompletedInitializing`, `ResolveRuntimeCompletionResultCompletedIdle`, `ResolveRuntimeCompletionResultCompletedAttached`, `ResolveRuntimeCompletionResultCompletedRunning`, `ResolveRuntimeCompletionResultCompletedRetired`, `ResolveRuntimeCompletionResultCompletedStopped`, `ResolveRuntimeCompletionResultWithoutResultInitializing`, `ResolveRuntimeCompletionResultWithoutResultIdle`, `ResolveRuntimeCompletionResultWithoutResultAttached`, `ResolveRuntimeCompletionResultWithoutResultRunning`, `ResolveRuntimeCompletionResultWithoutResultRetired`, `ResolveRuntimeCompletionResultWithoutResultStopped`, `ResolveRuntimeCompletionResultCallbackPendingInitializing`, `ResolveRuntimeCompletionResultCallbackPendingIdle`, `ResolveRuntimeCompletionResultCallbackPendingAttached`, `ResolveRuntimeCompletionResultCallbackPendingRunning`, `ResolveRuntimeCompletionResultCallbackPendingRetired`, `ResolveRuntimeCompletionResultCallbackPendingStopped`, `ResolveRuntimeCompletionResultCancelledInitializing`, `ResolveRuntimeCompletionResultCancelledIdle`, `ResolveRuntimeCompletionResultCancelledAttached`, `ResolveRuntimeCompletionResultCancelledRunning`, `ResolveRuntimeCompletionResultCancelledRetired`, `ResolveRuntimeCompletionResultCancelledStopped`, `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultMachineFailedInitializing`, `ResolveRuntimeCompletionResultMachineFailedIdle`, `ResolveRuntimeCompletionResultMachineFailedAttached`, `ResolveRuntimeCompletionResultMachineFailedRunning`, `ResolveRuntimeCompletionResultMachineFailedRetired`, `ResolveRuntimeCompletionResultMachineFailedStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`, `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`, `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`, `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`, `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`, `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`, `ResolveCheckpointCompletionResultSucceededInitializing`, `ResolveCheckpointCompletionResultSucceededIdle`, `ResolveCheckpointCompletionResultSucceededAttached`, `ResolveCheckpointCompletionResultSucceededRunning`, `ResolveCheckpointCompletionResultSucceededRetired`, `ResolveCheckpointCompletionResultSucceededStopped`, `ResolveCheckpointCompletionResultFailedInitializing`, `ResolveCheckpointCompletionResultFailedIdle`, `ResolveCheckpointCompletionResultFailedAttached`, `ResolveCheckpointCompletionResultFailedRunning`, `ResolveCheckpointCompletionResultFailedRetired`, `ResolveCheckpointCompletionResultFailedStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
 - Guard Expansion:
   - `ResolveRuntimeCompletionResultCompletedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
   - `ResolveRuntimeCompletionResultCompletedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
@@ -1255,11 +1261,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveCheckpointCompletionResultSucceededInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultFailedInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
-- Command Effects: `RuntimeCompletionResultResolved`
+- Command Effects: `RuntimeCompletionResultResolved`, `CheckpointCompletionResultResolved`
 - Effect Closure:
   - `RuntimeCompletionResultResolved` via `RuntimeCompletionResultAuthority` (LocalSurfaceResultAlignment) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
-- Emitted By Transitions: `RuntimeCompletionResultResolved`
+  - `CheckpointCompletionResultResolved` via `RuntimeCompletionResultAuthority` (LocalSurfaceResultAlignment) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `CheckpointCompletionResultResolved`, `RuntimeCompletionResultResolved`
 
 ## Invariants
 - `fence_requires_bound_runtime`
@@ -11689,41 +11708,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecordBoundarySeqIdle`
 - From: `Idle`
-- On: `RecordBoundarySeq`(input_id, run_id)
+- On: `RecordBoundarySeq`(input_id, run_id, boundary)
 - Guards:
   - `input_tracked`
+  - `input_run_matches`
 - Emits: `RecordBoundarySequence`
 - To: `Idle`
 
 ### `RecordBoundarySeqAttached`
 - From: `Attached`
-- On: `RecordBoundarySeq`(input_id, run_id)
+- On: `RecordBoundarySeq`(input_id, run_id, boundary)
 - Guards:
   - `input_tracked`
+  - `input_run_matches`
 - Emits: `RecordBoundarySequence`
 - To: `Attached`
 
 ### `RecordBoundarySeqRunning`
 - From: `Running`
-- On: `RecordBoundarySeq`(input_id, run_id)
+- On: `RecordBoundarySeq`(input_id, run_id, boundary)
 - Guards:
   - `input_tracked`
+  - `input_run_matches`
 - Emits: `RecordBoundarySequence`
 - To: `Running`
 
 ### `RecordBoundarySeqRetired`
 - From: `Retired`
-- On: `RecordBoundarySeq`(input_id, run_id)
+- On: `RecordBoundarySeq`(input_id, run_id, boundary)
 - Guards:
   - `input_tracked`
+  - `input_run_matches`
 - Emits: `RecordBoundarySequence`
 - To: `Retired`
 
 ### `RecordBoundarySeqStopped`
 - From: `Stopped`
-- On: `RecordBoundarySeq`(input_id, run_id)
+- On: `RecordBoundarySeq`(input_id, run_id, boundary)
 - Guards:
   - `input_tracked`
+  - `input_run_matches`
 - Emits: `RecordBoundarySequence`
 - To: `Stopped`
 
@@ -24473,6 +24497,333 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cause_any`
 - Emits: `TurnSurfaceResultResolved`
 - To: `Idle`
+
+### `RecoverInputCompletionBoundaryInitializing`
+- From: `Initializing`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Initializing`
+
+### `RecoverInputCompletionBoundaryIdle`
+- From: `Idle`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Idle`
+
+### `RecoverInputCompletionBoundaryAttached`
+- From: `Attached`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Attached`
+
+### `RecoverInputCompletionBoundaryRunning`
+- From: `Running`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Running`
+
+### `RecoverInputCompletionBoundaryRetired`
+- From: `Retired`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Retired`
+
+### `RecoverInputCompletionBoundaryStopped`
+- From: `Stopped`
+- On: `RecoverInputCompletionBoundary`(input_id, run_id, sequence, boundary, execution_kind)
+- Guards:
+  - `session_registered`
+  - `consumed_input`
+  - `exact_receipt_binding`
+  - `boundary_absent_or_same`
+  - `receipt_or_pre_boundary`
+  - `execution_kind_absent_or_same`
+- To: `Stopped`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointInitializing`
+- From: `Initializing`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Initializing`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointIdle`
+- From: `Idle`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Idle`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointAttached`
+- From: `Attached`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Attached`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointRunning`
+- From: `Running`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Running`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointRetired`
+- From: `Retired`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Retired`
+
+### `ClassifyTerminalCompletionCorrelationCheckpointStopped`
+- From: `Stopped`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Stopped`
+
+### `ClassifyTerminalCompletionCorrelationRunInitializing`
+- From: `Initializing`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Initializing`
+
+### `ClassifyTerminalCompletionCorrelationRunIdle`
+- From: `Idle`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Idle`
+
+### `ClassifyTerminalCompletionCorrelationRunAttached`
+- From: `Attached`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Attached`
+
+### `ClassifyTerminalCompletionCorrelationRunRunning`
+- From: `Running`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Running`
+
+### `ClassifyTerminalCompletionCorrelationRunRetired`
+- From: `Retired`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Retired`
+
+### `ClassifyTerminalCompletionCorrelationRunStopped`
+- From: `Stopped`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Stopped`
+
+### `ClassifyTerminalCompletionCorrelationRunDestroyed`
+- From: `Destroyed`
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- Guards:
+  - `session_registered`
+  - `ordinary_run_completion`
+- Emits: `TerminalCompletionCorrelationClassified`
+- To: `Destroyed`
+
+### `ResolveCheckpointCompletionResultSucceededInitializing`
+- From: `Initializing`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Initializing`
+
+### `ResolveCheckpointCompletionResultSucceededIdle`
+- From: `Idle`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Idle`
+
+### `ResolveCheckpointCompletionResultSucceededAttached`
+- From: `Attached`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Attached`
+
+### `ResolveCheckpointCompletionResultSucceededRunning`
+- From: `Running`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Running`
+
+### `ResolveCheckpointCompletionResultSucceededRetired`
+- From: `Retired`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Retired`
+
+### `ResolveCheckpointCompletionResultSucceededStopped`
+- From: `Stopped`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_succeeded`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Stopped`
+
+### `ResolveCheckpointCompletionResultFailedInitializing`
+- From: `Initializing`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Initializing`
+
+### `ResolveCheckpointCompletionResultFailedIdle`
+- From: `Idle`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Idle`
+
+### `ResolveCheckpointCompletionResultFailedAttached`
+- From: `Attached`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Attached`
+
+### `ResolveCheckpointCompletionResultFailedRunning`
+- From: `Running`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Running`
+
+### `ResolveCheckpointCompletionResultFailedRetired`
+- From: `Retired`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Retired`
+
+### `ResolveCheckpointCompletionResultFailedStopped`
+- From: `Stopped`
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- Guards:
+  - `session_registered`
+  - `checkpoint_input`
+  - `exact_consumed_checkpoint`
+  - `finalization_failed`
+- Emits: `CheckpointCompletionResultResolved`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

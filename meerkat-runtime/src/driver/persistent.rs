@@ -871,6 +871,19 @@ impl PersistentRuntimeDriver {
         }
     }
 
+    pub(crate) async fn completion_boundary_receipt(
+        &self,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<RunBoundaryReceipt>, RuntimeDriverError> {
+        self.store
+            .load_boundary_receipt(&self.runtime_id, run_id, sequence)
+            .await
+            .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                reason: format!("completion boundary receipt observation failed: {error}"),
+            })
+    }
+
     pub(crate) async fn durable_pending_terminal_input_states(
         &self,
     ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {

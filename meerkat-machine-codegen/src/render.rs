@@ -410,13 +410,7 @@ fn transitions_in_public_enum_order(
         return Ok(schema.transitions.iter().collect());
     }
 
-    let mut ordered = Vec::with_capacity(schema.transitions.len());
-    ordered.extend(
-        schema
-            .transitions
-            .iter()
-            .filter(|transition| !MEERKAT_TRANSITION_ENUM_TAIL.contains(&transition.name.as_ref())),
-    );
+    let mut compatibility_tail = Vec::with_capacity(MEERKAT_TRANSITION_ENUM_TAIL.len());
     for expected_name in MEERKAT_TRANSITION_ENUM_TAIL {
         let transition = schema
             .transitions
@@ -425,8 +419,40 @@ fn transitions_in_public_enum_order(
             .ok_or_else(|| MachineKernelRenderError::MissingPublicTransitionTail {
                 transition: (*expected_name).to_owned(),
             })?;
-        ordered.push(transition);
+        compatibility_tail.push(transition);
     }
+    let input_position = |transition: &TransitionSchema| match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => schema
+            .inputs
+            .variants
+            .iter()
+            .position(|input| input.name.as_str() == variant.as_str()),
+        meerkat_machine_schema::TriggerMatch::Signal { .. } => None,
+    };
+    // Inputs appended after the historical compatibility tail must append
+    // their transitions after it too. Derive this boundary from the existing
+    // tail and input declaration order, not a second list of new family names.
+    let compatibility_input_end = compatibility_tail
+        .iter()
+        .filter_map(|transition| input_position(transition))
+        .max();
+    let appended_input_transition = |transition: &TransitionSchema| {
+        compatibility_input_end
+            .zip(input_position(transition))
+            .is_some_and(|(end, position)| position > end)
+    };
+    let mut ordered = Vec::with_capacity(schema.transitions.len());
+    ordered.extend(schema.transitions.iter().filter(|transition| {
+        !MEERKAT_TRANSITION_ENUM_TAIL.contains(&transition.name.as_ref())
+            && !appended_input_transition(transition)
+    }));
+    ordered.extend(compatibility_tail);
+    ordered.extend(
+        schema
+            .transitions
+            .iter()
+            .filter(|transition| appended_input_transition(transition)),
+    );
     if ordered.len() != schema.transitions.len() {
         return Err(MachineKernelRenderError::NonUniquePublicTransitionTail {
             rendered: ordered.len(),

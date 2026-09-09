@@ -1,5 +1,9 @@
 //! Runtime driver entry point and lifecycle.
 
+#[cfg(all(test, feature = "sqlite-store"))]
+#[path = "checkpoint_completion_tests.rs"]
+mod checkpoint_completion_tests;
+
 use std::sync::Arc;
 
 use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunBoundaryReceipt, RunId};
@@ -47,6 +51,18 @@ pub(crate) struct RuntimeCompletionResultAuthority {
     finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
     result_class: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
     cleanup_observation: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
+    correlation: RuntimeCompletionAuthorityCorrelation,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimeCompletionAuthorityCorrelation {
+    Run,
+    CheckpointInput {
+        owner_input_id: InputId,
+        candidate_digest: String,
+        completion_input_ids_digest: String,
+        requires_session_checkpoint: bool,
+    },
 }
 
 /// Attempted local closure of a generated runtime-completion result effect.
@@ -143,6 +159,8 @@ pub(crate) struct InputTerminalCompletionRecoveryBatch {
     pub(crate) terminal_recovery: crate::input_state::RuntimeCompletionTerminalRecovery,
     pub(crate) requires_session_checkpoint: bool,
     pub(crate) has_interaction_terminal_outbox: bool,
+    pub(crate) correlation: crate::meerkat_machine::dsl::TerminalCompletionCorrelation,
+    pub(crate) witness: InputTerminalCompletionAuthorizationWitness,
 }
 
 /// Exact live witness that one generated completion authority is allowed to
@@ -179,6 +197,9 @@ pub(crate) struct InputTerminalCompletionAuthorizationWitness {
     runtime_generation: Option<u64>,
     runtime_epoch_id: Option<String>,
     batch_key: crate::input_state::InputTerminalCompletionBatchKey,
+    owner_input_id: InputId,
+    requires_session_checkpoint: bool,
+    completion_boundary: Option<crate::meerkat_machine::dsl::RecoveredRunApplyBoundary>,
     candidate_digest: String,
     completion_input_ids_digest: String,
     recipients: indexmap::IndexMap<InputId, InputTerminalOutcome>,
@@ -381,6 +402,7 @@ impl RuntimeCompletionResultAuthority {
             finalization,
             result_class,
             cleanup_observation,
+            correlation: RuntimeCompletionAuthorityCorrelation::Run,
         }
     }
 
@@ -404,6 +426,25 @@ impl RuntimeCompletionResultAuthority {
             && self.runtime_epoch_id.as_ref().map(|value| value.0.as_str())
                 == witness.runtime_epoch_id.as_deref()
             && self.run_id.as_ref() == witness.batch_key.run_id()
+            && match &self.correlation {
+                RuntimeCompletionAuthorityCorrelation::Run => true,
+                RuntimeCompletionAuthorityCorrelation::CheckpointInput {
+                    owner_input_id,
+                    candidate_digest,
+                    completion_input_ids_digest,
+                    requires_session_checkpoint,
+                } => owner_input_id == &witness.owner_input_id
+                    && candidate_digest == &witness.candidate_digest
+                    && completion_input_ids_digest == &witness.completion_input_ids_digest
+                    && requires_session_checkpoint == &witness.requires_session_checkpoint
+                    && witness.recipients.len() == 1
+                    && witness.completion_boundary
+                        == Some(
+                            crate::meerkat_machine::dsl::RecoveredRunApplyBoundary::RunCheckpoint,
+                        )
+                    && witness.recipients.get(owner_input_id)
+                        == Some(&InputTerminalOutcome::Consumed),
+            }
     }
 
     pub(crate) fn result_class(&self) -> crate::meerkat_machine::dsl::RuntimeCompletionResultClass {
@@ -453,6 +494,9 @@ impl RuntimeCompletionResultAuthority {
             fence_token: self.fence_token.map(|value| value.0),
             runtime_generation: self.runtime_generation.map(|value| value.0),
             runtime_epoch_id: self.runtime_epoch_id.as_ref().map(|value| value.0.clone()),
+            owner_input_id: owner_input_id.clone(),
+            requires_session_checkpoint: false,
+            completion_boundary: None,
             batch_key: match self.run_id.as_ref() {
                 Some(run_id) => InputTerminalCompletionBatchKey::Run {
                     run_id: run_id.clone(),
@@ -2816,6 +2860,130 @@ impl DriverEntry {
         Ok(batches)
     }
 
+    async fn recover_checkpoint_completion_boundaries(
+        &self,
+        rows: &[StoredInputState],
+    ) -> Result<(), RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm;
+        for stored in rows {
+            let Some(completion) = stored.state.terminal_completion.as_ref() else {
+                continue;
+            };
+            if completion.owner_input_id != stored.state.input_id
+                || stored.seed.terminal_outcome != Some(InputTerminalOutcome::Consumed)
+            {
+                continue;
+            }
+            let Some(run_id) = completion.batch_key.run_id() else {
+                continue;
+            };
+            let Some(semantics) = stored.state.runtime_semantics else {
+                continue;
+            };
+            if semantics.boundary
+                != meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
+                || semantics.execution_kind
+                    != meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+            {
+                continue;
+            }
+            if stored.seed.last_run_id.as_ref() != Some(run_id) {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "checkpoint completion run differs from its consumed input".to_string(),
+                });
+            }
+            let input_id = completion.owner_input_id.to_string();
+            let shared = self.shared_dsl_authority();
+            if shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                .input_completion_boundaries
+                .contains_key(&input_id)
+            {
+                continue;
+            }
+            let sequence = stored.seed.last_boundary_sequence.ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: "checkpoint completion has no input boundary sequence".to_string(),
+                }
+            })?;
+            let receipt = match self {
+                DriverEntry::Persistent(driver) => {
+                    driver.completion_boundary_receipt(run_id, sequence).await?
+                }
+                DriverEntry::Ephemeral(_) => {
+                    return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: "checkpoint completion lost its generated boundary evidence"
+                            .to_string(),
+                    });
+                }
+            };
+            let boundary = match receipt {
+                Some(receipt) => {
+                    if &receipt.run_id != run_id
+                        || receipt.sequence != sequence
+                        || !receipt
+                            .contributing_input_ids
+                            .contains(&completion.owner_input_id)
+                    {
+                        return Err(RuntimeDriverError::RecoveryCorruption {
+                            reason:
+                                "checkpoint completion receipt changed its exact input/run/sequence"
+                                    .to_string(),
+                        });
+                    }
+                    if receipt.boundary
+                        == meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
+                        && completion.completion_input_ids.as_ref()
+                            != Some(&canonical_completion_input_ids(
+                                &receipt.contributing_input_ids,
+                            ))
+                    {
+                        return Err(RuntimeDriverError::RecoveryCorruption {
+                            reason: "checkpoint completion recipients differ from their committed receipt".to_string(),
+                        });
+                    }
+                    Some(
+                        mm::RecoveredRunApplyBoundary::try_from(receipt.boundary).map_err(
+                            |reason| RuntimeDriverError::RecoveryCorruption {
+                                reason: reason.to_string(),
+                            },
+                        )?,
+                    )
+                }
+                None if sequence == 0 => None,
+                None => {
+                    return Err(RuntimeDriverError::RecoveryCorruption {
+                        reason: "checkpoint completion references a missing committed receipt"
+                            .to_string(),
+                    });
+                }
+            };
+            let mut authority = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mm::MeerkatMachineMutator::apply(
+                &mut *authority,
+                mm::MeerkatMachineInput::RecoverInputCompletionBoundary {
+                    input_id,
+                    run_id: mm::RunId::from_domain(run_id),
+                    sequence,
+                    boundary,
+                    execution_kind: mm::RecoveredRuntimeExecutionKind::ContentTurn,
+                },
+            )
+            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                reason: crate::meerkat_machine::dsl_authority::map_error(
+                    error,
+                    "RecoverInputCompletionBoundary",
+                ),
+            })?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn input_terminal_completion_recovery_batches(
         &self,
     ) -> Result<Vec<InputTerminalCompletionRecoveryBatch>, RuntimeDriverError> {
@@ -2824,6 +2992,8 @@ impl DriverEntry {
             validate_input_terminal_completion_batch,
         };
         let snapshot = self.pending_terminal_input_states().await?;
+        self.recover_checkpoint_completion_boundaries(&snapshot)
+            .await?;
         let mut interaction_terminal_batch_identities = std::collections::HashSet::new();
         for stored in &snapshot {
             let Some(outbox) = stored.state.interaction_terminal_outbox.as_ref() else {
@@ -2870,7 +3040,7 @@ impl DriverEntry {
             })
             .collect::<std::collections::HashSet<_>>();
         let mut grouped = std::collections::HashMap::<
-            InputTerminalCompletionBatchKey,
+            (InputTerminalCompletionBatchKey, InputId),
             Vec<crate::input_state::InputTerminalCompletion>,
         >::new();
         for stored in snapshot {
@@ -2888,7 +3058,10 @@ impl DriverEntry {
                     .validate_row()
                     .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
                 grouped
-                    .entry(completion.batch_key.clone())
+                    .entry((
+                        completion.batch_key.clone(),
+                        completion.owner_input_id.clone(),
+                    ))
                     .or_default()
                     .push(completion);
             }
@@ -2897,9 +3070,11 @@ impl DriverEntry {
         // disposition is taken, and iterate in a deterministic order: the
         // correlatable choice below must not depend on hash-map iteration.
         let mut grouped_batches = grouped.into_iter().collect::<Vec<_>>();
-        grouped_batches.sort_by_key(|(batch_key, _)| batch_key.audit_key());
+        grouped_batches.sort_by_key(|((batch_key, owner_input_id), _)| {
+            (batch_key.audit_key(), owner_input_id.0)
+        });
         let mut pending_batches = Vec::with_capacity(grouped_batches.len());
-        for (batch_key, mut rows) in grouped_batches {
+        for ((batch_key, _owner_input_id), mut rows) in grouped_batches {
             rows.sort_by_key(|row| row.batch_ordinal);
             let owner_finalized = {
                 let owner = validate_input_terminal_completion_batch(&rows)
@@ -2909,10 +3084,25 @@ impl DriverEntry {
             if owner_finalized {
                 continue;
             }
-            pending_batches.push((batch_key, rows));
+            let owner = validate_input_terminal_completion_batch(&rows)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let correlation = machine_classify_terminal_completion_correlation(
+                self,
+                owner,
+                owner
+                    .candidate
+                    .as_ref()
+                    .map(crate::input_state::InteractionTerminalCandidate::terminal_observation),
+            )?;
+            pending_batches.push((batch_key, rows, correlation));
         }
 
-        // The completion correlation is a single slot, and these rows carry no
+        // Checkpoint inputs retain their own generated input/run correlation;
+        // they do not compete for the single ordinary run-result slot. Group
+        // by canonical owner as well as run: one run may have several exact
+        // independently committed checkpoint batches.
+        //
+        // The ordinary run completion correlation is a single slot, and its rows carry no
         // runtime-binding identity (unlike InteractionTerminalOutbox, which
         // carries owner_fence_token / owner_runtime_generation /
         // owner_runtime_epoch_id), so two pending run-scoped batches cannot be
@@ -2929,11 +3119,15 @@ impl DriverEntry {
         // That is the failure an adopter member hit in production.
         let run_scoped_pending = pending_batches
             .iter()
-            .filter(|(batch_key, _)| batch_key.run_id().is_some())
+            .filter(|(batch_key, _, correlation)| {
+                batch_key.run_id().is_some()
+                    && *correlation
+                        == crate::meerkat_machine::dsl::TerminalCompletionCorrelation::Run
+            })
             .count();
 
         let mut batches = Vec::new();
-        for (batch_key, rows) in pending_batches {
+        for (batch_key, rows, correlation) in pending_batches {
             let owner = validate_input_terminal_completion_batch(&rows)
                 .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
             let batch_audit_key = batch_key.audit_key();
@@ -2945,7 +3139,10 @@ impl DriverEntry {
                 ));
             let disposition = machine_classify_recovered_terminal_completion_batch(
                 &batch_audit_key,
-                batch_key.run_id().is_none() || run_scoped_pending == 1,
+                correlation
+                    == crate::meerkat_machine::dsl::TerminalCompletionCorrelation::CheckpointInput
+                    || batch_key.run_id().is_none()
+                    || run_scoped_pending == 1,
                 owner.candidate.is_some(),
                 directed_publication_pending,
             )?;
@@ -3004,6 +3201,13 @@ impl DriverEntry {
                     owner.completion_input_ids_digest.clone(),
                 ));
             batches.push(InputTerminalCompletionRecoveryBatch {
+                witness: self.input_terminal_completion_authorization_witness(
+                    owner.completion_input_ids.as_deref().ok_or_else(|| {
+                        RuntimeDriverError::RecoveryCorruption {
+                            reason: "pending terminal completion owner lost recipients".to_string(),
+                        }
+                    })?,
+                )?,
                 batch_key,
                 input_ids: owner.completion_input_ids.clone().ok_or_else(|| {
                     RuntimeDriverError::RecoveryCorruption {
@@ -3017,6 +3221,7 @@ impl DriverEntry {
                 terminal_recovery,
                 requires_session_checkpoint: owner.requires_session_checkpoint,
                 has_interaction_terminal_outbox,
+                correlation,
             });
         }
         batches.sort_by_key(|batch| {
@@ -3169,6 +3374,13 @@ impl DriverEntry {
                 .as_ref()
                 .map(|value| value.0.clone()),
             batch_key: owner.batch_key.clone(),
+            owner_input_id: owner.owner_input_id.clone(),
+            requires_session_checkpoint: owner.requires_session_checkpoint,
+            completion_boundary: state
+                .input_completion_boundaries
+                .get(&owner.owner_input_id.to_string())
+                .copied()
+                .flatten(),
             candidate_digest: owner.candidate_digest.clone(),
             completion_input_ids_digest: owner.completion_input_ids_digest.clone(),
             recipients,
@@ -9043,6 +9255,179 @@ fn apply_runtime_completion_authority_preview(
         .map_err(|err| RuntimeDriverError::ValidationFailed {
             reason: crate::meerkat_machine::dsl_authority::map_error(err, context),
         })
+}
+
+fn machine_classify_terminal_completion_correlation(
+    driver: &DriverEntry,
+    owner: &crate::input_state::InputTerminalCompletion,
+    terminal: Option<crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation>,
+) -> Result<crate::meerkat_machine::dsl::TerminalCompletionCorrelation, RuntimeDriverError> {
+    use crate::meerkat_machine::dsl as mm;
+    let owner_input_id = owner.owner_input_id.to_string();
+    let run_id = owner.batch_key.run_id().map(mm::RunId::from_domain);
+    let recipient_count = u64::try_from(owner.completion_input_ids.as_ref().map_or(0, Vec::len))
+        .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+            reason: format!("completion recipient count is unrepresentable: {error}"),
+        })?;
+    let shared = driver.shared_dsl_authority();
+    let mut authority = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let transition = mm::MeerkatMachineMutator::apply(
+        &mut *authority,
+        mm::MeerkatMachineInput::ClassifyTerminalCompletionCorrelation {
+            owner_input_id: owner_input_id.clone(),
+            run_id: run_id.clone(),
+            terminal,
+            recipient_count,
+        },
+    )
+    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+        reason: crate::meerkat_machine::dsl_authority::map_error(
+            error,
+            "ClassifyTerminalCompletionCorrelation",
+        ),
+    })?;
+    transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::TerminalCompletionCorrelationClassified {
+                owner_input_id: emitted_owner,
+                run_id: emitted_run,
+                correlation,
+            } if emitted_owner == &owner_input_id && emitted_run == &run_id => Some(*correlation),
+            _ => None,
+        })
+        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+            reason: "completion correlation classification lost its exact owner/run".to_string(),
+        })
+}
+
+/// Resolve a checkpoint's exact consumed input without replacing the live
+/// run's correlation. Ordinary run results retain their existing authority.
+pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
+    driver: &DriverEntry,
+    witness: &InputTerminalCompletionAuthorizationWitness,
+    expected_run_id: Option<&RunId>,
+    terminal: crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation,
+    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+) -> Result<RuntimeCompletionResultAuthority, RuntimeDriverError> {
+    use crate::meerkat_machine::dsl as mm;
+    let input_ids = witness.input_ids().cloned().collect::<Vec<_>>();
+    if witness.batch_key.run_id() != expected_run_id
+        || driver.input_terminal_completion_authorization_witness(&input_ids)? != *witness
+    {
+        return Err(RuntimeDriverError::StaleAuthority {
+            reason: "completion resolution no longer owns the exact durable batch".to_string(),
+        });
+    }
+    let owner = driver
+        .as_driver()
+        .stored_input_state(&witness.owner_input_id)
+        .and_then(|stored| stored.state.terminal_completion)
+        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+            reason: "completion resolution lost its canonical owner".to_string(),
+        })?;
+    match machine_classify_terminal_completion_correlation(driver, &owner, Some(terminal))? {
+        mm::TerminalCompletionCorrelation::Run => machine_resolve_runtime_completion_result(
+            driver,
+            witness.batch_key.run_id(),
+            terminal,
+            finalization,
+        ),
+        mm::TerminalCompletionCorrelation::CheckpointInput => {
+            let run_id = witness.batch_key.run_id().ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: "checkpoint completion has no exact run".to_string(),
+                }
+            })?;
+            let shared = driver.shared_dsl_authority();
+            let mut authority = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transition = mm::MeerkatMachineMutator::apply(
+                &mut *authority,
+                mm::MeerkatMachineInput::ResolveCheckpointCompletionResult {
+                    owner_input_id: witness.owner_input_id.to_string(),
+                    run_id: mm::RunId::from_domain(run_id),
+                    candidate_digest: witness.candidate_digest.clone(),
+                    completion_input_ids_digest: witness.completion_input_ids_digest.clone(),
+                    requires_session_checkpoint: witness.requires_session_checkpoint,
+                    recipient_count: u64::try_from(witness.recipients.len()).map_err(|error| {
+                        RuntimeDriverError::RecoveryCorruption {
+                            reason: error.to_string(),
+                        }
+                    })?,
+                    finalization,
+                },
+            )
+            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                reason: crate::meerkat_machine::dsl_authority::map_error(
+                    error,
+                    "ResolveCheckpointCompletionResult",
+                ),
+            })?;
+            let mut resolved = None;
+            for effect in transition.effects() {
+                let mm::MeerkatMachineEffect::CheckpointCompletionResultResolved {
+                    session_id,
+                    agent_runtime_id,
+                    fence_token,
+                    runtime_generation,
+                    runtime_epoch_id,
+                    run_id: emitted_run,
+                    owner_input_id,
+                    candidate_digest,
+                    completion_input_ids_digest,
+                    requires_session_checkpoint,
+                    result_class,
+                    cleanup_outcome,
+                } = effect
+                else {
+                    continue;
+                };
+                if emitted_run != &mm::RunId::from_domain(run_id)
+                    || owner_input_id != &witness.owner_input_id.to_string()
+                    || candidate_digest != &witness.candidate_digest
+                    || completion_input_ids_digest != &witness.completion_input_ids_digest
+                    || *requires_session_checkpoint != witness.requires_session_checkpoint
+                    || resolved.is_some()
+                {
+                    return Err(RuntimeDriverError::RecoveryCorruption {
+                        reason: "checkpoint result effect changed its exact batch binding"
+                            .to_string(),
+                    });
+                }
+                let session_id = SessionId::parse(&session_id.0).map_err(|error| {
+                    RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    }
+                })?;
+                let mut projected = RuntimeCompletionResultAuthority::from_generated_effect(
+                    session_id,
+                    agent_runtime_id.clone(),
+                    *fence_token,
+                    *runtime_generation,
+                    runtime_epoch_id.clone(),
+                    Some(run_id.clone()),
+                    finalization,
+                    *result_class,
+                    *cleanup_outcome,
+                );
+                projected.correlation = RuntimeCompletionAuthorityCorrelation::CheckpointInput {
+                    owner_input_id: witness.owner_input_id.clone(),
+                    candidate_digest: candidate_digest.clone(),
+                    completion_input_ids_digest: completion_input_ids_digest.clone(),
+                    requires_session_checkpoint: *requires_session_checkpoint,
+                };
+                resolved = Some(projected);
+            }
+            resolved.ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: "checkpoint completion emitted no exact result authority".to_string(),
+            })
+        }
+    }
 }
 
 fn runtime_completion_result_authority_from_effects(

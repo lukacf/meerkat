@@ -605,6 +605,54 @@ fn generated_meerkat_transition_enum_order_is_decoupled_from_dispatch_order() {
 }
 
 #[test]
+fn newly_appended_input_transitions_follow_the_existing_compatibility_tail() {
+    let mut schema = meerkat_machine();
+    let before = render_machine_kernel_module(&schema);
+    let mut appended = schema
+        .transitions
+        .first()
+        .expect("initial transition")
+        .clone();
+    appended.name = meerkat_machine_schema::identity::TransitionId::parse("OrdinalAppendProbe")
+        .expect("transition identity");
+    appended.on = TriggerMatch::Input {
+        variant: meerkat_machine_schema::identity::InputVariantId::parse("OrdinalAppendProbe")
+            .expect("input identity"),
+        bindings: Vec::new(),
+    };
+    schema
+        .inputs
+        .variants
+        .push(meerkat_machine_schema::VariantSchema {
+            name: EnumVariantId::parse("OrdinalAppendProbe").expect("enum variant"),
+            fields: Vec::new(),
+        });
+    schema.transitions.push(appended);
+    let after = render_machine_kernel_module(&schema);
+    let variants = |rendered: &str| -> Vec<String> {
+        rendered
+            .split_once("pub enum TransitionId {")
+            .expect("TransitionId enum")
+            .1
+            .split_once("\n}")
+            .expect("TransitionId end")
+            .0
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let old = variants(&before);
+    let current = variants(&after);
+    assert_eq!(&current[..old.len()], old.as_slice());
+    assert_eq!(
+        current.last().map(String::as_str),
+        Some("OrdinalAppendProbe,")
+    );
+}
+
+#[test]
 fn generated_meerkat_transition_tail_missing_name_is_a_structured_error() {
     let mut schema = meerkat_machine();
     schema.transitions.retain(|transition| {

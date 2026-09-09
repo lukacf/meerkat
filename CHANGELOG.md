@@ -30,6 +30,57 @@ them.
 
 ## [0.8.36] - 2026-09-09
 
+### Breaking
+
+- **Generated completion authority:** the catalog/production
+  `MeerkatMachineState` and
+  `meerkat_machine_kernels::generated::meerkat::State` gain
+  `input_completion_boundaries`. Update exhaustive struct literals.
+  `RecordBoundarySeq` gains the `boundary` field, including
+  `inputs::RecordBoundarySeq` and its `MeerkatMachineInput` variant.
+- **Generated command and effect vocabulary:** `MeerkatMachineInput`,
+  `MeerkatMachineInputVariant`, `MeerkatMachineCatalogInput`, and generated
+  `Input` / `InputKind` gain `RecoverInputCompletionBoundary`,
+  `ClassifyTerminalCompletionCorrelation`, and
+  `ResolveCheckpointCompletionResult`. `MeerkatMachineEffect`,
+  `MeerkatMachineEffectVariant`, and generated `Effect` / `EffectKind` gain
+  `TerminalCompletionCorrelationClassified` and
+  `CheckpointCompletionResultResolved`. These are internal completion
+  authority stages, not new surface RPCs.
+- **Generated transition vocabulary:** `TransitionId` gains
+  `RecoverInputCompletionBoundaryInitializing`,
+  `RecoverInputCompletionBoundaryIdle`,
+  `RecoverInputCompletionBoundaryAttached`,
+  `RecoverInputCompletionBoundaryRunning`,
+  `RecoverInputCompletionBoundaryRetired`,
+  `RecoverInputCompletionBoundaryStopped`,
+  `ClassifyTerminalCompletionCorrelationCheckpointInitializing`,
+  `ClassifyTerminalCompletionCorrelationCheckpointIdle`,
+  `ClassifyTerminalCompletionCorrelationCheckpointAttached`,
+  `ClassifyTerminalCompletionCorrelationCheckpointRunning`,
+  `ClassifyTerminalCompletionCorrelationCheckpointRetired`,
+  `ClassifyTerminalCompletionCorrelationCheckpointStopped`,
+  `ClassifyTerminalCompletionCorrelationRunInitializing`,
+  `ClassifyTerminalCompletionCorrelationRunIdle`,
+  `ClassifyTerminalCompletionCorrelationRunAttached`,
+  `ClassifyTerminalCompletionCorrelationRunRunning`,
+  `ClassifyTerminalCompletionCorrelationRunRetired`,
+  `ClassifyTerminalCompletionCorrelationRunStopped`,
+  `ClassifyTerminalCompletionCorrelationRunDestroyed`,
+  `ResolveCheckpointCompletionResultSucceededInitializing`,
+  `ResolveCheckpointCompletionResultSucceededIdle`,
+  `ResolveCheckpointCompletionResultSucceededAttached`,
+  `ResolveCheckpointCompletionResultSucceededRunning`,
+  `ResolveCheckpointCompletionResultSucceededRetired`,
+  `ResolveCheckpointCompletionResultSucceededStopped`,
+  `ResolveCheckpointCompletionResultFailedInitializing`,
+  `ResolveCheckpointCompletionResultFailedIdle`,
+  `ResolveCheckpointCompletionResultFailedAttached`,
+  `ResolveCheckpointCompletionResultFailedRunning`,
+  `ResolveCheckpointCompletionResultFailedRetired`, and
+  `ResolveCheckpointCompletionResultFailedStopped`. Existing input, effect,
+  and transition variants retain their order and ordinals.
+
 ### Added
 
 - **Rust error vocabulary:** `meerkat_runtime::RuntimeStoreError` gains
@@ -50,6 +101,13 @@ them.
   workers while retaining the original noncancelable finalization owner.
   Concurrent cold resumes and cleanup can progress without detached writes
   crossing replacement registrations.
+- Consumed live-checkpoint completions retain their own committed boundary
+  authority instead of clearing or overwriting an ordinary run's result
+  correlation. Recovery can finalize older pending `CompletedWithoutResult`
+  batches from exact durable input and boundary evidence while preserving a
+  newer run, session continuity, and the committed transcript. Mismatched
+  candidates or receipts still fail closed; recovery does not delete pending
+  owners or manufacture publication acknowledgements.
 
 ## [0.8.35] - 2026-09-07
 

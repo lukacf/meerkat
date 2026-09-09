@@ -324,6 +324,8 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
         "ResolveRuntimeCompletionResultFinalizationFailureWithResult",
         "ResolveRuntimeCompletionResultFinalizationFailureWithoutResult",
         "ResolveRuntimeCompletionResultRuntimeTerminated",
+        "ResolveCheckpointCompletionResultSucceeded",
+        "ResolveCheckpointCompletionResultFailed",
     ];
     let mut completion_result_transitions = completion_result_families
         .iter()
@@ -500,12 +502,23 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
         CommandPlanSchema {
             name: "AuthorizedRuntimeCompletionResultClosure".to_owned(),
             authority_type: "RuntimeCompletionResultAuthority".to_owned(),
-            source_inputs: vec![input_variant_id("ResolveRuntimeCompletionResult")],
+            source_inputs: vec![
+                input_variant_id("ResolveRuntimeCompletionResult"),
+                input_variant_id("ResolveCheckpointCompletionResult"),
+            ],
             source_signals: vec![],
             transitions: completion_result_transitions,
-            effects: vec![effect_variant_id("RuntimeCompletionResultResolved")],
-            effect_closures: vec![EffectClosureSchema {
-                effect: effect_variant_id("RuntimeCompletionResultResolved"),
+            effects: vec![
+                effect_variant_id("RuntimeCompletionResultResolved"),
+                effect_variant_id("CheckpointCompletionResultResolved"),
+            ],
+            effect_closures: [
+                "RuntimeCompletionResultResolved",
+                "CheckpointCompletionResultResolved",
+            ]
+            .into_iter()
+            .map(|effect| EffectClosureSchema {
+                effect: effect_variant_id(effect),
                 authority_type: "RuntimeCompletionResultAuthority".to_owned(),
                 closure_policy: "LocalSurfaceResultAlignment".to_owned(),
                 lifecycle: vec![
@@ -516,7 +529,8 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
                     "Cancelled".to_owned(),
                     "Abandoned".to_owned(),
                 ],
-            }],
+            })
+            .collect(),
         },
     ]
 }
@@ -2290,6 +2304,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Succeeded", "Failed"],
             ),
             NamedTypeBinding::string_enum(
+                "TerminalCompletionCorrelation",
+                &["Run", "CheckpointInput"],
+            ),
+            NamedTypeBinding::string_enum(
                 "UserInterruptObservationKind",
                 &[
                     "Accepted",
@@ -2663,6 +2681,9 @@ runtime_internal_inputs!(
         // because a caller cannot ask for them: they exist only while the
         // runtime is reconciling a recovered batch against durable truth.
         ClassifyRecoveredTerminalCompletionBatch,
+        ClassifyTerminalCompletionCorrelation,
+        RecoverInputCompletionBoundary,
+        ResolveCheckpointCompletionResult,
         DeclareRecoveredTerminalCompletionUnrecoverable,
         BeginUnregisterSession,
         BeginUnregisterUnservedAttachment,

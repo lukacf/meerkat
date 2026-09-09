@@ -2592,6 +2592,7 @@ impl EphemeralRuntimeDriver {
                 mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
                     input_id: Self::dsl_key(input_id),
                     run_id: mm_dsl::RunId::from_domain(run_id),
+                    boundary: None,
                 },
                 "RecordBoundarySeq(MachineTerminalFailure)",
             )?;
@@ -4326,6 +4327,13 @@ impl EphemeralRuntimeDriver {
                 mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
                     input_id: key,
                     run_id: mm_dsl::RunId::from_domain(run_id),
+                    boundary: Some(
+                        mm_dsl::RecoveredRunApplyBoundary::try_from(receipt.boundary).map_err(
+                            |reason| RuntimeDriverError::ValidationFailed {
+                                reason: reason.to_string(),
+                            },
+                        )?,
+                    ),
                 },
                 "RecordBoundarySeq",
             )?;

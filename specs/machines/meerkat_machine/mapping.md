@@ -7019,6 +7019,99 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveTurnSurfaceResultStructuredOutputValidationFailedHardFailureIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverInputCompletionBoundaryStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationCheckpointStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationRunDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultSucceededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveCheckpointCompletionResultFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -7691,6 +7784,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoveredTerminalCompletionDeclaredUnrecoverable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `TerminalCompletionCorrelationClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CheckpointCompletionResultResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

@@ -11729,6 +11729,58 @@ impl std::fmt::Display for TerminalCauseClass {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TerminalCompletionCorrelation {
+    #[default]
+    #[serde(rename = "Run")]
+    Run,
+    #[serde(rename = "CheckpointInput")]
+    CheckpointInput,
+}
+impl TerminalCompletionCorrelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Run => "Run",
+            Self::CheckpointInput => "CheckpointInput",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TerminalCompletionCorrelation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Run" => Ok(Self::Run),
+            "CheckpointInput" => Ok(Self::CheckpointInput),
+            other => Err(format!(
+                "invalid TerminalCompletionCorrelation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TerminalCompletionCorrelation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TerminalCompletionCorrelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type ToolFilter = meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolFilter;
 pub type ToolName = meerkat_core::types::ToolName;
 pub type ToolVisibilityWitness =
@@ -12643,6 +12695,8 @@ pub struct State {
     pub max_stage_attempts: u64,
     pub input_run_associations: std::collections::BTreeMap<String, RunId>,
     pub input_boundary_sequences: std::collections::BTreeMap<String, u64>,
+    pub input_completion_boundaries:
+        std::collections::BTreeMap<String, Option<RecoveredRunApplyBoundary>>,
     pub live_boundary_context_sequence_by_run: std::collections::BTreeMap<RunId, u64>,
     pub next_admission_seq: u64,
     pub next_priority_admission_seq: u64,
@@ -13995,6 +14049,7 @@ pub mod inputs {
     pub struct RecordBoundarySeq {
         pub input_id: String,
         pub run_id: RunId,
+        pub boundary: Option<RecoveredRunApplyBoundary>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterOp {
@@ -15261,6 +15316,31 @@ pub mod inputs {
         pub batch_key: String,
         pub reason: RecoveredTerminalCompletionUnrecoverableReasonKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyTerminalCompletionCorrelation {
+        pub owner_input_id: String,
+        pub run_id: Option<RunId>,
+        pub terminal: Option<RuntimeCompletionTerminalObservation>,
+        pub recipient_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverInputCompletionBoundary {
+        pub input_id: String,
+        pub run_id: RunId,
+        pub sequence: u64,
+        pub boundary: Option<RecoveredRunApplyBoundary>,
+        pub execution_kind: RecoveredRuntimeExecutionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveCheckpointCompletionResult {
+        pub owner_input_id: String,
+        pub run_id: RunId,
+        pub candidate_digest: String,
+        pub completion_input_ids_digest: String,
+        pub requires_session_checkpoint: bool,
+        pub recipient_count: u64,
+        pub finalization: RuntimeCompletionFinalizationObservation,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15641,6 +15721,9 @@ pub enum Input {
     DeclareRecoveredTerminalCompletionUnrecoverable(
         inputs::DeclareRecoveredTerminalCompletionUnrecoverable,
     ),
+    ClassifyTerminalCompletionCorrelation(inputs::ClassifyTerminalCompletionCorrelation),
+    RecoverInputCompletionBoundary(inputs::RecoverInputCompletionBoundary),
+    ResolveCheckpointCompletionResult(inputs::ResolveCheckpointCompletionResult),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -16155,6 +16238,13 @@ impl Input {
             Self::DeclareRecoveredTerminalCompletionUnrecoverable(_) => {
                 InputKind::DeclareRecoveredTerminalCompletionUnrecoverable
             }
+            Self::ClassifyTerminalCompletionCorrelation(_) => {
+                InputKind::ClassifyTerminalCompletionCorrelation
+            }
+            Self::RecoverInputCompletionBoundary(_) => InputKind::RecoverInputCompletionBoundary,
+            Self::ResolveCheckpointCompletionResult(_) => {
+                InputKind::ResolveCheckpointCompletionResult
+            }
         }
     }
 }
@@ -16524,6 +16614,9 @@ pub enum InputKind {
     AuthorizeInteractionTerminalOutboxAdoption,
     ClassifyRecoveredTerminalCompletionBatch,
     DeclareRecoveredTerminalCompletionUnrecoverable,
+    ClassifyTerminalCompletionCorrelation,
+    RecoverInputCompletionBoundary,
+    ResolveCheckpointCompletionResult,
 }
 
 pub mod signals {
@@ -17989,6 +18082,27 @@ pub mod effects {
         pub batch_key: String,
         pub reason: RecoveredTerminalCompletionUnrecoverableReasonKind,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TerminalCompletionCorrelationClassified {
+        pub owner_input_id: String,
+        pub run_id: Option<RunId>,
+        pub correlation: TerminalCompletionCorrelation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CheckpointCompletionResultResolved {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub run_id: RunId,
+        pub owner_input_id: String,
+        pub candidate_digest: String,
+        pub completion_input_ids_digest: String,
+        pub requires_session_checkpoint: bool,
+        pub result_class: RuntimeCompletionResultClass,
+        pub cleanup_outcome: RuntimeCompletionObservedOutcome,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18229,6 +18343,8 @@ pub enum Effect {
     RecoveredTerminalCompletionDeclaredUnrecoverable(
         effects::RecoveredTerminalCompletionDeclaredUnrecoverable,
     ),
+    TerminalCompletionCorrelationClassified(effects::TerminalCompletionCorrelationClassified),
+    CheckpointCompletionResultResolved(effects::CheckpointCompletionResultResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -18456,6 +18572,8 @@ pub enum EffectKind {
     InteractionTerminalOutboxAdoptionAuthorized,
     RecoveredTerminalCompletionBatchClassified,
     RecoveredTerminalCompletionDeclaredUnrecoverable,
+    TerminalCompletionCorrelationClassified,
+    CheckpointCompletionResultResolved,
 }
 
 pub mod command_capabilities {
@@ -21194,6 +21312,37 @@ pub enum TransitionId {
     PrepareIdleRetainingUnsettledCompletion,
     PrepareAttachedRetainingUnsettledCompletion,
     DrainQueuedRunRetiredRetainingUnsettledCompletion,
+    RecoverInputCompletionBoundaryInitializing,
+    RecoverInputCompletionBoundaryIdle,
+    RecoverInputCompletionBoundaryAttached,
+    RecoverInputCompletionBoundaryRunning,
+    RecoverInputCompletionBoundaryRetired,
+    RecoverInputCompletionBoundaryStopped,
+    ClassifyTerminalCompletionCorrelationCheckpointInitializing,
+    ClassifyTerminalCompletionCorrelationCheckpointIdle,
+    ClassifyTerminalCompletionCorrelationCheckpointAttached,
+    ClassifyTerminalCompletionCorrelationCheckpointRunning,
+    ClassifyTerminalCompletionCorrelationCheckpointRetired,
+    ClassifyTerminalCompletionCorrelationCheckpointStopped,
+    ClassifyTerminalCompletionCorrelationRunInitializing,
+    ClassifyTerminalCompletionCorrelationRunIdle,
+    ClassifyTerminalCompletionCorrelationRunAttached,
+    ClassifyTerminalCompletionCorrelationRunRunning,
+    ClassifyTerminalCompletionCorrelationRunRetired,
+    ClassifyTerminalCompletionCorrelationRunStopped,
+    ClassifyTerminalCompletionCorrelationRunDestroyed,
+    ResolveCheckpointCompletionResultSucceededInitializing,
+    ResolveCheckpointCompletionResultSucceededIdle,
+    ResolveCheckpointCompletionResultSucceededAttached,
+    ResolveCheckpointCompletionResultSucceededRunning,
+    ResolveCheckpointCompletionResultSucceededRetired,
+    ResolveCheckpointCompletionResultSucceededStopped,
+    ResolveCheckpointCompletionResultFailedInitializing,
+    ResolveCheckpointCompletionResultFailedIdle,
+    ResolveCheckpointCompletionResultFailedAttached,
+    ResolveCheckpointCompletionResultFailedRunning,
+    ResolveCheckpointCompletionResultFailedRetired,
+    ResolveCheckpointCompletionResultFailedStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21399,6 +21548,7 @@ pub fn initial_state() -> State {
         max_stage_attempts: 3,
         input_run_associations: Default::default(),
         input_boundary_sequences: Default::default(),
+        input_completion_boundaries: Default::default(),
         live_boundary_context_sequence_by_run: Default::default(),
         next_admission_seq: 1000000000,
         next_priority_admission_seq: 999999999,

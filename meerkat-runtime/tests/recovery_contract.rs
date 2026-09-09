@@ -72,6 +72,350 @@ fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())
 }
 
+#[cfg(feature = "sqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_sqlite_resume_observation_does_not_wait_for_an_unrelated_writer() {
+    shared_sqlite_held_writer_read_probe(1024 * 1024, std::time::Duration::from_secs(1)).await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit 136MB held-writer WholeBlob read; requires the exclusive native validation slot"]
+async fn shared_sqlite_large_whole_blob_read_under_held_writer() {
+    shared_sqlite_held_writer_read_probe(135_790_000, std::time::Duration::from_secs(60)).await;
+}
+
+#[cfg(feature = "sqlite-store")]
+async fn shared_sqlite_held_writer_read_probe(
+    payload_bytes: usize,
+    cold_read_budget: std::time::Duration,
+) {
+    let fixture_started = std::time::Instant::now();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("x".repeat(payload_bytes)),
+    ));
+    let runtime_id = LogicalRuntimeId::for_session(session.id());
+    assert_eq!(commit_probe_session(&store, &session).await, 1);
+    drop(session);
+    let fixture_elapsed = fixture_started.elapsed();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let cold_started = std::time::Instant::now();
+    let reader = tokio::spawn({
+        let store = store.clone();
+        async move {
+            let observation = store.load_session_resume_observation(&runtime_id).await?;
+            let snapshot = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await?
+                .expect("committed WholeBlob body");
+            assert_eq!(snapshot.session().messages().len(), 1);
+            assert!(snapshot.bytes().len() >= payload_bytes);
+            eprintln!(
+                "sqlite held-writer probe: payload_bytes={payload_bytes}, stored_body_bytes={}, decoded_messages={}, setup={fixture_elapsed:?}, cold_read={:?}",
+                snapshot.bytes().len(),
+                snapshot.session().messages().len(),
+                cold_started.elapsed(),
+            );
+            Ok::<_, meerkat_runtime::RuntimeStoreError>(observation)
+        }
+    });
+    let mut reader = reader;
+    let observed = tokio::time::timeout(cold_read_budget, &mut reader).await;
+    let cold_elapsed = cold_started.elapsed();
+    // Release the writer even on failure: no detached test SQL may outlive
+    // the fixture or consume the production 60-second busy budget.
+    conn.execute_batch("ROLLBACK").unwrap();
+    match observed {
+        Ok(result) => assert!(result.unwrap().unwrap().session_authority().is_some()),
+        Err(_) => {
+            reader.await.unwrap().unwrap();
+            panic!(
+                "resume observation or WholeBlob materialization waited for an unrelated WAL writer"
+            );
+        }
+    }
+    assert!(cold_elapsed < cold_read_budget, "{cold_elapsed:?}");
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_sqlite_concurrent_cold_resume_and_unregister_settle() {
+    shared_sqlite_cold_resume_probe(&[1024 * 1024; 17], 3, false).await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit 562MB WholeBlob concurrency probe; requires the exclusive native validation slot"]
+async fn shared_sqlite_large_whole_blob_cold_resume_and_unregister_settle() {
+    // Rounded decimal-MB observations, each increased by 0.01MB. This is
+    // synthetic byte pressure, not a copy of consumer transcripts or proof
+    // of their message/input-state distribution. The observed vector totals
+    // 561.94MB; this upper-rounded fixture totals 562.11MB.
+    const PAYLOAD_BYTES: [usize; 17] = [
+        135_790_000,
+        133_550_000,
+        98_830_000,
+        49_390_000,
+        32_760_000,
+        25_640_000,
+        21_140_000,
+        10_250_000,
+        9_810_000,
+        8_700_000,
+        8_400_000,
+        7_110_000,
+        7_080_000,
+        4_940_000,
+        4_070_000,
+        2_710_000,
+        1_940_000,
+    ];
+    shared_sqlite_cold_resume_probe(&PAYLOAD_BYTES, 3, true).await;
+}
+
+#[cfg(feature = "sqlite-store")]
+async fn commit_probe_session(store: &SqliteRuntimeStore, session: &meerkat_core::Session) -> u64 {
+    let runtime_id = LogicalRuntimeId::for_session(session.id());
+    // Match PersistentSessionService's WholeBlob control-snapshot path:
+    // seal the typed session, then use the prepared boundary store contract.
+    let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+        session.clone(),
+    ))
+    .unwrap();
+    let result = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(committed),
+        )
+        .await
+        .unwrap();
+    let authority = result.authority().unwrap().whole_blob().unwrap();
+    assert_eq!(authority.session_id(), session.id());
+    authority.store_revision()
+}
+
+#[cfg(feature = "sqlite-store")]
+#[derive(Debug)]
+struct ColdResumeProbeMeasurement {
+    index: usize,
+    body_started: std::time::Duration,
+    body_finished: std::time::Duration,
+    registered: std::time::Duration,
+}
+
+#[cfg(feature = "sqlite-store")]
+async fn shared_sqlite_cold_resume_probe(
+    payload_bytes: &[usize],
+    writes_per_session: usize,
+    require_largest_load_overlap: bool,
+) {
+    use std::time::{Duration, Instant};
+
+    let fixture_started = Instant::now();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    let seeder = MeerkatMachine::persistent(store.clone(), memory_blob_store());
+    let mut sessions = Vec::new();
+    for &bytes in payload_bytes {
+        let mut session = meerkat_core::Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("x".repeat(bytes)),
+        ));
+        assert_eq!(commit_probe_session(&store, &session).await, 1);
+        seeder.register_session(session.id().clone()).await.unwrap();
+        seeder.unregister_session(session.id()).await.unwrap();
+        sessions.push(session.id().clone());
+    }
+    drop(seeder);
+    drop(store);
+    let fixture_elapsed = fixture_started.elapsed();
+    let fixture_body_bytes: u64 = {
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT sum(length(session_snapshot)) FROM runtime_whole_blob_bodies",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    eprintln!(
+        "sqlite probe fixture: sessions={}, payload_bytes={}, stored_body_bytes={fixture_body_bytes}, input_rows=0, setup={fixture_elapsed:?}",
+        payload_bytes.len(),
+        payload_bytes.iter().sum::<usize>(),
+    );
+
+    // Reopening and both cold-load/registration substeps count toward this
+    // stage. Fixture construction, subsequent writes and cleanup do not.
+    let cold_started = Instant::now();
+    let store = Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        store.clone(),
+        memory_blob_store(),
+    ));
+    let barrier = Arc::new(tokio::sync::Barrier::new(sessions.len()));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, session_id) in sessions.into_iter().enumerate() {
+        let store = store.clone();
+        let machine = machine.clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let observed = store
+                .load_session_resume_observation(&runtime_id)
+                .await
+                .unwrap();
+            assert!(observed.session_authority().is_some());
+            let body_started = cold_started.elapsed();
+            let snapshot = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let session = snapshot.session().clone();
+            assert_eq!(session.id(), &session_id);
+            drop(snapshot);
+            let body_finished = cold_started.elapsed();
+            let bindings = machine
+                .prepare_bindings(session.id().clone())
+                .await
+                .unwrap();
+            let registration = machine
+                .current_session_registration_witness(&session_id)
+                .await
+                .unwrap();
+            assert_eq!(registration.epoch_id(), bindings.epoch_id());
+            let measurement = ColdResumeProbeMeasurement {
+                index,
+                body_started,
+                body_finished,
+                registered: cold_started.elapsed(),
+            };
+            eprintln!("sqlite probe cold member: {measurement:?}");
+            (session, registration, measurement)
+        });
+    }
+    let mut resumed = tokio::time::timeout(
+        Duration::from_secs(60).saturating_sub(cold_started.elapsed()),
+        async {
+            let mut resumed = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                resumed.push(result.unwrap());
+            }
+            resumed
+        },
+    )
+    .await
+    .expect("all cold materializations and registrations must complete within 60 seconds");
+    let cold_elapsed = cold_started.elapsed();
+    assert_eq!(resumed.len(), payload_bytes.len());
+    assert!(cold_elapsed < Duration::from_secs(60), "{cold_elapsed:?}");
+    resumed.sort_by_key(|(_, _, measurement)| measurement.index);
+    if require_largest_load_overlap {
+        assert!(payload_bytes[0] >= payload_bytes[1]);
+        let first = &resumed[0].2;
+        let second = &resumed[1].2;
+        assert!(
+            first.body_started < second.body_finished && second.body_started < first.body_finished,
+            "largest WholeBlob cold loads must overlap: {first:?}; {second:?}",
+        );
+    }
+    assert!(
+        resumed
+            .iter()
+            .all(|(_, _, measurement)| measurement.registered < Duration::from_secs(60))
+    );
+    eprintln!(
+        "sqlite probe cold stage: registered={}, elapsed={cold_elapsed:?}, setup_excluded={fixture_elapsed:?}",
+        resumed.len(),
+    );
+
+    let post_started = Instant::now();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (mut session, registration, _) in resumed {
+        let store = store.clone();
+        let machine = machine.clone();
+        tasks.spawn(async move {
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            for index in 0..writes_per_session {
+                session.push(meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::text(format!("resumed write {index}")),
+                ));
+                assert_eq!(
+                    commit_probe_session(&store, &session).await,
+                    u64::try_from(index + 2).unwrap(),
+                );
+            }
+            let writes_finished = post_started.elapsed();
+            assert!(machine
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await.unwrap());
+            let cleanup_finished = post_started.elapsed();
+            assert!(
+                store
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let durable = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                durable.session().messages().len(),
+                writes_per_session + 1,
+            );
+            assert!(!machine.contains_session(session.id()).await);
+            eprintln!(
+                "sqlite probe post member: runtime_id={runtime_id}, writes_finished={writes_finished:?}, cleanup_finished={cleanup_finished:?}, verified={:?}",
+                post_started.elapsed(),
+            );
+            (runtime_id, registration.epoch_id().clone())
+        });
+    }
+    let settled = tokio::time::timeout(
+        Duration::from_secs(60).saturating_sub(post_started.elapsed()),
+        async {
+            let mut settled = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                settled.push(result.unwrap());
+            }
+            settled
+        },
+    )
+    .await
+    .expect("post-resume writes, exact cleanup and verification must settle within 60 seconds");
+    assert_eq!(settled.len(), payload_bytes.len());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (runtime_id, epoch) in settled {
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM runtime_retired_ops_epochs WHERE runtime_id = ?1 AND epoch_id = ?2",
+                rusqlite::params![runtime_id.to_string(), epoch.to_string()],
+                |row| row.get::<_, u32>(0),
+            ).unwrap(),
+            1,
+        );
+    }
+    assert!(post_started.elapsed() < Duration::from_secs(60));
+    eprintln!(
+        "sqlite probe post stage: writes_per_session={writes_per_session}, elapsed={:?}; cold_resume_elapsed={cold_elapsed:?}",
+        post_started.elapsed(),
+    );
+}
+
 fn make_runtime_id(label: &str) -> LogicalRuntimeId {
     LogicalRuntimeId::new(format!("recovery-{label}-{}", Uuid::now_v7()))
 }

@@ -28,6 +28,27 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- **Rust error vocabulary:** `meerkat_runtime::RuntimeStoreError` gains
+  `SqliteOperationFailed`, carrying the primary and extended SQLite result
+  codes, database path, operation, caller, and backend message for connection
+  setup and writer admission failures. The enum remains non-exhaustive.
+  These diagnostics do not authorize retrying a write whose outcome is unknown.
+
+### Fixed
+
+- Already-current SQLite schemas are authenticated in a read snapshot rather
+  than reserving the database writer on every operation. Actual migrations
+  still acquire the writer and revalidate the exact predecessor before DDL.
+- WholeBlob session materialization reads the committed authority and body
+  together without a writer reservation, then releases the read transaction
+  before decoding and hashing the captured bytes.
+- Contended SQLite unregister finalization hands back multithreaded Tokio
+  workers while retaining the original noncancelable finalization owner.
+  Concurrent cold resumes and cleanup can progress without detached writes
+  crossing replacement registrations.
+
 ## [0.8.35] - 2026-09-07
 
 ### Breaking

@@ -10,7 +10,6 @@ mod inner {
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
-    use meerkat_store::sqlite_store::begin_immediate_transaction;
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
@@ -3937,6 +3936,33 @@ END";
         }
     }
 
+    fn map_runtime_connection_error(
+        path: &Path,
+        operation: &'static str,
+        caller: &'static std::panic::Location<'static>,
+        error: meerkat_sqlite::SqliteStoreError,
+    ) -> RuntimeStoreError {
+        match error {
+            meerkat_sqlite::SqliteStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                code,
+                message,
+            )) => {
+                // Display alone drops SQLite's extended result code (for
+                // example BUSY versus BUSY_SNAPSHOT). Keep it and the actual
+                // connection owner when crossing the RuntimeStore boundary.
+                RuntimeStoreError::SqliteOperationFailed {
+                    primary_code: code.extended_code & 0xff,
+                    extended_code: code.extended_code,
+                    path: path.display().to_string(),
+                    operation,
+                    caller,
+                    message: message.unwrap_or_else(|| code.to_string()),
+                }
+            }
+            other => map_shared_sqlite_error(other),
+        }
+    }
+
     /// Per-operation connection: fence guard lives exactly as long as the
     /// connection it admits.
     struct RuntimeConn {
@@ -3957,7 +3983,9 @@ END";
         }
     }
 
+    #[track_caller]
     fn open_runtime_connection(path: &Path) -> Result<RuntimeConn, RuntimeStoreError> {
+        let caller = std::panic::Location::caller();
         let guard =
             meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
         let mut conn = meerkat_sqlite::open_with(
@@ -3971,9 +3999,12 @@ END";
                 ..meerkat_sqlite::OpenOptions::default()
             },
         )
-        .map_err(map_shared_sqlite_error)?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
-            .map_err(map_shared_sqlite_error)?;
+        .map_err(|error| {
+            map_runtime_connection_error(path, "runtime open/preflight", caller, error)
+        })?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN).map_err(
+            |error| map_runtime_connection_error(path, "runtime schema migration", caller, error),
+        )?;
         Ok(RuntimeConn {
             conn,
             _guard: guard,
@@ -3987,9 +4018,11 @@ END";
     /// profile is allowed to touch WAL. Ordinary RuntimeStore-only operations
     /// continue to use [`open_runtime_connection`] and do not claim ownership
     /// of the co-tenant session schema.
+    #[track_caller]
     fn open_head_canonical_runtime_connection(
         path: &Path,
     ) -> Result<RuntimeConn, RuntimeStoreError> {
+        let caller = std::panic::Location::caller();
         let guard =
             meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
         let mut conn = meerkat_sqlite::open_with(
@@ -4003,14 +4036,19 @@ END";
                 ..meerkat_sqlite::OpenOptions::default()
             },
         )
-        .map_err(map_shared_sqlite_error)?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
-            .map_err(map_shared_sqlite_error)?;
+        .map_err(|error| {
+            map_runtime_connection_error(path, "head-canonical open/preflight", caller, error)
+        })?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN).map_err(
+            |error| map_runtime_connection_error(path, "runtime schema migration", caller, error),
+        )?;
         meerkat_sqlite::apply_domain_migrations(
             &mut conn,
             &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
         )
-        .map_err(map_shared_sqlite_error)?;
+        .map_err(|error| {
+            map_runtime_connection_error(path, "session schema migration", caller, error)
+        })?;
         Ok(RuntimeConn {
             conn,
             _guard: guard,
@@ -4071,11 +4109,14 @@ END";
         })
     }
 
+    #[track_caller]
     fn begin_runtime_transaction(
         conn: &mut Connection,
     ) -> Result<Transaction<'_>, RuntimeStoreError> {
-        begin_immediate_transaction(conn)
-            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+        let path = PathBuf::from(conn.path().unwrap_or(":memory:"));
+        let caller = std::panic::Location::caller();
+        meerkat_sqlite::begin_immediate(conn)
+            .map_err(|error| map_runtime_connection_error(&path, "BEGIN IMMEDIATE", caller, error))
     }
 
     fn commit_runtime_transaction(
@@ -12091,35 +12132,43 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let authority = load_whole_blob_store_authority(&tx, &runtime_id)?;
-                let observed = match authority {
-                    None => None,
-                    Some(authority) => {
-                        let bytes = tx
-                            .query_row(
-                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
-                                params![authority.blob_sha256()],
-                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                            )
-                            .optional()
-                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
-                            .ok_or_else(|| {
-                                session_authority_conflict(
-                                    &runtime_id,
-                                    "WholeBlob authority references a missing body",
+                let observed = {
+                    let mut conn = open_runtime_connection(&path)?;
+                    let tx = conn.transaction()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let authority = load_whole_blob_store_authority(&tx, &runtime_id)?;
+                    let observed = match authority {
+                        None => None,
+                        Some(authority) => {
+                            let bytes = tx
+                                .query_row(
+                                    "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                    params![authority.blob_sha256()],
+                                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                                 )
-                            })?;
-                        Some(CommittedWholeBlobSnapshot::new(
-                            Arc::new(bytes),
-                            authority,
-                        )?)
-                    }
+                                .optional()
+                                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                                .ok_or_else(|| {
+                                    session_authority_conflict(
+                                        &runtime_id,
+                                        "WholeBlob authority references a missing body",
+                                    )
+                                })?;
+                            Some((bytes, authority))
+                        }
+                    };
+                    tx.rollback()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    observed
                 };
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-                Ok(observed)
+                // The pair comes from one snapshot. Decode and hash its owned
+                // bytes after releasing SQLite, not under a writer reservation
+                // or a read snapshot that pins WAL reclamation.
+                observed
+                    .map(|(bytes, authority)| {
+                        CommittedWholeBlobSnapshot::new(Arc::new(bytes), authority)
+                    })
+                    .transpose()
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
@@ -14883,10 +14932,11 @@ ORDER BY runtime_id";
             let fault = self.unregister_finalization_fault.swap(0, Ordering::SeqCst);
             #[cfg(not(test))]
             let fault = 0_u8;
-            // Complete this rare finalization synchronously in the future's
-            // first poll. A detached blocking task could outlive cancellation
-            // and cross a same-runtime-ID replacement.
-            {
+            // Retain finalization in this poll: a detached blocking task could
+            // outlive cancellation and cross a same-runtime-ID replacement.
+            // On a multithread runtime, hand the worker back before waiting
+            // for SQLite so unrelated resumes and drain feedback can progress.
+            let finalize = || {
                 let mut conn = open_runtime_connection(&path)?;
                 let final_lifecycle_record =
                     MachineLifecycleStoreRecord::from_snapshot(&snapshot).encode()?;
@@ -15000,6 +15050,13 @@ ORDER BY runtime_id";
                         "commit acknowledgement failed ({commit_error}); reopened lifecycle/input/ops bytes match neither final nor pre-transaction authority"
                     ),
                 ))
+            };
+            if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            }) {
+                tokio::task::block_in_place(finalize)
+            } else {
+                finalize()
             }
         }
 
@@ -20758,6 +20815,95 @@ ORDER BY runtime_id";
                     .is_none(),
                 "cancellation may observe the complete transaction, never a delayed or split write"
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+        async fn contended_unregister_finalization_does_not_starve_runtime_worker() {
+            let (_dir, store) = temp_store();
+            let store = Arc::new(store);
+            let runtime_id = runtime_id();
+            let epoch = meerkat_core::RuntimeEpochId::new();
+            let finalization = crate::store::UnregisterFinalizationCommit::new(
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![input_state()],
+                epoch,
+                crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+            );
+            let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+            let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel(1);
+            let path = store.path.clone();
+            let writer = std::thread::spawn(move || {
+                let mut conn = open_runtime_connection(&path).unwrap();
+                let tx = begin_runtime_transaction(&mut conn).unwrap();
+                locked_tx.send(()).unwrap();
+                let progressed = progress_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+                drop(tx);
+                progressed
+            });
+            locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let finalizer = tokio::spawn({
+                let store = store.clone();
+                let runtime_id = runtime_id.clone();
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    store
+                        .commit_unregister_finalization(&runtime_id, finalization)
+                        .await
+                }
+            });
+            entered.notified().await;
+            let heartbeat = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = progress_tx.send(());
+            });
+            finalizer.await.unwrap().unwrap();
+            heartbeat.await.unwrap();
+            assert!(
+                writer.join().unwrap(),
+                "SQLite finalization starved the Tokio worker"
+            );
+            assert!(
+                crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        #[test]
+        fn runtime_writer_contention_reports_code_path_and_callsite() {
+            let (_dir, store) = temp_store();
+            let mut writer = open_runtime_connection(store.path()).unwrap();
+            let mut contender = open_runtime_connection(store.path()).unwrap();
+            contender.busy_timeout(Duration::ZERO).unwrap();
+            let _tx = begin_runtime_transaction(&mut writer).unwrap();
+            let error = begin_runtime_transaction(&mut contender).unwrap_err();
+            let RuntimeStoreError::SqliteOperationFailed {
+                primary_code,
+                extended_code,
+                path,
+                operation,
+                caller,
+                ..
+            } = error
+            else {
+                panic!("missing structured SQLite failure: {error}");
+            };
+            assert_eq!(primary_code, rusqlite::ffi::SQLITE_BUSY);
+            assert_eq!(extended_code, rusqlite::ffi::SQLITE_BUSY);
+            assert_eq!(
+                std::fs::canonicalize(path).unwrap(),
+                std::fs::canonicalize(store.path()).unwrap(),
+            );
+            assert_eq!(operation, "BEGIN IMMEDIATE");
+            assert_eq!(caller.file(), file!());
+            assert!(caller.line() > 0);
         }
 
         #[tokio::test]

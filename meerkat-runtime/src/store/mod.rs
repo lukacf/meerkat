@@ -2334,6 +2334,19 @@ pub enum RuntimeStoreError {
     /// Read failed.
     #[error("Store read failed: {0}")]
     ReadFailed(String),
+    /// SQLite connection setup or transaction admission failed. These codes
+    /// describe the backend failure, not permission to retry a domain write.
+    #[error(
+        "SQLite operation failed: {message}; primary_code={primary_code}; extended_code={extended_code}; path={path}; operation={operation}; caller={caller}"
+    )]
+    SqliteOperationFailed {
+        primary_code: i32,
+        extended_code: i32,
+        path: String,
+        operation: &'static str,
+        caller: &'static std::panic::Location<'static>,
+        message: String,
+    },
     /// The explicit session-store key does not match the serialized session.
     #[error("Session store key mismatch: expected {expected}, actual {actual}")]
     SessionKeyMismatch {

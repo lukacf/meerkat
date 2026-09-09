@@ -31,6 +31,9 @@
 //!
 //! Concurrent opens race safely: the loser's in-transaction re-read sees the
 //! winner's committed version and applies nothing.
+//! An already-current domain is verified in a read-only snapshot first;
+//! it needs no writer reservation. If migration is needed, that snapshot is
+//! dropped before BEGIN IMMEDIATE and eligibility is re-read from scratch.
 //!
 //! # Compatibility floor
 //!
@@ -511,15 +514,31 @@ pub fn preflight_schema_eligibility(
 /// Bring `domain` up to date in the file behind `conn`, per the pinned
 /// protocol. Returns the version movement.
 ///
-/// Eligibility, including the current-version no-op, is established under
-/// one IMMEDIATE transaction. A future or unsupported version is refused
-/// before any schema or ledger mutation.
+/// The current-version no-op is authenticated in one read-only snapshot.
+/// Migration eligibility is re-established under one IMMEDIATE transaction;
+/// the read snapshot is never upgraded to a writer. A future or unsupported
+/// version is refused before any schema or ledger mutation.
 pub fn apply_domain_migrations(
     conn: &mut Connection,
     domain: &SchemaDomain,
 ) -> Result<LedgerReport, SqliteStoreError> {
     domain.validate()?;
     let supported = domain.supported_version();
+
+    {
+        let read = conn.transaction()?;
+        let is_current = domain_version(&read, domain.name)? == Some(supported);
+        if is_current {
+            domain.verify_predecessor(&read, supported)?;
+        }
+        read.rollback()?;
+        if is_current {
+            return Ok(LedgerReport {
+                from_version: supported,
+                to_version: supported,
+            });
+        }
+    }
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     // Establish eligibility inside the write transaction. No ledger or
@@ -554,6 +573,7 @@ pub fn apply_domain_migrations(
     }
     let current = current.unwrap_or(0);
     if current == supported {
+        tx.rollback()?;
         return Ok(LedgerReport {
             from_version: current,
             to_version: current,
@@ -3446,6 +3466,28 @@ mod tests {
     }
 
     #[test]
+    fn current_schema_verification_does_not_take_the_wal_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("db.sqlite3");
+        let mut writer = open(&path, ConnectionProfile::PRIMARY).expect("writer");
+        apply_domain_migrations(&mut writer, &DOMAIN_V2).expect("initialize");
+        let mut reader = open(&path, ConnectionProfile::PRIMARY).expect("reader");
+        // Zero is deliberate only in this test: any attempted writer
+        // reservation reports its precise SQLite code instead of waiting.
+        reader
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("busy policy");
+        let tx = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("reserve unrelated writer");
+        let report = apply_domain_migrations(&mut reader, &DOMAIN_V2)
+            .expect("current schema verification must be a read-only snapshot");
+        assert!(!report.migrated());
+        assert!(reader.is_autocommit());
+        drop(tx);
+    }
+
+    #[test]
     fn concurrent_opens_race_safely() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("db.sqlite3");
@@ -3465,8 +3507,35 @@ mod tests {
                 migrated += 1;
             }
         }
-        assert!(migrated >= 1, "someone must have migrated");
+        assert_eq!(migrated, 1, "only the winning writer may initialize");
         let conn = open(&path, ConnectionProfile::ReadOnly).expect("reopen");
         assert_eq!(domain_version(&conn, "test-domain").expect("read"), Some(2));
+    }
+
+    #[test]
+    fn concurrent_predecessor_upgrade_rechecks_after_read_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("db.sqlite3");
+        let mut conn = open(&path, ConnectionProfile::PRIMARY).expect("seed");
+        apply_domain_migrations(&mut conn, &DOMAIN_V1).expect("version 1");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut conn = open(&path, ConnectionProfile::PRIMARY).expect("open");
+                    barrier.wait();
+                    apply_domain_migrations(&mut conn, &DOMAIN_V2).expect("upgrade")
+                })
+            })
+            .collect::<Vec<_>>();
+        let reports = handles
+            .into_iter()
+            .map(|thread| thread.join().expect("thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(reports.iter().filter(|report| report.migrated()).count(), 1);
+        assert!(reports.iter().all(|report| report.to_version == 2));
+        preflight_schema_eligibility(&conn, &DOMAIN_V2).expect("verified upgraded catalog");
     }
 }

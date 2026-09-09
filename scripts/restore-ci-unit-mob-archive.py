@@ -21,7 +21,7 @@ def candidate_runs(rows, repository, commit, current_run):
         if type(row.get("id")) is int
         and 0 < row["id"] < current_run
         and row.get("head_sha") == commit
-        and row.get("event") == "push"
+        and row.get("event") in ("push", "workflow_dispatch")
         and row.get("status") == "completed"
         and row.get("conclusion") == "success"
         and row.get("path") == ".github/workflows/ci.yml"
@@ -75,7 +75,7 @@ def github_json(endpoint):
 def restore(repository, commit, current_run, destination):
     runs = github_json(
         f"repos/{repository}/actions/workflows/ci.yml/runs"
-        f"?event=push&status=success&head_sha={commit}&per_page=20"
+        f"?status=success&head_sha={commit}&per_page=20"
     )
     for run_id in candidate_runs(
         runs["workflow_runs"], repository, commit, current_run

@@ -37,16 +37,24 @@ class ArchiveReuseTests(unittest.TestCase):
             "workflow_run": {"id": 10, "head_sha": COMMIT},
         }
 
-    def test_only_completed_successful_exact_commit_push_ci_is_reusable(self):
+    def test_only_completed_successful_exact_commit_trusted_ci_is_reusable(self):
         row = self.run_row()
         self.assertEqual(
             RESTORE.candidate_runs([row], "owner/repo", COMMIT, 11), [10]
+        )
+        self.assertEqual(
+            RESTORE.candidate_runs(
+                [{**row, "event": "workflow_dispatch"}], "owner/repo", COMMIT, 11
+            ),
+            [10],
         )
         for field, value in [
             ("id", 11),
             ("id", -1),
             ("head_sha", "b" * 40),
             ("event", "pull_request"),
+            ("event", "pull_request_target"),
+            ("event", "workflow_run"),
             ("status", "in_progress"),
             ("conclusion", "failure"),
             ("path", ".github/workflows/untrusted.yml"),
@@ -60,6 +68,33 @@ class ArchiveReuseTests(unittest.TestCase):
                     ),
                     [],
                 )
+
+    def test_dispatched_ci_retains_every_provenance_requirement(self):
+        row = {**self.run_row(), "event": "workflow_dispatch"}
+        for field, value in [
+            ("head_sha", "b" * 40),
+            ("status", "in_progress"),
+            ("conclusion", "cancelled"),
+            ("path", ".github/workflows/untrusted.yml"),
+            ("head_repository", {"full_name": "fork/repo"}),
+        ]:
+            with self.subTest(field=field):
+                self.assertEqual(
+                    RESTORE.candidate_runs(
+                        [{**row, field: value}], "owner/repo", COMMIT, 11
+                    ),
+                    [],
+                )
+
+    def test_discovery_includes_dispatched_runs(self):
+        with patch.object(
+            RESTORE, "github_json", return_value={"workflow_runs": []}
+        ) as request:
+            RESTORE.restore("owner/repo", COMMIT, 11, Path("unused.tar.zst"))
+        endpoint = request.call_args.args[0]
+        self.assertNotIn("event=", endpoint)
+        self.assertIn(f"head_sha={COMMIT}", endpoint)
+        self.assertIn("status=success", endpoint)
 
     def test_artifact_identity_digest_and_uniqueness_are_required(self):
         row = self.artifact()

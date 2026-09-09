@@ -121,6 +121,10 @@ them.
   conflicts under the turn-finalization boundary using the existing finite
   observation budget. Callers already holding that boundary use the
   boundary-owned read rather than reacquiring their own lock.
+- CI archive reuse now recognizes successful manually dispatched CI runs as
+  well as pushes. It still requires the identical commit, owning repository,
+  canonical workflow, and verified artifact digest; test execution and CI
+  deadlines are unchanged.
 
 ## [0.8.35] - 2026-09-07
 

@@ -59,6 +59,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_initial_input(true).await
+    }
+
+    async fn with_initial_input(include_main: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SqliteRuntimeStore::new(dir.path().join("runtime.sqlite")).unwrap());
         let session_id = SessionId::parse("01a000bb-b69e-7570-933d-ffd5d61d51ee").unwrap();
@@ -85,19 +89,26 @@ impl Fixture {
             store.clone(),
             Arc::new(meerkat_store::MemoryBlobStore::new()),
         );
-        let main = Input::Prompt(PromptInput::new("run in progress", None));
-        let main_id = main.id().clone();
-        driver.accept_input(main).await.unwrap();
+        let main_id = if include_main {
+            let main = Input::Prompt(PromptInput::new("run in progress", None));
+            let main_id = main.id().clone();
+            driver.accept_input(main).await.unwrap();
+            Some(main_id)
+        } else {
+            None
+        };
         let run_id = RunId::from_uuid(
             uuid::Uuid::parse_str("01a0826a-f847-7ef2-8753-400d56761ce1").unwrap(),
         );
         driver.contract_begin_run_authority(run_id.clone()).unwrap();
-        driver
-            .machine_realize_authorized_stage_batch(test_authorized_stage_for_run(
-                vec![main_id],
-                run_id.clone(),
-            ))
-            .unwrap();
+        if let Some(main_id) = main_id {
+            driver
+                .machine_realize_authorized_stage_batch(test_authorized_stage_for_run(
+                    vec![main_id],
+                    run_id.clone(),
+                ))
+                .unwrap();
+        }
         Self {
             _dir: dir,
             store,
@@ -118,28 +129,7 @@ impl Fixture {
     }
 
     async fn checkpoint_in_run(&self, input_id: InputId, run_id: &RunId) {
-        let mut header = PromptInput::new("", None).header;
-        header.id = input_id.clone();
-        header.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-08T19:09:09.690958Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        header.source = InputOrigin::Peer {
-            peer_id: "checkpoint-peer".into(),
-            display_identity: None,
-            runtime_id: None,
-        };
-        let input = Input::Peer(PeerInput {
-            header,
-            directed_interaction_id: None,
-            convention: Some(PeerConvention::Message),
-            content: "already consumed steer".into(),
-            payload: None,
-            handling_mode: Some(HandlingMode::Steer),
-            sender_taint: None,
-            objective_id: None,
-            system_prompts: Vec::new(),
-            injected_context: Vec::new(),
-        });
+        let input = checkpoint_peer_input(input_id.clone());
         let mut entry = self.driver.lock().await;
         let admission = entry
             .resolve_admission_with_active_turn_boundary(&input, true)
@@ -154,6 +144,47 @@ impl Fixture {
             )
             .await
             .unwrap();
+    }
+
+    async fn checkpoint_batch(&self, input_ids: &[InputId]) {
+        let mut entry = self.driver.lock().await;
+        for input_id in input_ids {
+            let input = checkpoint_peer_input(input_id.clone());
+            let admission = entry
+                .resolve_admission_with_active_turn_boundary(&input, true)
+                .unwrap();
+            entry.accept_resolved_input(input, admission).await.unwrap();
+        }
+        let stage = machine_authorize_stage_for_run(
+            &entry,
+            &self.run_id,
+            input_ids,
+            RuntimeLoopBatchSource::Steer,
+        )
+        .expect("the generated same-boundary batch must authorize both inputs");
+        if let DriverEntry::Persistent(driver) = &mut *entry {
+            driver
+                .machine_realize_authorized_stage_batch(stage)
+                .unwrap();
+        }
+        drop(entry);
+        commit_runtime_loop_run(
+            &self.driver,
+            self.run_id.clone(),
+            input_ids.to_vec(),
+            meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                run_id: self.run_id.clone(),
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                contributing_input_ids: input_ids.to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("the actual runtime batch boundary must commit");
     }
 
     async fn pending(&self, input_id: &InputId) -> StoredInputState {
@@ -261,6 +292,31 @@ impl Fixture {
     }
 }
 
+fn checkpoint_peer_input(input_id: InputId) -> Input {
+    let mut header = PromptInput::new("", None).header;
+    header.id = input_id;
+    header.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-08T19:09:09.690958Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    header.source = InputOrigin::Peer {
+        peer_id: "checkpoint-peer".into(),
+        display_identity: None,
+        runtime_id: None,
+    };
+    Input::Peer(PeerInput {
+        header,
+        directed_interaction_id: None,
+        convention: Some(PeerConvention::Message),
+        content: "already consumed steer".into(),
+        payload: None,
+        handling_mode: Some(HandlingMode::Steer),
+        sender_taint: None,
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+    })
+}
+
 fn old_input_id() -> InputId {
     InputId::from_uuid(uuid::Uuid::parse_str("01a0826c-96ba-7b53-8706-6352bdbe76d0").unwrap())
 }
@@ -325,6 +381,113 @@ fn assert_run_unchanged(before: &mm::MeerkatMachineState, after: &mm::MeerkatMac
     );
     assert_eq!(before.terminal_outcome, after.terminal_outcome);
     assert_eq!(before.terminal_cause_kind, after.terminal_cause_kind);
+}
+
+#[tokio::test]
+async fn multi_recipient_checkpoint_finalizes_exact_cohort_once_live_and_after_restart() {
+    for cold in [false, true] {
+        let fixture = Fixture::with_initial_input(false).await;
+        let inputs = [old_input_id(), InputId::new()];
+        fixture.checkpoint_batch(&inputs).await;
+        let owner = fixture.pending(&inputs[0]).await;
+        assert_eq!(
+            owner
+                .state
+                .terminal_completion
+                .as_ref()
+                .unwrap()
+                .completion_input_ids
+                .as_deref(),
+            Some(inputs.as_slice()),
+        );
+        let driver = if cold {
+            fixture.fresh_driver_from_durable().await.unwrap()
+        } else {
+            fixture.driver.clone()
+        };
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .unwrap();
+        fixture.assert_finalized(&inputs[0]).await;
+        let second = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), &inputs[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed)
+        );
+        let completion = second.state.terminal_completion.unwrap();
+        assert_eq!(completion.owner_input_id, inputs[0]);
+        assert!(matches!(
+            completion.phase,
+            InputTerminalCompletionPhase::Finalized { .. }
+        ));
+        assert!(
+            completion.outcome.is_none(),
+            "only the exact owner stores the shared outcome"
+        );
+        let receipts = inputs
+            .iter()
+            .map(|id| fixture.raw_row(id))
+            .collect::<Vec<_>>();
+        crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+            &driver,
+            &mut NoExecution,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receipts,
+            inputs
+                .iter()
+                .map(|id| fixture.raw_row(id))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_recipient_checkpoint_refuses_a_nonowner_with_wrong_run_or_terminal() {
+    for wrong_run in [true, false] {
+        let fixture = Fixture::with_initial_input(false).await;
+        let inputs = [old_input_id(), InputId::new()];
+        fixture.checkpoint_batch(&inputs).await;
+        let owner_before = fixture.raw_row(&inputs[0]);
+        let mut other = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), &inputs[1])
+            .await
+            .unwrap()
+            .unwrap();
+        if wrong_run {
+            other.seed.last_run_id = Some(RunId::new());
+        } else {
+            other.seed.phase = InputLifecycleState::Abandoned;
+            other.seed.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
+                reason: crate::input_state::InputAbandonReason::Cancelled,
+            });
+        }
+        let bytes = serde_json::to_vec(&other).unwrap();
+        fixture.replace_fixture_row(&inputs[1], &bytes);
+        if let Ok(fresh) = fixture.fresh_driver_from_durable().await {
+            assert!(
+                crate::runtime_loop::test_drain_recovered_input_terminal_completions(
+                    &fresh,
+                    &mut NoExecution,
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(owner_before, fixture.raw_row(&inputs[0]));
+        assert_eq!(bytes, fixture.raw_row(&inputs[1]));
+    }
 }
 
 #[tokio::test]

@@ -3274,7 +3274,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         result
     }
 
-    fn is_transcript_revision_conflict(result: &Result<Option<Session>, SessionError>) -> bool {
+    fn is_transcript_revision_conflict<T>(result: &Result<T, SessionError>) -> bool {
         matches!(
             result,
             Err(SessionError::Store(error))
@@ -4364,6 +4364,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
             };
         }
+    }
+
+    /// An unlocked live-presence observation can race the physical
+    /// checkpoint-to-boundary commit. Retry the complete observation under B,
+    /// with the same finite read budget as history/revision observations.
+    /// Callers that already own B must use the unwrapped authority read.
+    async fn live_session_authority_for_observation(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveSessionAuthority, SessionError> {
+        let mut result = self.live_session_authority(id).await;
+        for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
+            if !Self::is_transcript_revision_conflict(&result) {
+                break;
+            }
+            let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+            result = self.live_session_authority(id).await;
+        }
+        result
     }
 
     /// Ask the generated document machine to classify pure live-vs-store
@@ -11172,7 +11191,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        match self.live_session_authority(id).await? {
+        match self.live_session_authority_for_observation(id).await? {
             LiveSessionAuthority::NoLive => Ok(false),
             LiveSessionAuthority::LiveAuthoritative { .. } => Ok(true),
             LiveSessionAuthority::DurableAuthoritative { session, .. } => {
@@ -34319,6 +34338,51 @@ mod tests {
             conflicts,
             "every conflicting read within the budget must be retried"
         );
+    }
+
+    #[tokio::test]
+    async fn live_presence_observation_retries_a_head_advance_under_turn_boundary() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        runtime_store.serve_stale_authority(superseded, 2);
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("live presence must re-observe a concurrently advanced head")
+        );
+        assert_eq!(runtime_store.stale_reads_served(), 2);
+    }
+
+    #[tokio::test]
+    async fn live_presence_observation_preserves_the_finite_conflict_budget() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        runtime_store.serve_stale_authority(superseded, 2 * OBSERVATION_LOAD_ATTEMPTS + 4);
+        let result = service.has_live_session(&session_id).await;
+        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
+        assert_eq!(
+            runtime_store.stale_reads_served(),
+            2 * OBSERVATION_LOAD_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_owned_live_presence_does_not_reacquire_its_boundary() {
+        let (runtime_store, service, session_id, superseded, _storage_dir) =
+            stale_authority_observation_fixture().await;
+        let _boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        runtime_store.serve_stale_authority(superseded, 2);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.has_live_session_under_runtime_turn_boundary(&session_id),
+        )
+        .await
+        .expect("the boundary-owned read must not wait on itself");
+        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
+        assert_eq!(runtime_store.stale_reads_served(), 2);
     }
 
     /// #1104: the budget is counted, not timed, and it is finite: once spent,

@@ -45,8 +45,10 @@ them.
   `ResolveCheckpointCompletionResult`. `MeerkatMachineEffect`,
   `MeerkatMachineEffectVariant`, and generated `Effect` / `EffectKind` gain
   `TerminalCompletionCorrelationClassified` and
-  `CheckpointCompletionResultResolved`. These are internal completion
-  authority stages, not new surface RPCs.
+  `CheckpointCompletionResultResolved`. `ClassifyTerminalCompletionCorrelation`
+  and `ResolveCheckpointCompletionResult` take the exact `recipient_input_ids`
+  set; `CheckpointCompletionResultResolved` echoes that set. These are internal
+  completion authority stages, not new surface RPCs.
 - **Generated transition vocabulary:** `TransitionId` gains
   `RecoverInputCompletionBoundaryInitializing`,
   `RecoverInputCompletionBoundaryIdle`,
@@ -108,6 +110,13 @@ them.
   newer run, session continuity, and the committed transcript. Mismatched
   candidates or receipts still fail closed; recovery does not delete pending
   owners or manufacture publication acknowledgements.
+- Batched checkpoint completions validate and retain the complete consumed
+  recipient set, so multiple Steer inputs receive their commit-gated completion
+  events without competing for ordinary run-result correlation.
+- Live-session presence observations re-read transient HeadCanonical revision
+  conflicts under the turn-finalization boundary using the existing finite
+  observation budget. Callers already holding that boundary use the
+  boundary-owned read rather than reacquiring their own lock.
 
 ## [0.8.35] - 2026-09-07
 

@@ -15321,7 +15321,7 @@ pub mod inputs {
         pub owner_input_id: String,
         pub run_id: Option<RunId>,
         pub terminal: Option<RuntimeCompletionTerminalObservation>,
-        pub recipient_count: u64,
+        pub recipient_input_ids: std::collections::BTreeSet<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverInputCompletionBoundary {
@@ -15338,7 +15338,7 @@ pub mod inputs {
         pub candidate_digest: String,
         pub completion_input_ids_digest: String,
         pub requires_session_checkpoint: bool,
-        pub recipient_count: u64,
+        pub recipient_input_ids: std::collections::BTreeSet<String>,
         pub finalization: RuntimeCompletionFinalizationObservation,
     }
 }
@@ -18099,6 +18099,7 @@ pub mod effects {
         pub owner_input_id: String,
         pub candidate_digest: String,
         pub completion_input_ids_digest: String,
+        pub recipient_input_ids: std::collections::BTreeSet<String>,
         pub requires_session_checkpoint: bool,
         pub result_class: RuntimeCompletionResultClass,
         pub cleanup_outcome: RuntimeCompletionObservedOutcome,

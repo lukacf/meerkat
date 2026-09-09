@@ -797,9 +797,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeInteractionTerminalOutboxAdoption`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>)
 - `ClassifyRecoveredTerminalCompletionBatch`(batch_key: String, correlatable: Bool, owner_candidate_present: Bool, directed_publication_pending: Bool)
 - `DeclareRecoveredTerminalCompletionUnrecoverable`(batch_key: String, reason: RecoveredTerminalCompletionUnrecoverableReasonKind)
-- `ClassifyTerminalCompletionCorrelation`(owner_input_id: String, run_id: Option<RunId>, terminal: Option<RuntimeCompletionTerminalObservation>, recipient_count: u64)
+- `ClassifyTerminalCompletionCorrelation`(owner_input_id: String, run_id: Option<RunId>, terminal: Option<RuntimeCompletionTerminalObservation>, recipient_input_ids: Set<String>)
 - `RecoverInputCompletionBoundary`(input_id: String, run_id: RunId, sequence: u64, boundary: Option<RecoveredRunApplyBoundary>, execution_kind: RecoveredRuntimeExecutionKind)
-- `ResolveCheckpointCompletionResult`(owner_input_id: String, run_id: RunId, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, recipient_count: u64, finalization: RuntimeCompletionFinalizationObservation)
+- `ResolveCheckpointCompletionResult`(owner_input_id: String, run_id: RunId, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, recipient_input_ids: Set<String>, finalization: RuntimeCompletionFinalizationObservation)
 
 ## Signals
 - `Initialize`
@@ -1036,7 +1036,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoveredTerminalCompletionBatchClassified`(batch_key: String, disposition: RecoveredTerminalCompletionDisposition)
 - `RecoveredTerminalCompletionDeclaredUnrecoverable`(batch_key: String, reason: RecoveredTerminalCompletionUnrecoverableReasonKind)
 - `TerminalCompletionCorrelationClassified`(owner_input_id: String, run_id: Option<RunId>, correlation: TerminalCompletionCorrelation)
-- `CheckpointCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
+- `CheckpointCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, recipient_input_ids: Set<String>, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1261,18 +1261,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
-  - `ResolveCheckpointCompletionResultSucceededInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultSucceededIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultSucceededAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultSucceededRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultSucceededRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultSucceededStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_succeeded`
-  - `ResolveCheckpointCompletionResultFailedInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
-  - `ResolveCheckpointCompletionResultFailedIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
-  - `ResolveCheckpointCompletionResultFailedAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
-  - `ResolveCheckpointCompletionResultFailedRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
-  - `ResolveCheckpointCompletionResultFailedRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
-  - `ResolveCheckpointCompletionResultFailedStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultSucceededInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultSucceededStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_succeeded`
+  - `ResolveCheckpointCompletionResultFailedInitializing`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedIdle`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedAttached`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedRunning`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedRetired`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
+  - `ResolveCheckpointCompletionResultFailedStopped`: `session_registered`, `checkpoint_input`, `exact_consumed_checkpoint`, `all_recipients_consumed_by_run`, `finalization_failed`
   - `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
 - Command Effects: `RuntimeCompletionResultResolved`, `CheckpointCompletionResultResolved`
 - Effect Closure:
@@ -24572,67 +24572,73 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointInitializing`
 - From: `Initializing`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Initializing`
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointIdle`
 - From: `Idle`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Idle`
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointAttached`
 - From: `Attached`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Attached`
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointRunning`
 - From: `Running`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Running`
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointRetired`
 - From: `Retired`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Retired`
 
 ### `ClassifyTerminalCompletionCorrelationCheckpointStopped`
 - From: `Stopped`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Stopped`
 
 ### `ClassifyTerminalCompletionCorrelationRunInitializing`
 - From: `Initializing`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24641,7 +24647,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunIdle`
 - From: `Idle`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24650,7 +24656,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunAttached`
 - From: `Attached`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24659,7 +24665,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunRunning`
 - From: `Running`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24668,7 +24674,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunRetired`
 - From: `Retired`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24677,7 +24683,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunStopped`
 - From: `Stopped`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24686,7 +24692,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyTerminalCompletionCorrelationRunDestroyed`
 - From: `Destroyed`
-- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_count)
+- On: `ClassifyTerminalCompletionCorrelation`(owner_input_id, run_id, terminal, recipient_input_ids)
 - Guards:
   - `session_registered`
   - `ordinary_run_completion`
@@ -24695,132 +24701,144 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveCheckpointCompletionResultSucceededInitializing`
 - From: `Initializing`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Initializing`
 
 ### `ResolveCheckpointCompletionResultSucceededIdle`
 - From: `Idle`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Idle`
 
 ### `ResolveCheckpointCompletionResultSucceededAttached`
 - From: `Attached`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Attached`
 
 ### `ResolveCheckpointCompletionResultSucceededRunning`
 - From: `Running`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Running`
 
 ### `ResolveCheckpointCompletionResultSucceededRetired`
 - From: `Retired`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Retired`
 
 ### `ResolveCheckpointCompletionResultSucceededStopped`
 - From: `Stopped`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_succeeded`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Stopped`
 
 ### `ResolveCheckpointCompletionResultFailedInitializing`
 - From: `Initializing`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Initializing`
 
 ### `ResolveCheckpointCompletionResultFailedIdle`
 - From: `Idle`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Idle`
 
 ### `ResolveCheckpointCompletionResultFailedAttached`
 - From: `Attached`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Attached`
 
 ### `ResolveCheckpointCompletionResultFailedRunning`
 - From: `Running`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Running`
 
 ### `ResolveCheckpointCompletionResultFailedRetired`
 - From: `Retired`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Retired`
 
 ### `ResolveCheckpointCompletionResultFailedStopped`
 - From: `Stopped`
-- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization)
+- On: `ResolveCheckpointCompletionResult`(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
 - Guards:
   - `session_registered`
   - `checkpoint_input`
   - `exact_consumed_checkpoint`
+  - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
 - To: `Stopped`

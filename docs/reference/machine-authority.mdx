@@ -114,9 +114,11 @@ receipt is finalized. Its `CompletedWithoutResult` candidate is not a new
 existing run association, independently of the latest run-result slot.
 `ClassifyTerminalCompletionCorrelation` identifies the exact checkpoint
 shape; `ResolveCheckpointCompletionResult` emits authority bound to its
-session, run, owner input, candidate digest, recipient digest, and checkpoint
-requirement. Neither command replaces a newer active run or changes its
-terminal facts.
+session, run, owner input, candidate digest, complete recipient set and digest,
+and checkpoint requirement. Every recipient must be consumed by that exact
+run. A same-boundary Steer batch can have multiple recipients while retaining
+one canonical owner. Neither command replaces a newer active run or changes
+its terminal facts.
 
 The boundary is the **committed receipt's** boundary, not merely the input's
 requested steer mode. Live realization records it with `RecordBoundarySeq`;

@@ -10137,10 +10137,20 @@ mod tests {
         let admitted = tokio::time::timeout(std::time::Duration::from_secs(15), webhook_task)
             .await
             .expect("peer terminal webhook should finish after the running turn releases")
-            .expect("peer terminal webhook task should not panic")
-            .expect(
-                "running target peer terminal webhook should bypass new-session capacity precheck",
-            );
+            .expect("peer terminal webhook task should not panic");
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            Err(response) => {
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("read failed webhook response");
+                panic!(
+                    "running target peer terminal webhook should bypass new-session capacity precheck: {status}: {}",
+                    String::from_utf8_lossy(&body),
+                );
+            }
+        };
         assert_eq!(admitted.0, StatusCode::ACCEPTED);
 
         release.add_permits(1);

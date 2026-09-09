@@ -6212,7 +6212,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 owner_input_id: String,
                 run_id: Option<RunId>,
                 terminal: Option<Enum<RuntimeCompletionTerminalObservation>>,
-                recipient_count: u64,
+                recipient_input_ids: Set<String>,
             },
             RecoverInputCompletionBoundary {
                 input_id: String,
@@ -6227,7 +6227,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 candidate_digest: String,
                 completion_input_ids_digest: String,
                 requires_session_checkpoint: bool,
-                recipient_count: u64,
+                recipient_input_ids: Set<String>,
                 finalization: Enum<RuntimeCompletionFinalizationObservation>,
             },
         }
@@ -7407,6 +7407,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 owner_input_id: String,
                 candidate_digest: String,
                 completion_input_ids_digest: String,
+                recipient_input_ids: Set<String>,
                 requires_session_checkpoint: bool,
                 result_class: Enum<RuntimeCompletionResultClass>,
                 cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
@@ -31746,7 +31747,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyTerminalCompletionCorrelationCheckpoint {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_count }
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids }
             guard "session_registered" { self.session_id != None }
             guard "checkpoint_input" {
                 self.input_completion_boundaries.contains_key(owner_input_id)
@@ -31756,7 +31757,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "exact_consumed_checkpoint" {
                 terminal == Some(RuntimeCompletionTerminalObservation::NoResult)
-                && recipient_count == 1
+                && recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
                 && run_id != None
                 && self.input_phases.contains_key(owner_input_id)
                 && self.input_phases.get(owner_input_id).get("value") == InputPhase::Consumed
@@ -31764,6 +31767,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
                 && self.input_run_associations.contains_key(owner_input_id)
                 && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
+            }
+            guard "all_recipients_consumed_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Consumed
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Consumed
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id.get("value"))
             }
             update {}
             to Idle
@@ -31776,7 +31788,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyTerminalCompletionCorrelationRun {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
-            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_count }
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids }
             guard "session_registered" { self.session_id != None }
             guard "ordinary_run_completion" {
                 run_id == None
@@ -31806,7 +31818,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveCheckpointCompletionResultSucceeded {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization }
+            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization }
             guard "session_registered" { self.session_id != None }
             guard "checkpoint_input" {
                 self.input_completion_boundaries.contains_key(owner_input_id)
@@ -31815,7 +31827,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_runtime_execution_kind.get(owner_input_id).get("value") == RecoveredRuntimeExecutionKind::ContentTurn
             }
             guard "exact_consumed_checkpoint" {
-                recipient_count == 1
+                recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
                 && candidate_digest != ""
                 && completion_input_ids_digest != ""
                 && self.input_phases.contains_key(owner_input_id)
@@ -31824,6 +31838,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
                 && self.input_run_associations.contains_key(owner_input_id)
                 && self.input_run_associations.get(owner_input_id).get("value") == run_id
+            }
+            guard "all_recipients_consumed_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Consumed
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Consumed
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id)
             }
             guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
             update {}
@@ -31838,6 +31861,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 owner_input_id: owner_input_id,
                 candidate_digest: candidate_digest,
                 completion_input_ids_digest: completion_input_ids_digest,
+                recipient_input_ids: recipient_input_ids,
                 requires_session_checkpoint: requires_session_checkpoint,
                 result_class: RuntimeCompletionResultClass::CompletedWithoutResult,
                 cleanup_outcome: RuntimeCompletionObservedOutcome::CompletedWithoutResult
@@ -31846,7 +31870,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ResolveCheckpointCompletionResultFailed {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_count, finalization }
+            on input ResolveCheckpointCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization }
             guard "session_registered" { self.session_id != None }
             guard "checkpoint_input" {
                 self.input_completion_boundaries.contains_key(owner_input_id)
@@ -31855,7 +31879,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_runtime_execution_kind.get(owner_input_id).get("value") == RecoveredRuntimeExecutionKind::ContentTurn
             }
             guard "exact_consumed_checkpoint" {
-                recipient_count == 1
+                recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
                 && candidate_digest != ""
                 && completion_input_ids_digest != ""
                 && self.input_phases.contains_key(owner_input_id)
@@ -31864,6 +31890,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_terminal_kind.get(owner_input_id).get("value") == InputTerminalKind::Consumed
                 && self.input_run_associations.contains_key(owner_input_id)
                 && self.input_run_associations.get(owner_input_id).get("value") == run_id
+            }
+            guard "all_recipients_consumed_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Consumed
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Consumed
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id)
             }
             guard "finalization_failed" { finalization == RuntimeCompletionFinalizationObservation::Failed }
             update {}
@@ -31878,6 +31913,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 owner_input_id: owner_input_id,
                 candidate_digest: candidate_digest,
                 completion_input_ids_digest: completion_input_ids_digest,
+                recipient_input_ids: recipient_input_ids,
                 requires_session_checkpoint: requires_session_checkpoint,
                 result_class: RuntimeCompletionResultClass::AbandonedWithError,
                 cleanup_outcome: RuntimeCompletionObservedOutcome::FinalizationFailed

@@ -59,6 +59,7 @@ enum RuntimeCompletionAuthorityCorrelation {
     Run,
     CheckpointInput {
         owner_input_id: InputId,
+        recipient_input_ids: std::collections::HashSet<InputId>,
         candidate_digest: String,
         completion_input_ids_digest: String,
         requires_session_checkpoint: bool,
@@ -430,6 +431,7 @@ impl RuntimeCompletionResultAuthority {
                 RuntimeCompletionAuthorityCorrelation::Run => true,
                 RuntimeCompletionAuthorityCorrelation::CheckpointInput {
                     owner_input_id,
+                    recipient_input_ids,
                     candidate_digest,
                     completion_input_ids_digest,
                     requires_session_checkpoint,
@@ -437,7 +439,11 @@ impl RuntimeCompletionResultAuthority {
                     && candidate_digest == &witness.candidate_digest
                     && completion_input_ids_digest == &witness.completion_input_ids_digest
                     && requires_session_checkpoint == &witness.requires_session_checkpoint
-                    && witness.recipients.len() == 1
+                    && recipient_input_ids.len() == witness.recipients.len()
+                    && witness.recipients.iter().all(|(input_id, outcome)| {
+                        recipient_input_ids.contains(input_id)
+                            && outcome == &InputTerminalOutcome::Consumed
+                    })
                     && witness.completion_boundary
                         == Some(
                             crate::meerkat_machine::dsl::RecoveredRunApplyBoundary::RunCheckpoint,
@@ -9265,10 +9271,8 @@ fn machine_classify_terminal_completion_correlation(
     use crate::meerkat_machine::dsl as mm;
     let owner_input_id = owner.owner_input_id.to_string();
     let run_id = owner.batch_key.run_id().map(mm::RunId::from_domain);
-    let recipient_count = u64::try_from(owner.completion_input_ids.as_ref().map_or(0, Vec::len))
-        .map_err(|error| RuntimeDriverError::RecoveryCorruption {
-            reason: format!("completion recipient count is unrepresentable: {error}"),
-        })?;
+    // Pass the whole batch so generated authority rejects partial consumption,
+    // rather than treating the owner's completion as proof for every recipient.
     let shared = driver.shared_dsl_authority();
     let mut authority = shared
         .lock()
@@ -9279,7 +9283,13 @@ fn machine_classify_terminal_completion_correlation(
             owner_input_id: owner_input_id.clone(),
             run_id: run_id.clone(),
             terminal,
-            recipient_count,
+            recipient_input_ids: owner
+                .completion_input_ids
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         },
     )
     .map_err(|error| RuntimeDriverError::RecoveryCorruption {
@@ -9343,6 +9353,10 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                 }
             })?;
             let shared = driver.shared_dsl_authority();
+            let expected_recipients = witness
+                .input_ids()
+                .map(ToString::to_string)
+                .collect::<std::collections::HashSet<_>>();
             let mut authority = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9354,11 +9368,7 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                     candidate_digest: witness.candidate_digest.clone(),
                     completion_input_ids_digest: witness.completion_input_ids_digest.clone(),
                     requires_session_checkpoint: witness.requires_session_checkpoint,
-                    recipient_count: u64::try_from(witness.recipients.len()).map_err(|error| {
-                        RuntimeDriverError::RecoveryCorruption {
-                            reason: error.to_string(),
-                        }
-                    })?,
+                    recipient_input_ids: expected_recipients.iter().cloned().collect(),
                     finalization,
                 },
             )
@@ -9380,6 +9390,7 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                     owner_input_id,
                     candidate_digest,
                     completion_input_ids_digest,
+                    recipient_input_ids,
                     requires_session_checkpoint,
                     result_class,
                     cleanup_outcome,
@@ -9392,6 +9403,10 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                     || candidate_digest != &witness.candidate_digest
                     || completion_input_ids_digest != &witness.completion_input_ids_digest
                     || *requires_session_checkpoint != witness.requires_session_checkpoint
+                    || recipient_input_ids.len() != expected_recipients.len()
+                    || !recipient_input_ids
+                        .iter()
+                        .all(|input_id| expected_recipients.contains(input_id))
                     || resolved.is_some()
                 {
                     return Err(RuntimeDriverError::RecoveryCorruption {
@@ -9417,6 +9432,7 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                 );
                 projected.correlation = RuntimeCompletionAuthorityCorrelation::CheckpointInput {
                     owner_input_id: witness.owner_input_id.clone(),
+                    recipient_input_ids: witness.input_ids().cloned().collect(),
                     candidate_digest: candidate_digest.clone(),
                     completion_input_ids_digest: completion_input_ids_digest.clone(),
                     requires_session_checkpoint: *requires_session_checkpoint,

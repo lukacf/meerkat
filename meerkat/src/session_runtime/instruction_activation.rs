@@ -9,7 +9,7 @@ use std::sync::Arc;
 use meerkat_core::{
     InstructionActivationAdmissionErrorCode, InstructionActivationDisposition,
     InstructionActivationMutation, InstructionActivationReceipt, InstructionActivationRequest,
-    SessionError, SessionId, SessionService as _, SessionServiceHistoryExt as _,
+    SessionError, SessionId, SessionServiceHistoryExt as _,
 };
 use meerkat_runtime::{
     RuntimeDriverError, RuntimeState, RuntimeStoreWriteFence, SessionServiceRuntimeExt as _,
@@ -130,7 +130,11 @@ impl MeerkatSessionRuntime {
             .service
             .acquire_runtime_turn_finalization_guard(session_id)
             .await;
-        if !self.service.has_live_session(session_id).await? {
+        if !self
+            .service
+            .has_live_session_under_runtime_turn_boundary(session_id)
+            .await?
+        {
             return Err(InstructionActivationHostError::Admission {
                 code: InstructionActivationAdmissionErrorCode::TargetNotMaterialized,
                 message: format!("session {session_id} is not currently materialized"),

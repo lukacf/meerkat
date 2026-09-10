@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -334,11 +334,17 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
       "identity": "identity:luka",
       "content": "What is on my calendar tomorrow?",
       "origin": "console:panel-1",
-      "idempotency_key": "panel-1:turn-1",
+      "idempotency_key": "panel-1:3f9c1c2e-6f7a-4c1b-9d2e-0b1a2c3d4e5f",
       "handling_mode": "queue"
     }
     ```
     Returns `{ "interaction_id": "...", "identity": "..." }`.
+
+    `idempotency_key` must be unique per send; the stock console mints one
+    UUID per send. Reusing a key with different content is rejected with HTTP
+    `409` / JSON-RPC `-32009 idempotency_conflict`. Reusing a key with
+    identical content is a replay: the original acceptance is returned and the
+    turn is not run again.
 
     The legacy `POST /console/send` route still exists for compatibility. New console clients should prefer JSON-RPC.
   </Step>
@@ -348,6 +354,14 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     event: text_delta
     data: {"id":"frame-1","cursor":"console:241","identity":"identity:luka","event":"text_delta","data":{"text":"done"}}
     ```
+    Correlate a send with its terminal by `interaction_id` on frames whose
+    `source.kind` is `console_event`. Session-history backfill re-emits past
+    turns as frames with `source.kind = "session_history"`; they carry the
+    persisted interaction id of the turn they replay and are never fresh
+    completions, so clients MUST exclude them from live turn handling (the
+    rule is stated with the frame shape under `mobkit/console/query_timeline`
+    in the [JSON-RPC reference](/mobkit/api/rpc)).
+
     If a requested cursor is no longer replayable, the stream returns `409 replay_unavailable`; refetch a recent page and resume from its `latest_cursor`.
   </Step>
 </Steps>
@@ -377,7 +391,27 @@ Primary RPC methods:
 - `mobkit/console/query_timeline` - timeline replay query
 - `mobkit/console/list_identities` and `mobkit/console/inspect_identity` - identity-first inspection
 - `mobkit/blob/upload` - multipart blob upload
-- `mobkit/retire`, `mobkit/respawn`, and `mobkit/reset` - operator lifecycle actions
+- `mobkit/reload_member` - non-destructive cold reload of one identity's live
+  member (same session, same generation); the repair for a member whose sends
+  fail with the reload-required class. Gated by the `agent.respawn` action.
+  `mobkit/member_health` is the matching read (`agent.view`): lifecycle
+  state, last delivery error class, and the actor-loop probe verdict with the
+  open `stall_id`, from in-process reads that answer during a stall.
+- `mobkit/retire`, `mobkit/respawn`, `mobkit/reset`, and `mobkit/reset_all` -
+  operator lifecycle actions. `reset_all` resets every identity the identity
+  runtime knows (generation advance, one `identity_reset` lifecycle frame
+  each, listed under `reset`) and retires only members with no registered
+  identity, such as raw delegates (listed under `retired_delegates`); a
+  registered identity on a runtime without a session bridge fails the
+  preflight with `identity_reset_requires_session_bridge` and nothing is
+  touched. Registered identities are classified by lifecycle state first: a
+  `retiring` identity is leaving the fleet and appears in no list, and a
+  registered identity with no live member (`dormant` before its first send,
+  `broken` after a failed materialize) is listed under `failed` with
+  `kind: identity_not_resettable_in_state` and its `state`, because a reset
+  is the bridge's successor transition and needs a live member to replace;
+  the identities beside it are still reset, and the call answers `-32000`
+  with the full body in `error.data`
 - `mobkit/send_message` - legacy member-addressed send path
 - `mobkit/topology/query`, `mobkit/topology/plan`, `mobkit/topology/apply`,
   `mobkit/topology/operation/get`, and `mobkit/topology/audit/query` - optional,
@@ -428,10 +462,14 @@ Coarse console access is governed by `ConsolePolicy`:
 
 ```rust
 ConsolePolicy {
-    require_app_auth: false,  // set true for production
+    require_app_auth: true,   // the default; set false only for local development
     read_only: false,         // set true for view-only deployments
 }
 ```
+
+`require_app_auth` defaults to `true`. The SDK builders expose the opt-out as
+`consoleAuthRequired(false)` (TypeScript) and `console_auth_required(False)`
+(Python); `rpc_gateway` reads it as `runtime_options.console_require_app_auth`.
 
 When `require_app_auth` is `true`, protected console JSON, RPC, blob, and stream
 requests are checked against the `AuthPolicy`. The shell, static assets, and

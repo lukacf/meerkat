@@ -4,7 +4,7 @@ description: "Configuration reference for MobKit: module definitions, runtime op
 icon: "gear"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -92,7 +92,7 @@ PreSpawnData {
 
 ## SDK and Gateway runtime options
 
-The stock SDK gateway consumes the `runtime_options` object sent by Python and TypeScript builders during `mobkit/init`.
+The stock SDK gateway (`rpc_gateway`) consumes the `runtime_options` object of `mobkit/init`. The Python and TypeScript builders emit it from their setters; where a row names a setter, that is the only way the SDK reaches the key, and a key with no setter on an SDK can be sent only from a hand-built `mobkit/init` payload. `mobkit_gateway` refuses a `runtime_options` object rather than dropping it.
 
 | Field | Type | Gateway behavior |
 |-------|------|------------------|
@@ -102,10 +102,13 @@ The stock SDK gateway consumes the `runtime_options` object sent by Python and T
 | `routing_config_path` | String | Loads JSON or TOML route config (`routes = [...]` / `[[routes]]`) and installs the routes into the unified runtime before serving RPCs. |
 | `gating_config_path` | String | Loads JSON or TOML action policies from an `actions` object and supplies a configured `risk_tier` for `mobkit/gating/evaluate` requests that omit `risk_tier`. |
 | `auth_config` | Object | Supports JWT shared-secret auth (`provider = "jwt"` / `shared_secret`) and wires the reference HTTP console/SSE routes to the configured trusted issuer, audience, and email allowlist. |
-| `console_config_path` | String | Loads a TOML `ConsoleUiConfig` and projects it through `/console/experience` as `console_config`. |
-| `console_require_app_auth` | Boolean | Overrides `ConsolePolicy.require_app_auth` for explicit gateway builds, commonly `false` for local demos. |
-| `console_read_only` | Boolean | Sets `ConsolePolicy.read_only` for SDK `rpc_gateway` launches; mutating console RPCs are denied and omitted from capabilities while read/stream routes stay available. |
+| `console_config_path` | String | Loads a TOML `ConsoleUiConfig` and projects it through `/console/experience` as `console_config`. Python `.console_config(path)`, TypeScript `.consoleConfig(path)`. |
+| `console_require_app_auth` | Boolean | Overrides `ConsolePolicy.require_app_auth`. The default is fail-closed: without `auth_config` the gateway's decision state trusts no signing key, so a console that still requires app auth refuses every request with 401, and the gateway logs a startup warning naming this. `false` is the explicit opt-out for a local or host-protected console. Python `.console_auth_required(False)`, TypeScript `.consoleAuthRequired(false)`; the Rust library twin is `RuntimeDecisionState::local_console`. |
+| `console_read_only` | Boolean | Sets `ConsolePolicy.read_only` for SDK `rpc_gateway` launches; mutating console RPCs are denied and omitted from capabilities while read/stream routes stay available. Python `.console_read_only()`, TypeScript `.consoleReadOnly()`. |
 | `console_fetch_timeout_ms` | Positive integer | Sets `RuntimeDecisionState.console.fetch_timeout_ms`, which the bundled console uses for JSON fetches after the initial 60s default. |
+| `http_listen` | `HOST:PORT` string | Bind address of the gateway HTTP listener (console, JSON-RPC, blobs, SSE, live). Default `127.0.0.1:0`: loopback, ephemeral port, the only bind every earlier release had. IP literals only, no hostnames. A non-loopback address is refused at init (`-32602`, before any bootstrap) unless `auth_config` enforces console app auth or `allow_remote` is `true`; every non-loopback bind that passes logs one WARN line. The listener is bound right behind that gate, still before any bootstrap, so a port another process holds is a `-32603` init error naming the address with no runtime built and no schedule executor lease taken behind it. The init result's `http_base_url` stays the same-host form (`127.0.0.1` for `0.0.0.0` and `::` binds). Python `.http_listen("0.0.0.0:8080")`, TypeScript `.httpListen("0.0.0.0:8080")`. A top-level `http_listen` (the `mobkit_gateway` init-param shape) is refused with `-32602` naming `runtime_options.http_listen`. See [Deployment](/mobkit/guides/deployment). |
+| `http_public_base_url` | Absolute `http(s)://` URL | The base URL clients reach the gateway at through a proxy. Reported back in the init result as `http_public_base_url` (trailing `/` removed; `null` when undeclared); never used to bind. Python `.http_public_base_url(url)`, read back as `runtime.rust_http_public_base_url`; TypeScript `.httpPublicBaseUrl(url)`, read back as `runtime.rustHttpPublicBaseUrl`. |
+| `allow_remote` | Boolean | Explicit acknowledgement that `http_listen` exposes the listener beyond this host; the same word and rule as `--allow-remote` on `rkat-rpc --tcp` and `rkat mob host --listen-tcp`. An exposure opt-in, not an auth mechanism: pass it only with an authenticating proxy in front of the listener. Python `.allow_remote()`, TypeScript `.allowRemote()`. |
 | `member_comms_address` | Socket-address string | Binds each local member to a signed TCP endpoint that remote peers can dial. Wildcard addresses are refused because they cannot be advertised as a concrete route. |
 | `contacts_toml` | TOML string | Loads the contact directory used to resolve remote mob ids to TCP/UDS control endpoints and pinned gateway public keys. |
 | `control_grants_toml` | TOML string | Loads the closed `[control_grants]` table for `--control-listen`. Each caller public key is scoped to named control verbs and members, and the gateway binds every request signature to the local mob id as its audience. Omitting the field installs an empty deny-all table; an explicit value without `[control_grants]`, or with an unknown/invalid field, fails initialization. |
@@ -113,6 +116,8 @@ The stock SDK gateway consumes the `runtime_options` object sent by Python and T
 | `runtime_store` | Object | Declares the runtime store's durability. The store (`runtime.sqlite` — session resume, archive, retire) is persistent SQLite by default; the only accepted declaration is `{ "storage": "memory" }`, after which sessions do not survive gateway restart. A failed SQLite open without this declaration is a startup error (`-32014`), never a silent in-memory fallback. |
 | `declare_spec_update` | Object | One-shot canonical mob-definition compare-and-swap. `{ "expected_revision": N }` applies the `mob_config` supplied in the same `mobkit/init` request only when the durable definition is still at `N`. The launch must be authoritative and use persistent mob storage. Exact replay converges; stale revision or successor-content disagreement refuses initialization with typed storage error `-32014`. |
 | `compaction` | Object | Declares the host-level session-compaction policy for every agent the gateway builds: `auto_compact_threshold` (tokens, non-zero), `recent_turn_budget`, `max_summary_tokens`, `min_turns_between_compactions`. A compactor is always installed; this declares *when it fires*. **Omitting `auto_compact_threshold` inherits Meerkat's model-aware default — `context_window * 4 / 5`, i.e. ~840,000 tokens on a million-token model such as `gpt-5.6-sol`, which in practice never fires and resends the full transcript every turn.** Declaring the key pins it. A mob profile's own `auto_compact_threshold` still wins per member. Unknown keys and a zero threshold fail initialization. |
+| `meerkat_config_path` | String path | The Meerkat host `config.toml` every agent the gateway builds starts from (the live/realtime door included), loaded once at init, merged over `Config::default()` with Meerkat's own file semantics and validated with Meerkat's own `Config::validate` against the canonical catalog. This is the only door for the `[self_hosted]` and `[realm]` tables, which Meerkat keeps in the host config rather than in `mob.toml`; a host-config `[models]` table reaches the factory too, but does not satisfy the [init model check](#the-init-model-check), which reads the definition's own `[models.<id>]`. The gateway's own overlays (`member_comms_address`, `compaction`) are layered on top. A missing, malformed or non-validating file (a `[self_hosted.models.<id>]` alias naming an undeclared server, for one) refuses init with `-32602` naming the option and the path, never a silent `Config::default()`. Omitted, agents build from Meerkat's default config as before. Python `.meerkat_config(path)`, TypeScript `.meerkatConfig(path)`. `mobkit_gateway` takes the same file as its top-level `meerkat_config_path` init param and adopts `<workspace>/.rkat/config.toml` when it exists, logging one INFO line naming the adopted file either way; a top-level `meerkat_config_path` sent to `rpc_gateway` is refused with `-32602` naming `runtime_options.meerkat_config_path`. See [Self-hosted models and the Meerkat host config](#self-hosted-models-and-the-meerkat-host-config). |
+| `workgraph` | Boolean or directory string | WorkGraph construction switch, default `true`. `false` disables the store, the member `workgraph_*` tools, the attention overlays and the `mobkit/workgraph/*` RPCs; a non-empty string is an explicit directory for the durable store (`workgraph.sqlite3` is created inside it); any other value fails initialization. Python `.workgraph(enabled)` and TypeScript `.workgraph(enabled)` take `true`, `false` or the directory string; an unused setter sends nothing and the gateway default applies. Store placement per launch mode, the auto-issued namespace grant and the memory-backed fallback are in [WorkGraph](#workgraph). |
 
 Unsupported nested fields fail initialization with `-32602` instead of being silently ignored.
 
@@ -161,6 +166,151 @@ process.
 unsupported field. Move definitions to the durable schedule store through
 schedule tools or `ScheduleService`.
 </Warning>
+
+## Self-hosted models and the Meerkat host config
+
+Meerkat keeps three tables out of the mob definition and in the host
+`config.toml`: `[self_hosted]` (serving endpoints and model aliases), `[realm]`
+(backend, auth and binding profiles, including the credential binding every
+`provider = "self_hosted"` member resolves through) and `[models]` (custom
+model rows). A `mob.toml` profile refers to them by name only:
+
+```toml mob.toml
+[profiles.worker]
+model = "gemma-4-31b"
+provider = "self_hosted"
+self_hosted_server_id = "local"
+```
+
+```toml config.toml
+[self_hosted]
+default_model = "gemma-4-31b"
+
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+
+[self_hosted.models.gemma-4-31b]
+server = "local"
+remote_model = "gemma4:31b"
+
+[realm.global]
+default_binding = "local"
+
+[realm.global.backend.local]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "local"
+
+[realm.global.auth.local_auth]
+provider = "self_hosted"
+auth_method = "none"
+source = { kind = "platform_default" }
+
+[realm.global.binding.local]
+backend_profile = "local"
+auth_profile = "local_auth"
+```
+
+The alias shape, the realm binding rules and the Gemma 4 worked example are
+Meerkat's contract, documented in the Meerkat
+[self-hosting guide](https://github.com/lukacf/meerkat/blob/main/docs/guides/self-hosting-models.mdx);
+MobKit adds nothing to them. Note that `[models.<id>] provider = "self_hosted"`
+is refused by Meerkat's model registry: self-hosted aliases live under
+`[self_hosted.models]` only.
+
+**`[self_hosted]` and `[realm]` belong in the host config, never in `mob.toml`.**
+`MobDefinition::from_toml` deserializes without `deny_unknown_fields`, so a
+top-level `[self_hosted]` or `[realm]` table written into `mob.toml` used to
+vanish without a diagnostic and resurface two layers later as a member that
+could not build. Both binaries now refuse it at init, on the raw TOML text,
+with one message:
+
+```text
+mob.toml declares a top-level [self_hosted] table, which is meerkat host configuration
+that the mob definition parser ignores; move it into the meerkat config.toml and point the
+gateway at that file: runtime_options.meerkat_config_path on rpc_gateway, or the
+meerkat_config_path init param (default <workspace>/.rkat/config.toml) on mobkit_gateway
+```
+
+Both binaries answer it as `-32602` on the `mobkit/init` request id
+(`mobkit_gateway` when it loads `config/mob.toml`).
+
+`[models.<id>]` is different from the two tables above. A profile's `model`
+must be catalogued, provider-annotated, or defined under the **mob
+definition's own** `[models.<id>]` to pass the model check: the check
+(`meerkat_mob::validate_definition`, run at init on `rpc_gateway` and by
+Meerkat at create time on both binaries) reads only the definition's tables.
+So a custom model a profile names by id belongs in `mob.toml`. A `[models]`
+table in the host config still reaches the factory through
+`meerkat_config_path` (a provider-annotated profile can use such a row), but
+it does not satisfy the check, and a profile whose model exists only there and
+carries no `provider` is refused at init as `UnknownModel`.
+
+### How the host config reaches each surface
+
+| Surface | Ingress | When nothing is declared |
+|---------|---------|--------------------------|
+| `rpc_gateway` | `runtime_options.meerkat_config_path`; Python `.meerkat_config(path)`, TypeScript `.meerkatConfig(path)` | `Config::default()`, as in every earlier release |
+| `mobkit_gateway` | Top-level `meerkat_config_path` init param (a relative path resolves against the launch directory); the file's content joins the resume fingerprint, so a changed host config does not resume a runtime built without it | `<workspace>/.rkat/config.toml` when that file exists (`ConventionalPaths::with_meerkat_config_from_workspace`), else `Config::default()` |
+| Rust library | `UnifiedRuntimeBuilder::meerkat_config(config)`; `gateway_composition::load_gateway_host_config(path)` is the loader both binaries use and `refuse_host_config_tables_in_mob_toml(text)` the `mob.toml` check | `Config::default()` |
+
+The loader reads exactly the named file and merges it over `Config::default()`
+with `Config::merge_toml_str`, the step Meerkat applies to a discovered
+`.rkat/config.toml`: no directory walk and no home-directory fallback, so what
+the gateway loads is what the operator named. Adoption is never silent:
+`mobkit_gateway` logs one INFO line naming the adopted file and whether the
+init param or the workspace convention produced it. A file that cannot be read or
+does not parse or does not validate refuses init (`rpc_gateway`: `-32602`,
+`runtime_options.meerkat_config_path: failed to read meerkat config <path>: ...`,
+`meerkat config <path> is invalid: ...` or
+`meerkat config <path> does not validate: ...`; `mobkit_gateway`: `-32602` on
+the request id, `init params: meerkat_config_path: ...`), because an operator
+who pointed the gateway at a file expects that file in force. Validation is
+Meerkat's own `Config::validate` against the canonical catalog, the step
+`rkat` and `rkat-rpc` run after every load: a `[self_hosted.models.<id>]`
+alias whose `server` is not declared, a `[models.<id>]` row colliding with a
+catalog id, or a zero compaction threshold is refused at init instead of
+killing the first member build. The gateway's own
+declarations stay layered on top: `member_comms_address` and `compaction` on
+`rpc_gateway`, `compaction` on `mobkit_gateway`, and a profile's own
+`auto_compact_threshold` still wins per member.
+
+### The init model check
+
+`rpc_gateway` checks every inline profile's `model` before the mob exists, by
+Meerkat's own rule (`meerkat_mob::validate_definition`, narrowed to its
+`UnknownModel` diagnostic): a model is acceptable when it is catalogued, or
+defined under this definition's `[models.<id>]`, or provider-annotated
+(`provider = "self_hosted"` with a `self_hosted_server_id`, for one). This is
+the rule `rkat mob validate` documents and `MobBuilder::create` applies at
+bootstrap. A refused model is `-32602` with the profile named and, when a
+catalog id is close, a `Did you mean one of: ...?` hint (the common cause is a
+dated id such as `claude-sonnet-4-5-20250514` for `claude-sonnet-4-5`). Only
+that one diagnostic is adopted at init on purpose: the rest of the set
+(missing skill refs, wiring, flows) is Meerkat's to refuse at create time.
+`mobkit_gateway` has no pre-check; Meerkat runs the same validation when it
+creates the mob.
+
+**Provider-annotated profiles bypass the refusal.** By Meerkat's rule a
+profile that sets `provider = "..."` is resolvable whatever its `model` string
+says, so a dated or misspelled id on such a profile (every HomeCore profile
+carries `provider = "openai"`) passes init and surfaces at the first LLM call.
+`rpc_gateway` does not add a second refusal authority for that case; it logs
+one WARN per such profile at init naming the profile, the model and the closest
+catalog ids (`profiles.<p> model '<m>' is provider-annotated ... a typo surfaces
+at the first LLM call. Did you mean one of: ...?`). A `provider = "self_hosted"`
+alias is checked against the host config's `[self_hosted.models]` instead and
+warned about only when it is not registered there. Catalogued and
+`[models.<id>]`-defined models warn about nothing.
+
+Earlier releases compared the model string against the static catalog alone,
+so a `[models.<id>]` custom model and every self-hosted alias were refused at
+init on `rpc_gateway` while `mobkit_gateway` accepted them and then failed at
+the first member build with "self-hosted model '..' is not registered in
+config"; both binaries now agree, and with `meerkat_config_path` the member
+builds.
 
 ## Member role migrations
 
@@ -229,6 +379,77 @@ Declarations that reach neither identity plane arm nothing, because there is no
 identity plane to migrate on. See
 [roster and member lifecycle](/mobkit/concepts/roster#role-migration) for the operator
 view of the refusal.
+
+## Mob profile tools (`[profiles.*.tools]`)
+
+The mob definition (`.mob("config/mob.toml")`, or the `mob_config` string of
+`mobkit/init`) is Meerkat's `MobDefinition`. Each
+`[profiles.<name>.tools]` table is meerkat-mob's `ToolConfig`, and every
+boolean in it defaults to `false`. The table has no unknown-key check, so a
+misspelled key (`comm = true`) is dropped and the flag it meant to set stays
+`false`.
+
+```toml
+[profiles.assistant.tools]
+comms = true
+builtins = true
+workgraph = true
+schedule = true
+```
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `comms` | `false` | **Must be `true` for every profile a member spawns from.** A member's durable identity, roster occupancy check, wiring, peer messaging and supervisor bridge are all keyed on its comms name, and the peer-messaging tools are composed whenever a member has one, so there is no honest member without comms: Meerkat refuses `comms = false`, and an omitted key, at build time with `MobError::WiringError`: `profile '<name>' has tools.comms=false; mob meerkats require comms=true`. On the worker plane `mobkit/ensure_member` answers `-32602` with `ensure_member failed: wiring error: ...` and creates no roster entry; on the identity plane the identity reconciles to outcome `broken` (`EmbodimentFailed`, the message as its detail), `mobkit/status_identity_bootstrap` carries it as `error`, and the continuity repair task retries what is a static configuration error. To keep a member from messaging peers, leave `comms = true` and set `read_only = true` (`send_message` is denied, `peers` stays permitted) or deny the tools through a per-spawn tool access policy. Mobpack validation does not flag this; it fails at spawn. |
+| `builtins` | `false` | Meerkat's built-in tools (task, blob, patch, datetime, web search and similar). When `workgraph` is `false` and `builtins` is `true`, the `task-workflow` skill is preloaded. |
+| `shell` | `false` | The shell execution tool. Never read-only: nothing classifies a command line, so `read_only = true` denies it outright. |
+| `memory` | `false` | Memory and semantic-search tools. |
+| `workgraph` | `false` | The realm-scoped `workgraph_*` tools; preloads the `workgraph-workflow` skill. The namespace grant the tools need is issued by the gateway, not the host (see [WorkGraph](#workgraph)). |
+| `mob` | `false` | Mob management tools (spawn, retire, wire, unwire, list). Without a host-supplied authority context the member is granted spawn authority over every profile in the definition. |
+| `schedule` | `false` | Durable schedule tools (create, list, update, pause, resume, delete). |
+| `image_generation` | `false` | Image generation tools; the profile's `image_generation_provider` names the backend. |
+| `read_only` | `false` | An enforcement declaration, not prompt guidance: a tool call executes only when its owning dispatcher declares it read-only, and the declaration wins over any per-spawn tool access policy. The category booleans above still decide what the model sees; this decides what may run. Provider-native tools, MCP tools and `shell` are outside the guarantee. |
+| `mcp` | `[]` | MCP server names this profile may use from the mob-wide default external-tools provider; an empty list means the full host surface. |
+| `mcp_servers` | `[]` | Declarative MCP server configs durable on the profile, so a revived member recomposes the same MCP tools that built it. |
+| `rust_bundles` | `[]` | Names of Rust tool bundles registered at mob construction. Not serializable; re-register them on resume. |
+
+The `mob-communication` skill is preloaded for every member regardless of these
+flags. Agent-side spawns that inherit the parent's tool filter open every
+category, including `comms`, before the inherited allow-list is applied, so the
+`comms` refusal is a host-spawn (`mobkit/ensure_member`) behaviour; an agent
+spawn of a `comms = false` profile silently runs with comms on.
+
+## WorkGraph
+
+`rpc_gateway` constructs a realm-scoped `WorkGraphService` on every launch
+unless `runtime_options.workgraph` is `false` (the default is `true`, so a
+launch that never mentions the key has one). The service backs the member
+`workgraph_*` tools, the mob-executor attention overlays and the
+`mobkit/workgraph/*` RPCs.
+
+| Launch | `workgraph: true` (default) | `workgraph: "<dir>"` |
+|--------|-----------------------------|----------------------|
+| With `persistent_state` | Durable `SqliteWorkGraphStore` at `<persistent_state>/workgraph.sqlite3`, the `workgraph` storage slot. If the store fails to open, the slot reports `degraded` and WorkGraph is disabled for that launch; nothing falls back to memory. | Durable store at `<dir>/workgraph.sqlite3`, created if needed, same open-failure posture. |
+| Without `persistent_state` | Memory-backed `MemoryWorkGraphStore`, reported as a declared-ephemeral slot: goals, work items and attention bindings do not survive a gateway restart. On an identity-first launch that persists through an SDK-hosted continuity store the gateway logs one WARN line naming this, because everything else about that launch is durable. | Durable store at `<dir>/workgraph.sqlite3`; the directory form exists for exactly this case. |
+
+`mobkit_gateway` has no switch: its persistent mode attaches the durable store
+from the workspace state dir (same degraded posture on open failure) and its
+default ephemeral launch is memory-backed.
+
+**The namespace grant is issued by the gateway, not the host.** Meerkat
+refuses to build an agent that has WorkGraph tools and no host-issued
+`WorkGraphNamespaceGrant`. Whenever MobKit installs the tools it takes the
+grant from the service it just built, so the grant names the same scope the
+tools are pinned to: realm `mob.<mob definition id>` (Meerkat's canonical mob
+realm, the one every other realm-scoped store for the mob uses; if it cannot
+be formed the raw id is used and Meerkat's own validation names both realms)
+and namespace `default`. Every `workgraph_*` tool call has its `realm_id` and
+`namespace` arguments overwritten with that scope and `all_namespaces`
+removed, so a member cannot wander into another mob's graph. The meerkat
+WorkGraph guide's "embedding hosts must issue the grant in the agent build" is
+a Rust-embedder instruction; SDK hosts have nothing to issue. The tools stay
+per-profile: a member sees them only when its profile sets
+`tools.workgraph = true`, while the `mobkit/workgraph/*` RPCs are available
+whenever the service exists.
 
 ## Storage layout and durability
 
@@ -372,6 +593,48 @@ That transfers runtime ownership to supervised identity mutations, so a
 disconnected request cannot cancel a cross-mob operation between its commit
 and rollback points. The borrowed dispatcher fails identity-owned cross-mob
 mutations closed because it cannot provide that ownership guarantee.
+
+### `mobkit_gateway` identity roster
+
+`identity_roster` is a top-level `mobkit/init` param of `mobkit_gateway`
+(typed `InitParams`), the standalone counterpart of the SDK roster provider
+that `rpc_gateway` reaches through `.roster(...)` callbacks; `rpc_gateway` has
+no `identity_roster` key. It is an array of `DurableAgentSpec` objects and seeds the
+desired identity roster for `identity_first: true` (the default):
+
+```json
+{
+  "identity_roster": [
+    { "identity": "personal:alice", "profile": "alpha" },
+    {
+      "identity": "domain:security",
+      "profile": "security",
+      "display_name": "Security",
+      "labels": { "console_group": "Internal" },
+      "runtime_mode_override": "turn_driven"
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `identity` | yes | `AgentIdentity` (`<kind>:<name>`), the durable identity key. |
+| `profile` | yes | A `[profiles.<name>]` of the mob definition. |
+| `addressability` | no | `addressable` (default; accepts `send`) or `internal_only` (`dispatch` only). |
+| `display_name`, `labels`, `context`, `additional_instructions` | no | Console name, string labels, opaque JSON app context, extra prompt instructions. |
+| `initial_message`, `runtime_mode_override` | no | The kickoff turn and the per-identity `autonomous_host` / `turn_driven` override, as on the SDK `DurableAgentSpec`. |
+| `backend`, `binding`, `placement` | no | Backend kind, runtime binding and exact Meerkat host placement; a placement never degrades to local. |
+
+At boot the seed becomes the `MutableRosterProvider` and `restore_flow` runs
+over it: the roster is validated, continuity is resolved for every listed
+identity, and each non-Broken identity is created or resumed. Omitting the
+param is an empty seed, so the gateway starts with no identities and
+`mobkit/ensure_member` adds them at runtime (it upserts the same provider). The
+seed is boot-scoped like `role_migrations`: it is never persisted, and an
+identity missing from the next boot's seed is not restored on that boot (its
+continuity record is untouched). Under `identity_first: false` the param is
+parsed and ignored, not refused.
 
 ## ConsoleUiConfig
 
@@ -527,6 +790,41 @@ For standalone `mobkit_gateway` launches, pass `console_read_only: true` in the
 part of the gateway resume fingerprint, so toggling it creates or resumes the
 matching runtime instead of reusing a runtime launched with the opposite policy.
 
+`mobkit_gateway` takes the HTTP exposure knobs as top-level `mobkit/init`
+params rather than `runtime_options`: `http_listen` (`HOST:PORT`, default
+`127.0.0.1:0`; also `--http-listen` or `MOBKIT_HTTP_LISTEN_ADDR`, the init
+param winning), `allow_remote` (also `--allow-remote` or
+`MOBKIT_HTTP_ALLOW_REMOTE=1`) and `http_public_base_url`. Its console is
+always open, so a non-loopback `http_listen` is refused unless `allow_remote`
+is set. Every init-param refusal on this binary (`http_listen` parse, the
+exposure gate, `http_public_base_url`, `meerkat_config_path`, `compaction`,
+a `[self_hosted]` table in `mob.toml`) answers `-32602` on the request id, and
+a listener bind failure `-32603` on the request id. The listen address and the
+advertised base both join the resume fingerprint like `--control-listen`, so a
+relaunch that changes either creates a runtime with the declared values instead
+of reporting the previous launch's. The mirror rule holds on `rpc_gateway`: the
+same four keys sent top-level there are refused with `-32602` naming their
+`runtime_options.*` home. See [Deployment](/mobkit/guides/deployment).
+
+### Console auth by surface
+
+`require_app_auth` defaults to `true`, and the SDK gateway's decision state
+without `auth_config` trusts no signing key, so the default console is closed
+to every caller (each request answers 401 `missing_credentials` or a token
+failure). Opening it is an explicit, per-surface choice:
+
+| Surface | Explicit opt-out |
+|---------|------------------|
+| Raw `mobkit/init` | `runtime_options.console_require_app_auth: false` |
+| Python | `MobKit.builder().console_auth_required(False)` |
+| TypeScript | `MobKit.builder().consoleAuthRequired(false)` |
+| Rust library | `RuntimeDecisionState::local_console(ConsolePolicy { require_app_auth: false, ..ConsolePolicy::default() }, None)` |
+| `mobkit_gateway` | Always open: it has no auth ingress and binds loopback by default, so the host is the protection; a non-loopback `http_listen` is refused unless `allow_remote` acknowledges the exposure |
+
+An open console is a deployment decision. Use it only behind a loopback bind
+or a reverse proxy that authenticates; for anything shared, configure
+`auth_config` (Python `.auth(...)`, TypeScript `.auth(...)`) instead.
+
 ---
 
 ## RuntimeOpsPolicy
@@ -560,10 +858,30 @@ LocalJsonMemoryBackendConfig {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state_path` | `String` | Local JSON state file persisting the operational assertion ledger |
-| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL health-gated at bootstrap (`GET /v1/health`); no ledger data is ever sent to it |
+| `state_path` | `String` | Local JSON file holding the operational assertion ledger (`mobkit/memory/*`). Runtime-owned: read once at bootstrap into memory, and rewritten wholesale (the whole state to `<state_path>.tmp`, then renamed over the file) on every `mobkit/memory/index`. Not a shared append log; see below. |
+| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL probed with `GET /v1/health` at the bootstrap load and before every persist; a failed probe refuses that load or persist. No ledger data is ever sent to it |
 
 For SDK builds that boot through `rpc_gateway`, `state_path` is derived from `.persistent_state(path)` as `<path>/memory-ledger-state.json`; callers provide only `backend: "local_json"` (and optionally `health_check_endpoint`). The legacy `ElephantMemoryBackendConfig` / `backend: "elephant"` shape is deprecated: it was always local JSON persistence plus a health check — no data ever reached Elephant — and it converts to this config on load. Real Elephant integration is the wire-boundary provider described in `docs/design/memory-hub-roadmap.md`.
+
+**Ownership of the assertion ledger.** The file is a snapshot of runtime
+state, not a log that other writers may append to. `MobkitRuntimeHandle` loads
+it exactly once at bootstrap and keeps assertions and conflicts in memory as
+the authority; every `mobkit/memory/index` (host calls, and the Steward's
+conflict signals when `agent_memory.steward` is enabled) serializes the entire
+in-memory state and atomically replaces the file, with no re-read, lock or
+modification check. A direct edit is therefore invisible until the next boot
+and overwritten by the next flush; single-writer is a convention MobKit does
+not enforce with a lock. Retention is capped at 4,096 assertions, oldest
+evicted first, at index time and at load. At load, a structurally malformed
+file (an entry missing `assertion_id`, `entity`, `topic`, `store`, `fact` or
+`indexed_at_ms`) refuses the boot with `MobkitRuntimeError::MemoryBackend`,
+while a well-formed entry whose entity, topic or store is not canonical, or
+whose fact is empty, is dropped without a diagnostic. Append through
+`mobkit/memory/index`, Python `MobHandle.memory_index(...)`, TypeScript
+`handle.memoryIndex(...)`, or Rust `MobkitRuntimeHandle::memory_index` /
+`UnifiedRuntime::memory_index`; there is no agent-facing tool, so a host that
+wants members to write exposes one over the handle. This ledger is distinct
+from the `agent_memory` injection and turn-surface ledgers below.
 
 ## Agent memory injection
 
@@ -616,6 +934,12 @@ ReleaseMetadata {
 |-------|------|-------------|
 | `targets` | `Vec<String>` | Release targets (must include: `crates.io`, `npm`, `pypi`, `github-releases`) |
 | `support_matrix` | `String` | Must be `"same-as-meerkat"` |
+
+`build_runtime_decision_state` parses and validates this document on every
+build, with or without console auth; nothing reads it at serve time, so the
+check is release governance, not runtime policy. `RuntimeDecisionState::local_console`
+fills the canonical value. A malformed document is a `DecisionPolicyError::TomlParse`
+whose message names the release metadata JSON.
 
 ---
 

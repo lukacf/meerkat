@@ -4,7 +4,7 @@ description: "Understand MobKit's lightweight roster projection, deep member sta
 icon: "users"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -19,6 +19,95 @@ them. The gateway profile changes the default behavior of
 `mobkit/ensure_member`; see the profile-specific contract below.
 </Warning>
 
+## Profiles are templates; members are declared
+
+A `[profiles.<name>]` entry in `mob.toml` is a role template: model, tool
+posture, skills, runtime mode, peer description. It produces no member. A
+member exists only when something names it:
+
+- the identity roster: the `RosterProvider` callback on `rpc_gateway`
+  (Python `.roster(provider)`, TypeScript `.rosterProvider(provider)`), or the
+  `identity_roster` top-level `mobkit/init` param on `mobkit_gateway` (a list
+  of `DurableAgentSpec` objects, restored at boot and extended at runtime by
+  `mobkit/ensure_member`);
+- a Rust `Discovery` implementation on `UnifiedRuntimeBuilder` (classic,
+  non-identity boot only; neither gateway binary wires one);
+- an explicit `mobkit/ensure_member`.
+
+Nothing derives one member per profile, and neither does meerkat: a mob
+definition's `orchestrator` names a profile, not a member. The only automatic
+spawn anywhere is `mobkit_gateway`'s no-config fallback, which ensures a single
+`alpha` member of its built-in definition when no `config/mob.toml` or
+`definition.json` exists; a workspace definition with an empty
+`identity_roster` boots with no members at all.
+
+The roster callback does not hand you the definition. On `rpc_gateway` the
+gateway sends `callback/roster_provider/roster` with the serialized
+`RosterContext` (`mob_definition`, always the definition the gateway booted
+with, and `previous_identities`) as the request params, but the Python and
+TypeScript SDK dispatchers pass the provider `params["context"]`, a key the
+gateway does not send. The `context` argument your `roster(context)` receives
+is therefore an empty dict or object on both SDKs, and
+`context["mob_definition"]` raises `KeyError`. A host that wants a
+profile-shaped crew derives it from the definition it already holds, the same
+`mob.toml` text it passes to `.mob_inline(...)` (HomeCore builds its roster the
+same way, from its own parsed config, and ignores `context`):
+
+```python
+import tomllib
+
+from meerkat_mobkit import DurableAgentSpec
+
+DEFINITION = tomllib.loads(MOB_TOML)  # the text passed to .mob_inline(MOB_TOML)
+
+
+def orchestrator_profile(definition):
+    # `[mob] orchestrator = "lead"` or `[mob.orchestrator] profile = "lead"`
+    orchestrator = definition["mob"].get("orchestrator")
+    return orchestrator.get("profile") if isinstance(orchestrator, dict) else orchestrator
+
+
+class ProfileShapedRoster:
+    # One durable identity per profile; the orchestrator is addressable.
+    async def roster(self, context):
+        orchestrator = orchestrator_profile(DEFINITION)
+        return [
+            DurableAgentSpec(
+                identity=f"{profile_name}:main",
+                profile=profile_name,
+                addressability=(
+                    "addressable" if profile_name == orchestrator else "internal_only"
+                ),
+            )
+            for profile_name in DEFINITION.get("profiles", {})
+        ]
+```
+
+Profile-to-member is not one-to-one in general (a per-user profile may back
+hundreds of identities), which is why this stays a host decision rather than a
+default.
+
+### When to call `reconcile_edges`
+
+Declared definition wiring (`[wiring] auto_wire_orchestrator = true` or
+`role_wiring` rules) is applied by meerkat only at spawn time and, for the
+orchestrator rule, only from the non-orchestrator side, so the result depends on
+bring-up order. MobKit installs the definition's wiring as a reconcilable edge
+policy and converges it with `mobkit/reconcile_edges` (Python
+`handle.reconcile_edges()`, TypeScript `handle.reconcileEdges()`).
+
+- `mobkit/ensure_member` already runs that reconcile after every successful
+  ensure, on both the worker plane and the console identity plane. Calling
+  `reconcile_edges` after `ensure_member` is redundant.
+- `mobkit/reconcile_identity` (Python `runtime.reconcile()`) and the
+  identity-first gateway boot do not: the gateway reconciles definition edges
+  before the roster is materialized. When the definition declares wiring, call
+  `reconcile_edges` once after boot and after each `runtime.reconcile()`.
+- Without declared wiring there is no definition edge policy; the call returns
+  an empty report. Edges from a host `TopologyProvider` converge on every
+  identity restore and reconcile on their own, and the reconciler never unwires
+  an edge it did not wire itself.
+
 ## Roster operations
 
 All operations are available through the gateway's JSON-RPC interface.
@@ -31,7 +120,9 @@ All operations are available through the gateway's JSON-RPC interface.
 | `mobkit/ensure_member` | Gateway-profile dependent | Ensure a durable identity or an ephemeral worker as described below |
 | `mobkit/member_status` | `MobMemberSnapshot` | Inspect one member's deep execution and connectivity state |
 | `mobkit/retire_member` | Acceptance acknowledgement | Retire a member |
-| `mobkit/respawn_member` | Acceptance acknowledgement | Replace a member with a fresh runtime incarnation |
+| `mobkit/respawn_member` | Acceptance acknowledgement | Replace a member with a fresh runtime incarnation (identity-first: a destructive continuity reset) |
+| `mobkit/reload_member` | `{reloaded, disposition, session_id, generation}` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
+| `mobkit/member_health` | `MemberHealthReport` | Lifecycle and delivery health from in-process reads; answers while the mob actor loop is stalled |
 
 ## `ensure_member` gateway profiles
 
@@ -78,7 +169,7 @@ shape:
 |-------|------|-------------|
 | `agent_identity` | `string` | Canonical public identity used to address the member |
 | `role` | `string` | Role or profile name used to build the member |
-| `runtime_mode` | `string` | `autonomous_host` or `turn_driven` |
+| `runtime_mode` | `string` | `autonomous_host` or `turn_driven`; see [Runtime modes](#runtime-modes) for the default and its consequences |
 | `wired_to` | `string[]` | Canonical identities of currently wired peers |
 | `labels` | `object` | String key-value metadata |
 | `status` | `string` | Machine-projected lifecycle status |
@@ -89,6 +180,36 @@ shape:
 
 The lightweight entry deliberately omits session IDs and live connectivity
 fanout. Use `mobkit/member_status` when those details are required.
+
+### Runtime modes
+
+`runtime_mode` comes from the profile (`[profiles.<name>] runtime_mode`), or
+from a per-spawn override where a surface offers one. `autonomous_host` is
+meerkat's default when a profile omits the key, and it is the mode most hosts
+end up on without choosing it. The two modes differ in ways that show up on
+the roster and on every send:
+
+- A fresh `autonomous_host` member runs one kickoff turn as soon as it is
+  spawned, on its `initial_message` if the spawn carried one, otherwise on
+  meerkat's fallback prompt (`You have been spawned as '<identity>' (role:
+  <role>) in mob '<mob>'.`). The `kickoff` field on the roster entry reports
+  that turn. Later sends are ordinary durable inputs that queue behind it;
+  nothing is dropped, but the member answers in order.
+- Autonomous inbox delivery carries no user-channel work boundary, so meerkat
+  refuses injected context and completion-bearing sends on that path. MobKit
+  therefore skips ambient per-turn agent-memory recall for `autonomous_host`
+  members with the typed reason `runtime_mode_autonomous_host` (the turn still
+  runs, without memory). Ambient per-turn memory requires
+  `runtime_mode = "turn_driven"` until meerkat's carrier change lands; the
+  Unreleased entry in the repository `CHANGELOG.md` records this.
+- `turn_driven` members run exactly one turn per delivered input and sit idle
+  between inputs. It is the mode meerkat's tracked, completion-bearing turn
+  carriers support; on `autonomous_host` those are refused with `tracked turn
+  completion is not supported by autonomous inbox delivery`.
+
+Pin `runtime_mode = "turn_driven"` explicitly on every profile that hosts a
+durable, addressable identity unless the member is meant to run its own inbox
+loop.
 
 Operational list projections retain `active`, `retiring`, and `broken` rows as
 applicable. They filter terminal `completed` and `unknown` rows, even though
@@ -193,6 +314,29 @@ plane still fails closed. Which declarations arm also depends on the binary:
 inside its identity-first block. Declarations that reach neither arm nothing,
 because there is no identity plane to migrate on.
 
+## Peer identity and comms names
+
+A member's comms (peer) name is `{mob_id}/{role}/{member}` (meerkat's
+`MemberCommsName`): the mob definition `id`, the profile name, and the
+mob-roster member id. That is the string peers see in the `peers` tool and in
+`Peer message from ...` projections; the routing key underneath is the
+pubkey-derived peer id.
+
+Identity-first members are registered under an encoded roster id, because a
+durable identity such as `domain:security` contains `:` and a comms-name
+component may only contain ASCII letters, digits, `-`, and `_`. MobKit's
+`mk--` codec escapes it (`domain:security` becomes `mk--domain_csecurity`), so
+the peer-facing name is `home/domain/mk--domain_csecurity`. Console, RPC, and
+SDK surfaces decode the id back to the public identity; the model-facing
+projections do not.
+
+The mob id is part of every member's name, so renaming a mob (changing the
+definition `id`) re-mints every peer name in it. Nothing rewrites records that
+already hold the old strings: identity-keyed agent memory lives in the host
+realm, survives the rename, and can recall `{old_mob}/...` names into a later
+prompt. Renaming a member's role is a different case and is refused unless
+declared, as the previous section describes.
+
 ## Mutation results
 
 The underlying Meerkat Rust operations have different success types:
@@ -292,6 +436,31 @@ The separate `RichMemberSnapshot` type wraps `mobkit/member_status`.
 Reconciliation compares the desired member set with the current roster and
 spawns, retains, or retires members to converge. See the
 [unified runtime guide](/mobkit/guides/unified-runtime) for the complete flow.
+
+### Roster provider context
+
+Every time the identity runtime derives the desired roster it calls the
+host's roster provider with a `RosterContext`. Behind the SDK gateway that is
+the `callback/roster_provider/roster` request, whose params nest the context
+under `context` (the same envelope the topology and customizer callbacks use):
+
+```json
+{
+  "context": {
+    "mob_definition": { "id": "household", "profiles": { "...": {} } },
+    "previous_identities": ["identity:luka", "triage:main"]
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mob_definition` | The booted mob's compiled definition. Always present behind the bundled `rpc_gateway`; `null` only when an in-process Rust embedder or test harness resolves a roster without a mob definition. |
+| `previous_identities` | Identities the identity runtime has registered at the time of the call. Empty on the bootstrap resolves (nothing is registered yet), populated on later re-derivations such as `mobkit/topology/query` or an edge reconcile. |
+
+The Python SDK delivers this as `RosterContext` from
+`meerkat_mobkit.identity_first_models`; the TypeScript SDK as the exported
+`RosterContext` interface (`mobDefinition`, `previousIdentities`).
 
 ## See also
 

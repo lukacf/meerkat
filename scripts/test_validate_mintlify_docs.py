@@ -26,6 +26,12 @@ class MintlifyHeadingSlugTests(unittest.TestCase):
     def test_percent_encodes_slash_like_mintlify(self) -> None:
         self.assertEqual(VALIDATE.slugify("capabilities/get"), "capabilities%2Fget")
 
+    def test_percent_encodes_semicolon_like_mintlify(self) -> None:
+        self.assertEqual(
+            VALIDATE.slugify("Profiles are templates; members are declared"),
+            "profiles-are-templates%3B-members-are-declared",
+        )
+
     def test_preserves_underscores_and_removes_apostrophes(self) -> None:
         self.assertEqual(VALIDATE.slugify("What's _new_?"), "whats-_new_%3F")
 
@@ -121,6 +127,20 @@ class MintlifyLinkValidationTests(unittest.TestCase):
         code, errors = self.run_validator()
         self.assertEqual(code, 1)
         self.assertIn("docs/api/rest.mdx links to missing anchor '/api/rpc#capabilitiesget'", errors)
+
+    def test_semicolon_heading_rejects_legacy_fragment_and_accepts_encoded_fragment(self) -> None:
+        (self.docs / "api" / "rpc.mdx").write_text(
+            '---\ntitle: "RPC"\ndescription: "RPC"\nicon: "plug"\n---\n\n'
+            "## Profiles are templates; members are declared\n",
+            encoding="utf-8",
+        )
+        self.write_rest_page("/api/rpc#profiles-are-templates-members-are-declared")
+        code, errors = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("missing anchor", errors)
+        self.write_rest_page("/api/rpc#profiles-are-templates%3B-members-are-declared")
+        code, errors = self.run_validator()
+        self.assertEqual(code, 0, errors)
 
 
 if __name__ == "__main__":

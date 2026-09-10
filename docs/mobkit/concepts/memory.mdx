@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -12,11 +12,14 @@ classes:
 - `agent_memory` is hot identity memory plus prompt injection. It is keyed by
   stable `AgentIdentity`, stored by realm, and injected during
   create/resume/materialize and ordinary identity-first turns.
-- `mobkit/memory/*` is an operational assertion and conflict ledger used by
-  routing/gating flows. It is persisted as a local JSON file under
+- `mobkit/memory/*` is the operational **assertion ledger**: assertions and
+  conflict signals used by routing/gating flows. The runtime owns it and
+  holds it in memory; it is persisted as a local JSON file under
   `persistent_state`, optionally gated by an HTTP health check. Query
   semantics are exact filters over stored assertions plus an optional
-  substring `query` filter.
+  substring `query` filter. It is not the `agent_memory` injection ledger or
+  turn-surface ledger, which are SQLite tables inside the agent-memory realm
+  database (see [Configuration](/mobkit/reference/configuration#agent-memory-injection)).
 
 ## Architecture
 
@@ -40,9 +43,10 @@ compacted session content and exposes semantic recall through Meerkat's
 provider that consults session memory or other stores, but the MobKit runtime
 does not assume semantic/vector search from `mobkit/memory/*`.
 
-The operational ledger backend persists assertions and conflict signals as a
-local JSON file, optionally gated by an HTTP health check before every ledger
-read/write. Configuration is provided through `LocalJsonMemoryBackendConfig`:
+The assertion ledger backend persists assertions and conflict signals as a
+local JSON file, optionally gated by an HTTP health check at the startup load
+and before every persist. Configuration is provided through
+`LocalJsonMemoryBackendConfig`:
 
 ```rust
 LocalJsonMemoryBackendConfig {
@@ -53,14 +57,55 @@ LocalJsonMemoryBackendConfig {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state_path` | `String` | Local JSON file the ledger is persisted to |
-| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL; when set, `GET <endpoint>/v1/health` must return 2xx before each ledger read/write |
+| `state_path` | `String` | Local JSON file the assertion ledger is persisted to. Runtime-owned: loaded once at bootstrap, rewritten wholesale on every index; not a shared append log (see below) |
+| `health_check_endpoint` | `Option<String>` | Optional HTTP base URL; when set, `GET <endpoint>/v1/health` must return 2xx at the startup load and before every persist |
 
 The legacy `ElephantMemoryBackendConfig` shape (`kind = "elephant"` with an
 `endpoint`) is still accepted for config compatibility and logs a deprecation
 warning: despite its name it never sent data to Elephant — the `endpoint` was
 only ever health-checked and the ledger persisted locally. It maps to the
 local-JSON backend with `endpoint` as the health-check endpoint.
+
+### The runtime owns the assertion ledger
+
+The assertion ledger is a runtime-owned snapshot, not a shared append log.
+`MobkitRuntimeHandle` reads `state_path` exactly once, at runtime bootstrap,
+and from then on the in-memory assertions and conflict signals are the
+authority. Every `mobkit/memory/index` serializes that entire in-memory state
+and atomically replaces the file (`<state_path>.tmp`, then rename over
+`state_path`); nothing re-reads the file, takes a lock, or checks its
+modification time first. If the persist fails, the in-memory write is rolled
+back and the index call returns the backend error.
+
+Persists are not only host-originated. When `agent_memory` enables the
+distiller or the memory Steward, `rpc_gateway` bridges Steward conflict
+signals into `memory_index(conflict: true)`, so the file can be rewritten with
+no RPC call from the host at all.
+
+What this means for anything else that touches the file:
+
+- An external edit is never observed by the running runtime and is overwritten
+  by the next persist, whether a host call or a Steward signal triggers it.
+- A well-formed hand-added entry is picked up only at the next restart, and
+  only if its `entity`, `topic`, and `store` are canonical (the five supported
+  store names) and its `fact` is non-empty; rows that fail that are dropped at
+  load without a diagnostic.
+- A structurally malformed file (an assertion missing a required field, or
+  invalid JSON) refuses the next boot with `MobkitRuntimeError::MemoryBackend`.
+- Retention is capped: the runtime keeps at most 4,096 assertions
+  (`MEMORY_ASSERTIONS_MAX_RETAINED`), evicting the oldest at index time and at
+  load. Conflict signals are keyed by `entity`/`topic`/`store`, one per key.
+  Do not treat the file as a durable audit log.
+- Single writer is by convention: no MobKit lock guards `state_path`. Run one
+  runtime per state file.
+
+Append through the runtime, never the file: `mobkit/memory/index` over
+JSON-RPC, `MobHandle.memory_index(...)` in Python, `handle.memoryIndex(...)`
+in TypeScript, or `UnifiedRuntime::memory_index` /
+`MobkitRuntimeHandle::memory_index` from Rust (the Rust `MobHandle` has no
+ledger method). There is no agent-facing tool that wraps the ledger; a host
+that wants members to write assertions exposes its own tool over one of those
+handles.
 
 When using the Python or TypeScript SDK through the stock `rpc_gateway`, configure the ledger with `memory.local_json()` (Python) / `memory.localJson()` (TypeScript), optionally passing a health-check endpoint, and enable `.persistent_state(path)`. The gateway derives the state file as `<persistent_state>/memory-ledger-state.json` (an existing legacy `<persistent_state>/elephant-memory-state.json` is adopted automatically so restarts keep their data). The deprecated `memory.elephant(endpoint)` helpers still work and emit the legacy `backend: "elephant"` wire shape; fields such as `stores`, `space_id`, and `collection` are rejected at init so unsupported configuration does not become a silent no-op.
 
@@ -80,7 +125,7 @@ MemoryIndexRequest {
 }
 ```
 
-The current MobKit runtime stores a canonical assertion locally and persists it when the memory backend is configured. Set `conflict: Some(true)` with `conflict_reason` to record a conflict signal instead of a normal assertion.
+The current MobKit runtime stores a canonical assertion in memory and, when the memory backend is configured, rewrites the whole ledger file from that in-memory state (see [the ownership model](#the-runtime-owns-the-assertion-ledger)). Set `conflict: Some(true)` with `conflict_reason` to record a conflict signal instead of a normal assertion.
 
 ## Querying
 
@@ -171,7 +216,7 @@ This integrates with [gating](/mobkit/concepts/gating) to prevent agents from ac
 
 ## Health checks
 
-When `health_check_endpoint` is configured, the ledger adapter performs a TCP-level health check against it before every ledger read/write. The health check:
+When `health_check_endpoint` is configured, the ledger adapter performs a TCP-level health check against it once at the startup load and before every persist (the whole-file rewrite that follows each `mobkit/memory/index`). There are no per-query file reads to gate. The health check:
 
 1. Resolves the endpoint hostname
 2. Opens a TCP connection with `MEMORY_LEDGER_HEALTHCHECK_TIMEOUT` (2s)

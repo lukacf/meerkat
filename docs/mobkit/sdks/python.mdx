@@ -4,7 +4,7 @@ description: "MobKit Python SDK — typed builder API, async runtime, and stream
 icon: "python"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 The MobKit Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -149,6 +149,53 @@ await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
 await rt.reconcile()                  # In-process roster reconciliation
 ```
 
+### DurableAgentSpec fields
+
+The roster provider returns one `DurableAgentSpec` per identity. The Rust side
+deserializes the same shape, so every field below reaches the gateway
+verbatim; fields left at their default are omitted from the wire.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identity` | `str` | Stable identity (`triage:main`); no whitespace or `/` |
+| `profile` | `str` | Profile name from mob.toml `[profiles.*]` |
+| `addressability` | `str` | `addressable` (default) or `internal_only` |
+| `display_name` | `str`, optional | Human-facing name |
+| `labels` | `dict[str, str]` | Member labels |
+| `context` | `Any`, optional | Opaque host context handed to the customizer |
+| `additional_instructions` | `list[str]` | Appended to the profile's system prompt |
+| `placement` | `str`, optional | Exact Meerkat host ref; never degrades to local |
+| `runtime_mode_override` | `str`, optional | `autonomous_host` or `turn_driven`. `None` defers to the profile's `runtime_mode`, whose meerkat default is `autonomous_host`. Ambient per-turn memory requires `turn_driven` (see the [configuration reference](/mobkit/reference/configuration)) |
+| `initial_message` | `str` or `list[ContentBlock]`, optional | First turn a fresh `autonomous_host` member runs on (Rust `ContentInput`: text or content blocks). `None` leaves meerkat's fallback spawn prompt in place |
+
+```python
+DurableAgentSpec(
+    identity="archivist:main",
+    profile="archivist",
+    runtime_mode_override="turn_driven",      # pin this identity regardless of the profile default
+    initial_message="Index yesterday's mail.", # or [TextBlock(...), ImageBlock(...)]
+)
+```
+
+### Roster provider context
+
+The gateway calls `roster(context)` with a typed `RosterContext`
+(`meerkat_mobkit.identity_first_models.RosterContext`), a one-to-one mirror of
+the Rust struct:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `mob_definition` | `dict \| None` | The booted mob's compiled definition as JSON (`id`, `profiles`, ...). Always present behind the bundled `rpc_gateway`; `None` only for in-process Rust embedders and test harnesses that resolve a roster without a mob definition. |
+| `previous_identities` | `list[str]` | Identities the identity runtime has registered at the time of the call. Empty on the bootstrap resolves (nothing is registered yet), populated on later re-derivations such as `mobkit/topology/query` or an edge reconcile. |
+
+```python
+class MyRoster:
+    async def roster(self, context):
+        household = (context.mob_definition or {}).get("id")
+        known = set(context.previous_identities)
+        ...
+```
+
 ### DispatchInput convenience constructors
 
 ```python
@@ -256,7 +303,8 @@ print(snapshot.agent_identity, snapshot.state)
 # Find members by label
 members = await handle.find_members("owner", "user-123")
 
-# Re-run discovery and reconcile the roster
+# Reconcile the named modules (routing, delivery). This does not touch the
+# roster; identity roster reconciliation is rt.reconcile().
 result = await handle.reconcile(["routing", "delivery"])
 
 # Call an MCP tool on a loaded module
@@ -284,6 +332,13 @@ snapshot = await handle.get_member("agent-1")
 # Member lifecycle
 await handle.retire_member("agent-1")
 await handle.respawn_member("agent-1")
+
+# Non-destructive cold reload (same session, same generation) and the
+# in-process health read that works while the actor loop is stalled
+health = await handle.member_health("agent-1")
+if health.last_delivery_error and health.last_delivery_error["class"] == "reload_required":
+    outcome = await handle.reload_member("agent-1")
+    assert outcome.disposition in ("discarded", "not_degraded")
 ```
 
 | Method | Return type | Description |
@@ -291,7 +346,10 @@ await handle.respawn_member("agent-1")
 | `list_members()` | `list[MemberSnapshot]` | List all members in the roster |
 | `get_member(member_id)` | `MemberSnapshot` | Get a single member by ID |
 | `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
-| `respawn_member(member_id)` | `None` | Respawn a previously retired member |
+| `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: a destructive continuity reset) |
+| `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
+| `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
+| `reconcile_edges()` | `ReconcileEdgesReport` | Converge mob.toml `[wiring]` (`auto_wire_orchestrator`, `role_wiring`) on the live roster. Needed after `runtime.reconcile()` or an identity-first boot only when the definition declares such wiring; `ensure_member` already runs it, and with no declared wiring the report is empty |
 
 `MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
 `labels`. Known state strings are exported from the top-level package as
@@ -331,7 +389,7 @@ rt = await (
     MobKit.builder()
     .mob("config/mob.toml")
     .session_service(my_builder, my_store)
-    .discovery(discover_fn)
+    .roster(my_roster)
     .gateway("./rpc_gateway")
     .build()
 )
@@ -343,18 +401,18 @@ rt = await (
 |--------|-------------|
 | `.mob(path)` | Path to mob TOML config |
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
+| `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
 | `.persistent_state(path)` | Enable persistent state at path |
 | `.continuity_store(provider)` | External identity continuity store |
 | `.lease_provider(provider)` | External identity lease provider |
 | `.scratch_dir(path)` | Required scratch path for external identity providers |
 | `.roster(provider)` | Identity-first roster provider |
 | `.topology_provider(provider)` | Identity-first topology provider |
-| `.agent_customizer(customizer)` | Identity-first agent customizer |
+| `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
+| `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `mobkit/on_error` notification; sync or async, fire-and-forget. Without it the events reach only the gateway's stderr ERROR line (see [Error hook and logging](/mobkit/guides/unified-runtime#error-hook-and-logging)) |
 | `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder, store)` | Session agent builder and optional store |
-| `.discovery(callback)` | Discovery callback (mob-level) |
-| `.pre_spawn(callback)` | Pre-spawn callback |
 | `.gating(path)` | Gating config path |
 | `.routing(path)` | Routing config path |
 | `.event_log(config)` | Operational event log declaration (`event_log.memory()` / `event_log.null()`) |
@@ -362,9 +420,20 @@ rt = await (
 | `.memory(config)` | Memory configuration |
 | `.agent_memory(config=True, **options)` | Durable identity-scoped agent memory |
 | `.auth(config)` | Auth configuration |
+| `.console_auth_required(required)` | Set `runtime_options.console_require_app_auth`; `False` is the explicit opt-out from the fail-closed console default (see [Console access](#console-access)) |
+| `.console_read_only(read_only=True)` | View-only console: mutating console RPCs are denied and omitted from capabilities |
+| `.console_fetch_timeout_ms(ms)` | Bundled-console JSON fetch timeout override (positive integer) |
+| `.console_config(path)` | Console UI TOML (`ConsoleUiConfig`) forwarded as `runtime_options.console_config_path` |
 | `.gateway(bin_path)` | Path to rpc_gateway binary |
 | `.modules(specs)` | Module specifications |
 | `.build()` | Build and connect the runtime |
+
+Boot-time membership is declared, never derived: a member exists only once a
+`.roster(provider)` names it (identity plane) or `ensure_member` creates it
+(worker plane); `[profiles.*]` in mob.toml are role templates and spawn
+nothing on their own. The former `.discovery(callback)` and
+`.pre_spawn(callback)` builder methods were removed: they stored the callback
+and never transmitted it, so no boot spawn ever came from them.
 
 External identity providers follow the Rust gateway's authoritative path: set
 `.continuity_store(provider)`, `.lease_provider(provider)`, and
@@ -443,6 +512,39 @@ declaration). Blob-store durability has no wire declaration today — it is
 declared by Rust embedders via `ephemeral_blobs(true)` /
 `binary_blob_store(...)` and reported read-only in the census.
 
+### Console access
+
+The bundled console is fail-closed. Without `.auth(...)` the gateway's
+decision state trusts no signing key, and because `require_app_auth` defaults
+to `true` every console request is refused with 401; the gateway logs a
+startup warning naming this. Opening the console is an explicit builder call:
+
+```python
+runtime = await (
+    MobKit.builder()
+    .mob("config/mob.toml")
+    .gateway("./rpc_gateway")
+    .console_auth_required(False)  # explicit opt-out: local console, no identity provider
+    .console_config("config/console.toml")
+    .build()
+)
+```
+
+Use `.console_auth_required(False)` only behind a loopback bind or a reverse
+proxy that authenticates; for anything shared, configure `.auth(...)` instead.
+Earlier SDKs had no setter and hosts overrode
+`MobKitRuntime._build_init_params` to inject `console_require_app_auth` or
+`console_config_path`; both now have builder methods and the override is no
+longer needed.
+
+The gateway binds `127.0.0.1` on an ephemeral port by default. To publish it
+from another container, `.http_listen("0.0.0.0:8080")` together with either
+`.auth(...)` or the explicit `.allow_remote()` acknowledgement, and
+`.http_public_base_url(...)` to advertise the proxy's address (read back as
+`runtime.rust_http_public_base_url`; `runtime.rust_http_base_url` stays the
+same-host form the SDK itself dials). A non-loopback bind without either is
+refused at init. See [Deployment](/mobkit/guides/deployment).
+
 ## Runtime lifecycle
 
 ```python
@@ -476,19 +578,118 @@ Discarding is the legacy pre-0.8.9 default and is not recommended: it hides
 panic output and makes a slow-but-working storage migration indistinguishable
 from a hang.
 
-## Session agent builder
+## Session agent builder and per-profile tools
 
-Define how agents are built during session creation:
+`build_agent` runs once per member build on the worker plane (fresh spawn or
+resume). The gateway pre-fills `SessionBuildOptions` before it calls you:
+
+| Field | Pre-filled with |
+|-------|-----------------|
+| `profile_name` | The spawn's role, taken from the member's `profile_name` (else `role`) label that meerkat stamps from the mob-member binding |
+| `labels` | The member's peer labels merged with the request labels |
+| `app_context` | The host context attached to the spawn, if any |
+| `session_id` | The spawn's `session_id` label when it carries one, else the resumed session's id |
+| `resume_session_id` | The resumed session's id on a resume; `None` on a mint |
+
+Read `profile_name`, do not assign it. There is no way to select a profile
+from `build_agent`: the gateway applies only `additional_instructions` (mint
+builds only; on a resume they are ignored with a warning, because a resume
+inherits the persisted prompt state), `labels`, `resume_session_id`, and the
+registered `tools` from what you return, and ignores a host-set
+`profile_name`. Per-profile tools are therefore
+one builder that branches on the pre-filled value:
 
 ```python
 from meerkat_mobkit import SessionAgentBuilder, SessionBuildOptions
 
 class MyBuilder(SessionAgentBuilder):
     async def build_agent(self, options: SessionBuildOptions) -> None:
-        options.profile_name = "assistant"
-        options.register_tool("search", my_search_handler)
-        options.register_tool("calculator", my_calc_handler)
+        # options.profile_name arrives pre-filled from the spawn role.
+        options.register_tool("calendar_lookup", my_calendar_handler)
+        if options.profile_name == "security":
+            options.register_tool(
+                "unifi_scan",
+                my_scan_handler,
+                description="Scan the UniFi controller",
+                input_schema={"type": "object", "properties": {"site": {"type": "string"}}},
+            )
+
+runtime = await (
+    MobKit.builder()
+    .mob("config/mob.toml")
+    .session_service(MyBuilder())
+    .gateway("./rpc_gateway")
+    .build()
+)
 ```
+
+`.session_service(builder)` is the public setter; `build()` connects and
+registers the builder on the callback dispatcher for you. `MobKitBuilder._config`
+and `MobKitRuntime._dispatcher` are internal and change without notice. The
+builder must be set before `build()`: `mobkit/init` tells the gateway whether a
+session builder exists, so there is no post-connect registration.
+
+### Identity-first equivalent: `customize_build`
+
+On the identity plane the same hook is `AgentCustomizer.customize_build`,
+registered with the public `.agent_customizer(customizer)`. It runs on fresh
+create and on every restore/reconcile, receives the durable spec (so
+`spec.profile` is the profile name), and registers tools on the draft:
+
+```python
+from meerkat_mobkit import (
+    AgentBuildContext,
+    AgentBuildDraft,
+    AgentCustomizerProtocol,
+    DurableAgentSpec,
+)
+
+class MyCustomizer(AgentCustomizerProtocol):
+    async def customize_build(
+        self,
+        context: AgentBuildContext,
+        spec: DurableAgentSpec,
+        draft: AgentBuildDraft,
+    ) -> None:
+        # context.identity, context.active_peers, context.managed_edges are read-only.
+        if spec.profile == "security":
+            draft.register_tool("unifi_scan", my_scan_handler, description="Scan the UniFi controller")
+        draft.additional_instructions.append(f"Your wired peers: {', '.join(context.active_peers)}")
+```
+
+`draft` also carries `model`, `system_prompt`, `additional_instructions`,
+`labels`, `app_context`, and `provider_params`. A tool registered here rides
+the same `callback/call_tool` dispatch as `build_agent` tools, so resumed
+identities keep it.
+
+### Provider parameters (`provider_params`)
+
+`AgentBuildDraft.provider_params` mirrors meerkat's `ProviderParamsOverride`:
+the shared sampling knobs at the top level and the provider-specific knobs
+nested under `provider_tag`, which is tagged by `provider`. Anthropic prompt
+caching is such a knob; meerkat 0.8.32 (the pinned release) defaults it to
+`disabled` on every backend, so a long-lived identity opts in here:
+
+```python
+draft.provider_params = {
+    "provider_tag": {
+        "provider": "anthropic",
+        "cache_control": "automatic",   # disabled | automatic | system_prefix | system_and_conversation
+        "cache_ttl": "1h",              # 5m | 1h; effective only with a cache_control policy
+    },
+}
+```
+
+The flat form `{"cache_control": "automatic"}` is refused: both
+`ProviderParamsOverride` and the provider tags deny unknown fields, so the
+gateway rejects the returned draft instead of dropping the knob. Knobs the
+draft leaves unset are filled from the profile's own `provider_params`, and a
+`provider_tag` from a different provider family than the profile's own tag is a
+typed merge error, not a silent union. A declared `provider_params` also reaches resumed
+sessions (the bridge masks it into `resume_overrides`); it requires an inline
+definition profile to carry it, so an identity bound to a realm-reference
+profile fails the build with a message naming the realm profile as the place
+to declare it.
 
 ## Error hierarchy
 

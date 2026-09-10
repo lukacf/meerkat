@@ -4,7 +4,7 @@ description: "Bootstrap a MobKit runtime with modules and a Meerkat mob. Single 
 icon: "rocket"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 ## Install
 
@@ -12,7 +12,7 @@ icon: "rocket"
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-    meerkat-mobkit = "0.8.31"
+    meerkat-mobkit = "0.8.33"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -33,7 +33,10 @@ icon: "rocket"
   executable. Download `mobkit-rpc-gateway-<version>-<target>.tar.gz` for Unix
   or macOS, or `mobkit-rpc-gateway-<version>-<target>.zip` for Windows, from
   [GitHub Releases](https://github.com/lukacf/meerkat-mobkit/releases) and
-  extract its `rpc_gateway` binary (`rpc_gateway.exe` on Windows). For a source
+  extract its `rpc_gateway` binary (`rpc_gateway.exe` on Windows). Linux
+  archives published after v0.8.30 are built against glibc 2.31 (Debian 11)
+  and load on any distribution with glibc 2.31 or newer; the v0.8.30 Linux
+  archives were built on Ubuntu 24.04 and need glibc 2.39. For a source
   build, run
   `./scripts/repo-cargo build -p meerkat-mobkit --bin rpc_gateway --locked`,
   then run `./scripts/repo-cargo --print-env`; the debug binary is at
@@ -180,6 +183,24 @@ output = await triage.dispatch_text_and_wait(
 
 await luka.send_and_wait("What's happening today?", timeout=60)
 ```
+
+<Note>
+**Profiles are templates; members are declared.** The `[profiles.*]` tables in
+`MOB_TOML` produce no members on their own: the identities your roster returns
+(or `ensure_member` names) are the only members that exist, and nothing spawns
+one member per profile for you. The roster callback's `context` argument is
+empty on both SDKs (the gateway sends the definition, the SDK dispatchers do
+not pass it through), so a profile-shaped crew is one loop over the
+`[profiles.*]` of your own parsed `MOB_TOML`; see
+[Profiles are templates](/mobkit/concepts/roster#profiles-are-templates%3B-members-are-declared).
+If the definition declares `[wiring]` (`auto_wire_orchestrator` or
+`role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after
+each `rt.reconcile()`; `ensure_member` reconciles on its own. Pin
+`runtime_mode = "turn_driven"` on profiles that back addressable identities:
+meerkat defaults to `autonomous_host`, which runs a kickoff turn at spawn and
+cannot receive ambient per-turn memory (see
+[Runtime modes](/mobkit/concepts/roster#runtime-modes)).
+</Note>
 
 Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.
 

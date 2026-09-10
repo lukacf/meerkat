@@ -25,6 +25,67 @@ class SyncMobKitDocsTests(unittest.TestCase):
         self.assertIn('href="/mobkit/quickstart"', rendered)
         self.assertIn('src="/mobkit/images/a.png"', rendered)
 
+    def test_root_links_preserve_code_fences(self) -> None:
+        for fence in ("```", "````", "~~~"):
+            with self.subTest(fence=fence):
+                example = f'{fence}md\n[example](/quickstart)\n{fence}\n'
+                self.assertEqual(sync.rewrite_root_links(example), example)
+
+    def test_legacy_anchor_correction_requires_an_unambiguous_existing_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            docs = Path(temp)
+            (docs / "concepts").mkdir()
+            roster = docs / "concepts" / "roster.mdx"
+            heading = "## Profiles are templates; members are declared\n"
+            legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
+            canonical = "/concepts/roster#profiles-are-templates%3B-members-are-declared"
+            roster.write_text(heading, encoding="utf-8")
+            corrections = sync.released_anchor_corrections(docs)
+            self.assertEqual(corrections, {legacy: canonical})
+            source = (
+                f"[Profiles are templates]({legacy})\n"
+                f'<Card href="{legacy}" />\n'
+            )
+            self.assertEqual(
+                sync.normalize_released_anchors(source, corrections),
+                source.replace(legacy, canonical),
+            )
+
+            for text in (
+                "",
+                f"```md\n{heading}```\n",
+                f"~~~md\n{heading}~~~\n",
+                heading * 2,
+                heading + "## Profiles are templates members are declared\n",
+            ):
+                with self.subTest(text=text):
+                    roster.write_text(text, encoding="utf-8")
+                    corrections = sync.released_anchor_corrections(docs)
+                    self.assertEqual(corrections, {})
+                    self.assertEqual(
+                        sync.normalize_released_anchors(source, corrections), source
+                    )
+            roster.unlink()
+            self.assertEqual(sync.released_anchor_corrections(docs), {})
+
+    def test_legacy_anchor_correction_preserves_unrelated_links_and_examples(self) -> None:
+        legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
+        corrections = {
+            legacy: "/concepts/roster#profiles-are-templates%3B-members-are-declared"
+        }
+        source = (
+            f"[external](https://example.com{legacy})\n"
+            f'[external](//example.com{legacy})\n'
+            "[valid](/concepts/roster#profiles-are-templates%3B-members-are-declared)\n"
+            "[valid](/concepts/roster#runtime-modes)\n"
+            "[unknown](/concepts/roster#unknown-fragment)\n"
+            "[different page](/guides/roster#profiles-are-templates-members-are-declared)\n"
+            f"Literal URL: {legacy}\n"
+        )
+        for fence in ("```", "````", "~~~"):
+            source += f'{fence}md\n[example]({legacy})\n<Card href="{legacy}" />\n{fence}\n'
+        self.assertEqual(sync.normalize_released_anchors(source, corrections), source)
+
     def test_release_snapshot_normalizes_required_icons(self) -> None:
         source = '---\ntitle: "Introduction"\ndescription: "Intro"\n---\n'
         rendered = sync.ensure_page_icon(source, "introduction")
@@ -135,6 +196,8 @@ class SyncMobKitDocsTests(unittest.TestCase):
             source = Path(temp) / "meerkat-mobkit"
             docs = source / "docs"
             (docs / "guides").mkdir(parents=True)
+            (docs / "api").mkdir()
+            (docs / "concepts").mkdir()
             (source / "Cargo.toml").write_text(
                 '[workspace]\n\n[workspace.package]\nversion = "1.2.3"\n',
                 encoding="utf-8",
@@ -149,7 +212,10 @@ class SyncMobKitDocsTests(unittest.TestCase):
                                     "groups": [
                                         {
                                             "group": "Start",
-                                            "pages": ["introduction", "guides/deploy"],
+                                            "pages": [
+                                                "introduction", "guides/deploy",
+                                                "quickstart", "api/rpc", "concepts/roster",
+                                            ],
                                         }
                                     ],
                                 }
@@ -165,6 +231,19 @@ class SyncMobKitDocsTests(unittest.TestCase):
             )
             (docs / "guides" / "deploy.mdx").write_text(
                 '---\ntitle: "Deploy"\ndescription: "Deploy"\nicon: "ship"\n---\n## Steps\n',
+                encoding="utf-8",
+            )
+            legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
+            for page_id in ("quickstart", "api/rpc"):
+                (docs / f"{page_id}.mdx").write_text(
+                    '---\ntitle: "Page"\ndescription: "Page"\nicon: "book"\n---\n\n'
+                    f"[Profiles are templates]({legacy})\n"
+                    "[Runtime modes](/concepts/roster#runtime-modes)\n",
+                    encoding="utf-8",
+                )
+            (docs / "concepts" / "roster.mdx").write_text(
+                '---\ntitle: "Roster"\ndescription: "Roster"\nicon: "users"\n---\n\n'
+                "## Profiles are templates; members are declared\n\n## Runtime modes\n",
                 encoding="utf-8",
             )
             git = ["git", "-C", str(source)]
@@ -192,9 +271,12 @@ class SyncMobKitDocsTests(unittest.TestCase):
             manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_version"], "1.2.3")
             self.assertEqual(manifest["source_ref"], "v1.2.3")
+            self.assertEqual(manifest["source_commit"], sync.git_output(source, "rev-parse", "HEAD"))
+            self.assertIs(manifest["source_docs_dirty"], False)
+            self.assertEqual(manifest["content_sha256"], sync.validate.tree_digest(destination))
             expected_stamp = sync.version_stamp("1.2.3", "v1.2.3", manifest["source_commit"])
             pages = sorted(destination.rglob("*.mdx"))
-            self.assertEqual(len(pages), 2)
+            self.assertEqual(len(pages), 5)
             for page in pages:
                 rendered = page.read_text(encoding="utf-8")
                 frontmatter_end = rendered.index("\n---\n", 4) + len("\n---\n")
@@ -207,6 +289,21 @@ class SyncMobKitDocsTests(unittest.TestCase):
             self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
             self.assertIn("This page documents MobKit v1.2.3", introduction)
             self.assertIn('icon: "boxes-stacked"', introduction)
+            for page_id in ("quickstart", "api/rpc"):
+                rendered = (destination / f"{page_id}.mdx").read_text(encoding="utf-8")
+                self.assertIn(
+                    "/mobkit/concepts/roster#profiles-are-templates%3B-members-are-declared",
+                    rendered,
+                )
+                self.assertIn("/mobkit/concepts/roster#runtime-modes", rendered)
+                self.assertIn(legacy, (docs / f"{page_id}.mdx").read_text(encoding="utf-8"))
+            self.assertEqual(sync.git_output(source, "status", "--porcelain"), "")
+
+            (docs / "quickstart.mdx").write_text("dirty", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "uncommitted changes"):
+                sync.build_snapshot(
+                    source, Path(temp) / "dirty", source_ref="v1.2.3", require_clean=True
+                )
 
 
 if __name__ == "__main__":

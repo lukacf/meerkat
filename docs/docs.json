@@ -263,7 +263,8 @@
                   "mobkit/guides/module-system",
                   "mobkit/guides/console",
                   "mobkit/guides/flow-editor",
-                  "mobkit/guides/authentication"
+                  "mobkit/guides/authentication",
+                  "mobkit/guides/deployment"
                 ]
               }
             ]

@@ -1,0 +1,271 @@
+---
+title: "Deployment"
+description: "Why the gateways bind loopback, how to publish them behind a reverse proxy or across containers, and the fail-closed rule for non-loopback binds."
+icon: "server"
+---
+
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
+
+Both bundled gateways, the console/admin `mobkit_gateway` and the SDK-facing
+`rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
+another address. This page explains the posture, the three shipped ways to
+publish a gateway, and the exposure gate a non-loopback bind has to pass.
+
+## Why loopback is the default
+
+Everything a gateway serves over HTTP hangs off one listener: the bundled
+console, console JSON-RPC, blobs, SSE event streams, and (when enabled) the
+live WebSocket transport. `mobkit_gateway` serves that console **open**: it has
+no `auth_config` ingress and builds its decision state with
+`require_app_auth = false`, so the loopback bind is its only access boundary.
+`rpc_gateway` is fail-closed by default (it trusts no signing key and refuses
+every console request until the host passes `auth_config` or opts out with
+`console_require_app_auth = false`), and the common host choice is the opt-out,
+which again makes loopback the boundary.
+
+Loopback is therefore a security posture, not an oversight. The SDK process that
+spawns a gateway shares its network namespace and reads the exact
+`http_base_url` from the `mobkit/init` result, so nothing on the host needs a
+fixed or public port.
+
+## Publishing a gateway
+
+### Same host or same network namespace: proxy to `http_base_url`
+
+The pattern the shipped hosts use. The SDK runtime exposes the base URL after
+`connect()` (`runtime.rust_http_base_url` in Python, `runtime.rustHttpBaseUrl`
+in TypeScript); the host's own web server proxies `/console` and the routes it
+wants to publish to that base and authenticates in front. Works for a process
+on the same machine, a Kubernetes sidecar in the same pod, or a Docker
+container started with `--network container:<gateway>`. The port is ephemeral,
+so read it at runtime rather than configuring it.
+
+`mobkit_gateway` additionally records `http_base_url` in its runtime registry
+under the gateway state directory, so a same-host proxy can discover a resumed
+runtime without holding the init handshake.
+
+### Separate containers: bind a non-loopback address
+
+A reverse proxy in another container on a bridge network cannot reach
+`127.0.0.1` inside the gateway's container. For that topology bind the listener
+on the container's interface and let the gate below decide whether the bind is
+allowed:
+
+<Tabs>
+  <Tab title="Python (rpc_gateway)">
+```python
+runtime = await (
+    MobKit.builder()
+    .mob("config/mob.toml")
+    .gateway("./rpc_gateway")
+    .http_listen("0.0.0.0:8080")               # runtime_options.http_listen
+    .http_public_base_url("https://mob.example.com")  # reported, never bound
+    .allow_remote()                            # exposure acknowledgement
+    .console_auth_required(False)              # or .auth(...) to enforce auth instead
+    .build()
+)
+print(runtime.rust_http_base_url)         # http://127.0.0.1:8080 (same-host form)
+print(runtime.rust_http_public_base_url)  # https://mob.example.com
+```
+  </Tab>
+  <Tab title="TypeScript (rpc_gateway)">
+```typescript
+const runtime = await MobKit.builder()
+  .mob("config/mob.toml")
+  .gateway("./rpc_gateway")
+  .httpListen("0.0.0.0:8080")
+  .httpPublicBaseUrl("https://mob.example.com")
+  .allowRemote()
+  .consoleAuthRequired(false)
+  .build();
+console.log(runtime.rustHttpBaseUrl);        // http://127.0.0.1:8080
+console.log(runtime.rustHttpPublicBaseUrl);  // https://mob.example.com
+```
+  </Tab>
+  <Tab title="mobkit_gateway">
+```bash
+# Launch flags (or MOBKIT_HTTP_LISTEN_ADDR / MOBKIT_HTTP_ALLOW_REMOTE=1):
+mobkit_gateway --http-listen 0.0.0.0:8080 --allow-remote
+```
+```json
+// or in the mobkit/init params, which win over flags and environment:
+{ "http_listen": "0.0.0.0:8080", "allow_remote": true,
+  "http_public_base_url": "https://mob.example.com" }
+```
+  </Tab>
+  <Tab title="Raw mobkit/init (rpc_gateway)">
+```json
+{ "runtime_options": {
+    "http_listen": "0.0.0.0:8080",
+    "http_public_base_url": "https://mob.example.com",
+    "allow_remote": true } }
+```
+  </Tab>
+</Tabs>
+
+`http_listen` takes an IP literal and port (`0.0.0.0:8080`, `[::]:8080`,
+`192.168.0.10:8080`); hostnames are refused so the bind cannot resolve
+differently on the next host. `HOST:0` still asks the kernel for a port.
+
+The init result then carries two base URLs:
+
+| Field | Value | Use it for |
+|-------|-------|------------|
+| `http_base_url` | The same-host form: the bound port at `127.0.0.1` for `0.0.0.0` / `::` binds, otherwise the bound address itself | The SDK's own SSE, multipart and console RPC calls; same-host proxies |
+| `http_public_base_url` | Exactly the `http_public_base_url` the launch declared, trailing `/` removed; `null` when none was declared | Links handed to browsers and off-host clients; the base a proxy in another container publishes |
+
+The public base is advertised, never bound: it is the operator's statement of
+how clients reach the proxy in front of the gateway. The Python runtime exposes
+it as `rust_http_public_base_url` (falling back to the same-host base when
+none was declared) and TypeScript as `rustHttpPublicBaseUrl`.
+
+### Rust library host: serve the router on your own listener
+
+`UnifiedRuntime::run(listener, decisions, shutdown)` and `::serve(listener,
+decisions)` accept any `TcpListener`, and `GatewayHttpBinding::bind(addr)` is
+the shared admission type the binaries use. `examples/library_mode_reference.rs`
+(`MOBKIT_REF_ADDR`) is the template. A library host owns its own exposure
+decision; run `validate_http_bind_policy` if you want the same gate.
+
+## The exposure gate: auth or acknowledgement
+
+A non-loopback `http_listen` is refused at init, before any runtime is
+bootstrapped, unless one of two things is true:
+
+1. **The console enforces app auth.** `require_app_auth` is on AND the trusted
+   JWKS carries at least one key, which is what `auth_config` (Python
+   `.auth(...)`, TypeScript `.auth(...)`) produces. The listener then carries
+   its own access boundary. Note that the fail-closed default, `require_app_auth`
+   with an empty key set, does not count: refusing everyone protects the
+   listener but authenticates nobody, and is not a deployment anyone intends.
+2. **The launch acknowledges the exposure with `allow_remote`.** This is the
+   same word and the same rule as `--allow-remote` on `rkat-rpc --tcp` and
+   `rkat mob host --listen-tcp` in Meerkat: an explicit transport-exposure
+   opt-in, not an auth mechanism. Pass it only when an authenticating proxy
+   fronts the listener.
+
+`mobkit_gateway` has no auth ingress, so on that binary only `allow_remote`
+(init param, `--allow-remote`, or `MOBKIT_HTTP_ALLOW_REMOTE=1`) can open the
+gate. On both binaries a refused bind answers `mobkit/init` with a `-32602`
+error on the request id whose message names the address and every way out.
+
+The listener is bound right behind the gate, before any bootstrap. A fixed
+`http_listen` port makes "address already in use" a realistic init failure,
+and it is answered the same way: `-32603` on the request id naming the
+address, with nothing built behind it (no runtime, no session store, and no
+schedule executor lease that a process exit would leave held for its full
+duration).
+
+Every non-loopback bind that does pass logs one WARN line on stderr naming the
+bound address and whether the console on it is authenticated or open. It cannot
+be silenced below WARN by the default filter.
+
+## Reading schedule watchdog diagnostics
+
+Both gateways probe the shared schedule service at boot and every 60 seconds.
+Only Pending occurrences more than 120 seconds overdue under an authoritative
+Active parent contribute to a firing-pipeline stall, its count, and its oldest
+due time. A boot backlog logs WARN; a new or changed periodic stall logs ERROR,
+with a WARN heartbeat every ten unchanged polls.
+
+Paused and Deleted parents can retain Pending occurrences without a firing
+fault. The DEBUG `schedule overdue pending parent attribution` record reports
+separate `active`, `paused`, `deleted`, and `unresolved` counts; the probe does
+not modify those rows. Enable `meerkat_mobkit::schedule_wiring=debug` in
+`RUST_LOG` to see these buckets.
+
+Missing parent evidence or failed/poisoned reads log **observation incomplete**
+at ERROR, including at boot, rather than claiming health or attributing a
+stall to inactive work. A mixed report retains unresolved evidence alongside
+any known active backlog. Executor owner and fencing-token observations explain
+an active backlog only; they never grant firing authority.
+
+## Docker sketch
+
+```yaml
+services:
+  mobkit:
+    image: your-host-image
+    command: ["python", "-m", "your_host"]   # builder: .http_listen("0.0.0.0:8080").allow_remote()
+    expose: ["8080"]
+  proxy:
+    image: nginx
+    ports: ["443:443"]
+    # nginx authenticates, then proxy_pass http://mobkit:8080;
+```
+
+The host image runs the SDK and the gateway together (the SDK spawns the
+gateway over stdio and reaches it at `http_base_url`); only the proxy is
+published. If the proxy instead shares the gateway's network namespace, keep
+the loopback default and proxy to `http_base_url`.
+
+## Resume behaviour (`mobkit_gateway`)
+
+The HTTP listen address and the advertised `http_public_base_url` are both
+part of the runtime resume fingerprint, like `--control-listen`. Relaunching
+with a different `http_listen` or a different (or newly dropped)
+`http_public_base_url` creates a runtime with the values you declared instead
+of silently reporting a live runtime started with other ones; with a fixed
+port that new runtime cannot bind while the old one still holds the port, and
+init says so. A resumed launch (same fingerprint) reports the `http_base_url`
+and `http_public_base_url` the live runtime was started with, which are by
+construction the ones you declared.
+
+## Reading a gateway exit
+
+Both gateways log on stderr, through `tracing`, at the default filter (no
+`RUST_LOG` needed). When the run loop ends, the binary writes one INFO line
+naming which branch ended it, runs the graceful shutdown sequence, then writes
+a closing bookend:
+
+```text
+INFO rpc_gateway: rpc_gateway dispatch loop ended; running graceful shutdown reason=signal signal=SIGTERM
+INFO rpc_gateway: rpc_gateway shutdown complete; exiting reason=signal signal=SIGTERM
+```
+
+`reason=` is one of these tokens; `signal=` (`SIGINT` or `SIGTERM`) is present
+only when the reason is `signal`.
+
+| Binary | `reason=` | Meaning |
+|--------|-----------|---------|
+| `rpc_gateway` | `stdin_closed` | The launching process closed the gateway's stdin (EOF) or the read failed; the reader logs which just before. Exiting on EOF is by design: the SDK that owned the pipe is gone. |
+| `rpc_gateway` | `signal` | SIGINT or SIGTERM arrived while stdin was still open. |
+| `rpc_gateway` | `sdk_shutdown_handshake` | The SDK's `mobkit/shutdown` handshake asked for an orderly stop. |
+| `mobkit_gateway` | `signal` | SIGINT or SIGTERM. |
+| `mobkit_gateway` | `http_server_ended` | The HTTP server task ended on its own. A clean end proceeds to graceful shutdown; an abnormal one is also logged at ERROR and the process exits 1. |
+| `mobkit_gateway` | `stdin_guard_ended` | Not expected: the stdin guard parks forever after EOF. Named so it can never be silently absorbed. |
+
+`mobkit_gateway` does not exit on stdin EOF. It logs `stdin closed by the
+launching process; mobkit_gateway keeps serving HTTP until SIGINT or SIGTERM`
+and stays up, so a later exit is attributed to what actually ended it. After a
+signal it exits once shutdown completes whether or not stdin is still open (a
+terminal, or a parent holding the pipe); both gateways exit explicitly on that
+path because tokio's stdin read cannot be cancelled.
+
+Panics are reported through the same stream at ERROR, with `thread`, `file`,
+`line`, `column` and `payload` fields, before the standard panic message
+(`RUST_BACKTRACE` still works). A panic on a tokio worker unwinds one task and
+the process keeps running, so this line may be the only record of one.
+
+How to read a gateway that is gone:
+
+- The "loop ended" line is present with `reason=signal`: a supervisor or
+  operator stopped it. Check who sent the signal (container stop, health check
+  timing out during a long console operation, `kill`).
+- `reason=stdin_closed` on `rpc_gateway`: the SDK host process exited or closed
+  the pipe; look at the host first.
+- The "loop ended" line is present but the bookend is not: the shutdown
+  sequence wedged or the process was killed during it.
+- Neither line, but a `panic` ERROR: a crash; the line names the source
+  location.
+- No line at all: the process was killed from outside (SIGKILL, an OOM kill,
+  a stack overflow) or aborted. The exit status names which; `137` is SIGKILL,
+  `139` is a segfault or stack overflow, `134` is an abort.
+
+## See also
+
+- [Configuration](/mobkit/reference/configuration): the `http_listen`,
+  `http_public_base_url` and `allow_remote` rows
+- [Authentication](/mobkit/guides/authentication): configuring `auth_config`
+- [Console](/mobkit/guides/console): the console surface these binds publish
+- [Unified runtime](/mobkit/guides/unified-runtime): `GatewayHttpBinding` in a library host

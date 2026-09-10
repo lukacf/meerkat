@@ -4,7 +4,7 @@ description: "Policy enforcement: auth rules, console access, runtime ops constr
 icon: "scale-balanced"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit's decision layer enforces operational policies through typed validation functions. Each function takes a policy or configuration input and returns a typed error on violation.
 
@@ -90,7 +90,7 @@ command = "meerkat-router"
 
 - Module `id` must be non-empty
 - Module `command` must be non-empty
-- TOML must parse correctly
+- TOML must parse correctly; an empty manifest (no `[[modules]]` table) declares no modules
 - Restart policy defaults to `OnFailure` when omitted
 
 ---
@@ -130,6 +130,87 @@ Every release must include all four targets:
 
 ---
 
+## Runtime decision state
+
+`build_runtime_decision_state` turns raw policy documents into the
+`RuntimeDecisionState` the runtime consults while serving. It runs every check
+below in order and returns the first refusal as a typed
+`DecisionRuntimeError::Policy(DecisionPolicyError)`; nothing panics, so a host
+that crashes at startup is unwrapping the result.
+
+```rust
+let decisions = build_runtime_decision_state(RuntimeDecisionInputs {
+    bigquery: BigQueryNaming { dataset: "mobkit".into(), table: "sessions".into() },
+    trusted_mobkit_toml: String::new(),          // empty manifest: no trusted modules
+    auth: AuthPolicy::default(),
+    trusted_oidc: TrustedOidcRuntimeConfig {
+        discovery_json: discovery_json,          // must carry issuer and jwks_uri
+        jwks_json: jwks_json,                    // at least one key
+        audience: "my-console".into(),
+    },
+    console: ConsolePolicy::default(),           // require_app_auth: true
+    ops: RuntimeOpsPolicy::default(),
+    release_metadata_json: release_metadata_json,
+})?;
+```
+
+| # | Check | Input | Runs when | Error |
+|---|-------|-------|-----------|-------|
+| 1 | `validate_bigquery_naming` | `bigquery` | Always | `EmptyBigQueryDataset`, `EmptyBigQueryTable`, `InvalidBigQueryName` |
+| 2 | `load_trusted_mobkit_modules_from_toml` | `trusted_mobkit_toml` | Always; an empty string is accepted and declares no modules | `TomlParse`, `MissingModuleId`, `MissingModuleCommand` |
+| 3 | `validate_runtime_ops_policy` | `ops` | Always | `ReplicaCountMustBeOne`, `SloTargetsNotSupportedV01` |
+| 4 | `parse_release_metadata_json` + `validate_release_metadata` | `release_metadata_json` | Always. Nothing reads the result at serve time; this is release governance carried in the build path | `TomlParse` (message names the release metadata JSON), `MissingReleaseTarget`, `DuplicateReleaseTarget`, `InvalidSupportMatrix` |
+| 5 | `validate_trusted_oidc_runtime_config` | `trusted_oidc` | Only when `console.require_app_auth` is `true` | `InvalidTrustedAuthConfig` |
+
+Check 5 requires a non-empty `audience`, a discovery document with `issuer`
+and `jwks_uri`, and a JWKS with at least one key. It is skipped with
+`require_app_auth: false` because an open console never verifies a token on
+its own; the console's request-time path re-validates the same snapshot and
+fails closed whenever a token actually has to be checked. `ConsolePolicy::default()`
+has `require_app_auth: true`, so a host that keeps the default still needs a
+complete snapshot.
+
+One consequence of the conditional check: an open console with an ABAC
+`AccessController` installed still resolves a token a caller volunteers, and a
+broken snapshot then degrades that caller to anonymous instead of refusing at
+startup. A host that wants the startup refusal on an open console calls
+`validate_trusted_oidc_runtime_config(&inputs.trusted_oidc)?` itself before
+building.
+
+### Opting out of console auth
+
+`RuntimeDecisionState::local_console(console, bigquery)` is the explicit
+opt-out and the single owner of the keyless snapshot both gateway binaries
+serve: a discovery document whose issuer resolves nowhere, a JWKS with no
+keys, no trusted modules, default auth and ops policies, and the canonical
+release metadata. It bypasses the validator because there is nothing to
+validate about a snapshot that trusts nothing.
+
+```rust
+// Local or host-protected console: no identity provider.
+let decisions = RuntimeDecisionState::local_console(
+    ConsolePolicy { require_app_auth: false, ..ConsolePolicy::default() },
+    None, // session-store naming defaults to default_dataset / default_table
+);
+// A host that runs trusted modules adds them; the state starts with none.
+let decisions = decisions.with_modules(trusted_modules);
+```
+
+At serve time the runtime reads `console`, the session-store naming and
+`modules` (the trusted module set console ingress consults); `local_console`
+takes the first two as parameters and `with_modules` covers the third.
+
+The default stays fail-closed: `local_console(ConsolePolicy::default(), None)`
+requires app auth and trusts no key, so it refuses every request. This is
+exactly what `rpc_gateway` serves when an SDK launch passes neither
+`runtime_options.auth_config` nor `console_require_app_auth: false`; it logs a
+startup warning naming the condition.
+
+`RuntimeDecisionState` has public fields, so a struct literal is also a
+supported construction path; it skips every check above.
+
+---
+
 ## Error types
 
 All decision functions return `DecisionPolicyError`:
@@ -139,7 +220,7 @@ All decision functions return `DecisionPolicyError`:
 | `EmptyBigQueryDataset` | BigQuery dataset name is empty |
 | `EmptyBigQueryTable` | BigQuery table name is empty |
 | `InvalidBigQueryName` | Name contains disallowed characters |
-| `TomlParse` | Trust manifest TOML parsing failed |
+| `TomlParse` | A policy document failed to parse: the trust manifest (TOML) or the release metadata (JSON). The message names the document and format; the variant name predates the JSON use and is kept because the enum is not `#[non_exhaustive]` |
 | `MissingModuleId` | Module declaration has empty ID |
 | `MissingModuleCommand` | Module declaration has empty command |
 | `AuthProviderMismatch` | Request provider differs from configured |
@@ -152,7 +233,7 @@ All decision functions return `DecisionPolicyError`:
 | `MissingReleaseTarget` | Required release target missing |
 | `DuplicateReleaseTarget` | Same target listed twice |
 | `InvalidSupportMatrix` | Support matrix is not "same-as-meerkat" |
-| `InvalidTrustedAuthConfig` | Trusted OIDC config invalid |
+| `InvalidTrustedAuthConfig` | Trusted OIDC snapshot invalid: empty audience, discovery without `issuer`/`jwks_uri`, or a JWKS with no keys. Checked at build time only when `console.require_app_auth` is `true` |
 
 ## See also
 

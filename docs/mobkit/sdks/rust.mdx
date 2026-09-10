@@ -4,7 +4,7 @@ description: "Use MobKit as a Rust library: bootstrap runtimes, route module cal
 icon: "code"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 The Rust crate `meerkat-mobkit` is the primary interface for MobKit. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-mobkit` is the primary interface for MobKit. All other i
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-mobkit = "0.8.31"
+meerkat-mobkit = "0.8.33"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -236,7 +236,36 @@ fn validate_bigquery_naming(naming: &BigQueryNaming) -> Result<(), DecisionPolic
 fn load_trusted_mobkit_modules_from_toml(toml: &str) -> Result<Vec<ModuleConfig>, DecisionPolicyError>
 fn enforce_console_route_access(auth: &AuthPolicy, console: &ConsolePolicy, req: &ConsoleAccessRequest) -> Result<(), DecisionPolicyError>
 fn validate_runtime_ops_policy(policy: &RuntimeOpsPolicy) -> Result<(), DecisionPolicyError>
+fn validate_trusted_oidc_runtime_config(config: &TrustedOidcRuntimeConfig) -> Result<(), DecisionPolicyError>
+fn build_runtime_decision_state(input: RuntimeDecisionInputs) -> Result<RuntimeDecisionState, DecisionRuntimeError>
+impl RuntimeDecisionState {
+    // Explicit opt-out: a console that trusts no identity provider.
+    fn local_console(console: ConsolePolicy, bigquery: Option<BigQueryNaming>) -> Self
+    // Trusted module set for a local_console state (starts empty).
+    fn with_modules(self, modules: Vec<ModuleConfig>) -> Self
+}
 ```
+
+`build_runtime_decision_state` is the validating constructor; it checks the
+trusted OIDC snapshot only when `console.require_app_auth` is `true`.
+`RuntimeDecisionState::local_console` is the explicit opt-out for local or
+host-protected consoles; at serve time the runtime reads `console`, the
+session-store naming and `modules`, and a host with trusted modules adds them
+with `.with_modules(...)`. The default stays fail-closed: `ConsolePolicy::default()`
+requires app auth, and a state that trusts no key refuses every request. See
+[Decisions](/mobkit/reference/decisions#runtime-decision-state) for every check and
+when it runs.
+
+`gateway_composition` also exports the HTTP exposure vocabulary both binaries
+use: `GatewaySurface` (`RpcGateway` | `MobkitGateway`, `Display` is the binary
+name), `ConsoleAuthPosture::of(&decisions)` (`Open` | `ClosedToEveryCaller` |
+`Enforced`, the one classifier behind the bind gate and the non-loopback
+warning), `HttpBindPolicy`, `validate_http_bind_policy(surface, listen, policy)`,
+`warn_on_non_loopback_bind(surface, bound, &decisions)`, and the typed
+`HttpExposureParseError` behind `parse_http_listen_addr`,
+`parse_http_public_base_url` and `parse_http_listen_arg`. The error enums
+(`HttpBindPolicyError`, `HttpExposureParseError`, `GatewayHostConfigError`,
+`HostConfigTableInMobToml`) are `#[non_exhaustive]`.
 
 ### Authentication
 
@@ -259,6 +288,15 @@ fn validate_traceability_statuses(statuses: &[&str]) -> Result<(), GovernanceVal
 Build Axum routers for serving the console and interactions:
 
 ```rust
+// Decision state. Explicit opt-out for a local console that trusts no
+// identity provider; ConsolePolicy::default() would require app auth and,
+// with no trusted key, refuse every request.
+let decisions = RuntimeDecisionState::local_console(
+    ConsolePolicy { require_app_auth: false, ..ConsolePolicy::default() },
+    None,
+);
+// Authenticated console: build_runtime_decision_state(RuntimeDecisionInputs { .. })?
+
 // Console frontend (HTML + JS + CSS)
 let frontend: Router = console_frontend_router();
 
@@ -267,6 +305,18 @@ let json_api_without_runtime: Router = console_json_router(decisions.clone());
 let json_api_with_runtime: Router =
     console_json_router_with_runtime(decisions, mob_runtime, None, None);
 ```
+
+Binding is separate from routing. `GatewayHttpBinding::bind_loopback()` is
+the default posture (loopback, ephemeral port) and
+`GatewayHttpBinding::bind(addr)` takes any `SocketAddr`; `http_base_url()`
+always returns the same-host form (`127.0.0.1` for `0.0.0.0` and `::`
+binds) and `with_advertised_base_url(..)` carries a proxy-facing base for
+your init reply. Run `validate_http_bind_policy("my-host", addr,
+HttpBindPolicy::for_gateway(allow_remote, &decisions))` before binding to
+get the gateways' fail-closed rule (non-loopback needs enforced console auth
+or the `allow_remote` acknowledgement) and `warn_on_non_loopback_bind` for
+their WARN line; all four live in `meerkat_mobkit::gateway_composition`. See
+[Deployment](/mobkit/guides/deployment).
 
 ## See also
 

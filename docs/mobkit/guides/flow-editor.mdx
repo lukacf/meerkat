@@ -4,7 +4,7 @@ description: "Embedded visual mobpack authoring studio with Basic and Graph edit
 icon: "sitemap"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit ships a web-based Flow Editor for authoring mobpacks — flows, member definitions, tools, skills, and structured-output schemas — embedded directly in the Rust binaries via `include_str!`. The editor is a thin client: every edit round-trips through the mobpack-authoring JSON-RPC surface, and the server-rendered document is what you see.
 
@@ -110,7 +110,7 @@ The top rail switches between **FLOWS** and **AGENTS** views and carries the IMP
 
 - **Basic mode** — a vertical step builder for the current flow.
 - **Graph mode** — an advanced canvas; node and edge edits sync through `graph_projection` / `graph_to_flow`.
-- **Agents view** — member definitions (identity, prompt, model, tools, schema references), skills, and a visual field-by-field schema editor for structured outputs.
+- **Agents view** - member definitions (identity, peer description, model, tools, schema references), skills, and a visual field-by-field schema editor for structured outputs. The peer description is the roster blurb other members see about this one (the `peers` tool and peer-added notifications); it is not the member's system prompt, which comes from the profile's `skills` and their inline or path content.
 - **Validation sheet** — opened by VALIDATE; shows passed/warning/blocking rows and hosts the deploy-plan and deploy-run buttons.
 - **Source preview** — renders the generated `mob.toml` and sibling source files via `mobkit/mobpacks/source`, without exporting an archive.
 - **Export / import** — PUBLISH exports the document and downloads it as a `.mobpack` archive; IMPORT accepts `.mobpack`, `.json`, and `.toml`.

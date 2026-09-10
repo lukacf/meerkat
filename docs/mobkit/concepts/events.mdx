@@ -4,7 +4,7 @@ description: "Unified agent and module envelopes, structural mob events, lossy W
 icon: "timeline"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 MobKit exposes three related event surfaces:
 
@@ -47,14 +47,47 @@ For `UnifiedEvent::Agent`, `source` must be `"agent"`. For `UnifiedEvent::Module
 
 Agent event names come from Meerkat's exhaustive event mapper. Current examples include:
 
-- Run and turn: `run_started`, `run_completed`, `run_failed`, `turn_started`, `turn_completed`
+- Run and turn: `run_started`, `retrying`, `run_completed`, `run_failed`, `turn_started`, `turn_completed`
 - Model output: `reasoning_delta`, `reasoning_complete`, `text_delta`, `text_complete`
 - Tools: `tool_call_requested`, `tool_result_received`, `tool_execution_started`, `tool_execution_completed`, `tool_execution_timed_out`
 - Hooks: `hook_started`, `hook_completed`, `hook_failed`, `hook_denied`
 - Compaction: `compaction_started`, `compaction_completed`, `compaction_failed`
-- Interaction: `interaction_complete`, `interaction_callback_pending`, `interaction_failed`
+- Interaction: `interaction_complete`, `interaction_callback_pending`, `interaction_failed`.
+  Only the first and last are terminals; `interaction_callback_pending` means
+  the interaction is paused at an external callback boundary waiting for tool
+  results, and it resumes and closes under the same `interaction_id`
 
 These strings are projections of Meerkat `AgentEvent` variants. MobKit does not synthesize them as module events.
+
+### Run failure payload
+
+`run_failed` carries Meerkat's typed failure fact as `error_report`; since Meerkat 0.7 there is no separately carried `error` string on the wire. MobKit's projection (`console_agent_event_payload`, the single site every SSE stream, event-log row and console frame goes through) keeps the report and derives two flat keys from it, so consumers read one shape:
+
+```json
+{
+  "type": "run_failed",
+  "session_id": "01a068a0-f911-7331-8187-d436145ac895",
+  "error_report": {
+    "class": "llm",
+    "reason": { "reason_type": "llm_auth_error" },
+    "message": "LLM error: authentication failed (401)"
+  },
+  "error": "LLM error: authentication failed (401)",
+  "reason": "llm_auth_error"
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `error_report.class` | Meerkat's `AgentErrorClass` (`llm`, `tool`, `budget`, `auth`, `internal`, ...). |
+| `error_report.reason` | Optional typed reason. `reason_type` is the stable discriminator (`llm_auth_error`, `llm_rate_limited`, `llm_provider_error`, `llm_context_exceeded`, `hook_denied`, ...); the remaining fields are variant data (`retry_after_ms`, `provider_error`, ...). Absent when Meerkat attached no typed reason. |
+| `error_report.message` | Human-readable failure text (the `Display` of the failing error). |
+| `error` | Derived: `error_report.message`. |
+| `reason` | Derived: `error_report.reason.reason_type`. Absent when there is no typed reason. |
+
+The console `interaction_failed` frame MobKit projects from `run_failed` carries the same payload, so `frame.data.error` and `frame.data.reason` name the failure there too. Frames MobKit mints itself (`reason: "superseded_by_later_run"`, or `error` set from a delivery failure) carry only the flat keys. Meerkat's own `interaction_failed` agent event carries a typed `reason` object (`kind` discriminator) whose `Display` is mirrored into `error`. The Python SDK exposes the report as `RunFailed.error_report` (with `error_class` and `reason_type` accessors) and derives `RunFailed.error` from it; the TypeScript SDK exposes `RunFailedEvent.errorReport`; `UnifiedAgentEvent.payload` carries it for `query_events` consumers.
+
+A retried LLM call (a 429, a network timeout) surfaces as `retrying` events before either terminal; a non-retryable failure (a 401 on a bad key) reaches `run_failed` in one round trip. The `user_input` frame of a console send terminates at `delivered` by design (the send was admitted); the turn's outcome is the sibling `interaction_complete` or `interaction_failed` frame, not a status change on the input frame.
 
 ### Merged module event names
 

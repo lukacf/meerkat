@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with MobKit modules into a single managed ru
 icon: "layer-group"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -89,6 +89,7 @@ After successful bootstrap, the builder returns a `UnifiedRuntime` handle with a
 | `module_events().await` | `Vec<EventEnvelope<UnifiedEvent>>` | Current module-runtime event snapshot |
 | `subscribe_events(request).await` | `SubscribeResponse` | Bounded unified-event replay for the requested scope |
 | `module_health_transitions().await` | `Vec<ModuleHealthTransition>` | Recorded module startup transitions |
+| `set_error_hook(hook)` | `()` | Install the operational error hook after construction; see [Error hook and logging](#error-hook-and-logging) |
 
 The raw `MobkitRuntimeHandle` is intentionally not exposed. Module operations
 such as routing, delivery, memory, and gating are methods on `UnifiedRuntime`.
@@ -183,6 +184,93 @@ Key routes in the reference app include:
 | `/mobkit/mob_events/stream` | GET | Structural mob-events SSE |
 | `/flow-editor` | GET | Visual mobpack editor |
 | `/flow-editor/rpc` | POST | Mobpack-authoring JSON-RPC |
+
+## Error hook and logging
+
+Failures the runtime detects after bootstrap (a member spawn that failed, a
+checkpoint that did not persist, a stalled actor loop) have no caller to return
+to. They are emitted as typed `ErrorEvent`s through the error hook, registered
+with `UnifiedRuntimeBuilder::on_error` or, for hosts that construct the runtime
+through `UnifiedRuntime::bootstrap`, with `UnifiedRuntime::set_error_hook`.
+The hook is fire-and-forget: it runs on a detached task, and a slow or failing
+hook cannot break the runtime. An attached identity-first runtime receives the
+same hook.
+
+```rust
+use meerkat_mobkit::{ErrorEvent, ErrorHook, UnifiedRuntime};
+use std::sync::Arc;
+
+let hook: ErrorHook = Arc::new(|event: ErrorEvent| {
+    Box::pin(async move {
+        match event {
+            ErrorEvent::SpawnFailure { member_id, error, .. } => page(&member_id, &error).await,
+            ErrorEvent::ActorLoopRecovered { .. } => {}
+            other => alert(&other).await,
+        }
+    })
+});
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .on_error(hook)
+    .build()
+    .await?;
+```
+
+`ErrorEvent` is `#[non_exhaustive]` and serializes with an internal
+`category` tag in `snake_case`, so match with a wildcard arm and branch on
+`category` on the wire. The variants and where the runtime fires them:
+
+| `category` | Fields | Fired when |
+|------------|--------|------------|
+| `spawn_failure` | `member_id`, `profile`, `error` | a member spawn fails |
+| `reconcile_incomplete` | `failures`, `skipped` | `reconcile_edges` finished with failed or skipped edges |
+| `checkpoint_failure` | `session_id`, `error` | the session store's periodic checkpoint/GC failed |
+| `compaction_persistence_rejected` | `identity`, `session_id`, `error`, `preserved_history?`, `attempted_entries?` | a member's compaction handoff was refused durably; `preserved_history` says whether the member can still send |
+| `actor_loop_stalled` | `probe_waited_secs`, `detail`, `stall_id?`, `prior_resolved_stalls?` | the actor-loop probe's round trip went unanswered past its budget |
+| `actor_loop_recovered` | `stall_id`, `stalled_for_secs` | that stall resolved; the one non-failure variant, correlated by `stall_id` |
+| `host_loop_crash` | `member_id`, `error` | a member emitted `run_failed` during event drain |
+| `rediscover_failure` | `error` | `rediscover` failed |
+| `event_log_flush_failure` | `error` | the operational event log could not flush |
+| `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | identity-first hydration skipped a member |
+| `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | teardown gave up waiting for runtime-attach readiness and continued without interrupting the member |
+
+**Default sink (since 0.8.18).** Every `ErrorEvent` is also logged through
+`tracing` whether or not a hook is registered: at ERROR, or at INFO for
+`actor_loop_recovered`, with a `hook_registered` field. A host that never
+registers a hook additionally gets one WARN, `no error hook is registered, so
+runtime error events reach logs only; register one with
+UnifiedRuntimeBuilder::on_error (or UnifiedRuntime::set_error_hook) to route
+them to paging`: `build()` emits it at startup when `on_error` was never
+called, and the fire path emits it once per process for hosts that bootstrap
+directly and install no hook.
+
+**Gateways.** `rpc_gateway` installs a hook that forwards every event to the
+SDK as the `mobkit/on_error` JSON-RPC notification (params are the serialized
+event); register a receiver with Python `.on_error(callback)` or TypeScript
+`.onError(callback)`. Because that forwarding hook is always installed, the
+absent-hook WARN never fires for SDK hosts; an SDK host that registers no
+callback sees only the gateway's stderr ERROR line, which the SDKs inherit by
+default (see [Gateway logging](/mobkit/sdks/python#gateway-logging-stderr)).
+`mobkit_gateway` installs no hook and relies on the log sink alone. Both
+binaries install a stderr `tracing` subscriber whose default filter is
+`warn,meerkat_mobkit=info,<binary>=info`; `RUST_LOG` overrides it.
+
+**Rust library hosts must install a tracing subscriber before `build()`.**
+`meerkat-mobkit` emits `tracing` events and installs no subscriber of its own.
+The default sink and the absent-hook notice are both `tracing` lines, so a host
+without a subscriber sees neither the failures nor the hint that nobody is
+listening. The minimum is a stderr subscriber honouring `RUST_LOG`:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,meerkat_mobkit=info")),
+    )
+    .with_writer(std::io::stderr)
+    .init();
+```
 
 ## Error hierarchy
 

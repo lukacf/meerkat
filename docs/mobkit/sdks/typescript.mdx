@@ -4,7 +4,7 @@ description: "TypeScript SDK for MobKit with type-safe contracts, parity tests, 
 icon: "js"
 ---
 
-*This page documents MobKit v0.8.31 (mirrored from [v0.8.31](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.31)).*
+*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
 
 The TypeScript SDK (`@rkat/mobkit-sdk`) provides type-safe access to the MobKit JSON-RPC gateway from Node.js.
 
@@ -133,6 +133,27 @@ export type UnifiedEvent = UnifiedAgentEvent | UnifiedModuleEvent;
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.
 
+An identity-first `RosterProvider.roster(context)` receives a typed
+`RosterContext`, a one-to-one mirror of the Rust struct the gateway sends
+under `params.context`:
+
+```typescript
+export interface RosterContext {
+  /**
+   * The booted mob's compiled definition as JSON (`id`, `profiles`, ...).
+   * Always present behind the bundled `rpc_gateway`; `null` only for in-process
+   * Rust embedders and test harnesses that resolve a roster without one.
+   */
+  readonly mobDefinition: Record<string, unknown> | null;
+  /**
+   * Identities the identity runtime has registered at the time of the call.
+   * Empty on the bootstrap resolves, populated on later re-derivations such as
+   * `mobkit/topology/query` or an edge reconcile.
+   */
+  readonly previousIdentities: readonly string[];
+}
+```
+
 ## Module support
 
 The SDK supports both ESM and CommonJS:
@@ -230,7 +251,13 @@ Gateway memory config accepts `{ backend: "local_json" }` with an optional `heal
 
 The builder exposes no `roleMigrations(...)` setter and sends no `role_migrations` init param, so a TypeScript host cannot authorize a role-migrating resume: a durable member whose role changed keeps refusing to resume with `MobError::MemberRoleMigrationRequired`. Declaring the migration currently requires the Python builder's `.role_migrations([...])` or a hand-built `mobkit/init` payload; see the [configuration reference](/mobkit/reference/configuration#member-role-migrations).
 
-The builder forwards `consoleConfig(path)` as `runtime_options.console_config_path`, which lets the bundled console consume the same `console_config` contract projected by `/console/experience`. Use `consoleAuthRequired(false)` only for explicit local demos.
+The builder forwards `consoleConfig(path)` as `runtime_options.console_config_path`, which lets the bundled console consume the same `console_config` contract projected by `/console/experience`. The console default is fail-closed: with neither `auth(...)` nor `consoleAuthRequired(false)` the gateway trusts no signing key and refuses every console request with 401 (it logs a startup warning naming this). `consoleAuthRequired(false)` is the explicit opt-out; use it only for a local or host-protected console. The Python twin is `.console_auth_required(False)`.
+
+`DurableAgentSpec` carries the two per-identity knobs the Rust type deserializes: `runtimeModeOverride` (`"autonomous_host"` or `"turn_driven"`; `null` defers to the profile's `runtime_mode`, whose meerkat default is `autonomous_host`) and `initialMessage` (the first turn a fresh `autonomous_host` member runs on: a string or `DispatchContentBlock[]`, Rust `ContentInput`; `null` leaves meerkat's fallback spawn prompt). Both are omitted from the roster payload when unset. `durableAgentSpecToDict` and `parseDurableAgentSpec` translate them (`runtime_mode_override`, `initial_message`). The Python twins are `runtime_mode_override` and `initial_message` on `DurableAgentSpec`.
+
+The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.0.0:8080")`, `allowRemote()` and `httpPublicBaseUrl(url)` are the exposure knobs (`runtime_options.http_listen`, `allow_remote`, `http_public_base_url`): a non-loopback bind is refused at init unless `auth(...)` enforces console auth or `allowRemote()` acknowledges the exposure, and the advertised base is read back as `runtime.rustHttpPublicBaseUrl` while `runtime.rustHttpBaseUrl` stays the same-host form the SDK itself dials. See [Deployment](/mobkit/guides/deployment).
+
+`meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
 
 ## Storage durability declarations
 
@@ -280,6 +307,28 @@ Two environment variables adjust this (same shape as the Python SDK):
 Discarding is the legacy pre-0.8.9 default and is not recommended: it hides
 panic output and makes a slow-but-working storage migration indistinguishable
 from a hang.
+
+### Error hook (`onError`)
+
+| Builder call | Effect |
+|--------------|--------|
+| `.onError(callback)` | Registers an `ErrorCallback` (`(event: ErrorEvent) => void`, or a promise of it). The gateway forwards every runtime `ErrorEvent` as the `mobkit/on_error` notification; the SDK parses it into `{ category, message, context }` and awaits your callback. |
+
+`category` is one of the `ErrorCategory` constants (`spawn_failure`,
+`reconcile_incomplete`, `checkpoint_failure`,
+`compaction_persistence_rejected`, `actor_loop_stalled`,
+`actor_loop_recovered`, `host_loop_crash`, `rediscover_failure`,
+`event_log_flush_failure`, `identity_materialization_failure`,
+`mob_stop_proceeded_without_interrupt`), kept in lockstep with the Rust enum
+by `tests/sdk_error_category_parity.rs`; `context` carries the variant's
+fields (`member_id`, `error`, and so on). The hook is fire-and-forget: a
+rejected promise is swallowed, and with no callback registered the
+notification is dropped. The gateway's own stderr line for the same event
+(ERROR, or INFO for `actor_loop_recovered`) is written either way, so the
+hook adds alerting, not logging. Use
+`isResolutionErrorEvent(event)` to tell a failure ending
+(`actor_loop_recovered`) from one starting before paging on it. The Python
+twin is `.on_error(callback)`.
 
 ## HTTP transport timeout
 

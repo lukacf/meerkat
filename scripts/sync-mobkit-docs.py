@@ -15,11 +15,14 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 
@@ -33,6 +36,22 @@ REQUIRED_PAGE_ICONS = {
     "introduction": "boxes-stacked",
     "quickstart": "rocket",
 }
+# v0.8.33 shipped this punctuation-stripped fragment. The release stays
+# immutable; correct only this known import when its target is unambiguous.
+RELEASED_ANCHORS = (
+    (
+        "concepts/roster",
+        "profiles-are-templates-members-are-declared",
+        "Profiles are templates; members are declared",
+    ),
+)
+SPEC = importlib.util.spec_from_file_location(
+    "validate_mintlify_docs", Path(__file__).with_name("validate-mintlify-docs.py")
+)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("could not load the canonical Mintlify validator")
+validate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(validate)
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,10 +150,86 @@ def git_output(source: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def prose_segments(text: str) -> Iterator[tuple[bool, str]]:
+    """Keep fenced examples byte-for-byte, including longer and tilde fences."""
+    fence = ""
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if not fence and marker:
+            yield True, "".join(lines)
+            lines = [line]
+            fence = marker.group(1)
+        elif fence:
+            lines.append(line)
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
+                yield False, "".join(lines)
+                lines = []
+                fence = ""
+        else:
+            lines.append(line)
+    yield not fence, "".join(lines)
+
+
+def rewrite_prose(text: str, transform: Callable[[str], str]) -> str:
+    return "".join(
+        transform(segment) if is_prose else segment
+        for is_prose, segment in prose_segments(text)
+    )
+
+
 def rewrite_root_links(text: str) -> str:
-    return ROOT_LINK_RE.sub(
-        lambda match: f"{match.group('prefix')}/mobkit/{match.group('path')}",
+    return rewrite_prose(
         text,
+        lambda segment: ROOT_LINK_RE.sub(
+            lambda match: f"{match.group('prefix')}/mobkit/{match.group('path')}",
+            segment,
+        ),
+    )
+
+
+def released_anchor_corrections(source_docs: Path) -> dict[str, str]:
+    corrections: dict[str, str] = {}
+    for page_id, legacy, heading in RELEASED_ANCHORS:
+        page = source_docs / f"{page_id}.mdx"
+        if not page.is_file():
+            continue
+        slugs = Counter(
+            validate.slugify(match.group(2))
+            for is_prose, segment in prose_segments(page.read_text(encoding="utf-8"))
+            if is_prose
+            for line in segment.splitlines()
+            if (match := re.match(r"^(#{2,6})\s+(.+?)\s*$", line))
+        )
+        canonical = validate.slugify(heading)
+        # Unknown, missing, duplicate, or already-valid targets remain untouched.
+        # The normal site/link validators still decide whether they can publish.
+        if slugs[canonical] == 1 and slugs[legacy] == 0:
+            corrections[f"/{page_id}#{legacy}"] = f"/{page_id}#{canonical}"
+    return corrections
+
+
+def normalize_released_anchors(text: str, corrections: dict[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        group = 1 if match.group(1) is not None else 2
+        target = match.group(group)
+        start, end = match.span(group)
+        return (
+            match.string[match.start():start]
+            + corrections.get(target, target)
+            + match.string[end:match.end()]
+        )
+
+    return rewrite_prose(
+        text,
+        lambda segment: validate.LINK_ATTR_RE.sub(
+            replace, validate.MARKDOWN_LINK_RE.sub(replace, segment)
+        ),
     )
 
 
@@ -248,6 +343,7 @@ def build_snapshot(
 
     source_commit = git_output(source, "rev-parse", "HEAD")
     stamp = version_stamp(source_version, source_ref, source_commit)
+    corrections = released_anchor_corrections(source_docs)
 
     destination.mkdir(parents=True, exist_ok=True)
     for page_id in page_ids:
@@ -259,6 +355,7 @@ def build_snapshot(
         rendered = source_page.read_text(encoding="utf-8")
         rendered = ensure_page_icon(rendered, page_id)
         rendered = stamp_page(rendered, stamp, page_id)
+        rendered = normalize_released_anchors(rendered, corrections)
         rendered = rewrite_root_links(rendered)
         destination_page.write_text(rendered, encoding="utf-8")
 

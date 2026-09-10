@@ -192,7 +192,7 @@ one member per profile for you. The roster callback's `context` argument is
 empty on both SDKs (the gateway sends the definition, the SDK dispatchers do
 not pass it through), so a profile-shaped crew is one loop over the
 `[profiles.*]` of your own parsed `MOB_TOML`; see
-[Profiles are templates](/mobkit/concepts/roster#profiles-are-templates%3B-members-are-declared).
+[Profiles are templates](/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared).
 If the definition declares `[wiring]` (`auto_wire_orchestrator` or
 `role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after
 each `rt.reconcile()`; `ensure_member` reconciles on its own. Pin

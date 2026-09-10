@@ -308,7 +308,7 @@ The roster family is served by the SDK stdio surface and, as runtime
 passthrough, by `POST /console/rpc`. Roster reads cross the mob actor's
 sequential command loop and are bounded by the `-32017` read budget. See
 [Roster and member lifecycle](/mobkit/concepts/roster) for the lifecycle model and
-[Profiles are templates](/mobkit/concepts/roster#profiles-are-templates%3B-members-are-declared)
+[Profiles are templates](/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared)
 for why none of these methods spawn members from `[profiles.*]` on their own.
 
 On `rpc_gateway` the roster itself comes from the SDK host. The gateway sends

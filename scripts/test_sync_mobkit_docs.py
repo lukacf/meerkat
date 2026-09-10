@@ -39,16 +39,18 @@ class SyncMobKitDocsTests(unittest.TestCase):
             heading = "## Profiles are templates; members are declared\n"
             legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
             canonical = "/concepts/roster#profiles-are-templates%3B-members-are-declared"
+            stable = "/concepts/roster#profiles-are-templates-and-members-are-declared"
             roster.write_text(heading, encoding="utf-8")
             corrections = sync.released_anchor_corrections(docs)
-            self.assertEqual(corrections, {legacy: canonical})
+            self.assertEqual(corrections, {legacy: stable, canonical: stable})
             source = (
                 f"[Profiles are templates]({legacy})\n"
                 f'<Card href="{legacy}" />\n'
+                f"[Encoded fragment]({canonical})\n"
             )
             self.assertEqual(
                 sync.normalize_released_anchors(source, corrections),
-                source.replace(legacy, canonical),
+                source.replace(legacy, stable).replace(canonical, stable),
             )
 
             for text in (
@@ -57,6 +59,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 f"~~~md\n{heading}~~~\n",
                 heading * 2,
                 heading + "## Profiles are templates members are declared\n",
+                heading + "## Profiles are templates and members are declared\n",
             ):
                 with self.subTest(text=text):
                     roster.write_text(text, encoding="utf-8")
@@ -65,18 +68,24 @@ class SyncMobKitDocsTests(unittest.TestCase):
                     self.assertEqual(
                         sync.normalize_released_anchors(source, corrections), source
                     )
+                    self.assertEqual(
+                        sync.normalize_released_heading(text, "concepts/roster", corrections), text
+                    )
             roster.unlink()
             self.assertEqual(sync.released_anchor_corrections(docs), {})
 
     def test_legacy_anchor_correction_preserves_unrelated_links_and_examples(self) -> None:
         legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
         corrections = {
-            legacy: "/concepts/roster#profiles-are-templates%3B-members-are-declared"
+            legacy: "/concepts/roster#profiles-are-templates-and-members-are-declared",
+            "/concepts/roster#profiles-are-templates%3B-members-are-declared":
+                "/concepts/roster#profiles-are-templates-and-members-are-declared",
         }
         source = (
             f"[external](https://example.com{legacy})\n"
             f'[external](//example.com{legacy})\n'
-            "[valid](/concepts/roster#profiles-are-templates%3B-members-are-declared)\n"
+            "[valid](/concepts/roster#profiles-are-templates-and-members-are-declared)\n"
+            "[encoded](/concepts/roster#capabilities%2Fget)\n"
             "[valid](/concepts/roster#runtime-modes)\n"
             "[unknown](/concepts/roster#unknown-fragment)\n"
             "[different page](/guides/roster#profiles-are-templates-members-are-declared)\n"
@@ -85,6 +94,22 @@ class SyncMobKitDocsTests(unittest.TestCase):
         for fence in ("```", "````", "~~~"):
             source += f'{fence}md\n[example]({legacy})\n<Card href="{legacy}" />\n{fence}\n'
         self.assertEqual(sync.normalize_released_anchors(source, corrections), source)
+
+    def test_known_heading_is_stable_across_hosted_and_pinned_renderers(self) -> None:
+        legacy = "/concepts/roster#profiles-are-templates-members-are-declared"
+        anchor = "profiles-are-templates-and-members-are-declared"
+        corrections = {legacy: f"/concepts/roster#{anchor}"}
+        heading = "## Profiles are templates; members are declared\n"
+        source = f"```md\n{heading}```\n\n{heading}\n## Runtime modes\n"
+        rendered = sync.normalize_released_heading(source, "concepts/roster", corrections)
+        stable_heading = "## Profiles are templates and members are declared\n"
+        self.assertIn(stable_heading, rendered)
+        self.assertEqual(rendered.count(stable_heading), 1)
+        self.assertTrue(rendered.startswith(f"```md\n{heading}```\n"))
+        self.assertTrue(rendered.endswith("## Runtime modes\n"))
+        self.assertEqual(sync.normalize_released_heading(source, "api/rpc", corrections), source)
+        self.assertEqual(sync.normalize_released_heading(source, "concepts/roster", {}), source)
+        self.assertEqual(sync.normalize_released_heading(rendered, "concepts/roster", corrections), rendered)
 
     def test_release_snapshot_normalizes_required_icons(self) -> None:
         source = '---\ntitle: "Introduction"\ndescription: "Intro"\n---\n'
@@ -292,12 +317,18 @@ class SyncMobKitDocsTests(unittest.TestCase):
             for page_id in ("quickstart", "api/rpc"):
                 rendered = (destination / f"{page_id}.mdx").read_text(encoding="utf-8")
                 self.assertIn(
-                    "/mobkit/concepts/roster#profiles-are-templates%3B-members-are-declared",
+                    "/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared",
                     rendered,
                 )
                 self.assertIn("/mobkit/concepts/roster#runtime-modes", rendered)
                 self.assertIn(legacy, (docs / f"{page_id}.mdx").read_text(encoding="utf-8"))
             self.assertEqual(sync.git_output(source, "status", "--porcelain"), "")
+            roster = (destination / "concepts" / "roster.mdx").read_text(encoding="utf-8")
+            self.assertIn("## Profiles are templates and members are declared", roster)
+            self.assertIn(
+                "## Profiles are templates; members are declared",
+                (docs / "concepts" / "roster.mdx").read_text(encoding="utf-8"),
+            )
 
             (docs / "quickstart.mdx").write_text("dirty", encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "uncommitted changes"):

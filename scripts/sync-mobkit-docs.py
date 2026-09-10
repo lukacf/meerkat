@@ -37,12 +37,13 @@ REQUIRED_PAGE_ICONS = {
     "quickstart": "rocket",
 }
 # v0.8.33 shipped this punctuation-stripped fragment. The release stays
-# immutable; correct only this known import when its target is unambiguous.
+# immutable; normalize only this known heading and its links when unambiguous.
 RELEASED_ANCHORS = (
     (
         "concepts/roster",
         "profiles-are-templates-members-are-declared",
         "Profiles are templates; members are declared",
+        "Profiles are templates and members are declared",
     ),
 )
 SPEC = importlib.util.spec_from_file_location(
@@ -195,7 +196,7 @@ def rewrite_root_links(text: str) -> str:
 
 def released_anchor_corrections(source_docs: Path) -> dict[str, str]:
     corrections: dict[str, str] = {}
-    for page_id, legacy, heading in RELEASED_ANCHORS:
+    for page_id, legacy, heading, rendered_heading in RELEASED_ANCHORS:
         page = source_docs / f"{page_id}.mdx"
         if not page.is_file():
             continue
@@ -207,10 +208,12 @@ def released_anchor_corrections(source_docs: Path) -> dict[str, str]:
             if (match := re.match(r"^(#{2,6})\s+(.+?)\s*$", line))
         )
         canonical = validate.slugify(heading)
-        # Unknown, missing, duplicate, or already-valid targets remain untouched.
+        stable = validate.slugify(rendered_heading)
+        # Unknown, missing, duplicate, or colliding targets remain untouched.
         # The normal site/link validators still decide whether they can publish.
-        if slugs[canonical] == 1 and slugs[legacy] == 0:
-            corrections[f"/{page_id}#{legacy}"] = f"/{page_id}#{canonical}"
+        if slugs[canonical] == 1 and slugs[legacy] == 0 and slugs[stable] == 0:
+            for old_anchor in (legacy, canonical):
+                corrections[f"/{page_id}#{old_anchor}"] = f"/{page_id}#{stable}"
     return corrections
 
 
@@ -231,6 +234,31 @@ def normalize_released_anchors(text: str, corrections: dict[str, str]) -> str:
             replace, validate.MARKDOWN_LINK_RE.sub(replace, segment)
         ),
     )
+
+
+def normalize_released_heading(
+    text: str, page_id: str, corrections: dict[str, str]
+) -> str:
+    headings = {
+        validate.slugify(heading): rendered_heading
+        for target_page, legacy, heading, rendered_heading in RELEASED_ANCHORS
+        if target_page == page_id and f"/{page_id}#{legacy}" in corrections
+    }
+    if not headings:
+        return text
+
+    def replace(segment: str) -> str:
+        lines: list[str] = []
+        for line in segment.splitlines(keepends=True):
+            match = re.match(r"^(#{2,6}\s+)(.+?)(\s*)$", line)
+            if match and (anchor := validate.slugify(match.group(2))) in headings:
+                # Hosted Mintlify strips the semicolon; the pinned CLI encodes it.
+                # Punctuation-free wording gives both renderers the same anchor.
+                line = f"{match.group(1)}{headings[anchor]}{match.group(3)}"
+            lines.append(line)
+        return "".join(lines)
+
+    return rewrite_prose(text, replace)
 
 
 def frontmatter_close(text: str, page_id: str) -> int:
@@ -355,6 +383,7 @@ def build_snapshot(
         rendered = source_page.read_text(encoding="utf-8")
         rendered = ensure_page_icon(rendered, page_id)
         rendered = stamp_page(rendered, stamp, page_id)
+        rendered = normalize_released_heading(rendered, page_id, corrections)
         rendered = normalize_released_anchors(rendered, corrections)
         rendered = rewrite_root_links(rendered)
         destination_page.write_text(rendered, encoding="utf-8")

@@ -11357,6 +11357,7 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
+            model_fallback: None,
             tool_access_policy: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,

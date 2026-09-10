@@ -31,33 +31,40 @@ The fallback chain is an agent-facing LLM client decorator assembled by
 `AgentFactory`, but it is not an authority for recovery semantics. Keep these
 ownership boundaries intact:
 
-- `meerkat` facade resolves concrete fallback identities from `[model_fallback]`
-  and the effective `ModelRegistry`; `meerkat-core` remains provider-data-free.
+- `meerkat` facade resolves only explicit, enabled `[model_fallback]` targets
+  against the effective `ModelRegistry`. Default is off, with no catalog walk;
+  `meerkat-core` remains provider-data-free.
 - `ProviderRuntimeRegistry` is still the only credential path for every
-  fallback target. Catalog-default candidates inherit the selected non-env realm
-  when possible and skip providers unavailable in that realm; explicit chains
-  may carry typed `auth_binding`, including same-model/provider credential
-  failover targets.
+  fallback target. Provider boundary is checked before foreign auth lookup.
+  Exact typed `auth_binding` and shared-account affinity are preserved, including
+  same-model/provider credential failover. Generated AuthMachine credential-use
+  admission, not JSON pressure or lease acquisition, owns current usability.
 - The generated turn recovery authority classifies whether an LLM failure is
   recoverable. The fallback client only selects the next prebuilt candidate; it
-  must not shadow-classify provider errors or make provider calls while
-  preparing a switch.
+  must not replace generated recoverability or make provider calls while
+  preparing a switch. Policy trigger/threshold filtering follows that verdict.
 - `Agent::apply_model_fallback_switch()` owns applying the switch: rotate auth
   lease binding, apply request policy, persist `SessionLlmIdentity`, recompute
-  provider params, clamp max output tokens, filter tools by the target model's
+  provider params, preserve admitted output reserve, filter tools by the target model's
   capability base filter, and append the hidden `model_fallback` system notice.
 - The retry is allowed only when core decides it is pre-stream safe. Do not add
-  hidden retry paths for network/call timeouts or after user-visible
-  text/reasoning stream output escaped.
+  hidden retry paths outside generated recovery or after user-visible
+  text/reasoning stream output escaped. Transport and empty output are not
+  default migration triggers.
 - Extraction fallback must merge the target request policy with the current
   extraction overrides: reapply structured output for the new provider and keep
   provider-native web search disabled.
 - Tool visibility projections must use the active model's
   `active_capability_base_filter()` on every call and visible-tool snapshot, so
   later sticky fallback turns and control-plane reads agree.
-- Context-overflow fallback must not downgrade to a target whose catalog
-  context window is smaller than the requested size; report skipped targets in
-  the notice payload.
+- Selection and precommit use `ModelFallbackRequest` over actual materialized
+  messages/tools/params/output schema. Use canonical context forecast/pressure
+  owners, never bytes-as-tokens or only the last ContextExceeded error.
+- Typed skips survive all-candidate rejection. Staged is not committed.
+  A target-bound provenance marker rides the existing sticky control delta and
+  compensation transaction, never a separate identity store. New proven unsafe
+  resumes can hold for reconfiguration; explicit identity overrides clear the
+  marker. Old notice/brain-swap history is not fallback authority or migration.
 
 ## Multimodal Content
 

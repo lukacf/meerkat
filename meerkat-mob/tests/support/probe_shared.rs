@@ -504,6 +504,7 @@ pub fn portable_member_spec_for_raw_probe(
         profile_name: profile_name.to_string(),
         agent_identity: identity.to_string(),
         profile: PortableProfile {
+            model_fallback: None,
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,

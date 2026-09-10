@@ -288,13 +288,19 @@ This does not turn ordinary runs into HTML. The CLI must still request
 
 ## Model fallback settings
 
-The model fallback chain is realm-scoped configuration. Empty `chain` means
-"use the catalog default chain"; a non-empty chain is an explicit ordered
-operator policy:
+Model fallback is disabled by default. Enabling it requires a non-empty,
+explicit ordered chain. There is no implicit catalog fallback:
 
 ```toml
 [model_fallback]
 enabled = true
+
+[model_fallback.policy]
+cross_provider = true
+min_context_headroom = 0.10
+require_tool_parity = true
+trigger_after_attempts = 3
+triggers = ["capacity", "provider_unavailable"]
 
 [[model_fallback.chain]]
 model = "claude-opus-4-8"
@@ -307,22 +313,42 @@ auth_binding = { realm = "global", binding = "openai_oauth" }
 ```
 
 A fallback target is identified by model, provider, self-hosted server, and
-`auth_binding`. This means an explicit custom chain can retry the same
-model/provider through a different credential binding. Catalog-default chains
-stay inside the selected non-env auth realm and skip providers that are not
-registered there.
+`auth_binding`. The same model/provider with a different credential binding is
+a valid target. Cross-provider candidates are skipped before credential lookup
+unless `cross_provider = true` (default false).
 
-Use `enabled = false` to disable runtime model failover. If a lower-precedence
-layer disabled fallback or supplied a custom chain, set
-`use_catalog_default_chain = true` in a higher-precedence layer to restore the
-built-in catalog chain.
+Use `enabled = false` to disable an inherited policy. An explicitly supplied
+fallback table replaces the inherited table as a whole; omitted tables inherit.
+A chain alone never enables fallback. `enabled = true` with an empty chain is
+invalid. Unknown fallback keys, including the removed `use_catalog_default_chain`
+and unsupported scope/expiry/revert options, are rejected.
+
+Mob definitions also accept `[runtime.model_fallback]` and
+`[profiles.<name>.model_fallback]`. A present profile table wins over mob runtime,
+which wins over host config; explicit false is preserved through materialization
+and portable profile revival.
+Realm-profile references cannot add a fallback override beside `realm_profile`;
+put it on the referenced profile or in the mob runtime table instead.
 
 Fallback activation is still runtime-governed: the generated recovery
 authority must classify the LLM failure as recoverable, and the core run loop
-must decide the retry is pre-stream safe. Network/call timeouts never trigger
-model fallback, and cross-model fallback is suppressed after user-visible text
-or reasoning stream output has been emitted. On activation, Meerkat recomputes
-the active model's tool capability filter and token limits before retrying.
+must decide the retry is pre-stream safe. Defaults consider capacity and provider
+unavailability only after three failed attempts. Transport and empty-output
+failures never migrate by default; ordinary bounded retries remain separate.
+Migration is suppressed after visible text or reasoning.
+
+Admission uses the actual hydrated, compacted request, output reserve, target
+context limits, required tools/modalities, structured output, and credential
+authority. Unsafe candidates produce typed `model_fallback_skipped` events,
+even if every candidate is rejected. Staging is not commitment; only
+`model_fallback_committed` confirms the canonical sticky route changed.
+
+New fallback commits persist target-bound provenance in the same canonical
+control transaction. An unsafe fallback-origin resume requires explicit model
+reconfiguration; explicit identity overrides obsolete that provenance. There is
+no automatic restoration or migration of pre-0.8.37 sticky routes: historical
+notice text and brain-swap history are not fallback authority. Scoped overlays,
+expiry, timed reversion, and doctor/migration redesign remain unsupported.
 
 ## See also
 

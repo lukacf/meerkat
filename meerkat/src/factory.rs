@@ -406,6 +406,8 @@ fn skill_inventory_prompt_section_enabled(
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
 #[derive(Clone)]
 pub struct AgentBuildConfig {
+    /// Whole-table fallback override. None inherits the host policy.
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
     /// Model name (e.g. "claude-sonnet-4-5").
     pub model: String,
     /// Explicit provider. If `None`, inferred from the model name.
@@ -816,6 +818,7 @@ impl AgentBuildConfig {
     /// Create a new build config with sensible defaults for the given model.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
+            model_fallback: None,
             model: model.into(),
             provider: None,
             self_hosted_server_id: None,
@@ -953,6 +956,7 @@ impl AgentBuildConfig {
         self.custom_models = build.custom_models.clone();
         self.image_generation_provider = build.image_generation_provider;
         self.auto_compact_threshold_override = build.auto_compact_threshold_override;
+        self.model_fallback = build.model_fallback.clone();
         self.compaction_curator_override = build.compaction_curator_override.clone();
         self.output_schema = build.output_schema.clone();
         self.structured_output_retries = build.structured_output_retries;
@@ -1026,6 +1030,7 @@ impl AgentBuildConfig {
     /// Convert build options to the service transport representation.
     pub fn to_session_build_options(&self) -> SessionBuildOptions {
         SessionBuildOptions {
+            model_fallback: self.model_fallback.clone(),
             provider: self.provider,
             self_hosted_server_id: self.self_hosted_server_id.clone(),
             custom_models: self.custom_models.clone(),
@@ -4424,12 +4429,17 @@ impl AgentFactory {
         config: &Config,
         registry: &ModelRegistry,
         current: &SessionLlmIdentity,
-    ) -> Result<Vec<SessionLlmIdentity>, BuildAgentError> {
-        if !config.model_fallback.enabled {
-            return Ok(Vec::new());
+    ) -> Result<
+        (
+            Vec<SessionLlmIdentity>,
+            Vec<meerkat_core::AgentLlmFallbackSkippedTarget>,
+        ),
+        BuildAgentError,
+    > {
+        if !config.model_fallback.is_enabled() {
+            return Ok((Vec::new(), Vec::new()));
         }
 
-        let catalog_default_chain = config.model_fallback.chain.is_empty();
         let preferred_realm = current
             .auth_binding
             .as_ref()
@@ -4438,50 +4448,12 @@ impl AgentFactory {
         let current_credential_identity =
             Self::credential_identity_for_llm_identity(config, current)
                 .map_err(BuildAgentError::LlmClient)?;
-        let mut targets: Vec<(String, Option<Provider>, Option<AuthBindingRef>)> =
-            if catalog_default_chain {
-                let mut defaults = Vec::new();
-                for provider in meerkat_models::provider_priority() {
-                    let model = match provider {
-                        Provider::Anthropic => config.models.anthropic.clone(),
-                        Provider::OpenAI => config.models.openai.clone(),
-                        Provider::Gemini => config.models.gemini.clone(),
-                        _ => String::new(),
-                    };
-                    let model = if model.is_empty() {
-                        meerkat_models::default_model(*provider)
-                            .map(str::to_string)
-                            .unwrap_or_default()
-                    } else {
-                        model
-                    };
-                    if !model.is_empty() {
-                        defaults.push((model, Some(*provider), None));
-                    }
-                }
-                defaults.push((
-                    meerkat_models::global_default_model().to_string(),
-                    None,
-                    None,
-                ));
-                defaults
-            } else {
-                config
-                    .model_fallback
-                    .chain
-                    .iter()
-                    .map(|target| {
-                        (
-                            target.model.clone(),
-                            target.provider,
-                            target.auth_binding.clone(),
-                        )
-                    })
-                    .collect()
-            };
-
         let mut identities = Vec::new();
-        for (model, provider_override, auth_binding) in targets.drain(..) {
+        let mut skipped = Vec::new();
+        for target in &config.model_fallback.chain {
+            let model = target.model.clone();
+            let provider_override = target.provider;
+            let auth_binding = target.auth_binding.clone();
             let provider = if let Some(provider) = provider_override {
                 if let Some(reason) = registry.provider_override_mismatch_reason(provider, &model) {
                     return Err(BuildAgentError::Config(reason));
@@ -4503,6 +4475,19 @@ impl AgentFactory {
             } else {
                 None
             };
+            if provider != current.provider && !config.model_fallback.policy.cross_provider {
+                skipped.push(meerkat_core::AgentLlmFallbackSkippedTarget::new(
+                    SessionLlmIdentity {
+                        model,
+                        provider,
+                        self_hosted_server_id,
+                        provider_params: None,
+                        auth_binding,
+                    },
+                    meerkat_core::model_fallback::ModelFallbackSkipReason::ProviderBoundary,
+                ));
+                continue;
+            }
             let auth_binding = match (auth_binding, preferred_realm.as_ref()) {
                 (Some(auth_binding), _) => Some(auth_binding),
                 (None, Some(realm)) => {
@@ -4529,25 +4514,9 @@ impl AgentFactory {
                             })?;
                             candidates
                                 .into_iter()
-                                .find(|target| {
-                                    if catalog_default_chain {
-                                        // Candidates are already chain-scoped
-                                        // (head -> ancestors -> global), in
-                                        // nearest-child-wins order. Accept the first
-                                        // configured one — an inherited binding is
-                                        // owner-stamped (owner != preferred realm),
-                                        // so a realm-equality filter would wrongly
-                                        // drop it.
-                                        !target.auth_binding.is_env_default()
-                                    } else {
-                                        true
-                                    }
-                                })
+                                .next()
                                 .map(|target| target.auth_binding)
                         };
-                    if catalog_default_chain && resolved.is_none() {
-                        continue;
-                    }
                     if current_credential_identity
                         .as_ref()
                         .is_some_and(|identity| {
@@ -4555,11 +4524,17 @@ impl AgentFactory {
                         })
                         && resolved.is_none()
                     {
-                        return Err(BuildAgentError::Config(format!(
-                            "model fallback target '{}:{}' has no route sharing the active credential account; configure an explicit auth_binding to change accounts",
-                            provider.as_str(),
-                            model
-                        )));
+                        skipped.push(meerkat_core::AgentLlmFallbackSkippedTarget::new(
+                            SessionLlmIdentity {
+                                model,
+                                provider,
+                                self_hosted_server_id,
+                                provider_params: None,
+                                auth_binding: None,
+                            },
+                            meerkat_core::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
+                        ));
+                        continue;
                     }
                     resolved
                 }
@@ -4590,7 +4565,7 @@ impl AgentFactory {
             identities.push(identity);
         }
 
-        Ok(identities)
+        Ok((identities, skipped))
     }
 
     #[cfg(feature = "openai")]
@@ -5073,6 +5048,18 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        let mut effective_config;
+        let config = if let Some(fallback) = &build_config.model_fallback {
+            effective_config = config.clone();
+            effective_config.model_fallback = fallback.clone();
+            &effective_config
+        } else {
+            config
+        };
+        config
+            .model_fallback
+            .validate()
+            .map_err(|error| BuildAgentError::Config(error.to_string()))?;
         build_config.resume_override_mask.override_builtins |= !matches!(
             build_config.override_builtins,
             ToolCategoryOverride::Inherit
@@ -5500,9 +5487,8 @@ impl AgentFactory {
         .map_err(BuildAgentError::LlmClient)?;
         let llm_adapter = if !agent_llm_client_was_overridden
             && !raw_llm_client_was_overridden
-            && config.model_fallback.enabled
+            && config.model_fallback.is_enabled()
         {
-            let explicit_fallback_chain = !config.model_fallback.chain.is_empty();
             let primary_request_policy = self.request_policy_for_session_llm_identity(
                 config,
                 &resolved_llm_identity,
@@ -5529,9 +5515,9 @@ impl AgentFactory {
                 RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
                 RuntimeBuildMode::StandaloneEphemeral => None,
             };
-            for identity in
-                self.model_fallback_identities(config, &registry, &resolved_llm_identity)?
-            {
+            let (identities, mut skipped) =
+                self.model_fallback_identities(config, &registry, &resolved_llm_identity)?;
+            for identity in identities {
                 let target_profile = match registry
                     .profile_witness_for_provider(identity.provider, &identity.model)
                 {
@@ -5554,18 +5540,29 @@ impl AgentFactory {
                     .await
                 {
                     Ok(client) => client,
-                    Err(error) if explicit_fallback_chain => {
-                        return Err(BuildAgentError::LlmClient(error));
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            model = %identity.model,
-                            provider = %identity.provider.as_str(),
-                            error = %error,
-                            "skipping unavailable catalog-default model fallback candidate"
-                        );
+                    Err(FactoryError::ProviderAuth(
+                        meerkat_llm_core::provider_runtime::errors::ProviderAuthError::Auth(
+                            meerkat_core::AuthError::MissingSecret
+                            | meerkat_core::AuthError::InteractiveLoginRequired
+                            | meerkat_core::AuthError::UserReauthRequired
+                            | meerkat_core::AuthError::HostOwnedUnavailable
+                        )
+                        | meerkat_llm_core::provider_runtime::errors::ProviderAuthError::ExternalResolverMissing(_)
+                    ) | FactoryError::ClientBuild(
+                        meerkat_llm_core::provider_runtime::errors::ProviderClientError::NoCredentialMaterial
+                    ) | FactoryError::ConnectionTarget(
+                        meerkat_core::ConnectionTargetError::BindingInvalid {
+                            source: meerkat_core::ProviderBindingError::UnknownBinding(_),
+                            ..
+                        }
+                    )) => {
+                        skipped.push(meerkat_core::AgentLlmFallbackSkippedTarget::new(
+                            identity,
+                            meerkat_core::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
+                        ));
                         continue;
                     }
+                    Err(error) => return Err(BuildAgentError::LlmClient(error)),
                 };
                 let mut adapter = match build_config.event_tx.clone() {
                     Some(tx) => LlmClientAdapter::try_with_event_channel_for_provider_identity(
@@ -5603,7 +5600,12 @@ impl AgentFactory {
                     client: decorated,
                 });
             }
-            match ModelFallbackClient::new(candidates) {
+            match ModelFallbackClient::new(
+                candidates,
+                config.model_fallback.policy.clone(),
+                skipped,
+                auth_lease_handle.clone(),
+            ) {
                 Some(client) => Arc::new(client) as Arc<dyn AgentLlmClient>,
                 None => llm_adapter,
             }
@@ -6756,6 +6758,21 @@ impl AgentFactory {
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
         let factory_metadata = if let Some(mut metadata) = resumed_session_metadata {
+            let mask = build_config.resume_override_mask;
+            if mask.model
+                || mask.provider
+                || mask.self_hosted_server_id
+                || mask.provider_params
+                || mask.auth_binding
+            {
+                metadata.apply_llm_identity(&SessionLlmIdentity {
+                    model: model.clone(),
+                    provider,
+                    self_hosted_server_id: self_hosted_server_id.clone(),
+                    provider_params: build_config.provider_params.clone(),
+                    auth_binding: build_config.auth_binding.clone(),
+                });
+            }
             metadata.model = model.clone();
             metadata.max_tokens = max_tokens;
             metadata.structured_output_retries = resolved_structured_output_retries;
@@ -6798,6 +6815,7 @@ impl AgentFactory {
             metadata
         } else {
             SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: model.clone(),
                 max_tokens,
@@ -9410,6 +9428,7 @@ mod tests {
         let mut session = Session::with_id(session_id.clone());
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "gpt-5.6-sol".to_string(),
                 max_tokens: 8_192,
@@ -9566,6 +9585,7 @@ mod tests {
         };
 
         SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 8192,
@@ -9609,6 +9629,14 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[async_trait]
     impl LlmClient for ScriptedStickyFallbackClient {
+        fn request_pressure(
+            &self,
+            _request: &meerkat_client::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_client::LlmError>
+        {
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(0, None)))
+        }
+
         fn project_replay_messages(
             &self,
             messages: &[meerkat_core::Message],
@@ -9774,7 +9802,10 @@ mod tests {
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sticky_fallback_test_config(backup_model: &str, backup_binding: AuthBindingRef) -> Config {
-        let mut config = Config::default();
+        let mut config = Config {
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
         config.realm.insert(
             "fallback_test".to_string(),
             inline_realm_section(&[
@@ -9795,7 +9826,10 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        config.model_fallback.enabled = true;
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.policy.cross_provider = true;
+        config.model_fallback.policy.trigger_after_attempts = 1;
+        config.model_fallback.policy.require_tool_parity = false;
         config.model_fallback.chain = vec![ModelFallbackTarget {
             model: backup_model.to_string(),
             provider: Some(Provider::OpenAI),
@@ -9995,7 +10029,10 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        config.model_fallback.enabled = true;
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.policy.cross_provider = true;
+        config.model_fallback.policy.trigger_after_attempts = 1;
+        config.model_fallback.policy.require_tool_parity = false;
         config.model_fallback.chain = vec![ModelFallbackTarget {
             model: backup_model.to_string(),
             provider: Some(Provider::OpenAI),
@@ -10014,6 +10051,7 @@ mod tests {
             .await
             .expect("ephemeral machine should prepare real session-owned bindings");
         let mut build = AgentBuildConfig::new(primary_model);
+        build.max_tokens = Some(1024);
         build.provider = Some(Provider::Anthropic);
         build.realm_id = Some(RealmId::parse("fallback_test").expect("test realm"));
         build.auth_binding = Some(primary_binding.clone());
@@ -11039,6 +11077,10 @@ mod tests {
                 ("secondary_openai", "sk-secondary"),
             ]),
         );
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.policy.cross_provider = true;
+        config.model_fallback.policy.trigger_after_attempts = 1;
+        config.model_fallback.policy.require_tool_parity = false;
         config.model_fallback.chain = vec![ModelFallbackTarget {
             model: "gpt-5.5".to_string(),
             provider: Some(Provider::OpenAI),
@@ -11053,9 +11095,10 @@ mod tests {
             auth_binding: Some(primary),
         };
 
-        let identities = factory
+        let (identities, skipped) = factory
             .model_fallback_identities(&config, &registry, &current)
             .expect("fallback identities");
+        assert!(skipped.is_empty());
 
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].model, "gpt-5.5");
@@ -11064,7 +11107,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_model_fallback_uses_only_available_bindings_in_selected_realm() {
+    fn default_model_fallback_never_constructs_catalog_targets() {
         let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
         let mut config = Config::default();
         config.realm.insert(
@@ -11082,33 +11125,12 @@ mod tests {
             auth_binding: Some(configured_auth_binding("team", "default_openai")),
         };
 
-        let identities = factory
+        let (identities, skipped) = factory
             .model_fallback_identities(&config, &registry, &current)
             .expect("catalog fallback identities");
 
-        assert!(
-            identities.iter().any(|identity| {
-                identity.provider == Provider::Anthropic
-                    && identity.auth_binding
-                        == Some(configured_auth_binding("team", "default_anthropic"))
-            }),
-            "catalog fallback should include providers registered in the selected realm: {identities:#?}"
-        );
-        assert!(
-            identities.iter().all(|identity| {
-                identity
-                    .auth_binding
-                    .as_ref()
-                    .is_some_and(|auth_binding| auth_binding.realm.as_str() == "team")
-            }),
-            "catalog fallback must not bleed into env/default realms when selected realm auth is in use"
-        );
-        assert!(
-            identities
-                .iter()
-                .all(|identity| identity.provider != Provider::Gemini),
-            "providers not registered in the selected realm should be skipped for the catalog chain"
-        );
+        assert!(identities.is_empty());
+        assert!(skipped.is_empty());
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -11184,6 +11206,10 @@ mod tests {
                 ("secondary_openai", "sk-secondary"),
             ]),
         );
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.policy.cross_provider = true;
+        config.model_fallback.policy.trigger_after_attempts = 1;
+        config.model_fallback.policy.require_tool_parity = false;
         config.model_fallback.chain = vec![ModelFallbackTarget {
             model: "gpt-5.5".to_string(),
             provider: Some(Provider::OpenAI),
@@ -11196,7 +11222,7 @@ mod tests {
         build.override_builtins = ToolCategoryOverride::Disable;
 
         let _agent = factory
-            .build_agent(build, &config)
+            .build_agent(build.clone(), &config)
             .await
             .expect("agent should build primary plus fallback clients");
 
@@ -11209,6 +11235,12 @@ mod tests {
             calls.contains(&secondary),
             "same model/provider fallback must still resolve the secondary auth binding"
         );
+        config.model_fallback.chain[0].auth_binding =
+            Some(configured_auth_binding("dev", "missing_fallback_binding"));
+        factory
+            .build_agent(build, &config)
+            .await
+            .expect("unavailable explicit fallback binding must not prevent building the primary");
     }
 
     #[test]
@@ -15322,6 +15354,7 @@ mod tests {
         let mut resumed = Session::new();
         resumed
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "gemma-4-e2b".to_string(),
                 max_tokens: 8_192,
@@ -16540,6 +16573,10 @@ mod host_prompt_sections_tests {
                 );
             }
             config.realm.insert("global".to_string(), realm);
+            config.model_fallback.enabled = Some(true);
+            config.model_fallback.policy.cross_provider = true;
+            config.model_fallback.policy.trigger_after_attempts = 1;
+            config.model_fallback.policy.require_tool_parity = false;
             config.model_fallback.chain = vec![meerkat_core::config::ModelFallbackTarget {
                 model: meerkat_models::default_model(Provider::Anthropic)
                     .expect("Anthropic default")
@@ -16572,9 +16609,10 @@ mod host_prompt_sections_tests {
             let registry = config
                 .model_registry(meerkat_models::canonical())
                 .expect("registry");
-            let candidates = factory
+            let (candidates, skipped) = factory
                 .model_fallback_identities(&config, &registry, &current)
                 .expect("fallback identities");
+            assert!(skipped.is_empty());
             assert_eq!(candidates.len(), 1);
             assert_eq!(
                 candidates[0]

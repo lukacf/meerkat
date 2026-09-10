@@ -306,6 +306,10 @@ pub async fn build_agent_config(
     config.additional_instructions = additional_instructions;
     config.shell_env = shell_env;
     config.provider_params = profile.provider_params.clone();
+    config.model_fallback = profile
+        .model_fallback
+        .clone()
+        .or_else(|| definition.runtime.model_fallback.clone());
 
     // Profile-declared provider identity: the typed provider (parsed
     // fail-closed at profile ingress) and the optional self-hosted server
@@ -1039,6 +1043,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("lead"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "claude-opus-4-8".into(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -1072,6 +1077,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("worker"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".into(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -1256,6 +1262,7 @@ mod tests {
         let mut resumed_session = Session::with_id(session_id);
         resumed_session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::session_metadata_schema_version(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: 2048,
@@ -3278,6 +3285,15 @@ mod tests {
     #[tokio::test]
     async fn test_build_agent_config_maps_profile_provider_and_definition_models() {
         let mut def = sample_definition();
+        def.runtime.model_fallback = Some(meerkat_core::config::ModelFallbackConfig {
+            enabled: Some(true),
+            chain: vec![meerkat_core::config::ModelFallbackTarget {
+                model: "backup".into(),
+                provider: None,
+                auth_binding: None,
+            }],
+            ..Default::default()
+        });
         def.models.insert(
             "claude-internal-preview".to_string(),
             meerkat_core::config::CustomModelConfig {
@@ -3305,6 +3321,10 @@ mod tests {
             lead.self_hosted_server_id = None;
             lead.image_generation_provider = Some(meerkat_core::Provider::Gemini);
             lead.auto_compact_threshold = std::num::NonZeroU64::new(60_000);
+            lead.model_fallback = Some(meerkat_core::config::ModelFallbackConfig {
+                enabled: Some(false),
+                ..Default::default()
+            });
             lead.resume_overrides = vec![
                 crate::profile::ResumeOverrideField::Model,
                 crate::profile::ResumeOverrideField::Provider,
@@ -3333,6 +3353,7 @@ mod tests {
         .expect("build_agent_config");
 
         assert_eq!(config.provider, Some(meerkat_core::Provider::Anthropic));
+        assert_eq!(config.model_fallback.as_ref().unwrap().enabled, Some(false));
         assert_eq!(
             config
                 .custom_models
@@ -3357,6 +3378,10 @@ mod tests {
         // The seam survives into SessionBuildOptions (deferred materialization).
         let req = to_create_session_request(&config, "hello".to_string().into());
         let build = req.build.expect("build options should be set");
+        assert_eq!(build.model_fallback, config.model_fallback);
+        let mut rebuilt = meerkat::AgentBuildConfig::new("roundtrip");
+        rebuilt.apply_session_build_options(&build);
+        assert_eq!(rebuilt.model_fallback, config.model_fallback);
         assert_eq!(build.provider, Some(meerkat_core::Provider::Anthropic));
         assert!(build.custom_models.contains_key("claude-internal-preview"));
         assert_eq!(
@@ -3374,6 +3399,10 @@ mod tests {
     async fn test_build_agent_config_uses_mob_level_image_provider_default() {
         let mut def = sample_definition();
         def.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        def.runtime.model_fallback = Some(meerkat_core::config::ModelFallbackConfig {
+            enabled: Some(false),
+            ..Default::default()
+        });
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
             .unwrap();
@@ -3396,6 +3425,7 @@ mod tests {
         })
         .await
         .expect("build_agent_config");
+        assert_eq!(config.model_fallback, def.runtime.model_fallback);
         assert_eq!(
             config.image_generation_provider,
             Some(meerkat_core::Provider::OpenAI),
@@ -3437,6 +3467,7 @@ mod tests {
             origin: meerkat_core::BindingOrigin::Configured,
         };
         let mut metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.4".to_string(),
             max_tokens: 4096,
@@ -3557,6 +3588,7 @@ mod tests {
         config.comms_name = Some("ob3/review/mk--rt_creview_csingleton_c0".to_string());
 
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.4".to_string(),
             max_tokens: 4096,
@@ -3598,6 +3630,7 @@ mod tests {
 
         let legacy_alias = "mk--rt_cidentity_cparent-1_c0";
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.5".to_string(),
             max_tokens: 16_384,
@@ -3672,6 +3705,7 @@ mod tests {
         config.peer_meta = Some(PeerMeta::default().with_label("fixture", "current"));
 
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.5".to_string(),
             max_tokens: 16_384,
@@ -3828,6 +3862,7 @@ mod tests {
             member: "parent-1".to_string(),
         });
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.5".to_string(),
             max_tokens: 16_384,
@@ -3875,6 +3910,7 @@ mod tests {
             ..Default::default()
         };
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.5".to_string(),
             max_tokens: 16_384,

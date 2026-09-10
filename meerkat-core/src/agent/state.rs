@@ -169,6 +169,7 @@ enum ModelFallbackSwitchOutcome {
 /// cancellation-safe; keeping the rest of the saga on `Agent` lets the
 /// session task settle it after a hard interrupt drops the run future.
 pub(crate) struct PendingStickyModelFallbackActivation {
+    committed_event: AgentEvent,
     operation: Arc<dyn crate::handles::StickyModelFallbackCommitOperation>,
     previous_identity: crate::SessionLlmIdentity,
     target_identity: crate::SessionLlmIdentity,
@@ -179,6 +180,7 @@ pub(crate) struct PendingStickyModelFallbackActivation {
 }
 
 struct MachineAcceptedModelFallbackActivation {
+    retry: crate::retry::LlmRetrySchedule,
     switch: AgentLlmFallbackSwitch,
     proof: crate::StickyModelFallbackActivationProof,
 }
@@ -331,7 +333,11 @@ impl MachineAcceptedModelFallbackActivation {
             switch.target_profile.clone(),
             retry_schedule.plan.attempt,
         );
-        Ok(Self { switch, proof })
+        Ok(Self {
+            switch,
+            proof,
+            retry: retry_schedule.clone(),
+        })
     }
 }
 
@@ -827,7 +833,7 @@ where
         self.save_session_with_durability(run_id, durability).await
     }
 
-    fn publish_pending_sticky_model_fallback(&mut self) -> Result<(), AgentError> {
+    async fn publish_pending_sticky_model_fallback(&mut self) -> Result<(), AgentError> {
         let pending = self
             .pending_sticky_model_fallback_activation
             .take()
@@ -840,6 +846,13 @@ where
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
         self.session = pending.next_session;
+        tracing::warn!(model = %self.client.model(), provider = %self.client.provider().as_str(), "model fallback committed");
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            self.default_event_tx.as_ref(),
+            pending.committed_event,
+        )
+        .await;
         Ok(())
     }
 
@@ -873,7 +886,7 @@ where
                     ),
                 })?;
         }
-        self.publish_pending_sticky_model_fallback()
+        self.publish_pending_sticky_model_fallback().await
     }
 
     fn reject_pending_sticky_model_fallback(
@@ -977,8 +990,37 @@ where
         previous_tools: &[Arc<ToolDef>],
         extraction_output_schema: Option<&crate::types::OutputSchema>,
         durable_visibility_parent: Option<&crate::SessionToolVisibilityState>,
+        request: &crate::model_fallback::ModelFallbackRequest<'_>,
     ) -> Result<ModelFallbackSwitchOutcome, AgentError> {
-        let MachineAcceptedModelFallbackActivation { switch, proof } = activation;
+        let MachineAcceptedModelFallbackActivation {
+            switch,
+            proof,
+            retry,
+        } = activation;
+        if let Err(skipped) = crate::model_fallback::admit_model_fallback(
+            &switch.previous_identity,
+            &switch.new_identity,
+            &switch.target_profile,
+            &switch.policy,
+            request,
+            None,
+        ) {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                self.default_event_tx.as_ref(),
+                AgentEvent::ModelFallbackSkipped {
+                    retry: retry.clone(),
+                    target: skipped.as_ref().clone(),
+                },
+            )
+            .await;
+            return Ok(ModelFallbackSwitchOutcome::SkippedNonDurable {
+                reason: format!(
+                    "fallback admission refused before commit: {:?}",
+                    skipped.reason
+                ),
+            });
+        }
         let retry_attempt = proof.retry_attempt();
         let capability_base_filter = crate::capability_base_filter_for_image_tool_results(
             switch.target_profile.profile().image_tool_results,
@@ -1045,7 +1087,14 @@ where
                 switch.previous_identity.model,
             )));
         }
+        let previous_provenance = metadata.model_fallback.clone();
+        let provenance = crate::model_fallback::ModelFallbackProvenance {
+            previous: switch.previous_identity.clone(),
+            target: switch.new_identity.clone(),
+            policy: switch.policy.clone(),
+        };
         metadata.apply_llm_identity(&switch.new_identity);
+        metadata.model_fallback = Some(provenance.clone());
         next_session.set_session_metadata(metadata).map_err(|err| {
             AgentError::ConfigError(format!("failed to persist fallback LLM identity: {err}"))
         })?;
@@ -1091,10 +1140,7 @@ where
             switch.new_identity.provider,
             provider_params.as_ref(),
         )?;
-        let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
-        let max_tokens = max_output_tokens
-            .map(|limit| configured_max_tokens.min(limit))
-            .unwrap_or(configured_max_tokens);
+        let max_tokens = request.max_tokens;
 
         let skipped_targets = switch
             .skipped_targets
@@ -1156,6 +1202,64 @@ where
         ));
         next_session.push(notice.clone());
 
+        // Include the notice, final visible tools, compiled extraction schema,
+        // and effective target parameters in the exact precommit invocation.
+        let mut commit_messages = request.messages.to_vec();
+        commit_messages.push(notice.clone());
+        let commit_request = crate::model_fallback::ModelFallbackRequest {
+            messages: &commit_messages,
+            tools: &next_tools,
+            max_tokens,
+            provider_params: provider_params.as_ref(),
+            ..*request
+        };
+        let fresh = self.client.prepare_model_fallback(failure, &commit_request);
+        if !matches!(&fresh, Ok(fresh) if fresh.new_identity == switch.new_identity && fresh.previous_identity == switch.previous_identity)
+        {
+            let targets = match fresh {
+                Err(targets) if !targets.is_empty() => targets,
+                _ => vec![crate::AgentLlmFallbackSkippedTarget::new(
+                    switch.new_identity.clone(),
+                    crate::model_fallback::ModelFallbackSkipReason::AdmissionUnavailable,
+                )],
+            };
+            for target in targets {
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    self.default_event_tx.as_ref(),
+                    AgentEvent::ModelFallbackSkipped {
+                        retry: retry.clone(),
+                        target,
+                    },
+                )
+                .await;
+            }
+            return Ok(ModelFallbackSwitchOutcome::SkippedNonDurable {
+                reason: "fallback admission changed before commit".into(),
+            });
+        }
+        if let Err(target) = crate::model_fallback::admit_model_fallback(
+            &switch.previous_identity,
+            &switch.new_identity,
+            &switch.target_profile,
+            &switch.policy,
+            &commit_request,
+            None,
+        ) {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                self.default_event_tx.as_ref(),
+                AgentEvent::ModelFallbackSkipped {
+                    retry: retry.clone(),
+                    target: *target,
+                },
+            )
+            .await;
+            return Ok(ModelFallbackSwitchOutcome::SkippedNonDurable {
+                reason: "materialized target invocation failed fallback admission".into(),
+            });
+        }
+
         if self.pending_sticky_model_fallback_activation.is_some() {
             return Err(AgentError::StickyModelFallbackAuthorityUnknown {
                 message: "a second sticky fallback was proposed while the prior durable transaction was still pending".to_string(),
@@ -1198,12 +1302,34 @@ where
             switch.new_identity.clone(),
             &visibility_plan,
             persisted_visibility_parent,
-        );
+        )
+        .with_provenance(previous_provenance, provenance);
 
         // All target-dependent preparation and generated preauthorization are
         // complete. Client/auth steps remain reversible until the supervised
         // coordinator confirms the control-only RuntimeStore CAS plus the
         // synchronous generated-machine realization.
+        if !crate::model_fallback::fallback_credential_authorized(
+            self.auth_lease_handle.as_ref(),
+            switch.request_policy.credential_identity.as_ref(),
+        )? {
+            let target = crate::AgentLlmFallbackSkippedTarget::new(
+                switch.new_identity.clone(),
+                crate::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
+            );
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                self.default_event_tx.as_ref(),
+                AgentEvent::ModelFallbackSkipped {
+                    retry: retry.clone(),
+                    target,
+                },
+            )
+            .await;
+            return Ok(ModelFallbackSwitchOutcome::SkippedNonDurable {
+                reason: "target credential-use authority refused fallback commit".into(),
+            });
+        }
         self.activate_model_fallback_client(&switch.previous_identity, &switch.new_identity)?;
         let auth_rotation = match self.stage_auth_lease_credential_identity(
             self.auth_credential_identity.as_ref(),
@@ -1237,6 +1363,11 @@ where
             };
             self.pending_sticky_model_fallback_activation =
                 Some(PendingStickyModelFallbackActivation {
+                    committed_event: AgentEvent::ModelFallbackCommitted {
+                        retry: retry.clone(),
+                        previous: switch.previous_identity.clone(),
+                        target: switch.new_identity.clone(),
+                    },
                     operation: Arc::clone(&operation),
                     previous_identity: switch.previous_identity.clone(),
                     target_identity: switch.new_identity.clone(),
@@ -1278,6 +1409,16 @@ where
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
             self.session = next_session;
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                self.default_event_tx.as_ref(),
+                AgentEvent::ModelFallbackCommitted {
+                    retry,
+                    previous: switch.previous_identity,
+                    target: switch.new_identity,
+                },
+            )
+            .await;
         }
 
         Ok(ModelFallbackSwitchOutcome::Applied((
@@ -1630,6 +1771,46 @@ where
     /// - stream-inactivity watchdog (`RetryPolicy::stream_inactivity_timeout`)
     ///   for liveness-reporting clients: a silent provider stream is aborted
     ///   with the retryable `LlmFailureReason::StreamStalled`
+    async fn select_model_fallback(
+        &self,
+        failure: &AgentError,
+        request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        retry: &crate::retry::LlmRetrySchedule,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) -> Option<AgentLlmFallbackSwitch> {
+        let (switch, skipped) = match self.client.prepare_model_fallback(failure, request) {
+            Ok(mut switch) => {
+                let skipped = std::mem::take(&mut switch.skipped_targets);
+                (Some(switch), skipped)
+            }
+            Err(skipped) => (None, skipped),
+        };
+        for target in skipped {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx.as_ref(),
+                AgentEvent::ModelFallbackSkipped {
+                    retry: retry.clone(),
+                    target,
+                },
+            )
+            .await;
+        }
+        if let Some(switch) = &switch {
+            let _ = crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx.as_ref(),
+                AgentEvent::ModelFallbackStaged {
+                    retry: retry.clone(),
+                    previous: switch.previous_identity.clone(),
+                    target: switch.new_identity.clone(),
+                },
+            )
+            .await;
+        }
+        switch
+    }
+
     async fn call_llm_with_retry(
         &mut self,
         request: LlmRetryRequest<'_>,
@@ -1660,6 +1841,63 @@ where
         let mut next_request_attempt = Some(prepared_attempt);
 
         loop {
+            if let Some(metadata) = self
+                .session
+                .try_session_metadata()
+                .map_err(|error| AgentError::ConfigError(error.to_string()))?
+                && let Some(provenance) = metadata.model_fallback.as_ref()
+                && provenance.target == metadata.llm_identity()
+            {
+                let profile = self.active_model_profile.as_ref().ok_or_else(|| {
+                    AgentError::ConfigError(
+                        "fallback-origin resume lacks an active model profile".into(),
+                    )
+                })?;
+                let request = crate::model_fallback::ModelFallbackRequest {
+                    messages: &current_messages,
+                    tools: &current_tools,
+                    max_tokens: current_max_tokens,
+                    temperature,
+                    provider_params: current_provider_params.as_ref(),
+                    output_schema: extraction_output_schema.as_ref(),
+                    attempt: attempt + 1,
+                };
+                if !crate::model_fallback::fallback_credential_authorized(
+                    self.auth_lease_handle.as_ref(),
+                    self.auth_credential_identity.as_ref(),
+                )? {
+                    return Err(AgentError::ModelFallbackResumeHeld {
+                        target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
+                            provenance.target.clone(),
+                            crate::model_fallback::ModelFallbackSkipReason::AuthUnavailable,
+                        )),
+                    });
+                }
+                let pressure = self
+                    .client
+                    .request_pressure(
+                        request.messages,
+                        request.tools,
+                        request.max_tokens,
+                        request.temperature,
+                        request.provider_params,
+                    )?
+                    .ok_or_else(|| AgentError::ModelFallbackResumeHeld {
+                        target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(
+                            provenance.target.clone(),
+                            crate::model_fallback::ModelFallbackSkipReason::AdmissionUnavailable,
+                        )),
+                    })?;
+                crate::model_fallback::admit_model_fallback(
+                    &provenance.previous,
+                    &provenance.target,
+                    profile,
+                    &provenance.policy,
+                    &request,
+                    Some(pressure),
+                )
+                .map_err(|target| AgentError::ModelFallbackResumeHeld { target })?;
+            }
             // 1. Budget gate at loop entry
             if let Some(exceeded) = self.budget.observe().exceeded() {
                 return Err(exceeded.to_agent_error());
@@ -1946,8 +2184,24 @@ where
                             // machine-accepted activation authority, then
                             // mutate identity/policy/tool visibility atomically
                             // for the retry attempt.
+                            let fallback_request = crate::model_fallback::ModelFallbackRequest {
+                                messages: &current_messages,
+                                tools: &current_tools,
+                                max_tokens: current_max_tokens,
+                                temperature,
+                                provider_params: current_provider_params.as_ref(),
+                                output_schema: extraction_output_schema.as_ref(),
+                                attempt: retry_schedule.plan.attempt,
+                            };
                             if may_activate_fallback
-                                && let Some(switch) = self.client.prepare_model_fallback(&error)
+                                && let Some(switch) = self
+                                    .select_model_fallback(
+                                        &error,
+                                        &fallback_request,
+                                        &retry_schedule,
+                                        event_tx,
+                                    )
+                                    .await
                             {
                                 let activation = MachineAcceptedModelFallbackActivation::authorize(
                                     switch,
@@ -1962,6 +2216,7 @@ where
                                         current_tools.as_ref(),
                                         extraction_output_schema.as_ref(),
                                         durable_visibility_parent.as_ref(),
+                                        &fallback_request,
                                     )
                                     .await?
                                 {
@@ -2023,6 +2278,24 @@ where
                     // owns the recoverable-vs-fatal/exhaustion verdict. Only a
                     // machine `Recover` verdict drives the retry path;
                     // `Exhausted`/`Fatal` bubble the error up.
+                    if let Some(metadata) = self
+                        .session
+                        .try_session_metadata()
+                        .map_err(|error| AgentError::ConfigError(error.to_string()))?
+                        && let Some(provenance) = metadata.model_fallback.as_ref()
+                        && provenance.target == metadata.llm_identity()
+                    {
+                        let _ = crate::event_tap::tap_emit(
+                            &self.event_tap,
+                            event_tx.as_ref(),
+                            AgentEvent::ModelFallbackTargetFailed {
+                                previous: provenance.previous.clone(),
+                                target: provenance.target.clone(),
+                                error: crate::event::AgentErrorReport::from_agent_error(&e),
+                            },
+                        )
+                        .await;
+                    }
                     let recovery = self.classify_llm_failure_recovery(
                         &e,
                         attempt,
@@ -2065,8 +2338,24 @@ where
                         // machine-accepted activation authority, then mutate
                         // identity/policy/tool visibility atomically for the
                         // retry attempt.
+                        let fallback_request = crate::model_fallback::ModelFallbackRequest {
+                            messages: &current_messages,
+                            tools: &current_tools,
+                            max_tokens: current_max_tokens,
+                            temperature,
+                            provider_params: current_provider_params.as_ref(),
+                            output_schema: extraction_output_schema.as_ref(),
+                            attempt: retry_schedule.plan.attempt,
+                        };
                         if may_activate_fallback
-                            && let Some(switch) = self.client.prepare_model_fallback(&e)
+                            && let Some(switch) = self
+                                .select_model_fallback(
+                                    &e,
+                                    &fallback_request,
+                                    &retry_schedule,
+                                    event_tx,
+                                )
+                                .await
                         {
                             let activation = MachineAcceptedModelFallbackActivation::authorize(
                                 switch,
@@ -2081,6 +2370,7 @@ where
                                     current_tools.as_ref(),
                                     extraction_output_schema.as_ref(),
                                     durable_visibility_parent.as_ref(),
+                                    &fallback_request,
                                 )
                                 .await?
                             {
@@ -3675,6 +3965,33 @@ where
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
             .await?;
+        if let AgentError::ModelFallbackResumeHeld { target } = error {
+            let snapshot = self
+                .execution_snapshot()
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "fallback hold terminal projection failed: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    AgentError::InternalError(
+                        "fallback hold omitted generated terminal snapshot".into(),
+                    )
+                })?;
+            let cause = snapshot.terminal_cause_kind.ok_or_else(|| {
+                AgentError::InternalError("fallback hold omitted generated terminal cause".into())
+            })?;
+            let mut metadata = crate::TurnErrorMetadata::terminal(
+                cause,
+                snapshot.terminal_outcome,
+                error.to_string(),
+            );
+            metadata.provider = Some(target.identity.provider.as_str().to_string());
+            metadata.model = Some(target.identity.model.clone());
+            metadata.retryable = Some(false);
+            metadata.reason = crate::event::AgentErrorReason::from_agent_error(error);
+            self.terminal_error_metadata = Some(metadata);
+        }
         Ok(())
     }
 
@@ -13103,6 +13420,7 @@ mod tests {
         let mut session = crate::Session::new();
         session
             .set_session_metadata(crate::SessionMetadata {
+                model_fallback: None,
                 schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
                 model: model.to_string(),
                 max_tokens: 16_384,
@@ -18399,11 +18717,19 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             _failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
             if self.active.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-                return None;
+                return Err(Vec::new());
             }
-            Some(crate::AgentLlmFallbackSwitch {
+            Ok(crate::AgentLlmFallbackSwitch {
+                policy: crate::config::ModelFallbackPolicy {
+                    cross_provider: true,
+                    require_tool_parity: false,
+                    min_context_headroom: 0.0,
+                    ..Default::default()
+                },
                 previous_identity: Self::identity_for("primary"),
                 new_identity: Self::identity_for("backup"),
                 target_profile: self
@@ -18571,6 +18897,17 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for FallbackActivatingClient {
+        fn request_pressure(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            Ok(Some(crate::ProviderRequestPressure::new(0, None)))
+        }
+
         async fn stream_response(
             &self,
             messages: &[Message],
@@ -18650,13 +18987,21 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             _failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
             self.fallback_proposals
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.active.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-                return None;
+                return Err(Vec::new());
             }
-            Some(crate::AgentLlmFallbackSwitch {
+            Ok(crate::AgentLlmFallbackSwitch {
+                policy: crate::config::ModelFallbackPolicy {
+                    cross_provider: true,
+                    require_tool_parity: false,
+                    min_context_headroom: 0.0,
+                    ..Default::default()
+                },
                 previous_identity: crate::SessionLlmIdentity {
                     model: "primary".to_string(),
                     provider: crate::provider::Provider::OpenAI,
@@ -18778,8 +19123,10 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
-            self.inner.prepare_model_fallback(failure)
+            request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
+            self.inner.prepare_model_fallback(failure, request)
         }
 
         fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
@@ -18866,8 +19213,16 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             _failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
-            Some(crate::AgentLlmFallbackSwitch {
+            _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
+            Ok(crate::AgentLlmFallbackSwitch {
+                policy: crate::config::ModelFallbackPolicy {
+                    cross_provider: true,
+                    require_tool_parity: false,
+                    min_context_headroom: 0.0,
+                    ..Default::default()
+                },
                 previous_identity: crate::SessionLlmIdentity {
                     model: "primary".to_string(),
                     provider: crate::provider::Provider::OpenAI,
@@ -19188,6 +19543,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
@@ -19243,10 +19599,10 @@ mod tests {
         );
         let seen_max_tokens = client.seen_max_tokens();
         assert_eq!(seen_max_tokens.len(), 2);
-        assert_eq!(seen_max_tokens[1], 2048);
+        assert_eq!(seen_max_tokens[1], 777);
         assert!(
-            seen_max_tokens[0] >= seen_max_tokens[1],
-            "fallback retry should clamp max tokens to the backup model limit"
+            seen_max_tokens[0] == seen_max_tokens[1],
+            "fallback retry must preserve the admitted output reserve"
         );
         let seen_provider_params = client.seen_provider_params();
         assert_eq!(seen_provider_params.len(), 2);
@@ -19308,7 +19664,7 @@ mod tests {
         let seen_max_tokens = client.seen_max_tokens();
         assert_eq!(seen_max_tokens.len(), 3);
         assert_eq!(
-            seen_max_tokens[2], 2048,
+            seen_max_tokens[2], 777,
             "subsequent fallback turn should keep the backup model max-token clamp"
         );
     }
@@ -19382,6 +19738,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .with_sticky_model_fallback_commit_coordinator(coordinator)
@@ -19429,6 +19786,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .with_sticky_model_fallback_commit_coordinator(coordinator)
@@ -19474,6 +19832,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing)
         .with_sticky_model_fallback_commit_coordinator(coordinator)
@@ -19519,6 +19878,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
@@ -19597,6 +19957,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing)
         .with_sticky_model_fallback_commit_coordinator(coordinator)
@@ -19658,6 +20019,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
@@ -19719,6 +20081,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .retry_policy(RetryPolicy {
@@ -19780,6 +20143,7 @@ mod tests {
             explicit_hot_swap_session("primary"),
         )
         .with_effective_model_registry(client.registry())
+        .max_tokens_per_turn(777)
         .with_tool_visibility_owner(generated_visibility_owner)
         .with_model_routing_handle(model_routing.clone())
         .retry_policy(RetryPolicy {
@@ -19869,10 +20233,12 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             _failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
             self.fallback_proposals
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            None
+            Err(Vec::new())
         }
 
         fn stream_output_observed(&self) -> bool {
@@ -20290,6 +20656,7 @@ mod tests {
         // test is that this `model` is NOT rewritten to the backup identity.
         session
             .set_session_metadata(crate::SessionMetadata {
+                model_fallback: None,
                 schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
                 model: "primary".to_string(),
                 max_tokens: 1024,
@@ -20843,6 +21210,17 @@ mod tests {
 
     #[async_trait]
     impl AgentLlmClient for ExtractionFallbackOverrideClient {
+        fn request_pressure(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            Ok(Some(crate::ProviderRequestPressure::new(0, None)))
+        }
+
         async fn stream_response(
             &self,
             _messages: &[Message],
@@ -20908,7 +21286,9 @@ mod tests {
         fn prepare_model_fallback(
             &self,
             _failure: &AgentError,
-        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+        ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+        {
             use crate::lifecycle::run_primitive::{
                 AnthropicProviderTag, OpaqueProviderBody, OpenAiProviderTag,
                 ProviderParamsOverride, ProviderTag,
@@ -20918,10 +21298,16 @@ mod tests {
                 .active_fallback
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
-                return None;
+                return Err(Vec::new());
             }
 
-            Some(crate::AgentLlmFallbackSwitch {
+            Ok(crate::AgentLlmFallbackSwitch {
+                policy: crate::config::ModelFallbackPolicy {
+                    cross_provider: true,
+                    require_tool_parity: false,
+                    min_context_headroom: 0.0,
+                    ..Default::default()
+                },
                 previous_identity: crate::SessionLlmIdentity {
                     model: "gpt-primary".to_string(),
                     provider: crate::provider::Provider::OpenAI,
@@ -21114,7 +21500,7 @@ mod tests {
             ));
         let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
         let mut agent = with_test_turn_state_handle_for_session(
-            AgentBuilder::new(),
+            AgentBuilder::new().max_tokens_per_turn(1024),
             explicit_hot_swap_session("gpt-primary"),
         )
         .output_schema(schema)
@@ -21152,7 +21538,7 @@ mod tests {
         assert_eq!(
             client.seen_max_tokens().last().copied(),
             Some(1024),
-            "fallback request must use the registry-owned output-token limit, not the client's forged 4096 limit"
+            "fallback must preserve the requested output reserve within the registry-owned limit"
         );
         let fallback_payload = agent
             .session()
@@ -21255,7 +21641,7 @@ mod tests {
             ),
         });
         let mut agent = with_test_turn_state_handle_for_session(
-            AgentBuilder::new(),
+            AgentBuilder::new().max_tokens_per_turn(1024),
             explicit_hot_swap_session("gpt-primary"),
         )
         .output_schema(schema)
@@ -21314,7 +21700,7 @@ mod tests {
             ));
         let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
         let mut agent = with_test_turn_state_handle_for_session(
-            AgentBuilder::new(),
+            AgentBuilder::new().max_tokens_per_turn(1024),
             explicit_hot_swap_session("gpt-primary"),
         )
         .output_schema(schema)
@@ -21391,7 +21777,7 @@ mod tests {
                 &visibility_owner,
             ));
         let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new().max_tokens_per_turn(1024))
             .output_schema(schema)
             .with_effective_model_registry(client.registry())
             .with_tool_visibility_owner(generated_visibility_owner)

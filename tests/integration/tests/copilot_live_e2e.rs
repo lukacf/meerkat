@@ -508,7 +508,7 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
         ));
         return;
     }
-    config.model_fallback.enabled = false;
+    config.model_fallback.enabled = Some(false);
 
     let resolved = timeout(
         Duration::from_secs(90),

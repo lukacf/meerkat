@@ -29,6 +29,7 @@ import type {
   MobControlScope,
   MobCreateOptions,
   MobDefinition,
+  ModelFallbackConfig,
   MobGrantRecord,
   MobGrantScopesParams,
   MobGrantScopesResult,
@@ -62,6 +63,17 @@ import type {
   WireFlowTurnOutcome,
   WireGrantRecord,
 } from "../src/index.js";
+
+const explicitFallback: ModelFallbackConfig = {
+  enabled: false,
+  policy: { cross_provider: false, min_context_headroom: 0.1 },
+};
+void explicitFallback;
+const unsupportedFallback: ModelFallbackConfig = {
+  // @ts-expect-error Scoped fallback overlays are not part of this contract.
+  scope: "turn",
+};
+void unsupportedFallback;
 import type {
   MobSpawnParams as PublicMobSpawnParams,
   MobSpawnSpecParams as PublicMobSpawnSpecParams,

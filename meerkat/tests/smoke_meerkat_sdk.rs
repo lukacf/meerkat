@@ -934,6 +934,7 @@ mod scenario_10_memory {
         let memory_session_id = memory_session.id().clone();
         memory_session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: smoke_model(),
                 max_tokens: 512,

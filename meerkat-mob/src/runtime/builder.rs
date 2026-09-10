@@ -9887,6 +9887,7 @@ mod tests {
         member: &str,
     ) -> meerkat_core::SessionMetadata {
         meerkat_core::SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "test-model".to_string(),
             max_tokens: 1024,
@@ -10602,6 +10603,7 @@ mod tests {
             profile_name: "worker".to_string(),
             agent_identity: identity.as_str().to_string(),
             profile: PortableProfile {
+                model_fallback: None,
                 model: "test-model".to_string(),
                 provider: meerkat_core::Provider::Anthropic,
                 self_hosted_server_id: None,

@@ -282,6 +282,7 @@ fn persistent_service(
 
 fn flow_profile(model: &str, peer_description: &str) -> Profile {
     Profile {
+        model_fallback: None,
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
@@ -2849,6 +2850,7 @@ fn external_tcp_smoke_definition(
     profiles.insert(
         ProfileName::from("lead"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: None,
             self_hosted_server_id: None,

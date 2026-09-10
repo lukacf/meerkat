@@ -5262,6 +5262,7 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
+        model_fallback: None,
         tool_access_policy: None,
         tool_dispatch_admission: None,
         application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
@@ -6426,6 +6427,7 @@ async fn continue_session_inner(
         };
         let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
+            model_fallback: None,
             tool_access_policy: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
@@ -9705,6 +9707,7 @@ mod tests {
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -9747,6 +9750,7 @@ mod tests {
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -12003,6 +12007,7 @@ mod tests {
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -15049,6 +15054,7 @@ mod tests {
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,

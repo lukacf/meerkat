@@ -1875,6 +1875,7 @@ class WireMobProfile:
     external_addressable: Optional[bool] = None
     image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
+    model_fallback: Optional[ModelFallbackConfig] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
     provider: Optional[Provider] = None
@@ -2870,6 +2871,57 @@ class MobMemberLiveControlParams:
 
 
 @dataclass
+class AuthBindingRef:
+    """Session-facing reference to a binding inside a realm.
+
+`AuthBindingRef` is purely structural — it does NOT carry a `"realm:binding"`
+string form. Wave-b deleted `parse` and `Display` so that no code path
+accidentally ferries the opaque join through the runtime. CLI input that
+arrives as `"realm:binding[:profile]"` must be split at the CLI boundary
+and constructed field-by-field."""
+    binding: BindingId
+    realm: RealmId
+    origin: Optional[Any] = None
+    profile: Optional[ProfileId] = None
+
+
+@dataclass
+class ModelFallbackConfig:
+    """Ordered model failover policy used when a turn reaches a recoverable LLM
+failure boundary.
+
+Fallback is off unless explicitly enabled with a nonempty chain. A present
+table replaces the inherited policy as a whole; a chain never enables it."""
+    chain: Optional[list[ModelFallbackTarget]] = None
+    enabled: Optional[bool] = None
+    policy: Optional[ModelFallbackPolicy] = None
+
+
+@dataclass
+class ModelFallbackPolicy:
+    """Request payload for ModelFallbackPolicy."""
+    cross_provider: Optional[bool] = None
+    min_context_headroom: Optional[float] = None
+    require_tool_parity: Optional[bool] = None
+    trigger_after_attempts: Optional[int] = None
+    triggers: Optional[list[ModelFallbackTrigger]] = None
+
+
+@dataclass
+class ModelFallbackTarget:
+    """One configured model fallback target."""
+    model: str
+    auth_binding: Optional[AuthBindingRef] = None
+    provider: Optional[Provider] = None
+
+
+@dataclass
+class WireMobRuntimeConfig:
+    """Request payload for WireMobRuntimeConfig."""
+    model_fallback: Optional[ModelFallbackConfig] = None
+
+
+@dataclass
 class PublicTurnToolOverlay:
     """Public caller-safe per-turn tool overlay."""
     allowed_tools: Optional[list[ToolName]] = None
@@ -2895,6 +2947,7 @@ Not `Eq`: `profiles` transitively carries float provider params."""
     limits: Optional[MobLimitsSpecInput] = None
     models: Optional[dict[str, CustomModelConfig]] = None
     orchestrator: Optional[MobOrchestratorInput] = None
+    runtime: Optional[WireMobRuntimeConfig] = None
     skills: Optional[dict[str, MobSkillSourceInput]] = None
     spawn_policy: Optional[MobSpawnPolicyInput] = None
     supervisor: Optional[MobSupervisorSpecInput] = None
@@ -2984,6 +3037,7 @@ class MobProfileInput:
     external_addressable: Optional[bool] = None
     image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
+    model_fallback: Optional[ModelFallbackConfig] = None
     output_schema: Optional[OutputSchema] = None
     peer_description: Optional[str] = None
     provider: Optional[Provider] = None
@@ -3293,6 +3347,7 @@ vocabulary; `RuntimeBinding` is machine-owned."""
     external_addressable: Optional[bool] = None
     image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
+    model_fallback: Optional[ModelFallbackConfig] = None
     output_schema: Optional[WireOpaqueJson] = None
     peer_description: Optional[str] = None
     provider_params: Optional[WireProviderParamsOverride] = None
@@ -6031,7 +6086,7 @@ MobPolicyModeInput = Literal['advisory', 'strict']
 # Not `Eq`: `Inline(MobProfileInput)` transitively carries float provider
 # params (`temperature`, `top_p`) so `Eq` cannot be derived without
 # losing fidelity.
-MobProfileBindingInput = dict[str, Any] | MobProfileInput
+MobProfileBindingInput = dict[str, str] | MobProfileInput
 
 # Mob RPC helper wire type for MobSkillSourceInput.
 class MobSkillSourceInputInline(TypedDict, total=False):
@@ -6336,6 +6391,9 @@ WireIdentityConvergenceResolutionOutcome = WireIdentityConvergenceResolutionOutc
 
 # Opaque slug identifying a binding inside a realm.
 BindingId = str
+
+# Mob RPC helper wire type for ModelFallbackTrigger.
+ModelFallbackTrigger = Literal['capacity', 'provider_unavailable', 'transport', 'empty_output']
 
 # A Meerkat-native JSON schema.
 MeerkatSchema = Any

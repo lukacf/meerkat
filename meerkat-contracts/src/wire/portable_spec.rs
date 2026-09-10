@@ -57,6 +57,8 @@ pub struct PortableMemberSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortableProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
     pub model: String,
     pub provider: meerkat_core::Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +93,8 @@ pub struct PortableProfile {
 }
 
 /// `Eq` is required by the `MaterializeMember` command chain, and
-/// `provider_params` holds `f32` knobs, so `Eq` cannot be derived. The
+/// `provider_params` holds `f32` knobs and `model_fallback` holds an `f64`
+/// headroom fraction, so `Eq` cannot be derived. The
 /// manual claim is sound on this wire: JSON has no NaN literal, and
 /// `serde_json` refuses to serialize non-finite floats — so a value whose
 /// derived `PartialEq` could violate reflexivity can neither be decoded
@@ -382,6 +385,7 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
         profile_name: "worker".to_string(),
         agent_identity: "worker-1".to_string(),
         profile: PortableProfile {
+            model_fallback: None,
             model: "claude-opus-4-8".to_string(),
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,

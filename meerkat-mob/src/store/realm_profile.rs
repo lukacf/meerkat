@@ -69,6 +69,7 @@ pub(crate) mod contract_tests {
 
     fn sample_profile(model: &str) -> Profile {
         Profile {
+            model_fallback: None,
             model: model.to_string(),
             provider: None,
             self_hosted_server_id: None,

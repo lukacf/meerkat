@@ -51,6 +51,7 @@ pub mod live_execution;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
+pub mod model_fallback;
 pub mod model_profile;
 pub mod model_registry;
 pub mod oauth_identity;

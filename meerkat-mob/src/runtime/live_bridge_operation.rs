@@ -575,6 +575,7 @@ mod tests {
         let mut session = Session::with_id(session_id.clone());
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,

@@ -113,6 +113,7 @@ fn forged_factory_policy_session() -> Session {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "forged-model".to_string(),
             max_tokens: 1024,

@@ -63,6 +63,7 @@ fn generated_image_comms_profile(
     image_generation: bool,
 ) -> Profile {
     Profile {
+        model_fallback: None,
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
@@ -119,6 +120,7 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
 
 fn image_relay_profile(model: &str, peer_description: &str, image_generation: bool) -> Profile {
     Profile {
+        model_fallback: None,
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,

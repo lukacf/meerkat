@@ -210,6 +210,7 @@ sh_test(
         "//tests/integration:e2e_artifacts_bin",
         "//tests/integration:e2e_smoke_lane_test",
         "//tests/integration:smoke_shared_realm_test",
+        "//tests/integration:smoke_model_fallback_test",
     ],
     env = {
         "MEERKAT_E2E_ARTIFACTS_BIN": "$(rootpath //tests/integration:e2e_artifacts_bin)",
@@ -280,6 +281,7 @@ E2E_SMOKE_REMOTE_DATA = [
     "//tests/integration:e2e_artifacts_bin",
     "//tests/integration:e2e_smoke_lane_test",
     "//tests/integration:smoke_shared_realm_test",
+    "//tests/integration:smoke_model_fallback_test",
 ]
 
 E2E_SMOKE_REMOTE_ENV = {
@@ -317,6 +319,8 @@ E2E_SMOKE_TURBO_S_SUITES = [
     ("cli_storage_split_brain", "cli-storage-split-brain"),
     ("mob_idle_burn", "mob-idle-burn"),
     ("mob_turn_latency", "mob-turn-latency"),
+    ("model_fallback_boundaries", "model-fallback-boundaries"),
+    ("model_fallback_context", "model-fallback-context"),
 ]
 
 E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS = [

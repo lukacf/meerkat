@@ -919,14 +919,15 @@ The model catalog (canonical data: `meerkat-models`; `meerkat_core::model_profil
 ### Model fallback chain
 
 Factory-built agents support runtime model fallback through `[model_fallback]`
-in realm config. Defaults are enabled with an empty `chain`, which means
-"build the catalog-owned default backup order" from provider defaults plus the
-global catalog default. A non-empty `[[model_fallback.chain]]` is a user-owned
-ordered policy:
+in realm config. Defaults are OFF. `enabled = true` requires a non-empty
+`[[model_fallback.chain]]`; no catalog chain is synthesized:
 
 ```toml
 [model_fallback]
 enabled = true
+
+[model_fallback.policy]
+cross_provider = true
 
 [[model_fallback.chain]]
 model = "claude-opus-5"
@@ -940,29 +941,38 @@ auth_binding = { realm = "global", binding = "openai_oauth" }
 
 Operational rules to remember:
 
-- `enabled = false` disables failover; `use_catalog_default_chain = true`
-  restores the built-in chain over an inherited disabled/custom policy.
+- Explicit `enabled = false` wins over an inherited table. Unknown fallback
+  keys, including `use_catalog_default_chain` and scope/expiry/revert, reject.
+- Policy defaults: cross_provider=false, min_context_headroom=0.10,
+  require_tool_parity=true, trigger_after_attempts=3,
+  triggers=["capacity","provider_unavailable"].
 - Fallback is only for machine-classified recoverable LLM failures and core
-  pre-stream-safe retries. Network/call timeouts do not trigger model fallback,
+  pre-stream-safe retries. Transport/empty-output do not trigger it by default,
   and any user-visible text/reasoning stream output suppresses cross-model
   fallback for that failed call.
 - Fallback target identity includes `auth_binding`; same model/provider with a
   different configured binding is a valid credential-failover target.
 - The switch updates session LLM identity, request policy, auth lease, provider
-  params, max-output clamp, and capability-based tool filtering before retry.
+  params and capability-based visibility in the existing canonical sticky
+  transaction. Admission refuses lost output reserve or required capabilities.
 - Structured-output extraction fallback must reapply the extraction schema for
   the new provider and keep provider-native web search disabled.
 - The active agent receives a hidden `model_fallback` system notice explaining
   the source model, fallback model, reason, skipped targets, limits, and hidden
   tools.
-- A smaller-context backup target is skipped for a context-overflow failure
-  when its catalog context window cannot satisfy the requested size.
-- Catalog-default candidates stay scoped to the selected non-env auth realm's
-  parent chain when a chain member has a provider binding. The model-swap filter
-  accepts inherited candidates (binding owned by an ancestor or `global`), so a
-  hot swap does not drop inherited bindings; each keeps its owning-realm
-  provenance. Explicit chains may set `auth_binding`; missing explicit targets
-  fail configuration instead of being silently skipped.
+- Every candidate is checked against actual hydrated/compacted messages, tools,
+  output reserve and target pressure, including on capacity failures. Forecast
+  can veto optional migration, never ordinary operator-selected dispatch.
+- Provider-boundary and unavailable-auth candidates produce typed
+  `model_fallback_skipped` events; staging/commit have separate typed events.
+  Credential-store/invariant faults are not silently treated as missing keys.
+- Mob profile fallback > mob runtime fallback > host fallback. Optional typed
+  carriers preserve explicit false through portable materialization/revival.
+- New committed fallback provenance is exact-target-bound history in the same
+  canonical transaction. Unsafe newly proven fallback-origin resumes hold for
+  explicit reconfiguration; explicit identity masks obsolete the marker.
+  Pre-0.8.37 notice text/brain-swap history is not authority. Historical unsafe
+  sticky routes require operator migration; overlays/expiry/reversion are deferred.
 
 ### Stream-inactivity watchdog
 

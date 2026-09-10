@@ -11139,6 +11139,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("worker"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -13479,6 +13480,7 @@ mod tests {
         {
             let store = SqliteRealmProfileStore::open(&db_path).unwrap();
             let profile = Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".into(),
                 provider: None,
                 self_hosted_server_id: None,

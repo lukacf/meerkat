@@ -133,6 +133,7 @@ fn sanitize_gemini_key_error(api_key: &str, error: reqwest::Error) -> String {
 
 fn comms_profile(model: &str, peer_desc: &str) -> Profile {
     Profile {
+        model_fallback: None,
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,

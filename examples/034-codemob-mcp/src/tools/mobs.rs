@@ -126,6 +126,7 @@ impl UserMobConfig {
             profiles.insert(
                 ProfileName::from(name.as_str()),
                 ProfileBinding::Inline(Box::new(Profile {
+                    model_fallback: None,
                     model: resolve_model(model_overrides, name, &agent.model),
                     provider: None,
                     self_hosted_server_id: None,

@@ -156,6 +156,7 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
     profiles.insert(
         ProfileName::from("lead"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: "gpt-5.4".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -179,6 +180,7 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
     profiles.insert(
         ProfileName::from("worker"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: "gpt-5.4".to_string(),
             provider: None,
             self_hosted_server_id: None,

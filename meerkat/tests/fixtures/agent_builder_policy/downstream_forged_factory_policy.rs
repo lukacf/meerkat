@@ -13,6 +13,7 @@ async fn forged_factory_policy_entrypoint() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: 1,
             model: "forged-model".to_string(),
             max_tokens: 1024,

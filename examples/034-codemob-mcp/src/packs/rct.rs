@@ -102,6 +102,7 @@ impl Pack for RctPack {
             profiles.insert(
                 ProfileName::from(*name),
                 ProfileBinding::Inline(Box::new(Profile {
+                    model_fallback: None,
                     model: resolve_model(overrides, name, default),
                     provider: None,
                     self_hosted_server_id: None,

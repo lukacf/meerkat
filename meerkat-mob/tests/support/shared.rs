@@ -3564,6 +3564,7 @@ pub fn controlling_mob_definition(mob_id: meerkat_mob::MobId) -> meerkat_mob::Mo
     profiles.insert(
         meerkat_mob::ProfileName::from("lead"),
         meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+            model_fallback: None,
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -3593,6 +3594,7 @@ pub fn controlling_mob_definition(mob_id: meerkat_mob::MobId) -> meerkat_mob::Mo
     // a deliberately NON-portable sibling (explicit workgraph assertion) for
     // the placement reject matrix.
     let base_worker = meerkat_mob::Profile {
+        model_fallback: None,
         model: "claude-haiku-4-5-20251001".to_string(),
         provider: None,
         self_hosted_server_id: None,
@@ -3801,6 +3803,7 @@ pub fn add_realtime_worker_profile(definition: &mut meerkat_mob::MobDefinition) 
     definition.profiles.insert(
         meerkat_mob::ProfileName::from("rt-worker"),
         meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+            model_fallback: None,
             model: "gpt-realtime-2".to_string(),
             provider: Some(meerkat_core::Provider::OpenAI),
             peer_description: "Portable realtime worker (phase 6b live rows)".to_string(),
@@ -4332,6 +4335,7 @@ pub fn sample_portable_member_spec(
         profile_name: profile_name.to_string(),
         agent_identity: identity.to_string(),
         profile: PortableProfile {
+            model_fallback: None,
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,

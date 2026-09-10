@@ -6900,6 +6900,8 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<crate::model_fallback::ModelFallbackProvenance>,
     /// Per-entity schema version byte.
     ///
     /// Mandatory on read: a persisted row missing the byte (or carrying a
@@ -6970,6 +6972,7 @@ pub struct SessionMetadata {
 
 /// Canonical durable LLM identity for a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmIdentity {
     pub model: String,
@@ -7207,6 +7210,7 @@ impl SessionMetadata {
 
     /// Overwrite the durable LLM identity while preserving unrelated session metadata.
     pub fn apply_llm_identity(&mut self, identity: &SessionLlmIdentity) {
+        self.model_fallback = None;
         self.model = identity.model.clone();
         self.provider = identity.provider;
         self.self_hosted_server_id = identity.self_hosted_server_id.clone();
@@ -12839,6 +12843,7 @@ mod tests {
         // A typed realm_id serializes as a bare JSON string (byte-identical to
         // the prior Option<String> durable shape).
         let metadata = SessionMetadata {
+            model_fallback: None,
             schema_version: SESSION_METADATA_SCHEMA_VERSION,
             model: "test-model".to_string(),
             max_tokens: 1024,
@@ -13063,6 +13068,7 @@ mod tests {
         assert!(!absent.metadata().contains_key(compaction_intents_key));
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
@@ -14344,6 +14350,7 @@ mod tests {
 
     fn metadata_seam_session_metadata() -> SessionMetadata {
         SessionMetadata {
+            model_fallback: None,
             schema_version: SESSION_METADATA_SCHEMA_VERSION,
             model: "test-model".to_string(),
             max_tokens: 1024,

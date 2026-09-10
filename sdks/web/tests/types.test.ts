@@ -425,6 +425,13 @@ function handleEvent(event: AgentEvent): string {
       return `${event.budget_type}:${event.percent}`;
     case 'retrying':
       return `${event.retry.plan.attempt}/${event.retry.plan.max_retries}`;
+    case 'model_fallback_skipped':
+      return `${event.target.identity.provider}/${event.target.identity.model}:${event.target.reason}`;
+    case 'model_fallback_staged':
+    case 'model_fallback_committed':
+      return `${event.previous.model}->${event.target.model}:${event.retry.plan.attempt}`;
+    case 'model_fallback_target_failed':
+      return `${event.target.provider}/${event.target.model}:${event.error.message}`;
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':

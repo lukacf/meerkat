@@ -265,6 +265,7 @@ impl McpScheduleContext {
                     .map(|snapshot| snapshot.generation)
                     .or(create.config_generation);
                 let build = SessionBuildOptions {
+                    model_fallback: None,
                     custom_models: std::collections::BTreeMap::new(),
                     image_generation_provider: None,
                     auto_compact_threshold_override: None,

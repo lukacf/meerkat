@@ -333,13 +333,15 @@ or use `rkat run --no-web-search` for one run.
 
 ## Model Fallback
 
-Runtime model fallback is enabled by default for factory-built agents. With no
-custom chain, Meerkat builds an ordered chain from compatible configured and
-catalog defaults. Operators can provide an explicit chain:
+Runtime model fallback is disabled by default. Operators must explicitly enable
+it and provide a non-empty ordered chain; catalog defaults are never a chain:
 
 ```toml
 [model_fallback]
 enabled = true
+
+[model_fallback.policy]
+cross_provider = true
 
 [[model_fallback.chain]]
 model = "claude-opus-4-8"
@@ -353,14 +355,22 @@ auth_binding = { realm = "global", binding = "openai_oauth" }
 
 Fallback activates only when generated recovery authority classifies the
 failure as recoverable and the core loop determines that switching is
-pre-stream safe. Call/network timeouts do not trigger cross-model fallback, and
-a switch is suppressed after user-visible text or reasoning has streamed.
+pre-stream safe. The default triggers are capacity and provider unavailability,
+after three failed attempts. Transport and empty output do not migrate by
+default, and a switch is suppressed after visible text or reasoning.
 
 An accepted switch is sticky for later turns and recovery. Meerkat re-resolves
 credentials, output limits, context limits, provider parameters, and tool
-visibility for the target. An unavailable target in an explicit operator chain
-is a configuration error; unavailable candidates in the catalog-derived chain
-are skipped.
+visibility for the target. Actual materialized context, output reserve,
+tool/modality/structured-output parity, and credential authority must pass both
+selection and precommit admission. Cross-provider targets without opt-in and
+targets with unavailable credentials are typed skips, not fatal configuration
+errors; malformed configuration and credential-store faults still surface.
+
+New fallback-origin unsafe resumes require explicit reconfiguration. Older
+sticky routes have no proven fallback provenance and are not automatically
+healed. See [fallback configuration](/concepts/configuration#model-fallback-settings)
+for precedence and deferred migration boundaries.
 
 Ordinary same-model retry is separate. Genuinely unknown provider failures now
 consume the existing bounded retry budget, while explicit terminal classes

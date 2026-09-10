@@ -4358,6 +4358,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("delegate"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -4381,6 +4382,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -6145,6 +6147,7 @@ mod tests {
         let mut parent_session = meerkat_core::Session::with_id(parent_session_id.clone());
         parent_session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
@@ -6499,6 +6502,7 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
                 meerkat_mob::Profile {
+                    model_fallback: None,
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
@@ -6532,6 +6536,7 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
                 meerkat_mob::Profile {
+                    model_fallback: None,
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
@@ -6564,6 +6569,7 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
                 meerkat_mob::Profile {
+                    model_fallback: None,
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
@@ -6597,6 +6603,7 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Profile {
             source: Box::new(meerkat_mob::ProfileSource::Inline(Box::new(
                 meerkat_mob::Profile {
+                    model_fallback: None,
                     model: expected_model.clone(),
                     provider: None,
                     self_hosted_server_id: None,

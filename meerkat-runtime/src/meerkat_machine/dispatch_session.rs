@@ -1068,6 +1068,7 @@ mod sticky_model_fallback_commit_tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: SESSION_METADATA_SCHEMA_VERSION,
                 model: model.to_string(),
                 max_tokens: 4096,

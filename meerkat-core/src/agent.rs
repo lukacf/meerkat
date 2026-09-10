@@ -291,8 +291,12 @@ pub trait AgentLlmClient: Send + Sync {
     /// This method does not classify failures and must not call the provider.
     /// It only selects an already-constructed candidate and returns the typed
     /// state the agent loop must apply before the retry attempt.
-    fn prepare_model_fallback(&self, _failure: &AgentError) -> Option<AgentLlmFallbackSwitch> {
-        None
+    fn prepare_model_fallback(
+        &self,
+        _failure: &AgentError,
+        _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+    ) -> Result<AgentLlmFallbackSwitch, Vec<AgentLlmFallbackSkippedTarget>> {
+        Err(Vec::new())
     }
 
     /// Move the client-local active candidate from `previous_identity` to the
@@ -432,11 +436,7 @@ pub type AgentLlmClientDecorator =
     Arc<dyn Fn(Arc<dyn AgentLlmClient>) -> Arc<dyn AgentLlmClient> + Send + Sync + 'static>;
 
 /// One fallback target skipped while selecting a viable backup model.
-#[derive(Debug, Clone)]
-pub struct AgentLlmFallbackSkippedTarget {
-    pub identity: crate::SessionLlmIdentity,
-    pub reason: String,
-}
+pub use crate::model_fallback::ModelFallbackSkippedTarget as AgentLlmFallbackSkippedTarget;
 
 /// Typed state produced when an agent-facing LLM client activates a fallback.
 ///
@@ -445,6 +445,7 @@ pub struct AgentLlmFallbackSkippedTarget {
 /// before issuing the machine-authorized retry.
 #[derive(Debug, Clone)]
 pub struct AgentLlmFallbackSwitch {
+    pub policy: crate::config::ModelFallbackPolicy,
     pub previous_identity: crate::SessionLlmIdentity,
     pub new_identity: crate::SessionLlmIdentity,
     pub request_policy: crate::SessionLlmRequestPolicy,

@@ -28,6 +28,46 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Explicit fallback policy:** `ModelFallbackConfig::enabled` changes from
+  `bool` to `Option<bool>` (`None` is disabled), `use_catalog_default_chain` is
+  removed, and `policy: ModelFallbackPolicy` is added. Behavior-only: fallback
+  defaults off, enabled empty chains are invalid, unknown fallback keys reject,
+  and no implicit catalog chain is constructed.
+- **Request-aware fallback clients:** `AgentLlmClient::prepare_model_fallback`
+  takes `&ModelFallbackRequest<'_>` and returns
+  `Result<AgentLlmFallbackSwitch, Vec<AgentLlmFallbackSkippedTarget>>` instead of
+  `Option<AgentLlmFallbackSwitch>`. `AgentLlmFallbackSwitch` gains `policy`.
+  `AgentLlmFallbackSkippedTarget` re-exports `ModelFallbackSkippedTarget`;
+  `reason` is now `ModelFallbackSkipReason`, and `context` is added.
+  Decorators must forward the complete request and measure the same transformed
+  messages they dispatch; missing request-pressure support fails closed.
+- **Fallback carriers:** `AgentBuildConfig`, `SessionBuildOptions`, `Profile`,
+  `WireMobProfile`, `MobProfileInput`, and `PortableProfile` gain optional
+  `model_fallback`. `MobDefinition` and `MobDefinitionInput` gain `runtime`.
+  `SessionMetadata` gains optional target-bound `model_fallback` provenance.
+  Update exhaustive Rust struct literals.
+- **Typed fallback diagnostics:** `AgentEvent` gains `ModelFallbackSkipped`,
+  `ModelFallbackStaged`, `ModelFallbackCommitted`, and
+  `ModelFallbackTargetFailed`. `AgentError` and `AgentErrorReason` gain
+  `ModelFallbackResumeHeld`. Update exhaustive matches.
+
+### Fixed
+
+- Automatic fallback checks actual materialized context, output reserve,
+  required tools/modalities, structured output, provider boundary and credential
+  authority before selection and canonical commit. Defaults require three
+  capacity/provider-unavailability failures, not transport or empty output.
+- Profile fallback overrides mob runtime, which overrides host config; explicit
+  false survives portable projection and materialization.
+- New proven fallback-origin unsafe resumes hold for explicit reconfiguration.
+  Explicit identity overrides, including same-value overrides, obsolete the
+  marker. Pre-0.8.37 sticky-route migration and scoped expiry/revert remain
+  deferred; historical notice text is not fallback authority.
+- Added local real-provider-adapter Turbo S boundary and 650k-context suites
+  using SQLite and fresh OS-process restart, without live provider credentials.
+
 ## [0.8.36] - 2026-09-09
 
 ### Breaking

@@ -546,6 +546,7 @@ impl WorkGraphNamespaceGrant {
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
+    pub model_fallback: Option<crate::config::ModelFallbackConfig>,
     pub provider: Option<Provider>,
     pub self_hosted_server_id: Option<String>,
     /// Caller-scoped custom model registry entries (e.g. mob-definition
@@ -1439,6 +1440,7 @@ impl Default for SessionBuildOptions {
             provider: None,
             self_hosted_server_id: None,
             custom_models: BTreeMap::new(),
+            model_fallback: None,
             image_generation_provider: None,
             auto_compact_threshold_override: None,
             compaction_curator_override: None,

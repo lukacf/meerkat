@@ -119,6 +119,7 @@ pub fn turn_driven_profile(
 ) -> ProfileBinding {
     ProfileBinding::Inline(Box::new(Profile {
         model,
+        model_fallback: None,
         provider: None,
         self_hosted_server_id: None,
         image_generation_provider: None,

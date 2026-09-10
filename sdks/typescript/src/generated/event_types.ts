@@ -8,7 +8,9 @@
 
 import type {
   AssistantImageId,
+  AuthBindingRef,
   BackgroundJobTerminalStatus,
+  BindingId,
   BlobId,
   BlobRef,
   CommsNoticeKind,
@@ -18,17 +20,24 @@ import type {
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
   GeminiImageMetadata,
+  MeerkatSchema,
   OpenAiImageMetadata,
+  OutputSchema,
   PeerId,
+  ProfileId,
   PromptText,
   Provider,
   ProviderImageMetadata,
+  RealmId,
   RevisedPromptDisposition,
   RevisedPromptSource,
+  SchemaCompat,
+  SchemaFormat,
   SenderContentTaint,
   SkillKey,
   SkillName,
   SourceUuid,
+  StructuredProviderExtension,
   SystemNoticePeer,
   ToolConfigChangeDomain,
   ToolConfigChangeOperation,
@@ -61,6 +70,8 @@ export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "ser
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable";
+
 /**
  * Closed machine-owned classifier for why a turn reached a terminal failure.
  */
@@ -72,6 +83,11 @@ export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" |
 export type TurnTerminalOutcome = "none" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "time_budget_exceeded" | "structured_output_validation_failed";
 
 export type AgentErrorReason = {
+  model: string;
+  provider: Provider;
+  reason: ModelFallbackSkipReason;
+  reason_type: "model_fallback_resume_held";
+} | {
   reason_type: "llm_rate_limited";
   retry_after_ms?: number | null;
 } | {
@@ -510,6 +526,300 @@ export interface LlmRetrySchedule {
 }
 
 /**
+ * Provenance of the effective input-token value used for classification.
+ */
+export type ContextBudgetEstimateProvenance = "canonical_forecast" | "exact_provider_token_count";
+
+/**
+ * Typed pre-dispatch state of one exact request budget projection.
+ */
+export type ContextBudgetState = "within" | "forecast_exceeded" | "exceeded";
+
+/**
+ * Exact provider request encoding measured after all lowering.
+ */
+export type LoweredRequestEncoding = "anthropic_messages_json" | "open_ai_responses_json" | "open_ai_chat_completions_json" | "gemini_generate_content_json";
+
+/**
+ * Identity of the fully lowered provider request body used for pressure and
+ * context evidence.
+ */
+export interface LoweredRequestProvenance {
+  body_sha256: number[];
+  encoding: LoweredRequestEncoding;
+  provider: Provider;
+}
+
+/**
+ * Deterministic budget evidence for a loaded durable session and one exact
+ * prospective provider request.
+ *
+ * This is a projection, not authority. The context window is copied only as
+ * evidence from the supplied registry-minted [`ModelProfileWitness`]; callers
+ * cannot provide an independent limit to this classifier.
+ */
+export type ContextBudgetFact = {
+  context_window_tokens: number;
+  estimate_provenance?: ContextBudgetEstimateProvenance;
+  estimated_input_tokens: number;
+  estimated_tool_tokens: number;
+  estimated_total_tokens: number;
+  lowered_request_provenance?: LoweredRequestProvenance | null;
+  max_input_tokens?: number | null;
+  overage_tokens: number;
+  provider_issued_input_tokens?: number | null;
+  provider_lowered_encoded_bytes?: number | null;
+  remaining_tokens: number;
+  reserved_output_tokens: number;
+  state: ContextBudgetState;
+};
+
+/**
+ * Origin discriminant for an [`AuthBindingRef`].
+ *
+ * Distinguishes a binding that names a durable, config-resolvable identity
+ * (`Configured`) from the synthetic env-var fallback the resolver mints when
+ * no realm config exists but a well-known API-key env var is set
+ * (`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be
+ * rehydrated as a durable identity nor publish a durable auth lease.
+ *
+ * This is the typed owner of the "is this the env-var default?" fact, replacing
+ * the prior recovery-by-magic-slug (`realm == "env_default"`,
+ * `binding == "default"`). Identity slugs (`RealmId`/`BindingId`) are pure
+ * opaque identity again; origin is carried explicitly.
+ */
+export type BindingOrigin = "configured" | "synthetic_env_default";
+
+/**
+ * Typed shape of Anthropic's prompt-cache breakpoint policy.
+ */
+export type AnthropicCacheControlPolicy = "disabled" | "automatic" | "system_prefix" | "system_and_conversation";
+
+/**
+ * Anthropic prompt-cache TTL selected per agent/profile.
+ */
+export type AnthropicCacheTtl = "5m" | "1h";
+
+/**
+ * Opaque provider-native JSON body carried verbatim from caller to
+ * provider. Used for pass-through sub-shapes (web search config,
+ * provider-native custom compaction edits, OpenAI-compatible
+ * `chat_template_kwargs`/`thinking`/`reasoning` forwards) where the
+ * exact wire shape varies across downstream providers (Anthropic /
+ * DeepSeek / OpenRouter / custom proxies) and the runtime deliberately
+ * does not parse the body — it simply forwards it.
+ */
+export type OpaqueProviderBody = string;
+
+/**
+ * Typed shape of Anthropic's automatic-compaction knob.
+ */
+export type AnthropicCompactionConfig = {
+  kind: "auto";
+} | {
+  edit: OpaqueProviderBody;
+  kind: "custom";
+};
+
+/**
+ * Typed shape of Anthropic's context-window opt-in.
+ */
+export type AnthropicContextWindow = "one_megabyte";
+
+/**
+ * Typed shape of Anthropic's response-effort knob.
+ * `XHigh` is the Opus 4.8 / 4.7 extended-high effort level.
+ */
+export type AnthropicEffort = "low" | "medium" | "high" | "max" | "x_high";
+
+/**
+ * Typed shape of Anthropic's data-residency knob.
+ */
+export type AnthropicInferenceGeo = {
+  kind: "us";
+} | {
+  kind: "global";
+} | {
+  kind: "other";
+  region: string;
+};
+
+/**
+ * Typed shape of Anthropic's extended-thinking knob.
+ */
+export type AnthropicThinkingConfig = {
+  type: "adaptive";
+} | {
+  budget_tokens: number;
+  type: "enabled";
+};
+
+/**
+ * Gemini 3 reasoning levels accepted by the API.
+ */
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+/**
+ * Typed shape of Gemini's thinking knob.
+ */
+export type GeminiThinkingConfig = {
+  include_thoughts?: boolean | null;
+  thinking_budget?: number | null;
+  thinking_level?: GeminiThinkingLevel | null;
+};
+
+/**
+ * Request-wide GPT-5.6 prompt-cache breakpoint policy.
+ */
+export type OpenAiPromptCacheMode = "implicit" | "explicit";
+
+/**
+ * Minimum lifetime for GPT-5.6 prompt-cache entries.
+ */
+export type OpenAiPromptCacheTtl = "30m";
+
+/**
+ * GPT-5.6 request-wide prompt-cache controls.
+ */
+export type OpenAiPromptCacheOptions = {
+  mode?: OpenAiPromptCacheMode | null;
+  ttl?: OpenAiPromptCacheTtl | null;
+};
+
+/**
+ * Typed shape of OpenAI's prompt-cache retention hint.
+ */
+export type OpenAiPromptCacheRetention = "in_memory" | "24h";
+
+/**
+ * Which available reasoning items GPT-5.6 may render into the next sample.
+ */
+export type OpenAiReasoningContext = "auto" | "current_turn" | "all_turns";
+
+/**
+ * GPT-5.6 Responses execution mode.
+ */
+export type OpenAiReasoningMode = "standard" | "pro";
+
+/**
+ * Default level of detail for OpenAI text output.
+ */
+export type OpenAiTextVerbosity = "low" | "medium" | "high";
+
+/**
+ * Typed projection of OpenAI's reasoning-effort knob.
+ */
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * Provider-specific typed override payload carried on a single turn.
+ *
+ * Each provider family gets its own typed variant. Anything that does not
+ * fit a typed field belongs on the per-binding auth/backend profile, not
+ * on the per-turn override — the per-turn seam carries only scalars the
+ * runtime can route authoritatively.
+ *
+ * `Unknown { bag }` is the typed escape hatch for V3 legacy-row
+ * deserialize (see C-TM-V3): the untyped `serde_json::Value` thinking
+ * carrier from pre-wave rows projects into `StructuredProviderExtension`
+ * rather than being silently dropped (persistence-migration.md §3.1,
+ * adversarial review flaw 5).
+ */
+export type ProviderTag = {
+  cache_control?: AnthropicCacheControlPolicy | null;
+  cache_ttl?: AnthropicCacheTtl | null;
+  compaction?: AnthropicCompactionConfig | null;
+  context?: AnthropicContextWindow | null;
+  effort?: AnthropicEffort | null;
+  inference_geo?: AnthropicInferenceGeo | null;
+  provider: "anthropic";
+  structured_output?: OutputSchema | null;
+  supports_temperature_override?: boolean | null;
+  thinking?: AnthropicThinkingConfig | null;
+  thinking_budget_tokens?: number | null;
+  top_k?: number | null;
+  web_search?: OpaqueProviderBody | null;
+} | {
+  chat_template_kwargs?: OpaqueProviderBody | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  prompt_cache_enabled?: boolean | null;
+  prompt_cache_key?: string | null;
+  prompt_cache_options?: OpenAiPromptCacheOptions | null;
+  prompt_cache_retention?: OpenAiPromptCacheRetention | null;
+  provider: "open_ai";
+  reasoning?: OpaqueProviderBody | null;
+  reasoning_context?: OpenAiReasoningContext | null;
+  reasoning_effort?: ReasoningEffort | null;
+  reasoning_mode?: OpenAiReasoningMode | null;
+  seed?: number | null;
+  store?: boolean | null;
+  structured_output?: OutputSchema | null;
+  supports_reasoning_override?: boolean | null;
+  supports_temperature_override?: boolean | null;
+  text_verbosity?: OpenAiTextVerbosity | null;
+  thinking?: OpaqueProviderBody | null;
+  web_search?: OpaqueProviderBody | null;
+} | {
+  cached_content_name?: string | null;
+  candidate_count?: number | null;
+  google_search?: OpaqueProviderBody | null;
+  provider: "gemini";
+  structured_output?: OutputSchema | null;
+  thinking?: GeminiThinkingConfig | null;
+  thinking_budget?: number | null;
+  thinking_level?: GeminiThinkingLevel | null;
+  top_k?: number | null;
+  top_p?: number | null;
+} | {
+  bag: StructuredProviderExtension;
+  provider: "unknown";
+};
+
+/**
+ * Typed mode for generalized reasoning emission.
+ */
+export type ReasoningMode = "emit" | "silent" | "off";
+
+/**
+ * Typed per-turn provider parameter overrides.
+ *
+ * Replaces the legacy untyped `serde_json::Value` bag. Every knob exposed
+ * by the runtime on a per-turn seam must have a typed field here. Anything
+ * provider-specific enough to not fit goes on [`ProviderTag`]; anything
+ * that is fundamentally per-binding (not per-turn) lives on the auth /
+ * backend profile and never traverses this seam.
+ */
+export type ProviderParamsOverride = {
+  max_output_tokens?: number | null;
+  provider_tag?: ProviderTag | null;
+  reasoning?: ReasoningMode | null;
+  temperature?: number | null;
+  thinking_budget_tokens?: number | null;
+  top_p?: number | null;
+};
+
+/**
+ * Canonical durable LLM identity for a session.
+ */
+export type SessionLlmIdentity = {
+  auth_binding?: AuthBindingRef | null;
+  model: string;
+  provider: Provider;
+  provider_params?: ProviderParamsOverride | null;
+  self_hosted_server_id?: string | null;
+};
+
+/**
+ * Evidence attached even when every configured candidate is rejected.
+ */
+export type ModelFallbackSkippedTarget = {
+  context?: ContextBudgetFact | null;
+  identity: SessionLlmIdentity;
+  reason: ModelFallbackSkipReason;
+};
+
+/**
  * One externally routed callback tool call inside a suspended assistant
  * tool-use batch.
  */
@@ -919,6 +1229,25 @@ export type AgentEvent = {
 } | {
   retry: LlmRetrySchedule;
   type: "retrying";
+} | {
+  retry: LlmRetrySchedule;
+  target: ModelFallbackSkippedTarget;
+  type: "model_fallback_skipped";
+} | {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_staged";
+} | {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_committed";
+} | {
+  error: AgentErrorReport;
+  previous: SessionLlmIdentity;
+  target: SessionLlmIdentity;
+  type: "model_fallback_target_failed";
 } | {
   injection_bytes: number;
   skills: SkillKey[];

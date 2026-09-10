@@ -981,6 +981,7 @@ mod tests {
             profile_name: "worker".to_string(),
             agent_identity: "worker-1".to_string(),
             profile: PortableProfile {
+                model_fallback: None,
                 model: "claude-fable-5".to_string(),
                 provider: meerkat_core::Provider::Anthropic,
                 self_hosted_server_id: None,

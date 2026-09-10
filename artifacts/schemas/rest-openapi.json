@@ -36,6 +36,30 @@
         "oneOf": [
           {
             "properties": {
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "$ref": "#/components/schemas/Provider"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/ModelFallbackSkipReason"
+              },
+              "reason_type": {
+                "const": "model_fallback_resume_held",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider",
+              "model",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "reason_type": {
                 "const": "llm_rate_limited",
                 "type": "string"
@@ -1080,6 +1104,98 @@
             "type": "object"
           },
           {
+            "properties": {
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/ModelFallbackSkippedTarget"
+              },
+              "type": {
+                "const": "model_fallback_skipped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_staged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "$ref": "#/components/schemas/AgentErrorReport"
+              },
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_target_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "previous",
+              "target",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Skills resolved for this turn.",
             "properties": {
               "injection_bytes": {
@@ -1794,6 +1910,36 @@
         },
         "type": "object"
       },
+      "AuthBindingRef": {
+        "description": "Session-facing reference to a binding inside a realm.\n\n`AuthBindingRef` is purely structural — it does NOT carry a `\"realm:binding\"`\nstring form. Wave-b deleted `parse` and `Display` so that no code path\naccidentally ferries the opaque join through the runtime. CLI input that\narrives as `\"realm:binding[:profile]\"` must be split at the CLI boundary\nand constructed field-by-field.",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/BindingId"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/BindingOrigin",
+            "description": "Whether this ref names a configured durable identity or the synthetic\nenv-var fallback. Defaults to [`BindingOrigin::Configured`] for back-read\nof rows persisted before the discriminant existed."
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/components/schemas/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
       "AuthErrorKind": {
         "description": "Stable discriminant for [`AuthError`]. Used in serialized error summaries\nand for SDK-facing wire codes.",
         "enum": [
@@ -1859,6 +2005,21 @@
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
+      },
+      "BindingOrigin": {
+        "description": "Origin discriminant for an [`AuthBindingRef`].\n\nDistinguishes a binding that names a durable, config-resolvable identity\n(`Configured`) from the synthetic env-var fallback the resolver mints when\nno realm config exists but a well-known API-key env var is set\n(`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be\nrehydrated as a durable identity nor publish a durable auth lease.\n\nThis is the typed owner of the \"is this the env-var default?\" fact, replacing\nthe prior recovery-by-magic-slug (`realm == \"env_default\"`,\n`binding == \"default\"`). Identity slugs (`RealmId`/`BindingId`) are pure\nopaque identity again; origin is carried explicitly.",
+        "oneOf": [
+          {
+            "const": "configured",
+            "description": "A durable, config-resolvable binding. This is the back-read default so\nthat wire/persisted rows written before this field existed deserialize\nas a configured identity.",
+            "type": "string"
+          },
+          {
+            "const": "synthetic_env_default",
+            "description": "The synthetic env-var fallback binding (ephemeral, not durable).",
+            "type": "string"
+          }
+        ]
       },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
@@ -7503,7 +7664,21 @@
             "minimum": 1,
             "type": "integer"
           },
-          "model_fallback": true,
+          "model_fallback": {
+            "$ref": "#/components/schemas/ModelFallbackConfig",
+            "default": {
+              "policy": {
+                "cross_provider": false,
+                "min_context_headroom": 0.1,
+                "require_tool_parity": true,
+                "trigger_after_attempts": 3,
+                "triggers": [
+                  "provider_unavailable",
+                  "capacity"
+                ]
+              }
+            }
+          },
           "models": true,
           "presentation": true,
           "provider_tools": true,
@@ -7803,6 +7978,147 @@
           }
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "ContextBudgetEstimateProvenance": {
+        "description": "Provenance of the effective input-token value used for classification.",
+        "oneOf": [
+          {
+            "const": "canonical_forecast",
+            "description": "Host-side forecast over canonical messages and visible tool definitions.",
+            "type": "string"
+          },
+          {
+            "const": "exact_provider_token_count",
+            "description": "Exact input-token count issued by the provider for the fully lowered\nrequest.",
+            "type": "string"
+          }
+        ]
+      },
+      "ContextBudgetFact": {
+        "additionalProperties": false,
+        "description": "Deterministic budget evidence for a loaded durable session and one exact\nprospective provider request.\n\nThis is a projection, not authority. The context window is copied only as\nevidence from the supplied registry-minted [`ModelProfileWitness`]; callers\ncannot provide an independent limit to this classifier.",
+        "properties": {
+          "context_window_tokens": {
+            "description": "Active registry-owned model context window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "estimate_provenance": {
+            "$ref": "#/components/schemas/ContextBudgetEstimateProvenance",
+            "default": "canonical_forecast",
+            "description": "Provenance of the effective input-token value used by `state`."
+          },
+          "estimated_input_tokens": {
+            "description": "Observational estimate for the durable ordered transcript.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "estimated_tool_tokens": {
+            "description": "Observational estimate for the exact visible tool definitions.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "estimated_total_tokens": {
+            "description": "Effective pre-output estimate plus the output reserve.\n\nAn exact provider-issued count is used when available. Otherwise, this\nremains the canonical input/tool forecast.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lowered_request_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LoweredRequestProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit identity of the fully lowered body whose pressure was\nobserved. This remains observational unless accompanied by an exact\nprovider-issued token count."
+          },
+          "max_input_tokens": {
+            "description": "Active registry-owned separate input ceiling, when declared.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "overage_tokens": {
+            "description": "Greatest excess over either the context window or input ceiling,\notherwise zero.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "provider_issued_input_tokens": {
+            "description": "Exact provider-issued input-token count, when the provider exposes one\nsynchronously before dispatch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_lowered_encoded_bytes": {
+            "description": "Exact provider-lowered JSON body bytes, when runtime lowering can\nproduce a witness before dispatch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remaining_tokens": {
+            "description": "Input headroom under both the input ceiling and context-minus-output\nbudget, otherwise zero.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reserved_output_tokens": {
+            "description": "Effective output tokens reserved by the prospective request.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ContextBudgetState",
+            "description": "Typed classification for host and runtime policy."
+          }
+        },
+        "required": [
+          "state",
+          "context_window_tokens",
+          "estimated_input_tokens",
+          "estimated_tool_tokens",
+          "reserved_output_tokens",
+          "estimated_total_tokens",
+          "remaining_tokens",
+          "overage_tokens"
+        ],
+        "type": "object"
+      },
+      "ContextBudgetState": {
+        "description": "Typed pre-dispatch state of one exact request budget projection.",
+        "oneOf": [
+          {
+            "const": "within",
+            "description": "The request remains within the witnessed context and input limits.",
+            "type": "string"
+          },
+          {
+            "const": "forecast_exceeded",
+            "description": "Forecast evidence projects the request beyond the active context\nwindow or input ceiling, but does not authorize refusal.",
+            "type": "string"
+          },
+          {
+            "const": "exceeded",
+            "description": "Exact provider-issued token evidence exceeds the active model profile's\ncontext window or input ceiling.",
+            "type": "string"
+          }
+        ]
       },
       "ContractVersion": {
         "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
@@ -9824,6 +10140,45 @@
         "title": "LoginStartParams",
         "type": "object"
       },
+      "LoweredRequestEncoding": {
+        "description": "Exact provider request encoding measured after all lowering.",
+        "enum": [
+          "anthropic_messages_json",
+          "open_ai_responses_json",
+          "open_ai_chat_completions_json",
+          "gemini_generate_content_json"
+        ],
+        "type": "string"
+      },
+      "LoweredRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Identity of the fully lowered provider request body used for pressure and\ncontext evidence.",
+        "properties": {
+          "body_sha256": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "encoding": {
+            "$ref": "#/components/schemas/LoweredRequestEncoding"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "encoding",
+          "body_sha256"
+        ],
+        "type": "object"
+      },
       "MaterializeLaunchMode": {
         "description": "Launch mode for `MaterializeMember`. CLOSED — `Fork` is deliberately\nunrepresentable on this wire (A6/§19.L1): mob fork collapses to prompt\ntext on the controlling host before provisioning, and resume validation\nis realm-local to the member host. A `{\"mode\":\"fork\"}` payload is a\nfail-closed decode error, never a fallback.",
         "oneOf": [
@@ -11144,6 +11499,160 @@
         "title": "MobWireMembersBatchResult",
         "type": "object"
       },
+      "ModelFallbackConfig": {
+        "additionalProperties": false,
+        "description": "Ordered model failover policy used when a turn reaches a recoverable LLM\nfailure boundary.\n\nFallback is off unless explicitly enabled with a nonempty chain. A present\ntable replaces the inherited policy as a whole; a chain never enables it.",
+        "properties": {
+          "chain": {
+            "description": "Ordered operator-provided backup targets.",
+            "items": {
+              "$ref": "#/components/schemas/ModelFallbackTarget"
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "description": "Absent is disabled. Presence preserves explicit false across inheritance.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ModelFallbackPolicy",
+            "default": {
+              "cross_provider": false,
+              "min_context_headroom": 0.1,
+              "require_tool_parity": true,
+              "trigger_after_attempts": 3,
+              "triggers": [
+                "provider_unavailable",
+                "capacity"
+              ]
+            }
+          }
+        },
+        "type": "object"
+      },
+      "ModelFallbackPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "cross_provider": {
+            "default": false,
+            "type": "boolean"
+          },
+          "min_context_headroom": {
+            "default": 0.1,
+            "format": "double",
+            "type": "number"
+          },
+          "require_tool_parity": {
+            "default": true,
+            "type": "boolean"
+          },
+          "trigger_after_attempts": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "triggers": {
+            "default": [
+              "provider_unavailable",
+              "capacity"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ModelFallbackTrigger"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ModelFallbackSkipReason": {
+        "enum": [
+          "provider_boundary",
+          "auth_unavailable",
+          "context_fit",
+          "context_unknown",
+          "output_budget",
+          "tool_parity",
+          "modality_parity",
+          "request_unsupported",
+          "admission_unavailable"
+        ],
+        "type": "string"
+      },
+      "ModelFallbackSkippedTarget": {
+        "description": "Evidence attached even when every configured candidate is rejected.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextBudgetFact"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identity": {
+            "$ref": "#/components/schemas/SessionLlmIdentity"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ModelFallbackSkipReason"
+          }
+        },
+        "required": [
+          "identity",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ModelFallbackTarget": {
+        "additionalProperties": false,
+        "description": "One configured model fallback target.",
+        "properties": {
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional realm-scoped auth binding for this target. When omitted, the\nprovider's default binding is resolved by the existing provider-runtime\nregistry.\n\n`AuthBindingRef` only derives `JsonSchema` under the `schema` feature\n(its slug newtypes gate the same way), while this struct's derive is\nunconditional; without the schema-off skip, `--no-default-features`\nfails to compile. The emitted schema (feature on) is unchanged."
+          },
+          "model": {
+            "description": "Model id, resolved through the effective [`crate::ModelRegistry`].",
+            "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional typed provider override. When omitted, registry ownership of\n`model` supplies the provider."
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "ModelFallbackTrigger": {
+        "enum": [
+          "capacity",
+          "provider_unavailable",
+          "transport",
+          "empty_output"
+        ],
+        "type": "string"
+      },
       "ModelsCatalogResponse": {
         "description": "Response for `models/catalog` — the resolved model catalog.\n\nThis is **not** a pure compiled-in snapshot. Surfaces build it from the\nconfig-backed `ModelRegistry`, which combines the compiled-in\n`meerkat-models` catalog with any config-declared self-hosted aliases\n(entries that carry a [`CatalogModelEntry::server_id`]). Two responses for\nthe same binary can therefore differ when the active config declares\ndifferent self-hosted models.\n\nProvider resolution for these entries is exact-catalog-match, not name\nprefix inference: an entry's provider is the one recorded for its catalog\nid (or its self-hosted alias config), never inferred from a `claude-*` /\n`gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through\nthe registry, not by prefix guessing.",
         "properties": {
@@ -11959,6 +12468,16 @@
           },
           "model": {
             "type": "string"
+          },
+          "model_fallback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelFallbackConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "output_schema": {
             "anyOf": [
@@ -14948,6 +15467,50 @@
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
+      },
+      "SessionLlmIdentity": {
+        "description": "Canonical durable LLM identity for a session.",
+        "properties": {
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Realm-scoped auth binding this session resolves credentials\nthrough. Carried on the identity so mid-session hot-swaps\n(`apply_live_session_llm_identity`) re-resolve against the\nsame realm the session was created with — preventing\ncross-realm credential bleed in multi-tenant setups. Dogma\n§12 (dynamic policy follows dynamic identity): on swap the\nfactory re-enters `ProviderRuntimeRegistry::resolve` against\nthis binding, not a new synthesized env-default realm.\n\nProjection (dogma §1/§13): canonical owner is\n`SessionMetadata.auth_binding`; this field is the\nread/write projection used by hot-swap."
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed provider parameter overrides carried on the durable identity."
+          },
+          "self_hosted_server_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "provider"
+        ],
+        "type": "object"
       },
       "SessionMaterializationSpec": {
         "properties": {

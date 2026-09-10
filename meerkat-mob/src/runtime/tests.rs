@@ -529,6 +529,7 @@ fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) 
     if session.session_metadata().is_none() {
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::session_metadata_schema_version(),
                 model,
                 max_tokens,
@@ -3065,6 +3066,7 @@ impl MockSessionService {
         if session.session_metadata().is_none() {
             let build = req.build.as_ref();
             let metadata = SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::session_metadata_schema_version(),
                 model: req.model.clone(),
                 max_tokens: req.max_tokens.unwrap_or(4096),
@@ -6297,6 +6299,7 @@ fn sample_definition() -> MobDefinition {
     profiles.insert(
         ProfileName::from("lead"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: "claude-opus-4-8".into(),
             provider: None,
             self_hosted_server_id: None,
@@ -6330,6 +6333,7 @@ fn sample_definition() -> MobDefinition {
     profiles.insert(
         ProfileName::from("worker"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
@@ -26752,6 +26756,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
     let mut resumed = Session::new();
     resumed
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::session_metadata_schema_version(),
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -47480,6 +47485,7 @@ impl RealCommsSessionService {
             let build = req.build.as_ref();
             session
                 .set_session_metadata(SessionMetadata {
+                    model_fallback: None,
                     schema_version: meerkat_core::session_metadata_schema_version(),
                     model: req.model.clone(),
                     max_tokens: req.max_tokens.unwrap_or(4096),
@@ -63711,6 +63717,7 @@ async fn test_spawn_realm_ref_resolves_from_store() {
 
     let realm_store = Arc::new(InMemoryRealmProfileStore::new());
     let worker_profile = Profile {
+        model_fallback: None,
         model: "claude-sonnet-4-5".into(),
         provider: None,
         self_hosted_server_id: None,

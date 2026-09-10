@@ -344,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
         profiles.insert(
             ProfileName::from("target"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: hive_model.clone(),
                 skills: Vec::new(),
                 tools: ToolConfig {

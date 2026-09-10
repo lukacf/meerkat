@@ -177,6 +177,8 @@ pub struct StickyModelFallbackVisibilityPlan {
 /// changes only canonical control metadata; transcript messages are untouched.
 #[derive(Debug, Clone)]
 pub struct StickyModelFallbackControlDelta {
+    previous_provenance: Option<crate::model_fallback::ModelFallbackProvenance>,
+    target_provenance: Option<crate::model_fallback::ModelFallbackProvenance>,
     previous_identity: crate::SessionLlmIdentity,
     target_identity: crate::SessionLlmIdentity,
     persisted_visibility_parent: crate::SessionToolVisibilityState,
@@ -191,6 +193,8 @@ impl StickyModelFallbackControlDelta {
         persisted_visibility_parent: crate::SessionToolVisibilityState,
     ) -> Self {
         Self {
+            previous_provenance: None,
+            target_provenance: None,
             previous_identity,
             target_identity,
             persisted_visibility_parent,
@@ -209,6 +213,8 @@ impl StickyModelFallbackControlDelta {
         target_visibility_state: crate::SessionToolVisibilityState,
     ) -> Self {
         Self {
+            previous_provenance: None,
+            target_provenance: None,
             previous_identity,
             target_identity,
             persisted_visibility_parent,
@@ -218,6 +224,16 @@ impl StickyModelFallbackControlDelta {
 
     pub fn previous_identity(&self) -> &crate::SessionLlmIdentity {
         &self.previous_identity
+    }
+
+    pub(crate) fn with_provenance(
+        mut self,
+        previous: Option<crate::model_fallback::ModelFallbackProvenance>,
+        target: crate::model_fallback::ModelFallbackProvenance,
+    ) -> Self {
+        self.previous_provenance = previous;
+        self.target_provenance = Some(target);
+        self
     }
 
     pub fn target_identity(&self) -> &crate::SessionLlmIdentity {
@@ -244,6 +260,13 @@ impl StickyModelFallbackControlDelta {
             })?
             .ok_or(StickyModelFallbackControlDeltaError::MissingSessionMetadata)?;
         let current_identity = metadata.llm_identity();
+        if metadata.model_fallback != self.previous_provenance {
+            return Err(
+                StickyModelFallbackControlDeltaError::InvalidSessionMetadata(
+                    "fallback provenance parent changed".into(),
+                ),
+            );
+        }
         if current_identity != self.previous_identity {
             return Err(
                 StickyModelFallbackControlDeltaError::IdentityParentMismatch {
@@ -263,6 +286,7 @@ impl StickyModelFallbackControlDelta {
         }
 
         metadata.apply_llm_identity(&self.target_identity);
+        metadata.model_fallback = self.target_provenance.clone();
         session.set_session_metadata(metadata).map_err(|error| {
             StickyModelFallbackControlDeltaError::InvalidSessionMetadata(error.to_string())
         })?;
@@ -287,6 +311,8 @@ impl StickyModelFallbackControlDelta {
     #[must_use]
     pub fn inverted(&self) -> Self {
         Self {
+            previous_provenance: self.target_provenance.clone(),
+            target_provenance: self.previous_provenance.clone(),
             previous_identity: self.target_identity.clone(),
             target_identity: self.previous_identity.clone(),
             persisted_visibility_parent: self.target_visibility_state.clone(),
@@ -407,6 +433,7 @@ mod sticky_model_fallback_control_delta_tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: SESSION_METADATA_SCHEMA_VERSION,
                 model: identity.model.clone(),
                 max_tokens: 4096,
@@ -585,21 +612,44 @@ mod sticky_model_fallback_control_delta_tests {
             committed_visible_set_changed: true,
             revision_bumped: true,
         };
+        let prior = crate::model_fallback::ModelFallbackProvenance {
+            previous: identity("original"),
+            target: previous.clone(),
+            policy: Default::default(),
+        };
+        let committed = crate::model_fallback::ModelFallbackProvenance {
+            previous: previous.clone(),
+            target: target.clone(),
+            policy: Default::default(),
+        };
         let delta = StickyModelFallbackControlDelta::new(
             previous.clone(),
             target.clone(),
             &plan,
             previous_visibility.clone(),
-        );
+        )
+        .with_provenance(Some(prior.clone()), committed.clone());
         let mut session = session_with_control_state(&previous, &previous_visibility);
+        let mut metadata = session.session_metadata().unwrap();
+        metadata.model_fallback = Some(prior.clone());
+        session.set_session_metadata(metadata).unwrap();
 
         delta.validate_and_apply(&mut session).unwrap();
+        assert_eq!(
+            session.session_metadata().unwrap().model_fallback,
+            Some(committed)
+        );
+        session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         let inverse = delta.inverted();
         assert_eq!(inverse.previous_identity(), &target);
         assert_eq!(inverse.target_identity(), &previous);
         inverse.validate_and_apply(&mut session).unwrap();
 
         assert_eq!(session.session_metadata().unwrap().llm_identity(), previous);
+        assert_eq!(
+            session.session_metadata().unwrap().model_fallback,
+            Some(prior)
+        );
         assert_eq!(
             session.tool_visibility_state().unwrap(),
             Some(previous_visibility)

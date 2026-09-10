@@ -165,6 +165,7 @@ mod planned_identity_fork_inheritance {
             ..meerkat_core::SessionTooling::default()
         };
         meerkat_core::SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::session_metadata_schema_version(),
             model: "test".to_string(),
             max_tokens: 4096,

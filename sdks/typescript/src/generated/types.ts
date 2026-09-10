@@ -1437,6 +1437,7 @@ export interface WireMobProfile {
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
   model: string;
+  model_fallback?: ModelFallbackConfig | null;
   output_schema?: unknown;
   peer_description?: string;
   provider?: Provider | null;
@@ -2138,6 +2139,37 @@ export interface MobMemberLiveControlParams {
   verb: BridgeLiveControlVerb;
 }
 
+export interface AuthBindingRef {
+  binding: BindingId;
+  origin?: unknown;
+  profile?: ProfileId | null;
+  realm: RealmId;
+}
+
+export interface ModelFallbackConfig {
+  chain?: ModelFallbackTarget[];
+  enabled?: boolean | null;
+  policy?: ModelFallbackPolicy;
+}
+
+export interface ModelFallbackPolicy {
+  cross_provider?: boolean;
+  min_context_headroom?: number;
+  require_tool_parity?: boolean;
+  trigger_after_attempts?: number;
+  triggers?: ModelFallbackTrigger[];
+}
+
+export interface ModelFallbackTarget {
+  auth_binding?: AuthBindingRef | null;
+  model: string;
+  provider?: Provider | null;
+}
+
+export interface WireMobRuntimeConfig {
+  model_fallback?: ModelFallbackConfig | null;
+}
+
 export interface PublicTurnToolOverlay {
   allowed_tools?: ToolName[] | null;
   blocked_tools?: ToolName[] | null;
@@ -2153,6 +2185,7 @@ export interface MobDefinitionInput {
   models?: Record<string, CustomModelConfig>;
   orchestrator?: MobOrchestratorInput | null;
   profiles: Record<string, MobProfileBindingInput>;
+  runtime?: WireMobRuntimeConfig;
   skills?: Record<string, MobSkillSourceInput>;
   spawn_policy?: MobSpawnPolicyInput | null;
   supervisor?: MobSupervisorSpecInput | null;
@@ -2224,6 +2257,7 @@ export interface MobProfileInput {
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
   model: string;
+  model_fallback?: ModelFallbackConfig | null;
   output_schema?: OutputSchema | null;
   peer_description?: string;
   provider?: Provider | null;
@@ -2429,6 +2463,7 @@ export interface PortableProfile {
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
   model: string;
+  model_fallback?: ModelFallbackConfig | null;
   output_schema?: WireOpaqueJson | null;
   peer_description?: string;
   provider: Provider;
@@ -3316,7 +3351,7 @@ export type MobFlowNodeInput = MobFlowNodeInputStep | MobFlowNodeInputRepeatUnti
 
 export type MobPolicyModeInput = "advisory" | "strict";
 
-export type MobProfileBindingInput = Record<string, unknown> | MobProfileInput;
+export type MobProfileBindingInput = { realm_profile: string } | MobProfileInput;
 
 export interface MobSkillSourceInputInline {
   content: string;
@@ -3604,6 +3639,8 @@ export interface WireIdentityConvergenceResolutionOutcomeRequestConflict {
 export type WireIdentityConvergenceResolutionOutcome = WireIdentityConvergenceResolutionOutcomeResolved | WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict | WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict | WireIdentityConvergenceResolutionOutcomeNotBlocked | WireIdentityConvergenceResolutionOutcomeMemberAbsent | WireIdentityConvergenceResolutionOutcomeRequestConflict;
 
 export type BindingId = string;
+
+export type ModelFallbackTrigger = "capacity" | "provider_unavailable" | "transport" | "empty_output";
 
 export type MeerkatSchema = unknown;
 

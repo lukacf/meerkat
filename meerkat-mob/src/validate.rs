@@ -13,6 +13,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
+    InvalidModelFallback,
     /// A skill referenced by a profile is not defined in the skills section.
     MissingSkillRef,
     /// The orchestrator profile is not defined.
@@ -73,6 +74,7 @@ pub enum DiagnosticCode {
 impl fmt::Display for DiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
+            Self::InvalidModelFallback => "invalid_model_fallback",
             Self::MissingSkillRef => "missing_skill_ref",
             Self::MissingOrchestratorProfile => "missing_orchestrator_profile",
             Self::InvalidProfileName => "invalid_profile_name",
@@ -130,6 +132,16 @@ pub struct Diagnostic {
 /// Returns an empty `Vec` if the definition is valid.
 pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    if let Some(config) = &def.runtime.model_fallback
+        && let Err(error) = config.validate()
+    {
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::InvalidModelFallback,
+            message: error.to_string(),
+            location: Some("runtime.model_fallback".into()),
+            severity: DiagnosticSeverity::Error,
+        });
+    }
 
     if def.profiles.is_empty() {
         diagnostics.push(Diagnostic {
@@ -182,6 +194,16 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
         let Some(profile) = binding.as_inline() else {
             continue;
         };
+        if let Some(config) = &profile.model_fallback
+            && let Err(error) = config.validate()
+        {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::InvalidModelFallback,
+                message: error.to_string(),
+                location: Some(format!("profiles.{name}.model_fallback")),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
 
         // Check skill references
         for (i, skill_ref) in profile.skills.iter().enumerate() {
@@ -455,6 +477,7 @@ mod tests {
 
     fn base_profile() -> Profile {
         Profile {
+            model_fallback: None,
             model: "claude-opus-4-8".to_string(),
             provider: None,
             self_hosted_server_id: None,

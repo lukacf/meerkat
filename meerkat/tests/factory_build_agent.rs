@@ -647,7 +647,7 @@ async fn agent_llm_client_decorator_wraps_registry_resolved_provider_client() {
         meerkat_core::connection::GLOBAL_REALM_SLUG.to_string(),
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]),
     );
-    config.model_fallback.enabled = false;
+    config.model_fallback.enabled = Some(false);
     let constructions = Arc::new(AtomicUsize::new(0));
     let stream_calls = Arc::new(AtomicUsize::new(0));
 
@@ -1235,6 +1235,7 @@ async fn build_agent_with_resume_preserves_messages() {
     )));
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -1301,6 +1302,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     // Create a session with metadata already set
     let mut session = Session::new();
     let original_metadata = SessionMetadata {
+        model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "claude-sonnet-4-5".to_string(),
         max_tokens: 4096,
@@ -1440,6 +1442,7 @@ async fn build_agent_workgraph_enabled_without_dispatcher_fails_closed() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -1531,6 +1534,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -1656,6 +1660,7 @@ async fn explicit_resume_prompts_append_without_rewriting_prior_systems() {
         .unwrap();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -1755,6 +1760,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -1824,6 +1830,7 @@ async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates(
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-sonnet-4-5".to_string(),
                 max_tokens: 4096,
@@ -1916,6 +1923,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -2002,6 +2010,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -2342,6 +2351,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
     )));
     resumed
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".into(),
             max_tokens: 2048,
@@ -2502,6 +2512,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -2562,6 +2573,7 @@ async fn resume_with_disable_mob_stays_disabled() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -2621,6 +2633,7 @@ async fn resume_with_metadata_mob_enable_becomes_inherit() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -2723,6 +2736,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -2785,6 +2799,7 @@ async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -2850,6 +2865,7 @@ async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_cap
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -3010,6 +3026,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -3098,6 +3115,7 @@ async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -3183,6 +3201,7 @@ async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority(
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 2048,
@@ -3646,6 +3665,7 @@ fn session_metadata_projects_auth_binding_into_llm_identity() {
         origin: meerkat_core::BindingOrigin::Configured,
     };
     let mut metadata = SessionMetadata {
+        model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "gpt-5.4".to_string(),
         max_tokens: 1024,

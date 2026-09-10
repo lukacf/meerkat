@@ -577,6 +577,7 @@ fn decompile_portable_spec_with_env(
         .transpose()?;
 
     let mut profile = Profile {
+        model_fallback: spec.profile.model_fallback.clone(),
         model: spec.profile.model.clone(),
         // Provider is REQUIRED on the portable profile (R4): the member host
         // never re-infers a provider for the model id.
@@ -3106,6 +3107,7 @@ mod tests {
             profile_name: "worker".to_string(),
             agent_identity: "worker-1".to_string(),
             profile: PortableProfile {
+                model_fallback: None,
                 model: "claude-opus-4-8".to_string(),
                 provider: meerkat_core::Provider::Anthropic,
                 self_hosted_server_id: None,

@@ -16563,6 +16563,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        model_fallback: None,
                         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
@@ -18085,6 +18086,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        model_fallback: None,
                         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
@@ -18326,6 +18328,7 @@ mod tests {
                 session
                     .session_metadata()
                     .unwrap_or(meerkat_core::SessionMetadata {
+                        model_fallback: None,
                         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                         model: identity.model.clone(),
                         max_tokens: 0,
@@ -20565,6 +20568,7 @@ mod tests {
         let parent = mutate_test_session(parent, "run boundary", |parent| {
             parent
                 .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
                     schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                     model: "test".to_string(),
                     max_tokens: 1024,
@@ -32656,6 +32660,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "test-model".to_string(),
                 max_tokens: 1024,
@@ -33273,6 +33278,7 @@ mod tests {
     ) -> CreateSessionRequest {
         let mut session = Session::new();
         let metadata = meerkat_core::SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "test".to_string(),
             max_tokens: 1024,

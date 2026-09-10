@@ -473,6 +473,7 @@ impl CouncilFixture {
 
 pub fn participant_profile(description: &str) -> meerkat_mob::Profile {
     meerkat_mob::Profile {
+        model_fallback: None,
         model: "claude-haiku-4-5-20251001".to_string(),
         provider: None,
         self_hosted_server_id: None,

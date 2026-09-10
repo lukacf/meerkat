@@ -545,6 +545,7 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     # prevents PortableProfile and provider overrides from degrading to
     # dangling references or opaque maps in generated SDKs.
     "BindingId",
+    "ModelFallbackTrigger",
     "MeerkatSchema",
     "PortableMcpDecl",
     "PortableSystemPrompt",
@@ -576,6 +577,11 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
 ]
 
 MOB_RPC_CONTRACT_HELPER_TYPES = [
+    "AuthBindingRef",
+    "ModelFallbackConfig",
+    "ModelFallbackPolicy",
+    "ModelFallbackTarget",
+    "WireMobRuntimeConfig",
     "PublicTurnToolOverlay",
     "MobDefinitionInput",
     "MobBackendConfigInput",

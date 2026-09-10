@@ -4,6 +4,11 @@
 export type AgentErrorClass = "llm" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 export type AgentErrorReason = {
+  model: string;
+  provider: Provider;
+  reason: ModelFallbackSkipReason;
+  reason_type: "model_fallback_resume_held";
+} | {
   reason_type: "llm_rate_limited";
   retry_after_ms?: number | null;
 } | {
@@ -70,6 +75,37 @@ export type AgentErrorReport = {
   reason?: AgentErrorReason | null;
 };
 
+export type AnthropicCacheControlPolicy = "disabled" | "automatic" | "system_prefix" | "system_and_conversation";
+
+export type AnthropicCacheTtl = "5m" | "1h";
+
+export type AnthropicCompactionConfig = {
+  kind: "auto";
+} | {
+  edit: OpaqueProviderBody;
+  kind: "custom";
+};
+
+export type AnthropicContextWindow = "one_megabyte";
+
+export type AnthropicEffort = "low" | "medium" | "high" | "max" | "x_high";
+
+export type AnthropicInferenceGeo = {
+  kind: "us";
+} | {
+  kind: "global";
+} | {
+  kind: "other";
+  region: string;
+};
+
+export type AnthropicThinkingConfig = {
+  type: "adaptive";
+} | {
+  budget_tokens: number;
+  type: "enabled";
+};
+
 export interface AssistantImageEvent {
   blob_ref: BlobRef;
   height: number;
@@ -82,7 +118,18 @@ export interface AssistantImageEvent {
 
 export type AssistantImageId = string;
 
+export type AuthBindingRef = {
+  binding: BindingId;
+  origin?: BindingOrigin;
+  profile?: ProfileId | null;
+  realm: RealmId;
+};
+
 export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
+
+export type BindingId = string;
+
+export type BindingOrigin = "configured" | "synthetic_env_default";
 
 export type BlobId = string;
 
@@ -182,6 +229,26 @@ export type ContentBlock = {
 
 export type ContentInput = string | ContentBlock[];
 
+export type ContextBudgetEstimateProvenance = "canonical_forecast" | "exact_provider_token_count";
+
+export type ContextBudgetFact = {
+  context_window_tokens: number;
+  estimate_provenance?: ContextBudgetEstimateProvenance;
+  estimated_input_tokens: number;
+  estimated_tool_tokens: number;
+  estimated_total_tokens: number;
+  lowered_request_provenance?: LoweredRequestProvenance | null;
+  max_input_tokens?: number | null;
+  overage_tokens: number;
+  provider_issued_input_tokens?: number | null;
+  provider_lowered_encoded_bytes?: number | null;
+  remaining_tokens: number;
+  reserved_output_tokens: number;
+  state: ContextBudgetState;
+};
+
+export type ContextBudgetState = "within" | "forecast_exceeded" | "exceeded";
+
 export type CumulativeUsage = Usage;
 
 export interface DeferredCatalogDelta {
@@ -216,6 +283,14 @@ export type GeminiImageMetadata = {
   response_id?: string | null;
   target_model: string;
 };
+
+export type GeminiThinkingConfig = {
+  include_thoughts?: boolean | null;
+  thinking_budget?: number | null;
+  thinking_level?: GeminiThinkingLevel | null;
+};
+
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
 
 export type HookFailureReason = {
   reason_code: "timeout";
@@ -287,10 +362,55 @@ export interface LlmRetrySchedule {
   plan: LlmRetryPlan;
 }
 
+export type LoweredRequestEncoding = "anthropic_messages_json" | "open_ai_responses_json" | "open_ai_chat_completions_json" | "gemini_generate_content_json";
+
+export interface LoweredRequestProvenance {
+  body_sha256: number[];
+  encoding: LoweredRequestEncoding;
+  provider: Provider;
+}
+
+export type MeerkatSchema = unknown;
+
+export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable";
+
+export type ModelFallbackSkippedTarget = {
+  context?: ContextBudgetFact | null;
+  identity: SessionLlmIdentity;
+  reason: ModelFallbackSkipReason;
+};
+
+export type OpaqueProviderBody = string;
+
 export type OpenAiImageMetadata = {
   image_generation_call_id?: string | null;
   response_id?: string | null;
   target_model: string;
+};
+
+export type OpenAiPromptCacheMode = "implicit" | "explicit";
+
+export type OpenAiPromptCacheOptions = {
+  mode?: OpenAiPromptCacheMode | null;
+  ttl?: OpenAiPromptCacheTtl | null;
+};
+
+export type OpenAiPromptCacheRetention = "in_memory" | "24h";
+
+export type OpenAiPromptCacheTtl = "30m";
+
+export type OpenAiReasoningContext = "auto" | "current_turn" | "all_turns";
+
+export type OpenAiReasoningMode = "standard" | "pro";
+
+export type OpenAiTextVerbosity = "low" | "medium" | "high";
+
+export type OutputSchema = {
+  compat?: SchemaCompat;
+  format?: SchemaFormat;
+  name?: string | null;
+  schema: MeerkatSchema;
+  strict?: boolean;
 };
 
 export type PeerId = string;
@@ -303,6 +423,8 @@ export interface PendingCallbackToolCall {
 
 export type PresentedTokenConvention = "anthropic_disjoint_input_components" | "open_ai_input_includes_cached_subset" | "gemini_prompt_includes_cached_subset" | "open_ai_compatible_prompt_includes_cache_details" | "host_declared_inclusive_input_total";
 
+export type ProfileId = string;
+
 export interface PromptText {
   content: string;
 }
@@ -313,6 +435,66 @@ export type ProviderImageMetadata = {
   provider: "not_emitted";
 } | OpenAiImageMetadata | GeminiImageMetadata;
 
+export type ProviderParamsOverride = {
+  max_output_tokens?: number | null;
+  provider_tag?: ProviderTag | null;
+  reasoning?: ReasoningMode | null;
+  temperature?: number | null;
+  thinking_budget_tokens?: number | null;
+  top_p?: number | null;
+};
+
+export type ProviderTag = {
+  cache_control?: AnthropicCacheControlPolicy | null;
+  cache_ttl?: AnthropicCacheTtl | null;
+  compaction?: AnthropicCompactionConfig | null;
+  context?: AnthropicContextWindow | null;
+  effort?: AnthropicEffort | null;
+  inference_geo?: AnthropicInferenceGeo | null;
+  provider: "anthropic";
+  structured_output?: OutputSchema | null;
+  supports_temperature_override?: boolean | null;
+  thinking?: AnthropicThinkingConfig | null;
+  thinking_budget_tokens?: number | null;
+  top_k?: number | null;
+  web_search?: OpaqueProviderBody | null;
+} | {
+  chat_template_kwargs?: OpaqueProviderBody | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  prompt_cache_enabled?: boolean | null;
+  prompt_cache_key?: string | null;
+  prompt_cache_options?: OpenAiPromptCacheOptions | null;
+  prompt_cache_retention?: OpenAiPromptCacheRetention | null;
+  provider: "open_ai";
+  reasoning?: OpaqueProviderBody | null;
+  reasoning_context?: OpenAiReasoningContext | null;
+  reasoning_effort?: ReasoningEffort | null;
+  reasoning_mode?: OpenAiReasoningMode | null;
+  seed?: number | null;
+  store?: boolean | null;
+  structured_output?: OutputSchema | null;
+  supports_reasoning_override?: boolean | null;
+  supports_temperature_override?: boolean | null;
+  text_verbosity?: OpenAiTextVerbosity | null;
+  thinking?: OpaqueProviderBody | null;
+  web_search?: OpaqueProviderBody | null;
+} | {
+  cached_content_name?: string | null;
+  candidate_count?: number | null;
+  google_search?: OpaqueProviderBody | null;
+  provider: "gemini";
+  structured_output?: OutputSchema | null;
+  thinking?: GeminiThinkingConfig | null;
+  thinking_budget?: number | null;
+  thinking_level?: GeminiThinkingLevel | null;
+  top_k?: number | null;
+  top_p?: number | null;
+} | {
+  bag: StructuredProviderExtension;
+  provider: "unknown";
+};
+
 export interface ProviderTokenAccounting {
   aggregation: TokenAggregationProvenance;
   convention: PresentedTokenConvention;
@@ -320,6 +502,12 @@ export interface ProviderTokenAccounting {
   presented_tokens: number;
   provider: Provider;
 }
+
+export type RealmId = string;
+
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type ReasoningMode = "emit" | "silent" | "off";
 
 export type RevisedPromptDisposition = {
   disposition: "not_requested";
@@ -342,6 +530,10 @@ export type RunInput = {
   kind: "pending_tool_results";
 };
 
+export type SchemaCompat = "lossy" | "strict";
+
+export type SchemaFormat = "meerkat_v1";
+
 export interface SchemaWarning {
   message: string;
   path: string;
@@ -360,6 +552,14 @@ export type ServerToolKind = {
 };
 
 export type SessionId = string;
+
+export type SessionLlmIdentity = {
+  auth_binding?: AuthBindingRef | null;
+  model: string;
+  provider: Provider;
+  provider_params?: ProviderParamsOverride | null;
+  self_hosted_server_id?: string | null;
+};
 
 export interface SkillKey {
   skill_name: SkillName;
@@ -443,6 +643,12 @@ export type StreamTruncationReason = {
   kind: "oversized_remote_event";
   max_bytes: number;
 };
+
+export interface StructuredProviderExtension {
+  body?: string;
+  key: string;
+  namespace: string;
+}
 
 export type SystemNoticePeer = {
   display_name?: string | null;
@@ -759,6 +965,33 @@ export interface RetryingEvent {
   type: "retrying";
 }
 
+export interface ModelFallbackSkippedEvent {
+  retry: LlmRetrySchedule;
+  target: ModelFallbackSkippedTarget;
+  type: "model_fallback_skipped";
+}
+
+export interface ModelFallbackStagedEvent {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_staged";
+}
+
+export interface ModelFallbackCommittedEvent {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_committed";
+}
+
+export interface ModelFallbackTargetFailedEvent {
+  error: AgentErrorReport;
+  previous: SessionLlmIdentity;
+  target: SessionLlmIdentity;
+  type: "model_fallback_target_failed";
+}
+
 export interface SkillsResolvedEvent {
   injection_bytes: number;
   skills: SkillKey[];
@@ -922,6 +1155,10 @@ export type AgentEvent =
   CompactionFailedEvent |
   BudgetWarningEvent |
   RetryingEvent |
+  ModelFallbackSkippedEvent |
+  ModelFallbackStagedEvent |
+  ModelFallbackCommittedEvent |
+  ModelFallbackTargetFailedEvent |
   SkillsResolvedEvent |
   SkillResolutionFailedEvent |
   InteractionCompleteEvent |

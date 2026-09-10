@@ -3768,6 +3768,7 @@ pub(crate) fn identity_adoption_fixture(
 
     let profile_name = ProfileName::from("worker");
     let profile = PortableProfile {
+        model_fallback: None,
         model: "test-model".to_string(),
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,

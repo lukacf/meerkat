@@ -250,6 +250,9 @@ pub(crate) async fn compile_desired_member_material(
         }
     };
 
+    if portable_profile.model_fallback.is_none() {
+        portable_profile.model_fallback = definition.runtime.model_fallback.clone();
+    }
     let runtime_mode = declared_runtime_mode.unwrap_or(portable_profile.runtime_mode);
     portable_profile.runtime_mode = runtime_mode;
     let skills = compile_inline_skills(
@@ -803,6 +806,7 @@ mod tests {
 
     fn worker_profile() -> Profile {
         Profile {
+            model_fallback: None,
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -903,7 +907,11 @@ mod tests {
     async fn desired_material_compiler_seals_overrides_and_canonical_callback_tools() {
         let identity = AgentIdentity::from("worker-a");
         let profile = worker_profile();
-        let definition = definition();
+        let mut definition = definition();
+        definition.runtime.model_fallback = Some(meerkat_core::config::ModelFallbackConfig {
+            enabled: Some(false),
+            ..Default::default()
+        });
         let declaration = IdentityProfileMemberDeclaration {
             profile_name: ProfileName::from("worker"),
             profile_override: None,
@@ -946,6 +954,31 @@ mod tests {
         .expect("compile desired material");
 
         assert_eq!(material.profile.model, "claude-opus-4-8");
+        assert_eq!(
+            material.profile.model_fallback,
+            definition.runtime.model_fallback
+        );
+        let mut portable = material.profile.clone();
+        portable.model_fallback = None;
+        let portable_declaration = IdentityProfileMemberDeclaration {
+            profile_override: Some(portable),
+            ..declaration.clone()
+        };
+        let portable_material =
+            compile_desired_member_material(CompileDesiredMemberMaterialParams {
+                agent_identity: &identity,
+                declaration: &portable_declaration,
+                resolved_profile: None,
+                definition: &definition,
+                base_prompt: None,
+                non_portable_disabled: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            portable_material.profile.model_fallback,
+            definition.runtime.model_fallback
+        );
         assert!(!material.profile.external_addressable);
         assert_eq!(
             material

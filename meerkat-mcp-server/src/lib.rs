@@ -4156,6 +4156,7 @@ async fn handle_meerkat_run(
                 compose_external_tool_dispatchers(callback_tools_for_plan.clone(), Some(mcp_tools))
                     .map_err(ToolCallError::internal)?;
             let mut build = SessionBuildOptions {
+                model_fallback: None,
                 tool_access_policy: None,
                 tool_dispatch_admission: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
@@ -4581,6 +4582,7 @@ async fn handle_meerkat_resume(
     .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
+            model_fallback: None,
             tool_access_policy: None,
             tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
@@ -5588,6 +5590,7 @@ mod tests {
         let session_id = session.id().to_string();
         session
             .set_session_metadata(meerkat::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 4096,
@@ -6283,6 +6286,7 @@ mod tests {
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -6328,6 +6332,7 @@ mod tests {
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -7363,6 +7368,7 @@ mod tests {
         let session_id = session.id().clone();
         session
             .set_session_metadata(meerkat::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 4096,
@@ -8143,6 +8149,7 @@ mod tests {
         let session_id = session.id().clone();
         session
             .set_session_metadata(meerkat::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-6".to_string(),
                 max_tokens: 4096,
@@ -8534,6 +8541,7 @@ mod tests {
         let session_id = session.id().clone();
         session
             .set_session_metadata(meerkat::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: 4096,
@@ -8626,6 +8634,7 @@ mod tests {
         let session_id = session.id().clone();
         session
             .set_session_metadata(meerkat::SessionMetadata {
+                model_fallback: None,
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: 4096,

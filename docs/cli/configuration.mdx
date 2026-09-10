@@ -205,13 +205,15 @@ realm binding shape.
 
 ## Model fallback config
 
-Model fallback is enabled by default for factory-built agents. If the active
-model fails at a recoverable LLM boundary, Meerkat can move through an ordered
-backup chain and retry with the next viable model:
+Model fallback is disabled by default. Enable an explicit non-empty backup
+chain to permit migration at a recoverable, pre-output LLM boundary:
 
 ```toml
 [model_fallback]
 enabled = true
+
+[model_fallback.policy]
+cross_provider = true
 
 [[model_fallback.chain]]
 model = "claude-opus-4-8"
@@ -223,21 +225,21 @@ provider = "openai"
 auth_binding = { realm = "global", binding = "openai_oauth" }
 ```
 
-Omit `chain` to use the catalog default chain. Set `enabled = false` to fail
-closed on the original model error. Set `use_catalog_default_chain = true` in a
-higher-precedence config layer when you need to undo an inherited disabled or
-custom policy.
+There is no catalog chain. `enabled = true` with no targets is invalid;
+`enabled = false` overrides an inherited enabled table. Unknown fallback
+keys (including the removed `use_catalog_default_chain`) reject.
 
 Fallback targets include the auth binding identity. Use `auth_binding` on an
 explicit target to retry the same model/provider through a different configured
-credential. The catalog default chain only uses provider bindings available in
-the selected non-env realm.
+credential. Cross-provider targets are skipped unless policy explicitly allows
+them. Defaults migrate only on capacity/provider unavailability after three
+failures, not transport or empty output. See the
+[policy and resume contract](/concepts/configuration#model-fallback-settings).
 
-Fallback can change the effective model surface. Smaller backup models can
-reduce max output tokens, hide tools gated by model capabilities, and be skipped
-for context overflow if their context window is too small. The agent receives a
-hidden system notice when a switch happens, including the reason and any hidden
-tools.
+Fallback admission preserves the requested output reserve and, by default,
+required tools. Smaller targets that cannot fit the actual context are skipped
+even when the primary failure was capacity rather than context overflow. The
+agent receives a hidden system notice when a switch commits.
 
 Fallback is only attempted before user-visible stream output has been emitted.
 Structured-output extraction retries keep their schema and provider-native web

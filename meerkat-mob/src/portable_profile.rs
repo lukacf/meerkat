@@ -78,6 +78,7 @@ pub(crate) fn project_portable_profile(
     }
 
     Ok(PortableProfile {
+        model_fallback: profile.model_fallback.clone(),
         model: profile.model.clone(),
         provider,
         self_hosted_server_id: profile.self_hosted_server_id.clone(),
@@ -200,6 +201,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
         .transpose()?;
 
     Ok(Profile {
+        model_fallback: portable.model_fallback.clone(),
         model: portable.model.clone(),
         provider: Some(portable.provider),
         self_hosted_server_id: portable.self_hosted_server_id.clone(),
@@ -286,6 +288,10 @@ mod tests {
         );
         sse.connect_timeout_secs = Some(23);
         let profile = Profile {
+            model_fallback: Some(meerkat_core::config::ModelFallbackConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
             model: "override-model".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: None,
@@ -375,6 +381,7 @@ mod tests {
     fn future_required_secret_names_fail_closed_in_v1_reverse_projection() {
         let mut portable = project_portable_profile(
             &Profile {
+                model_fallback: None,
                 model: "override-model".to_string(),
                 provider: Some(meerkat_core::Provider::Anthropic),
                 self_hosted_server_id: None,

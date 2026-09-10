@@ -179,7 +179,7 @@ fn scenario_config() -> Config {
     );
     let mut config = Config::default();
     config.realm.insert(REALM.to_string(), section);
-    config.model_fallback.enabled = false;
+    config.model_fallback.enabled = Some(false);
     config
 }
 

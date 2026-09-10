@@ -1162,6 +1162,7 @@ fn wire_member_status(status: MobMemberStatus) -> meerkat_contracts::WireMobMemb
 pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobProfile {
     let tools = &profile.tools;
     meerkat_contracts::WireMobProfile {
+        model_fallback: profile.model_fallback.clone(),
         model: profile.model.clone(),
         provider: profile.provider,
         self_hosted_server_id: profile.self_hosted_server_id.clone(),

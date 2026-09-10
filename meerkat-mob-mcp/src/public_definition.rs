@@ -40,6 +40,7 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
     // `models` reuses the typed core config owner on both sides of the wire;
     // no re-derivation, just a move.
     definition.models = input.models;
+    definition.runtime.model_fallback = input.runtime.model_fallback;
     definition.image_generation_provider = input.image_generation_provider;
     definition.wiring = WiringRules {
         auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
@@ -113,6 +114,7 @@ fn decode_resume_override_field(
 
 fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
     Ok(Profile {
+        model_fallback: input.model_fallback,
         model: input.model,
         provider: input.provider,
         self_hosted_server_id: input.self_hosted_server_id,
@@ -412,6 +414,7 @@ mod tests {
         profiles.insert(
             "lead".to_string(),
             MobProfileBindingInput::Inline(MobProfileInput {
+                model_fallback: None,
                 model: "gpt-5.4".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -503,6 +506,7 @@ mod tests {
         );
 
         let definition = decode_public_mob_definition(MobDefinitionInput {
+            runtime: Default::default(),
             id: "triage".to_string(),
             orchestrator: None,
             profiles,

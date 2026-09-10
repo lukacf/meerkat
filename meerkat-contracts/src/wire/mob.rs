@@ -545,6 +545,8 @@ pub enum WireMobResumeOverrideField {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WireMobProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
     pub model: String,
     /// Explicit typed provider for the profile model (closed vocabulary,
     /// fail-closed at the wire boundary).
@@ -652,7 +654,7 @@ pub struct MobToolConfigInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum MobProfileBindingInput {
     /// Reference to a realm-scoped profile.
     RealmRef {
@@ -667,6 +669,8 @@ pub enum MobProfileBindingInput {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobProfileInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
     pub model: String,
     /// Explicit typed provider for the profile model (closed vocabulary,
     /// fail-closed at the wire boundary).
@@ -998,6 +1002,8 @@ const fn default_event_router_buffer_size() -> usize {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobDefinitionInput {
+    #[serde(default)]
+    pub runtime: WireMobRuntimeConfig,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<MobOrchestratorInput>,
@@ -1028,6 +1034,14 @@ pub struct MobDefinitionInput {
     pub spawn_policy: Option<MobSpawnPolicyInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_router: Option<MobEventRouterConfigInput>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct WireMobRuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
 }
 
 /// Request payload for `mob/create`.

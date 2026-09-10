@@ -620,6 +620,8 @@ fn default_event_router_buffer_size() -> usize {
 /// must be re-registered on resume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MobDefinition {
+    #[serde(default)]
+    pub runtime: MobRuntimeConfig,
     /// Unique mob identifier.
     pub id: MobId,
     /// Optional orchestrator configuration.
@@ -681,6 +683,14 @@ pub struct MobDefinition {
 
 impl Eq for MobDefinition {}
 
+/// Mob-owned runtime defaults. Fallback policy is the shared core vocabulary.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MobRuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
+}
+
 /// Helper struct for TOML deserialization of the `[mob]` section.
 #[derive(Deserialize)]
 struct TomlMob {
@@ -698,6 +708,8 @@ enum TomlOrchestrator {
 /// Top-level TOML structure for mob definition files.
 #[derive(Deserialize)]
 struct TomlDefinition {
+    #[serde(default)]
+    runtime: MobRuntimeConfig,
     mob: TomlMob,
     #[serde(default)]
     profiles: BTreeMap<ProfileName, ProfileBinding>,
@@ -808,6 +820,16 @@ fn inspect_profile_keys(
             ProfileBinding::Inline(_) => Profile::FIELD_NAMES,
             ProfileBinding::RealmRef { .. } => ProfileBinding::REALM_REF_FIELD_NAMES,
         };
+        if matches!(binding, ProfileBinding::RealmRef { .. })
+            && raw_profile.contains_key("model_fallback")
+        {
+            return Err(MobError::DefinitionError(vec![Diagnostic {
+                code: DiagnosticCode::InvalidModelFallback,
+                message: "realm profile references cannot override model_fallback; configure the referenced profile or runtime.model_fallback".into(),
+                location: Some(format!("profiles.{name}.model_fallback")),
+                severity: DiagnosticSeverity::Error,
+            }]));
+        }
         let mut keys = Vec::new();
         for key in raw_profile.keys() {
             if declared.contains(&key.as_str()) {
@@ -848,6 +870,7 @@ impl MobDefinition {
     /// Create a minimal explicit mob definition with manual cleanup semantics.
     pub fn explicit(id: impl Into<MobId>) -> Self {
         Self {
+            runtime: MobRuntimeConfig::default(),
             id: id.into(),
             orchestrator: None,
             profiles: BTreeMap::new(),
@@ -881,6 +904,7 @@ impl MobDefinition {
         profiles.insert(
             ProfileName::from("delegate"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: model.to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -903,6 +927,7 @@ impl MobDefinition {
         );
         Self {
             id: mob_id,
+            runtime: MobRuntimeConfig::default(),
             orchestrator: None,
             profiles,
             models: BTreeMap::new(),
@@ -965,6 +990,7 @@ impl MobDefinition {
         });
         let definition = Self {
             id: raw.mob.id,
+            runtime: raw.runtime,
             orchestrator,
             profiles: raw.profiles,
             models: raw.models,
@@ -1420,6 +1446,65 @@ builtins = true
         );
     }
 
+    #[test]
+    fn model_fallback_runtime_profile_tables_are_strict_and_round_trip() {
+        let content = r#"
+[mob]
+id = "fallback"
+[runtime.model_fallback]
+enabled = false
+[profiles.worker]
+model = "claude-sonnet-4-5"
+private_host_hint = true
+[profiles.worker.model_fallback]
+enabled = true
+chain = [{ model = "claude-opus-4-8" }]
+"#;
+        let parsed = MobDefinition::parse_toml(content).unwrap();
+        assert_eq!(
+            parsed
+                .definition
+                .runtime
+                .model_fallback
+                .as_ref()
+                .unwrap()
+                .enabled,
+            Some(false)
+        );
+        assert_eq!(parsed.unknown_profile_keys[0].keys, ["private_host_hint"]);
+        let bytes = serde_json::to_vec(&parsed.definition).unwrap();
+        let restored: MobDefinition = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            restored.runtime.model_fallback,
+            parsed.definition.runtime.model_fallback
+        );
+        assert_eq!(restored.profiles, parsed.definition.profiles);
+        assert!(
+            MobDefinition::parse_toml(
+                &content.replace("enabled = false", "enabled = false\nscope = \"turn\"")
+            )
+            .is_err()
+        );
+        assert!(
+            MobDefinition::parse_toml(
+                &content.replace("model = \"claude-sonnet-4-5\"", "realm_profile = \"base\"")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<meerkat_contracts::wire::MobProfileBindingInput>(
+                serde_json::json!({"realm_profile": "base", "model_fallback": {"enabled": false}})
+            )
+            .is_err()
+        );
+        assert!(
+            MobDefinition::parse_toml(
+                &content.replace("enabled = true", "enabled = true\nscope = \"turn\"")
+            )
+            .is_err()
+        );
+    }
+
     fn example_toml() -> &'static str {
         r#"
 [mob]
@@ -1538,6 +1623,7 @@ comms = true
         // the accepted key set is the one the serializer emits; a rename on
         // either side shows up here, not only in the derive probe.
         let profile = Profile {
+            model_fallback: None,
             model: "claude-sonnet-4-5".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: Some("local-a".to_string()),
@@ -1691,6 +1777,7 @@ comms = true
     #[test]
     fn test_mob_definition_json_roundtrip() {
         let def = MobDefinition {
+            runtime: Default::default(),
             id: MobId::from("test-mob"),
             orchestrator: Some(OrchestratorConfig {
                 profile: ProfileName::from("lead"),
@@ -1702,6 +1789,7 @@ comms = true
                 m.insert(
                     ProfileName::from("lead"),
                     ProfileBinding::Inline(Box::new(Profile {
+                        model_fallback: None,
                         model: "claude-opus-4-8".to_string(),
                         provider: None,
                         self_hosted_server_id: None,

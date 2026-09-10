@@ -1636,6 +1636,7 @@ mod tests {
         definition.profiles.insert(
             ProfileName::from("worker"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -2352,6 +2353,7 @@ mod tests {
 
     fn override_profile_with_mcp_servers() -> Profile {
         Profile {
+            model_fallback: None,
             model: "claude-sonnet-4-5".to_string(),
             provider: None,
             self_hosted_server_id: None,

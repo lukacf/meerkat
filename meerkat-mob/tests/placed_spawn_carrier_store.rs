@@ -73,6 +73,7 @@ fn portable_spec(identity: &str) -> PortableMemberSpec {
         profile_name: PROFILE_NAME.to_string(),
         agent_identity: identity.to_string(),
         profile: PortableProfile {
+            model_fallback: None,
             model: "claude-opus-4-8".to_string(),
             provider: Provider::Anthropic,
             self_hosted_server_id: None,

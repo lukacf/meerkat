@@ -514,6 +514,7 @@ pub fn resolve_effective_turn_config(
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
 
     let mut build = SessionBuildOptions {
+        model_fallback: None,
         provider: llm_binding.provider,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
         // Caller-scoped build inputs, not durable session facts: the owning
@@ -735,6 +736,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: crate::session_metadata_schema_version(),
                 model: "test-anthropic-default".to_string(),
                 max_tokens: 4096,
@@ -1412,6 +1414,7 @@ mod tests {
         let mut session = Session::new();
         session
             .set_session_metadata(SessionMetadata {
+                model_fallback: None,
                 schema_version: crate::session_metadata_schema_version(),
                 model: "test-anthropic-default".to_string(),
                 max_tokens: 4096,

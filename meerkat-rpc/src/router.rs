@@ -6124,6 +6124,7 @@ mod tests {
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -6176,6 +6177,7 @@ mod tests {
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -9552,6 +9554,7 @@ mod tests {
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,

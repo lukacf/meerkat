@@ -54,8 +54,8 @@ pub struct ConfigContractSchema {
     pub self_hosted: Value,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provider_tools: Value,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub model_fallback: Value,
+    #[serde(default)]
+    pub model_fallback: meerkat_core::config::ModelFallbackConfig,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub presentation: Value,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

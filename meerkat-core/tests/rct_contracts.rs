@@ -86,6 +86,7 @@ fn test_config_env_contract() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = meerkat_core::SessionMetadata {
+        model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "claude-test".to_string(),
         max_tokens: 1234,
@@ -280,6 +281,7 @@ fn test_inv_002_default_max_tokens_from_config() {
 #[test]
 fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = meerkat_core::SessionMetadata {
+        model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "model-x".to_string(),
         max_tokens: 999,

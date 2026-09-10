@@ -3692,6 +3692,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
+            model_fallback: None,
             model: "gpt-5.5".to_string(),
             provider: None,
             self_hosted_server_id: None,

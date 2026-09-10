@@ -170,6 +170,7 @@ fn process_cpu_time() -> Duration {
 
 fn gate_profile(peer_description: &str) -> Profile {
     Profile {
+        model_fallback: None,
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,

@@ -233,6 +233,8 @@ macro_rules! e2e_smoke_lane_entries {
             suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
             suite(e2e_smoke_turbo_s_idle_burn, "mob-idle-burn");
             suite(e2e_smoke_turbo_s_turn_latency, "mob-turn-latency");
+            suite(e2e_smoke_model_fallback_boundaries, "model-fallback-boundaries");
+            suite(e2e_smoke_model_fallback_context, "model-fallback-context");
         }
     };
 }
@@ -2500,6 +2502,9 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
     match key {
         "meerkat-integration-tests:smoke_shared_realm" => {
             Ok("tests/integration/smoke_shared_realm_test")
+        }
+        "meerkat-integration-tests:smoke_model_fallback" => {
+            Ok("tests/integration/smoke_model_fallback_test")
         }
         "meerkat-integration-tests:gpt_live_client_e2e" => {
             Ok("tests/integration/gpt_live_client_e2e_test")
@@ -5765,6 +5770,44 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        "model-fallback-boundaries" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Explicit fallback boundaries and durable positive switch",
+            timeout_secs: 900,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_model_fallback",
+                test_name: "model_fallback_boundaries",
+                features: &[],
+                all_features: false,
+            },
+        }),
+        "model-fallback-context" => Some(&Spec {
+            id: None,
+            lane: Lane::Smoke,
+            title: "Materialized 650k context fallback safety across process restart",
+            timeout_secs: 900,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_model_fallback",
+                test_name: "model_fallback_context",
+                features: &[],
+                all_features: false,
+            },
+        }),
         "mob-idle-burn" => Some(&Spec {
             id: None,
             lane: Lane::Smoke,
@@ -6423,6 +6466,45 @@ mod tests {
                 .pre_commands
                 .iter()
                 .all(|command| command.first().map(String::as_str) != Some("cargo"))
+        );
+    }
+
+    #[test]
+    fn model_fallback_suites_map_exact_native_and_prebuilt_fixtures() {
+        let manifest = ArtifactManifest::from_json_str(
+            r#"{"rust_tests":{"meerkat-integration-tests:smoke_model_fallback":"/tmp/smoke_model_fallback"}}"#,
+        ).unwrap();
+        for (suite, fixture) in [
+            ("model-fallback-boundaries", "model_fallback_boundaries"),
+            ("model-fallback-context", "model_fallback_context"),
+        ] {
+            let spec = suite_spec(suite).unwrap();
+            assert!(spec.required_env.is_empty());
+            assert_eq!(spec.timeout_secs, 900);
+            let native = build_commands_for_mode(spec, ExecutionMode::Cargo, None).unwrap();
+            assert!(
+                native
+                    .command
+                    .windows(2)
+                    .any(|pair| pair == ["--test", "smoke_model_fallback"])
+            );
+            assert!(native.command.iter().any(|value| value == fixture));
+            let prebuilt =
+                build_commands_for_mode(spec, ExecutionMode::Prebuilt, Some(&manifest)).unwrap();
+            assert_eq!(
+                prebuilt.command,
+                [
+                    "/tmp/smoke_model_fallback",
+                    fixture,
+                    "--ignored",
+                    "--nocapture"
+                ]
+            );
+        }
+        assert_eq!(
+            super::bazel_rust_test_relative("meerkat-integration-tests:smoke_model_fallback")
+                .unwrap(),
+            "tests/integration/smoke_model_fallback_test"
         );
     }
 

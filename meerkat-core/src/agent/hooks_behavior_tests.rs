@@ -178,6 +178,7 @@ fn factory_policy_session() -> meerkat_core::Session {
     let mut session = meerkat_core::Session::new();
     session
         .set_session_metadata(meerkat_core::SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::session_metadata_schema_version(),
             model: "mock-model".to_string(),
             max_tokens: 1024,

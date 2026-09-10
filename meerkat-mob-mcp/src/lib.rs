@@ -7252,6 +7252,7 @@ mod tests {
             if persisted_session.session_metadata().is_none() {
                 persisted_session
                     .set_session_metadata(SessionMetadata {
+                        model_fallback: None,
                         schema_version: meerkat_core::session_metadata_schema_version(),
                         model: req.model.clone(),
                         max_tokens: req.max_tokens.unwrap_or(4096),
@@ -8411,6 +8412,7 @@ mod tests {
         let mut spoofed = Session::new();
         let spoofed_id = spoofed.id().clone();
         let _ = spoofed.set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -8455,6 +8457,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -8513,6 +8516,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -8568,6 +8572,7 @@ mod tests {
         let mut persisted = Session::new();
         let persisted_id = persisted.id().clone();
         let _ = persisted.set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
@@ -10208,6 +10213,7 @@ mod tests {
         explicit_profiles.insert(
             ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::profile::Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -10491,6 +10497,7 @@ mod tests {
 
     fn sample_realm_profile(model: &str) -> meerkat_mob::Profile {
         meerkat_mob::profile::Profile {
+            model_fallback: None,
             model: model.to_string(),
             provider: None,
             self_hosted_server_id: None,

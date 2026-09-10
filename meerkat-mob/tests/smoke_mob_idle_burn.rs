@@ -138,6 +138,7 @@ async fn wait_for_quiesce(what: &str) {
 
 fn idle_profile(peer_description: &str) -> Profile {
     Profile {
+        model_fallback: None,
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,

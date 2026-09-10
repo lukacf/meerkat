@@ -15,16 +15,22 @@ from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 from .types import (  # noqa: F401
     AssistantImageId,
     BackgroundJobTerminalStatus,
+    BindingId,
     BlobId,
     CommsNoticeKind,
     ContentBlock,
     ContentInput,
     ExternalToolDeltaPhase,
+    MeerkatSchema,
     PeerId,
+    ProfileId,
     Provider,
     ProviderImageMetadata,
+    RealmId,
     RevisedPromptDisposition,
     RevisedPromptSource,
+    SchemaCompat,
+    SchemaFormat,
     SenderContentTaint,
     SkillName,
     SourceUuid,
@@ -59,12 +65,22 @@ LlmProviderErrorKind = Literal['invalid_request', 'content_filtered', 'server_er
 LlmProviderErrorRetryability = Literal['retryable', 'non_retryable']
 
 
+ModelFallbackSkipReason = Literal['provider_boundary', 'auth_unavailable', 'context_fit', 'context_unknown', 'output_budget', 'tool_parity', 'modality_parity', 'request_unsupported', 'admission_unavailable']
+
+
 # Closed machine-owned classifier for why a turn reached a terminal failure.
 TurnTerminalCauseKind = Literal['unknown', 'hook_denied', 'hook_failure', 'llm_failure', 'tool_failure', 'structured_output_validation_failed', 'budget_exhausted', 'time_budget_exceeded', 'retry_exhausted', 'turn_limit_reached', 'runtime_apply_failure', 'fatal_failure']
 
 
 # Terminal outcome of a turn.
 TurnTerminalOutcome = Literal['none', 'completed', 'failed', 'cancelled', 'budget_exhausted', 'time_budget_exceeded', 'structured_output_validation_failed']
+
+
+class AgentErrorReasonModelFallbackResumeHeld(TypedDict, total=False):
+    model: Required[str]
+    provider: Required[Provider]
+    reason: Required[ModelFallbackSkipReason]
+    reason_type: Required[Literal['model_fallback_resume_held']]
 
 
 class AgentErrorReasonLlmRateLimited(TypedDict, total=False):
@@ -158,7 +174,7 @@ class AgentErrorReasonTurnTerminalCause(TypedDict, total=False):
     reason_type: Required[Literal['turn_terminal_cause']]
 
 
-AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause
+AgentErrorReason = AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause
 
 
 class AgentErrorReport(TypedDict, total=False):
@@ -658,6 +674,367 @@ class LlmRetrySchedule(TypedDict, total=False):
     """
     failure: Required[LlmRetryFailure]
     plan: Required[LlmRetryPlan]
+
+
+# Provenance of the effective input-token value used for classification.
+ContextBudgetEstimateProvenance = Literal['canonical_forecast', 'exact_provider_token_count']
+
+
+# Typed pre-dispatch state of one exact request budget projection.
+ContextBudgetState = Literal['within', 'forecast_exceeded', 'exceeded']
+
+
+# Exact provider request encoding measured after all lowering.
+LoweredRequestEncoding = Literal['anthropic_messages_json', 'open_ai_responses_json', 'open_ai_chat_completions_json', 'gemini_generate_content_json']
+
+
+class LoweredRequestProvenance(TypedDict, total=False):
+    """Identity of the fully lowered provider request body used for pressure and
+    context evidence.
+    """
+    body_sha256: Required[list[int]]
+    encoding: Required[LoweredRequestEncoding]
+    provider: Required[Provider]
+
+
+class ContextBudgetFact(TypedDict, total=False):
+    """Deterministic budget evidence for a loaded durable session and one exact
+    prospective provider request.
+
+    This is a projection, not authority. The context window is copied only as
+    evidence from the supplied registry-minted [`ModelProfileWitness`]; callers
+    cannot provide an independent limit to this classifier.
+    """
+    context_window_tokens: Required[int]
+    estimate_provenance: NotRequired[ContextBudgetEstimateProvenance]
+    estimated_input_tokens: Required[int]
+    estimated_tool_tokens: Required[int]
+    estimated_total_tokens: Required[int]
+    lowered_request_provenance: NotRequired[Optional[LoweredRequestProvenance]]
+    max_input_tokens: NotRequired[Optional[int]]
+    overage_tokens: Required[int]
+    provider_issued_input_tokens: NotRequired[Optional[int]]
+    provider_lowered_encoded_bytes: NotRequired[Optional[int]]
+    remaining_tokens: Required[int]
+    reserved_output_tokens: Required[int]
+    state: Required[ContextBudgetState]
+
+
+# Origin discriminant for an [`AuthBindingRef`].
+#
+# Distinguishes a binding that names a durable, config-resolvable identity
+# (`Configured`) from the synthetic env-var fallback the resolver mints when
+# no realm config exists but a well-known API-key env var is set
+# (`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be
+# rehydrated as a durable identity nor publish a durable auth lease.
+#
+# This is the typed owner of the "is this the env-var default?" fact, replacing
+# the prior recovery-by-magic-slug (`realm == "env_default"`,
+# `binding == "default"`). Identity slugs (`RealmId`/`BindingId`) are pure
+# opaque identity again; origin is carried explicitly.
+BindingOrigin = Literal['configured', 'synthetic_env_default']
+
+
+class AuthBindingRef(TypedDict, total=False):
+    """Session-facing reference to a binding inside a realm.
+
+    `AuthBindingRef` is purely structural — it does NOT carry a `"realm:binding"`
+    string form. Wave-b deleted `parse` and `Display` so that no code path
+    accidentally ferries the opaque join through the runtime. CLI input that
+    arrives as `"realm:binding[:profile]"` must be split at the CLI boundary
+    and constructed field-by-field.
+    """
+    binding: Required[BindingId]
+    origin: NotRequired[BindingOrigin]
+    profile: NotRequired[Optional[ProfileId]]
+    realm: Required[RealmId]
+
+
+# Typed shape of Anthropic's prompt-cache breakpoint policy.
+AnthropicCacheControlPolicy = Literal['disabled', 'automatic', 'system_prefix', 'system_and_conversation']
+
+
+# Anthropic prompt-cache TTL selected per agent/profile.
+AnthropicCacheTtl = Literal['5m', '1h']
+
+
+# Opaque provider-native JSON body carried verbatim from caller to
+# provider. Used for pass-through sub-shapes (web search config,
+# provider-native custom compaction edits, OpenAI-compatible
+# `chat_template_kwargs`/`thinking`/`reasoning` forwards) where the
+# exact wire shape varies across downstream providers (Anthropic /
+# DeepSeek / OpenRouter / custom proxies) and the runtime deliberately
+# does not parse the body — it simply forwards it.
+OpaqueProviderBody = str
+
+
+class AnthropicCompactionConfigAuto(TypedDict, total=False):
+    """`"auto"` — provider picks trigger and instructions.
+    """
+    kind: Required[Literal['auto']]
+
+
+class AnthropicCompactionConfigCustom(TypedDict, total=False):
+    """Caller-provided edit body merged into the compact edit shape.
+    Fields like `trigger` / `instructions` are preserved verbatim.
+    """
+    edit: Required[OpaqueProviderBody]
+    kind: Required[Literal['custom']]
+
+
+# Typed shape of Anthropic's automatic-compaction knob.
+AnthropicCompactionConfig = AnthropicCompactionConfigAuto | AnthropicCompactionConfigCustom
+
+
+# Typed shape of Anthropic's context-window opt-in.
+AnthropicContextWindow = Literal['one_megabyte']
+
+
+# Typed shape of Anthropic's response-effort knob.
+# `XHigh` is the Opus 4.8 / 4.7 extended-high effort level.
+AnthropicEffort = Literal['low', 'medium', 'high', 'max', 'x_high']
+
+
+class AnthropicInferenceGeoUs(TypedDict, total=False):
+    kind: Required[Literal['us']]
+
+
+class AnthropicInferenceGeoGlobal(TypedDict, total=False):
+    kind: Required[Literal['global']]
+
+
+class AnthropicInferenceGeoOther(TypedDict, total=False):
+    """Caller-provided region string — providers may accept region codes
+    this typed variant does not yet enumerate.
+    """
+    kind: Required[Literal['other']]
+    region: Required[str]
+
+
+# Typed shape of Anthropic's data-residency knob.
+AnthropicInferenceGeo = AnthropicInferenceGeoUs | AnthropicInferenceGeoGlobal | AnthropicInferenceGeoOther
+
+
+class AnthropicThinkingConfigAdaptive(TypedDict, total=False):
+    """Adaptive thinking — provider picks the budget.
+    """
+    type: Required[Literal['adaptive']]
+
+
+class AnthropicThinkingConfigEnabled(TypedDict, total=False):
+    """Explicit budget — model emits at most `budget_tokens` tokens of
+    reasoning before the assistant text.
+    """
+    budget_tokens: Required[int]
+    type: Required[Literal['enabled']]
+
+
+# Typed shape of Anthropic's extended-thinking knob.
+AnthropicThinkingConfig = AnthropicThinkingConfigAdaptive | AnthropicThinkingConfigEnabled
+
+
+# Gemini 3 reasoning levels accepted by the API.
+GeminiThinkingLevel = Literal['minimal', 'low', 'medium', 'high']
+
+
+class GeminiThinkingConfig(TypedDict, total=False):
+    """Typed shape of Gemini's thinking knob.
+    """
+    include_thoughts: NotRequired[Optional[bool]]
+    thinking_budget: NotRequired[Optional[int]]
+    thinking_level: NotRequired[Optional[GeminiThinkingLevel]]
+
+
+# Request-wide GPT-5.6 prompt-cache breakpoint policy.
+OpenAiPromptCacheMode = Literal['implicit', 'explicit']
+
+
+# Minimum lifetime for GPT-5.6 prompt-cache entries.
+OpenAiPromptCacheTtl = Literal['30m']
+
+
+class OpenAiPromptCacheOptions(TypedDict, total=False):
+    """GPT-5.6 request-wide prompt-cache controls.
+    """
+    mode: NotRequired[Optional[OpenAiPromptCacheMode]]
+    ttl: NotRequired[Optional[OpenAiPromptCacheTtl]]
+
+
+# Typed shape of OpenAI's prompt-cache retention hint.
+OpenAiPromptCacheRetention = Literal['in_memory', '24h']
+
+
+# Which available reasoning items GPT-5.6 may render into the next sample.
+OpenAiReasoningContext = Literal['auto', 'current_turn', 'all_turns']
+
+
+# GPT-5.6 Responses execution mode.
+OpenAiReasoningMode = Literal['standard', 'pro']
+
+
+# Default level of detail for OpenAI text output.
+OpenAiTextVerbosity = Literal['low', 'medium', 'high']
+
+
+class OutputSchema(TypedDict, total=False):
+    """Configuration for structured output extraction.
+
+    When provided to an agent, the agent will perform an extraction turn after
+    completing the agentic work, forcing the LLM to output validated JSON that
+    conforms to the provided schema. [`RunResult::text`] remains the committed
+    main-turn output; extraction populates [`RunResult::structured_output`] on
+    success or [`RunResult::extraction_error`] on failure.
+    """
+    compat: NotRequired[SchemaCompat]
+    format: NotRequired[SchemaFormat]
+    name: NotRequired[Optional[str]]
+    schema: Required[MeerkatSchema]
+    strict: NotRequired[bool]
+
+
+# Typed projection of OpenAI's reasoning-effort knob.
+ReasoningEffort = Literal['none', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
+class StructuredProviderExtension(TypedDict, total=False):
+    """Typed non-semantic opaque bag for per-turn provider knobs that cannot be
+    fully typed without blocking a wave boundary. Explicitly marked
+    non-semantic and RMAT-exempt.
+
+    Use of this type is a deliberate boundary marker: content is passed
+    through without interpretation. Any consumer that needs to interpret the
+    content must promote the relevant structure into a proper typed variant
+    in its own wave.
+
+    Relocated from `meerkat_contracts::wire::runtime` into core so
+    `ProviderTag::Unknown { bag }` can name the bag without a cross-crate
+    cycle (adversarial review flaw 5). `meerkat-contracts` re-exports this
+    type so the wire path is preserved.
+    """
+    body: NotRequired[str]
+    key: Required[str]
+    namespace: Required[str]
+
+
+class ProviderTagAnthropic(TypedDict, total=False):
+    """Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.
+    """
+    cache_control: NotRequired[Optional[AnthropicCacheControlPolicy]]
+    cache_ttl: NotRequired[Optional[AnthropicCacheTtl]]
+    compaction: NotRequired[Optional[AnthropicCompactionConfig]]
+    context: NotRequired[Optional[AnthropicContextWindow]]
+    effort: NotRequired[Optional[AnthropicEffort]]
+    inference_geo: NotRequired[Optional[AnthropicInferenceGeo]]
+    provider: Required[Literal['anthropic']]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    supports_temperature_override: NotRequired[Optional[bool]]
+    thinking: NotRequired[Optional[AnthropicThinkingConfig]]
+    thinking_budget_tokens: NotRequired[Optional[int]]
+    top_k: NotRequired[Optional[int]]
+    web_search: NotRequired[Optional[OpaqueProviderBody]]
+
+
+class ProviderTagOpenAi(TypedDict, total=False):
+    """Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
+    """
+    chat_template_kwargs: NotRequired[Optional[OpaqueProviderBody]]
+    frequency_penalty: NotRequired[Optional[float]]
+    presence_penalty: NotRequired[Optional[float]]
+    prompt_cache_enabled: NotRequired[Optional[bool]]
+    prompt_cache_key: NotRequired[Optional[str]]
+    prompt_cache_options: NotRequired[Optional[OpenAiPromptCacheOptions]]
+    prompt_cache_retention: NotRequired[Optional[OpenAiPromptCacheRetention]]
+    provider: Required[Literal['open_ai']]
+    reasoning: NotRequired[Optional[OpaqueProviderBody]]
+    reasoning_context: NotRequired[Optional[OpenAiReasoningContext]]
+    reasoning_effort: NotRequired[Optional[ReasoningEffort]]
+    reasoning_mode: NotRequired[Optional[OpenAiReasoningMode]]
+    seed: NotRequired[Optional[int]]
+    store: NotRequired[Optional[bool]]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    supports_reasoning_override: NotRequired[Optional[bool]]
+    supports_temperature_override: NotRequired[Optional[bool]]
+    text_verbosity: NotRequired[Optional[OpenAiTextVerbosity]]
+    thinking: NotRequired[Optional[OpaqueProviderBody]]
+    web_search: NotRequired[Optional[OpaqueProviderBody]]
+
+
+class ProviderTagGemini(TypedDict, total=False):
+    """Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.
+    """
+    cached_content_name: NotRequired[Optional[str]]
+    candidate_count: NotRequired[Optional[int]]
+    google_search: NotRequired[Optional[OpaqueProviderBody]]
+    provider: Required[Literal['gemini']]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    thinking: NotRequired[Optional[GeminiThinkingConfig]]
+    thinking_budget: NotRequired[Optional[int]]
+    thinking_level: NotRequired[Optional[GeminiThinkingLevel]]
+    top_k: NotRequired[Optional[int]]
+    top_p: NotRequired[Optional[float]]
+
+
+class ProviderTagUnknown(TypedDict, total=False):
+    """Opaque pass-through for legacy-row knobs that don't (yet) map to a
+    typed variant. Carries the namespaced bag so a later wave can
+    promote the structure to a typed variant without losing data.
+    """
+    bag: Required[StructuredProviderExtension]
+    provider: Required[Literal['unknown']]
+
+
+# Provider-specific typed override payload carried on a single turn.
+#
+# Each provider family gets its own typed variant. Anything that does not
+# fit a typed field belongs on the per-binding auth/backend profile, not
+# on the per-turn override — the per-turn seam carries only scalars the
+# runtime can route authoritatively.
+#
+# `Unknown { bag }` is the typed escape hatch for V3 legacy-row
+# deserialize (see C-TM-V3): the untyped `serde_json::Value` thinking
+# carrier from pre-wave rows projects into `StructuredProviderExtension`
+# rather than being silently dropped (persistence-migration.md §3.1,
+# adversarial review flaw 5).
+ProviderTag = ProviderTagAnthropic | ProviderTagOpenAi | ProviderTagGemini | ProviderTagUnknown
+
+
+# Typed mode for generalized reasoning emission.
+ReasoningMode = Literal['emit', 'silent', 'off']
+
+
+class ProviderParamsOverride(TypedDict, total=False):
+    """Typed per-turn provider parameter overrides.
+
+    Replaces the legacy untyped `serde_json::Value` bag. Every knob exposed
+    by the runtime on a per-turn seam must have a typed field here. Anything
+    provider-specific enough to not fit goes on [`ProviderTag`]; anything
+    that is fundamentally per-binding (not per-turn) lives on the auth /
+    backend profile and never traverses this seam.
+    """
+    max_output_tokens: NotRequired[Optional[int]]
+    provider_tag: NotRequired[Optional[ProviderTag]]
+    reasoning: NotRequired[Optional[ReasoningMode]]
+    temperature: NotRequired[Optional[float]]
+    thinking_budget_tokens: NotRequired[Optional[int]]
+    top_p: NotRequired[Optional[float]]
+
+
+class SessionLlmIdentity(TypedDict, total=False):
+    """Canonical durable LLM identity for a session.
+    """
+    auth_binding: NotRequired[Optional[AuthBindingRef]]
+    model: Required[str]
+    provider: Required[Provider]
+    provider_params: NotRequired[Optional[ProviderParamsOverride]]
+    self_hosted_server_id: NotRequired[Optional[str]]
+
+
+class ModelFallbackSkippedTarget(TypedDict, total=False):
+    """Evidence attached even when every configured candidate is rejected.
+    """
+    context: NotRequired[Optional[ContextBudgetFact]]
+    identity: Required[SessionLlmIdentity]
+    reason: Required[ModelFallbackSkipReason]
 
 
 class PendingCallbackToolCall(TypedDict, total=False):
@@ -1348,6 +1725,33 @@ class AgentEventRetrying(TypedDict, total=False):
     type: Required[Literal['retrying']]
 
 
+class AgentEventModelFallbackSkipped(TypedDict, total=False):
+    retry: Required[LlmRetrySchedule]
+    target: Required[ModelFallbackSkippedTarget]
+    type: Required[Literal['model_fallback_skipped']]
+
+
+class AgentEventModelFallbackStaged(TypedDict, total=False):
+    previous: Required[SessionLlmIdentity]
+    retry: Required[LlmRetrySchedule]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_staged']]
+
+
+class AgentEventModelFallbackCommitted(TypedDict, total=False):
+    previous: Required[SessionLlmIdentity]
+    retry: Required[LlmRetrySchedule]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_committed']]
+
+
+class AgentEventModelFallbackTargetFailed(TypedDict, total=False):
+    error: Required[AgentErrorReport]
+    previous: Required[SessionLlmIdentity]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_target_failed']]
+
+
 class AgentEventSkillsResolved(TypedDict, total=False):
     """Skills resolved for this turn.
     """
@@ -1529,7 +1933,7 @@ class AgentEventTurnUsageAccountingIdentityDisputed(TypedDict, total=False):
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

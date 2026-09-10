@@ -269,6 +269,11 @@ fn value_kind(value: &Value) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason_type", rename_all = "snake_case")]
 pub enum AgentErrorReason {
+    ModelFallbackResumeHeld {
+        provider: crate::Provider,
+        model: String,
+        reason: crate::model_fallback::ModelFallbackSkipReason,
+    },
     LlmRateLimited {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
@@ -372,6 +377,11 @@ impl AgentErrorReason {
 
     pub fn from_agent_error(error: &AgentError) -> Option<Self> {
         match error {
+            AgentError::ModelFallbackResumeHeld { target } => Some(Self::ModelFallbackResumeHeld {
+                provider: target.identity.provider,
+                model: target.identity.model.clone(),
+                reason: target.reason,
+            }),
             AgentError::Llm { reason, .. } => Some(Self::from_llm_reason(reason)),
             AgentError::HookDenied {
                 hook_id,
@@ -490,7 +500,8 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::NoPendingBoundary => Self::NoPendingBoundary,
             // Capability-unsupported sync; classified like the config-class it
             // was previously represented as (a `ConfigError`).
-            AgentError::DurableSnapshotSyncUnsupported => Self::Config,
+            AgentError::DurableSnapshotSyncUnsupported
+            | AgentError::ModelFallbackResumeHeld { .. } => Self::Config,
         }
     }
 }
@@ -1015,6 +1026,10 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::CompactionFailed { .. } => "compaction_failed",
         AgentEvent::BudgetWarning { .. } => "budget_warning",
         AgentEvent::Retrying { .. } => "retrying",
+        AgentEvent::ModelFallbackSkipped { .. } => "model_fallback_skipped",
+        AgentEvent::ModelFallbackStaged { .. } => "model_fallback_staged",
+        AgentEvent::ModelFallbackCommitted { .. } => "model_fallback_committed",
+        AgentEvent::ModelFallbackTargetFailed { .. } => "model_fallback_target_failed",
         AgentEvent::SkillsResolved { .. } => "skills_resolved",
         AgentEvent::SkillResolutionFailed { .. } => "skill_resolution_failed",
         AgentEvent::InteractionComplete { .. } => "interaction_complete",
@@ -2281,6 +2296,25 @@ pub enum AgentEvent {
     /// kind/provider/diagnostic and plan attempt/delay); display strings are
     /// derived from it, never carried beside it.
     Retrying { retry: LlmRetrySchedule },
+    ModelFallbackSkipped {
+        retry: LlmRetrySchedule,
+        target: crate::model_fallback::ModelFallbackSkippedTarget,
+    },
+    ModelFallbackStaged {
+        retry: LlmRetrySchedule,
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+    },
+    ModelFallbackCommitted {
+        retry: LlmRetrySchedule,
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+    },
+    ModelFallbackTargetFailed {
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+        error: AgentErrorReport,
+    },
 
     // === Skill Events ===
     /// Skills resolved for this turn.

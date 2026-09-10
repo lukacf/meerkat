@@ -155,6 +155,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
     profiles.insert(
         ProfileName::from("lead"),
         ProfileBinding::Inline(Box::new(Profile {
+            model_fallback: None,
             model: model.clone(),
             provider: None,
             self_hosted_server_id: None,
@@ -179,6 +180,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
         ProfileName::from("worker"),
         ProfileBinding::Inline(Box::new(Profile {
             model,
+            model_fallback: None,
             provider: None,
             self_hosted_server_id: None,
             image_generation_provider: None,

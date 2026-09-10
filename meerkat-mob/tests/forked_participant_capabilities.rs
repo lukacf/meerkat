@@ -1286,6 +1286,7 @@ fn planned_identity_fork_selects_the_exact_prefix_and_leaves_the_source_unmodifi
         ..SessionTooling::default()
     };
     let metadata = SessionMetadata {
+        model_fallback: None,
         schema_version: meerkat_core::session_metadata_schema_version(),
         model: "claude-sonnet-4-6".to_string(),
         max_tokens: 4096,

@@ -483,6 +483,7 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
     let mut session = Session::default();
     session
         .set_session_metadata(SessionMetadata {
+            model_fallback: None,
             schema_version: SESSION_METADATA_SCHEMA_VERSION,
             model: "mock-model".to_string(),
             max_tokens: 8192,

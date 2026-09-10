@@ -434,9 +434,7 @@ impl Config {
             }
             self.hooks.entries.extend(other.hooks.entries);
         }
-        if other.model_fallback.use_catalog_default_chain {
-            self.model_fallback = ModelFallbackConfig::default();
-        } else if other.model_fallback != ModelFallbackConfig::default() {
+        if other.model_fallback != ModelFallbackConfig::default() {
             self.model_fallback = other.model_fallback;
         }
 
@@ -919,6 +917,7 @@ impl Config {
     ///   over the injected catalog) constructs without conflicts
     pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
         self.reject_unwired_agent_provider_params()?;
+        self.model_fallback.validate()?;
         if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0 when set".to_string(),
@@ -1513,32 +1512,90 @@ pub struct ProviderToolsConfig {
 /// Ordered model failover policy used when a turn reaches a recoverable LLM
 /// failure boundary.
 ///
-/// Empty `chain` means "use the catalog-owned default fallback chain" at the
-/// factory seam. Core keeps this provider-data-free; the `meerkat` facade
-/// resolves catalog defaults and builds concrete clients.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+/// Fallback is off unless explicitly enabled with a nonempty chain. A present
+/// table replaces the inherited policy as a whole; a chain never enables it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelFallbackConfig {
-    /// Enables runtime model failover for factory-built agents.
-    pub enabled: bool,
-    /// When true in a higher-precedence layer, restore the catalog-owned
-    /// default chain (`enabled = true`, empty `chain`) over an inherited
-    /// disabled/custom fallback policy.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub use_catalog_default_chain: bool,
+    /// Absent is disabled. Presence preserves explicit false across inheritance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Ordered operator-provided backup targets.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chain: Vec<ModelFallbackTarget>,
+    pub policy: ModelFallbackPolicy,
 }
 
-impl Default for ModelFallbackConfig {
+impl ModelFallbackConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled == Some(true)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.is_enabled() && self.chain.is_empty() {
+            return Err(ConfigError::Validation(
+                "model_fallback.enabled = true requires a nonempty explicit chain".into(),
+            ));
+        }
+        if self
+            .chain
+            .iter()
+            .any(|target| target.model.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(
+                "model_fallback.chain target model must not be empty".into(),
+            ));
+        }
+        if !self.policy.min_context_headroom.is_finite()
+            || !(0.0..1.0).contains(&self.policy.min_context_headroom)
+        {
+            return Err(ConfigError::Validation(
+                "model_fallback.policy.min_context_headroom must be finite and in [0, 1)".into(),
+            ));
+        }
+        if self.policy.trigger_after_attempts == 0 {
+            return Err(ConfigError::Validation(
+                "model_fallback.policy.trigger_after_attempts must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelFallbackPolicy {
+    pub cross_provider: bool,
+    pub min_context_headroom: f64,
+    pub require_tool_parity: bool,
+    pub trigger_after_attempts: u32,
+    pub triggers: Vec<ModelFallbackTrigger>,
+}
+
+impl Default for ModelFallbackPolicy {
     fn default() -> Self {
         Self {
-            enabled: true,
-            use_catalog_default_chain: false,
-            chain: Vec::new(),
+            cross_provider: false,
+            min_context_headroom: 0.10,
+            require_tool_parity: true,
+            trigger_after_attempts: 3,
+            triggers: vec![
+                ModelFallbackTrigger::ProviderUnavailable,
+                ModelFallbackTrigger::Capacity,
+            ],
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFallbackTrigger {
+    Capacity,
+    ProviderUnavailable,
+    Transport,
+    EmptyOutput,
 }
 
 /// One configured model fallback target.
@@ -2538,10 +2595,6 @@ pub struct CommandRuntimeConfig {
 
 fn default_http_method() -> String {
     "POST".to_string()
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// Typed payload for a [`HookRuntimeKind::Http`] adapter.
@@ -4548,9 +4601,9 @@ stream_inactivity_timeout = "2m"
     }
 
     #[test]
-    fn test_model_fallback_defaults_enabled_with_catalog_chain() {
+    fn test_model_fallback_defaults_disabled_without_chain() {
         let config = Config::default();
-        assert!(config.model_fallback.enabled);
+        assert!(!config.model_fallback.is_enabled());
         assert!(config.model_fallback.chain.is_empty());
     }
 
@@ -4572,7 +4625,7 @@ provider = "anthropic"
         )
         .unwrap();
 
-        assert!(config.model_fallback.enabled);
+        assert!(config.model_fallback.is_enabled());
         assert_eq!(config.model_fallback.chain.len(), 2);
         assert_eq!(config.model_fallback.chain[0].model, "backup-openai");
         assert_eq!(
@@ -4586,11 +4639,11 @@ provider = "anthropic"
     }
 
     #[test]
-    fn test_model_fallback_catalog_default_reset_overrides_custom_layer() {
+    fn test_model_fallback_explicit_false_overrides_enabled_layer() {
         let mut config: Config = toml::from_str(
             r#"
 [model_fallback]
-enabled = false
+enabled = true
 
 [[model_fallback.chain]]
 model = "backup-openai"
@@ -4601,14 +4654,48 @@ provider = "openai"
         let reset: Config = toml::from_str(
             r"
 [model_fallback]
-use_catalog_default_chain = true
+enabled = false
 ",
         )
         .unwrap();
 
         config.merge(reset);
 
-        assert_eq!(config.model_fallback, ModelFallbackConfig::default());
+        assert_eq!(config.model_fallback.enabled, Some(false));
+        assert!(config.model_fallback.chain.is_empty());
+        config.model_fallback.validate().unwrap();
+    }
+
+    #[test]
+    fn test_model_fallback_validation_and_strict_policy() {
+        let enabled: ModelFallbackConfig = toml::from_str("enabled = true").unwrap();
+        assert!(enabled.validate().is_err());
+        let disabled: ModelFallbackConfig = toml::from_str("enabled = false").unwrap();
+        disabled.validate().unwrap();
+        for invalid in [
+            "scope = 'turn'",
+            "use_catalog_default_chain = true",
+            "[policy]\nunknown = true",
+            "[policy]\ntriggers = ['typo']",
+        ] {
+            assert!(
+                toml::from_str::<ModelFallbackConfig>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        for invalid in [
+            "[policy]\nmin_context_headroom = nan",
+            "[policy]\nmin_context_headroom = -0.1",
+            "[policy]\nmin_context_headroom = 1.0",
+            "[policy]\ntrigger_after_attempts = 0",
+        ] {
+            assert!(
+                toml::from_str::<ModelFallbackConfig>(invalid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

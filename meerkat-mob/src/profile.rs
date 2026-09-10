@@ -220,6 +220,9 @@ pub enum ProfileSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Profile {
+    /// Whole-table override; omitted inherits mob runtime, then host policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback: Option<meerkat_core::config::ModelFallbackConfig>,
     /// LLM model name (e.g. "claude-opus-4-8").
     pub model: String,
     /// Explicit typed provider for this profile's model.
@@ -347,6 +350,7 @@ impl Profile {
     /// parsing. A serde-derived drift test keeps it equal to the derive's own
     /// field list.
     pub const FIELD_NAMES: &'static [&'static str] = &[
+        "model_fallback",
         "model",
         "provider",
         "self_hosted_server_id",
@@ -644,6 +648,7 @@ mod tests {
     #[test]
     fn test_profile_serde_roundtrip() {
         let profile = Profile {
+            model_fallback: None,
             model: "claude-opus-4-8".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -681,6 +686,7 @@ mod tests {
     #[test]
     fn test_profile_toml_roundtrip() {
         let profile = Profile {
+            model_fallback: None,
             model: "gpt-5.2".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -934,6 +940,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
     #[test]
     fn profile_binding_inline_roundtrip() {
         let profile = Profile {
+            model_fallback: None,
             model: "claude-opus-4-8".to_string(),
             provider: None,
             self_hosted_server_id: None,
@@ -941,6 +948,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
             ..Profile {
+                model_fallback: None,
                 model: String::new(),
                 provider: None,
                 self_hosted_server_id: None,
@@ -1034,6 +1042,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
     #[test]
     fn spawn_tooling_profile_inline_roundtrip() {
         let profile = Profile {
+            model_fallback: None,
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,

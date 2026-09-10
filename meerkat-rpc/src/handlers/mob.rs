@@ -257,6 +257,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         .map(meerkat_core::MeerkatSchema::new)
         .transpose()?;
     Ok(Profile {
+        model_fallback: profile.model_fallback,
         model: profile.model,
         provider: profile.provider,
         self_hosted_server_id: profile.self_hosted_server_id,
@@ -3378,6 +3379,7 @@ mod tests {
         profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
             meerkat_mob::ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,

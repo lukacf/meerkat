@@ -4752,6 +4752,7 @@ mod tests {
         profiles.insert(
             ProfileName::from("worker"),
             ProfileBinding::Inline(Box::new(Profile {
+                model_fallback: None,
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,

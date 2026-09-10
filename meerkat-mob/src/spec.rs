@@ -502,6 +502,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
+            model_fallback: None,
             model: "test".to_string(),
             provider: None,
             self_hosted_server_id: None,

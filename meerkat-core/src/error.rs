@@ -417,6 +417,10 @@ pub enum AgentError {
     /// failed-batch retry could continue against split model identity.
     #[error("Sticky model fallback authority outcome is unknown: {message}")]
     StickyModelFallbackAuthorityUnknown { message: String },
+    #[error("fallback-origin session requires explicit model reconfiguration: {target:?}")]
+    ModelFallbackResumeHeld {
+        target: Box<crate::model_fallback::ModelFallbackSkippedTarget>,
+    },
 
     /// One live session projection advanced but its paired durable/session
     /// authority did not provably converge. Reusing the actor could duplicate

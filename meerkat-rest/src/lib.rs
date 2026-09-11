@@ -390,6 +390,7 @@ impl AppState {
         let mut bootstrap = RuntimeBootstrap::default();
         bootstrap.realm.state_root = Some(instance_root.join("realms"));
         bootstrap.context.context_root = Some(instance_root.clone());
+        bootstrap.context.user_config_root = Some(instance_root.join("user"));
         Self::load_from_with_bootstrap(instance_root, bootstrap, false).await
     }
 
@@ -9338,6 +9339,7 @@ mod tests {
         bootstrap.realm.backend_hint = Some("sqlite".to_string());
         bootstrap.realm.state_root = Some(temp.path().join("realms"));
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
         let target = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm fixture"),
             binding: meerkat_core::BindingId::parse("default_openai")
@@ -9813,6 +9815,7 @@ mod tests {
             realm_id: realm_id.to_string(),
         };
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
         AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
             .await
             .expect("load rest app state with capacity")
@@ -11191,7 +11194,49 @@ mod tests {
             .unwrap();
         assert!(!resolved_default_model(&state).await.is_empty());
         assert!(state.max_tokens > 0);
+        assert_eq!(state.user_config_root, Some(temp.path().join("user")));
+        assert!(
+            !effective_config_for_state(&state)
+                .await
+                .unwrap()
+                .model_fallback
+                .is_enabled()
+        );
         // runtime_adapter is always present (non-optional)
+    }
+
+    #[tokio::test]
+    async fn explicit_user_config_root_preserves_fallback_validation() {
+        let temp = TempDir::new().unwrap();
+        let user_root = temp.path().join("user");
+        let config_dir = user_root.join(".rkat");
+        tokio::fs::create_dir_all(&config_dir).await.unwrap();
+        let config_path = config_dir.join("config.toml");
+        let invalid = "[model_fallback]\nenabled = true\n";
+        tokio::fs::write(&config_path, invalid).await.unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: meerkat_core::RealmId::global().to_string(),
+        };
+        bootstrap.realm.state_root = Some(temp.path().join("realms"));
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(user_root);
+
+        let result =
+            AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false).await;
+        let error = result
+            .err()
+            .expect("invalid explicit config must reject startup");
+        assert!(
+            error
+                .to_string()
+                .contains("model_fallback.enabled = true requires a nonempty explicit chain"),
+            "{error}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(config_path).await.unwrap(),
+            invalid
+        );
     }
 
     /// Regression (default-model ladder): with `config.agent.model` EMPTY the

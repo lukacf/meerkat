@@ -323,6 +323,18 @@ A chain alone never enables fallback. `enabled = true` with an empty chain is
 invalid. Unknown fallback keys, including the removed `use_catalog_default_chain`
 and unsupported scope/expiry/revert options, are rejected.
 
+Explicit `brain_swap` requests are independent of automatic fallback settings.
+Target discovery uses the effective model catalog, configured realm routes,
+account affinity, and installed provider runtimes; it does not resolve foreign
+credentials or prebuild foreign clients. The active route remains eligible,
+including an environment-backed active route, but an unconfigured foreign
+environment-only route is not advertised. Credential and client admission still
+occur through the canonical runtime realization before the next turn; a staged
+request is not a committed switch.
+Separately enabled image generation may resolve its own provider credentials;
+disabling automatic model fallback does not disable image features. An explicit
+image-generation disable skips that feature's automatic executor discovery.
+
 Mob definitions also accept `[runtime.model_fallback]` and
 `[profiles.<name>.model_fallback]`. A present profile table wins over mob runtime,
 which wins over host config; explicit false is preserved through materialization

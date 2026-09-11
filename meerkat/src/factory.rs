@@ -74,14 +74,11 @@ use crate::model_fallback::{ModelFallbackCandidate, ModelFallbackClient};
 /// Availability here means something specific and deliberately narrow: a model
 /// is available only if the canonical model-only resolver can route it from the
 /// session's CURRENT identity — preserving provider selection rules and
-/// credential-account affinity — AND the identity that resolution lands on has
-/// already been proven constructible during this build.
-///
-/// That second condition is why `proven_identities` is required rather than
-/// inferred. Enumerating the catalog would advertise models the session has no
-/// credentials for, and the model would discover that only by requesting a
-/// switch that later fails at realization, one turn after it was told the
-/// request was accepted.
+/// credential-account affinity — AND the target has either the already-active
+/// route or a valid configured binding with an installed provider runtime.
+/// Discovery never resolves foreign credentials or constructs clients.
+/// A staged request is not auth admission: the explicit runtime realization
+/// still resolves credentials and builds the target client, failing closed.
 ///
 /// The result is keyed by model id, so several provider routes converging on
 /// one model contribute one entry. "How many models can I choose between" is
@@ -92,7 +89,8 @@ fn brain_swap_available_models_for_resolved_identity(
     config: &Config,
     registry: &ModelRegistry,
     current: &SessionLlmIdentity,
-    proven_identities: &[SessionLlmIdentity],
+    provider_registry: &meerkat_providers::ProviderRuntimeRegistry,
+    preferred_realm: Option<&RealmId>,
 ) -> Vec<String> {
     let mut models = std::collections::BTreeSet::new();
     for (provider, _) in registry.provider_defaults() {
@@ -110,30 +108,49 @@ fn brain_swap_available_models_for_resolved_identity(
             else {
                 continue;
             };
-            // Compare everything EXCEPT the model: the proof we need is that
-            // this provider/server/params/credential route works, and the model
-            // id is the one thing the switch is allowed to change.
-            //
-            // An unset target binding is not a mismatch. `None` means "resolve
-            // the credential the ordinary way for this provider", which is
-            // exactly what the proven identity already did — the proven route
-            // IS that resolution's result. Requiring a literal `Some` match
-            // here would exclude every cross-provider target whose credential
-            // identity is not an account (the ordinary API-key case), because
-            // account affinity is the only thing that fills the binding in
-            // early, and it deliberately declines when there is no account to
-            // preserve. That would silently make `brain_swap` same-provider-only
-            // for most configurations.
-            if !proven_identities.iter().any(|proven| {
-                proven.provider == target.provider
-                    && proven.self_hosted_server_id == target.self_hosted_server_id
-                    && proven.provider_params == target.provider_params
-                    && match &target.auth_binding {
-                        Some(binding) => proven.auth_binding.as_ref() == Some(binding),
-                        None => true,
+            let active_route = current.provider == target.provider
+                && current.self_hosted_server_id == target.self_hosted_server_id
+                && current.provider_params == target.provider_params
+                && current.auth_binding == target.auth_binding;
+            if !active_route {
+                if provider_registry.get(target.provider).is_none() {
+                    continue;
+                }
+                let route = match meerkat_core::resolve_auth_binding_or_default_for_provider(
+                    config,
+                    target.provider,
+                    target.auth_binding.as_ref(),
+                    preferred_realm,
+                    false,
+                ) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        tracing::debug!(model = %entry.id, %error, "brain-swap target has no configured route");
+                        continue;
                     }
-            }) {
-                continue;
+                };
+                let (binding, backend, auth) = match route
+                    .realm
+                    .lookup_auth_binding(&route.auth_binding)
+                {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        tracing::debug!(model = %entry.id, %error, "brain-swap target binding is absent");
+                        continue;
+                    }
+                };
+                let validation =
+                    meerkat_providers::ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+                        &route.auth_binding,
+                        route.credential_identity.clone(),
+                        backend,
+                        auth,
+                        &binding.policy,
+                    );
+                if let Err(error) = validation {
+                    tracing::debug!(model = %entry.id, %error, "brain-swap target binding is invalid");
+                    continue;
+                }
             }
             models.insert(entry.id.clone());
         }
@@ -5373,12 +5390,6 @@ impl AgentFactory {
             } else {
                 Some(resolved_llm_identity.clone())
             };
-        // Availability is proven, not assumed: an identity enters this set only
-        // after a client was actually constructed for it, which is the same
-        // evidence the fallback chain requires.
-        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-        let mut brain_swap_proven_identities: Vec<SessionLlmIdentity> =
-            brain_swap_current_identity.iter().cloned().collect();
         let configured_credential_identity =
             if agent_llm_client_was_overridden || raw_llm_client_was_overridden {
                 Self::credential_identity_for_client_override(config, &resolved_llm_identity)
@@ -5591,8 +5602,6 @@ impl AgentFactory {
                     build_config.override_web_search,
                     session.id(),
                 )?;
-                #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-                brain_swap_proven_identities.push(identity.clone());
                 candidates.push(ModelFallbackCandidate {
                     target_profile,
                     request_policy,
@@ -5621,7 +5630,8 @@ impl AgentFactory {
                         config,
                         &registry,
                         current,
-                        &brain_swap_proven_identities,
+                        &self.provider_registry,
+                        build_config.realm_id.as_ref(),
                     )
                 });
         #[cfg(any(not(feature = "session-store"), target_arch = "wasm32"))]
@@ -7433,7 +7443,10 @@ impl AgentFactory {
                         }
 
                         #[cfg(not(target_arch = "wasm32"))]
-                        {
+                        if !matches!(
+                            build_config.override_image_generation,
+                            ToolCategoryOverride::Disable
+                        ) {
                             auto_image_generation_executor = provider_registry
                                 .build_image_generation_executor(connection.clone())
                                 .map_err(|e| {
@@ -7523,7 +7536,12 @@ impl AgentFactory {
             })
         };
         #[cfg(not(target_arch = "wasm32"))]
-        if build_config.image_generation_executor_override.is_none() {
+        if build_config.image_generation_executor_override.is_none()
+            && !matches!(
+                build_config.override_image_generation,
+                ToolCategoryOverride::Disable
+            )
+        {
             let mut executors: BTreeMap<
                 String,
                 Arc<dyn meerkat_llm_core::ImageGenerationExecutor>,
@@ -14405,6 +14423,30 @@ mod tests {
                 ("openai", "image-openai-key"),
             ]),
         );
+        let disabled_session = Session::new();
+        let disabled_runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let disabled_bindings = disabled_runtime
+            .prepare_bindings(disabled_session.id().clone())
+            .await
+            .unwrap();
+        let mut disabled_build = AgentBuildConfig::new("claude-sonnet-4-5");
+        disabled_build.provider = Some(Provider::Anthropic);
+        disabled_build.realm_id = Some(RealmId::parse("session_a").unwrap());
+        disabled_build.resume_session = Some(disabled_session);
+        disabled_build.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(disabled_bindings);
+        disabled_build.override_builtins = ToolCategoryOverride::Disable;
+        disabled_build.override_image_generation = ToolCategoryOverride::Disable;
+        factory.build_agent(disabled_build, &config).await.unwrap();
+        assert!(
+            !saw_auth_lease_handle.load(std::sync::atomic::Ordering::SeqCst),
+            "disabled image discovery must not resolve foreign provider credentials"
+        );
+        assert_eq!(
+            image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
         let session = Session::new();
         let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
         let bindings = runtime

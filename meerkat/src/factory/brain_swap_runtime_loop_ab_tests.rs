@@ -268,6 +268,7 @@ struct DeferredBrainSwapProviderRuntime {
     client: Arc<dyn LlmClient>,
     availability: Arc<ModelAvailability>,
     client_build_models: Arc<StdMutex<Vec<String>>>,
+    resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
 }
 
 #[derive(Default)]
@@ -308,6 +309,10 @@ impl ProviderRuntime for DeferredBrainSwapProviderRuntime {
         binding: &ValidatedBinding,
         _env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
+        self.resolved_auth_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(binding.auth_binding_ref().clone());
         Ok(ResolvedConnection {
             provider: self.provider,
             backend: binding.backend(),
@@ -420,6 +425,105 @@ fn expected_auth_binding() -> AuthBindingRef {
     expected_auth_binding_named(TEST_BINDING)
 }
 
+#[test]
+fn brain_swap_discovery_requires_configured_routes_without_foreign_auth() {
+    let route = CROSS_PROVIDER_ROUTE;
+    let availability = Arc::new(ModelAvailability::default());
+    let config = ab_test_config(route, &availability);
+    let current = SessionLlmIdentity {
+        model: route.model_a.into(),
+        provider: route.provider_a,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: Some(expected_auth_binding_named(route.binding_a)),
+    };
+    let resolved_auth_bindings = Arc::new(StdMutex::new(Vec::new()));
+    let client_build_models = Arc::new(StdMutex::new(Vec::new()));
+    let provider_registry =
+        ProviderRuntimeRegistry::empty().with_runtime(Arc::new(DeferredBrainSwapProviderRuntime {
+            provider: route.provider_b,
+            client: Arc::new(DeferredBrainSwapClient {
+                requested_calls: Arc::new(StdMutex::new(Vec::new())),
+                provider: route.provider_b,
+                route,
+            }),
+            availability,
+            client_build_models: Arc::clone(&client_build_models),
+            resolved_auth_bindings: Arc::clone(&resolved_auth_bindings),
+        }));
+    let realm = RealmId::parse(TEST_REALM).unwrap();
+    let models = |config: &Config, providers: &ProviderRuntimeRegistry| {
+        super::brain_swap_available_models_for_resolved_identity(
+            config,
+            &config.model_registry(meerkat_models::canonical()).unwrap(),
+            &current,
+            providers,
+            Some(&realm),
+        )
+    };
+    assert!(
+        models(&config, &provider_registry)
+            .iter()
+            .any(|m| m == route.model_b)
+    );
+    assert!(
+        !models(&config, &ProviderRuntimeRegistry::empty())
+            .iter()
+            .any(|m| m == route.model_b)
+    );
+    assert!(
+        !models(&config, &provider_registry)
+            .iter()
+            .any(|m| m == "unknown-brain-swap-model")
+    );
+
+    let mut unconfigured = config.clone();
+    unconfigured
+        .realm
+        .get_mut(TEST_REALM)
+        .unwrap()
+        .binding
+        .remove(route.binding_b);
+    assert!(
+        !models(&unconfigured, &provider_registry)
+            .iter()
+            .any(|m| m == route.model_b)
+    );
+
+    let mut wrong_account = config.clone();
+    wrong_account
+        .realm
+        .get_mut(TEST_REALM)
+        .unwrap()
+        .binding
+        .get_mut(route.binding_b)
+        .unwrap()
+        .credential_account =
+        Some(meerkat_core::CredentialAccountId::parse("other_account").unwrap());
+    assert!(
+        !models(&wrong_account, &provider_registry)
+            .iter()
+            .any(|m| m == route.model_b)
+    );
+
+    let mut invalid_binding = config;
+    invalid_binding
+        .realm
+        .get_mut(TEST_REALM)
+        .unwrap()
+        .auth
+        .get_mut(route.binding_b)
+        .unwrap()
+        .auth_method = "unsupported-auth".into();
+    assert!(
+        !models(&invalid_binding, &provider_registry)
+            .iter()
+            .any(|m| m == route.model_b)
+    );
+    assert!(resolved_auth_bindings.lock().unwrap().is_empty());
+    assert!(client_build_models.lock().unwrap().is_empty());
+}
+
 fn create_request_for(route: RouteSpec, fresh: bool) -> CreateSessionRequest {
     CreateSessionRequest {
         injected_context: Vec::new(),
@@ -434,6 +538,7 @@ fn create_request_for(route: RouteSpec, fresh: bool) -> CreateSessionRequest {
             provider: fresh.then_some(route.provider_a),
             realm_id: Some(RealmId::parse(TEST_REALM).expect("valid test realm")),
             auth_binding: fresh.then(|| expected_auth_binding_named(route.binding_a)),
+            override_image_generation: meerkat_core::ToolCategoryOverride::Disable,
             ..Default::default()
         }),
         labels: None,
@@ -456,6 +561,7 @@ struct AbEnvironment {
     requested_calls: Arc<StdMutex<Vec<ProviderCall>>>,
     availability: Arc<ModelAvailability>,
     client_build_models: Arc<StdMutex<Vec<String>>>,
+    resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
 }
 
 impl AbHarness {
@@ -494,6 +600,14 @@ impl AbHarness {
     fn client_build_models(&self) -> Vec<String> {
         self.environment
             .client_build_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn resolved_auth_bindings(&self) -> Vec<AuthBindingRef> {
+        self.environment
+            .resolved_auth_bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -613,6 +727,7 @@ async fn build_harness_for(profile: PersistenceProfile, route: RouteSpec) -> AbH
         requested_calls: Arc::new(StdMutex::new(Vec::new())),
         availability: Arc::new(ModelAvailability::default()),
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
+        resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
     });
     attach_harness(environment, None).await
 }
@@ -642,6 +757,7 @@ async fn attach_harness(
             client: scripted,
             availability: Arc::clone(&environment.availability),
             client_build_models: Arc::clone(&environment.client_build_models),
+            resolved_auth_bindings: Arc::clone(&environment.resolved_auth_bindings),
         }));
     }
     factory.provider_registry = Arc::new(registry);
@@ -1019,6 +1135,15 @@ fn assert_exact_realized_terminal(
 async fn brain_swap_crosses_the_provider_seam(profile: PersistenceProfile) {
     let route = CROSS_PROVIDER_ROUTE;
     let harness = build_harness_for(profile, route).await;
+    let config = ab_test_config(route, &harness.environment.availability);
+    assert!(!config.model_fallback.is_enabled());
+    assert!(!config.model_fallback.policy.cross_provider);
+    assert_eq!(harness.client_build_models(), vec![route.model_a]);
+    assert_eq!(
+        harness.resolved_auth_bindings(),
+        vec![expected_auth_binding_named(route.binding_a)],
+        "advertising explicit brain-swap targets must not resolve foreign credentials"
+    );
 
     // The session really does start on Anthropic's route.
     let before = harness.live_identity().await;
@@ -1031,6 +1156,12 @@ async fn brain_swap_crosses_the_provider_seam(profile: PersistenceProfile) {
     );
 
     let proof = commit_brain_swap_request(&harness).await;
+    assert_eq!(harness.client_build_models(), vec![route.model_a]);
+    assert_eq!(
+        harness.resolved_auth_bindings(),
+        vec![expected_auth_binding_named(route.binding_a)],
+        "staging must not resolve the target before explicit runtime realization"
+    );
     let next = harness
         .run_prompt("continue after the cross-provider swap")
         .await;

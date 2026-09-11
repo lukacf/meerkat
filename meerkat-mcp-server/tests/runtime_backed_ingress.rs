@@ -35,7 +35,7 @@ fn mcp_bootstrap(root: &Path, instance_id: &str) -> RuntimeBootstrap {
         },
         context: ContextConfig {
             context_root: Some(project_root),
-            user_config_root: None,
+            user_config_root: Some(root.join("user")),
         },
     }
 }

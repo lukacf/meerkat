@@ -3,7 +3,7 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "rules_rust", version = "0.74.0")
 
 # crate_universe records in-tree [patch.crates-io] path dependencies with the
 # absolute path of whichever checkout last evaluated the extension, which
@@ -211,11 +211,11 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 # feature union for `meerkat-live`. Resolve that union in a separate generated
 # repository so crate_universe never writes its synthetic direct-dependency
 # package into Cargo's authoritative workspace lockfile.
-crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.11.1")
-crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.3.1")
+crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.12.1")
+crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.4.0")
 crate.spec(package = "rubato", repositories = ["meerkat_live_crates"], version = "=2.0.0")
-crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.14.0")
-crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.11.0")
+crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.20.5")
+crate.spec(package = "webrtc-media", repositories = ["meerkat_live_crates"], version = "=0.17.2")
 crate.annotation_select(
     crate = "audiopus_sys",
     build_script_data = ["@@+http_archive+cmake_macos_universal//:runtime"],

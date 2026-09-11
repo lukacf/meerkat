@@ -172,7 +172,7 @@ sha2 = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-session = { workspace = true }
 meerkat-llm-core = { workspace = true }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.30"
 
 [package.metadata.cargo-machete]
 ignored = ["thiserror"]  # proc macro (derive)

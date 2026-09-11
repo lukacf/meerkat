@@ -972,16 +972,6 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
     }
 }
 
-/// The ambient user-global config document convention, used where no
-/// resolved [`meerkat_core::StorageLayout`] is in hand (test constructors):
-/// the home-rooted doc, or a never-existent path under the realms root when
-/// no home resolves, so the reserved `global` realm yields None and behaves
-/// like a leaf realm.
-fn mcp_ambient_global_config_doc(realms_root: &std::path::Path) -> PathBuf {
-    meerkat_core::Config::global_config_path()
-        .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"))
-}
-
 /// Shared filesystem realm-config source for the MCP server.
 ///
 /// Mirrors REST: maps the reserved `global` realm to the injected
@@ -1589,7 +1579,7 @@ impl MeerkatMcpState {
         max_sessions_override: Option<usize>,
         default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     ) -> Self {
-        let bootstrap = RuntimeBootstrap::default();
+        let mut bootstrap = RuntimeBootstrap::default();
         let locator = match bootstrap.realm.resolve_locator() {
             Ok(locator) => locator,
             Err(_) => meerkat_core::RealmLocator {
@@ -1600,8 +1590,11 @@ impl MeerkatMcpState {
         };
         let realm_id = locator.realm.clone();
         let realms_root = locator.state_root;
+        let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm_id.as_str());
+        let user_root = realm_paths.root.join("user");
+        bootstrap.context.user_config_root = Some(user_root.clone());
         let fs_realm_config_source =
-            mcp_realm_config_source(&realms_root, mcp_ambient_global_config_doc(&realms_root));
+            mcp_realm_config_source(&realms_root, user_root.join(".rkat/config.toml"));
         // Test-only constructor over a freshly generated isolated realm: a
         // config-load failure is an environment defect the test must see.
         #[allow(clippy::expect_used)]
@@ -1620,7 +1613,6 @@ impl MeerkatMcpState {
         }
         let store_path =
             realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Sqlite);
-        let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm_id.as_str());
         let project_root = realm_paths.root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
@@ -5234,7 +5226,10 @@ mod tests {
                     backend_hint: Some("sqlite".to_string()),
                     state_root: Some(temp.path().to_path_buf()),
                 },
-                context: meerkat_core::ContextConfig::default(),
+                context: meerkat_core::ContextConfig {
+                    user_config_root: Some(temp.path().join("user")),
+                    ..Default::default()
+                },
             },
             false,
         )
@@ -5245,6 +5240,35 @@ mod tests {
             state.service.has_event_projection(),
             "MCP must pass the complete realm persistence bundle to the shared runtime-backed service"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_explicit_global_invalid_fallback_config_rejects_without_rewriting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let user_root = temp.path().join("user");
+        let config_dir = user_root.join(".rkat");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.toml");
+        let config_text = "[model_fallback]\nenabled = true\n";
+        std::fs::write(&config_path, config_text).unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "global".into(),
+        };
+        bootstrap.realm.state_root = Some(temp.path().join("realms"));
+        bootstrap.context.user_config_root = Some(user_root);
+
+        let error = MeerkatMcpState::new_with_bootstrap_and_test_client(bootstrap, false)
+            .await
+            .err()
+            .expect("invalid explicit fallback policy must reject startup");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a nonempty explicit chain"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), config_text);
     }
 
     fn mcp_inherited_gemini_binding() -> (Config, meerkat_core::AuthBindingRef) {

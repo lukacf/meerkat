@@ -1020,6 +1020,7 @@ impl GptLiveBrokerSessionState {
                 let summary = summarize_unknown_private_event(&event);
                 tracing::warn!(
                     provider_event_class = "unknown",
+                    event_kind_sha256 = %summary.event_kind_sha256,
                     error_class = summary.error_class,
                     top_level_field_count = summary.top_level_field_count,
                     normalized_json_bytes = summary.normalized_json_bytes,
@@ -1104,8 +1105,9 @@ fn protocol_error() -> GptLiveBrokerError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct UnknownPrivateEventSummary {
+    event_kind_sha256: String,
     error_class: &'static str,
     top_level_field_count: usize,
     normalized_json_bytes: usize,
@@ -1115,6 +1117,8 @@ struct UnknownPrivateEventSummary {
 fn summarize_unknown_private_event(
     event: &oai_rt_rs::experimental::gpt_live::UnknownEvent,
 ) -> UnknownPrivateEventSummary {
+    use sha2::{Digest, Sha256};
+
     let message = event
         .raw()
         .pointer("/error/message")
@@ -1137,6 +1141,7 @@ fn summarize_unknown_private_event(
         "unsupported_event"
     };
     UnknownPrivateEventSummary {
+        event_kind_sha256: format!("{:x}", Sha256::digest(event.kind().as_bytes())),
         error_class,
         top_level_field_count: event.raw().as_object().map_or(0, serde_json::Map::len),
         normalized_json_bytes: serde_json::to_vec(event.raw()).map_or(0, |bytes| bytes.len()),
@@ -1312,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_private_event_summary_contains_only_fixed_classes_and_counts() {
+    fn unknown_private_event_summary_redacts_discriminator_and_payload() {
         let event = oai_rt_rs::experimental::gpt_live::decode_server_event(
             &json!({
                 "type": "FIXTURE_PRIVATE_UNKNOWN_KIND",
@@ -1329,6 +1334,10 @@ mod tests {
         };
 
         let summary = summarize_unknown_private_event(&event);
+        assert_eq!(
+            summary.event_kind_sha256,
+            "f9b7098fca222c5a37d08be50e849334121e410c0c5cb8974f2be34879af92be"
+        );
         assert_eq!(summary.error_class, "invalid_parameter");
         assert_eq!(summary.top_level_field_count, 3);
         assert!(summary.normalized_json_bytes > 0);
@@ -1337,6 +1346,57 @@ mod tests {
         assert!(!diagnostics.contains("FIXTURE_PRIVATE_UNKNOWN_KIND"));
         assert!(!diagnostics.contains("FIXTURE_PRIVATE_MESSAGE_SECRET"));
         assert!(!diagnostics.contains("FIXTURE_PRIVATE_PAYLOAD_SECRET"));
+    }
+
+    #[test]
+    fn unknown_private_event_fingerprint_identifies_only_the_discriminator() {
+        let summary = |kind: &str, payload: &str| {
+            let event = oai_rt_rs::experimental::gpt_live::decode_server_event(
+                &json!({"type": kind, "payload": payload}).to_string(),
+            )
+            .expect("unknown fixture event");
+            let ServerEvent::Unknown(event) = event else {
+                panic!("fixture must remain unknown");
+            };
+            summarize_unknown_private_event(&event)
+        };
+        let first = summary("private.fixture.alpha", "FIRST_PRIVATE_PAYLOAD");
+        let same_kind = summary("private.fixture.alpha", "DIFFERENT_PRIVATE_PAYLOAD");
+        let different_kind = summary("private.fixture.beta", "FIRST_PRIVATE_PAYLOAD");
+        assert_eq!(first.event_kind_sha256, same_kind.event_kind_sha256);
+        assert_ne!(first.event_kind_sha256, different_kind.event_kind_sha256);
+        assert!(
+            first
+                .event_kind_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn unknown_private_event_diagnostics_do_not_acknowledge_or_authorize_work() {
+        for mode in [
+            GptLiveBrokerDelegationMode::None,
+            GptLiveBrokerDelegationMode::Client,
+            GptLiveBrokerDelegationMode::Responses,
+        ] {
+            let mut state = broker_state(mode);
+            state.pending_session_append = Some(GptLiveAppendToken(7));
+            let event = oai_rt_rs::experimental::gpt_live::decode_server_event(
+                r#"{"type":"private.fixture.unknown","payload":{"status":"completed"}}"#,
+            )
+            .expect("unknown fixture event");
+            state
+                .apply_event(event)
+                .expect("project unknown observation");
+            assert!(matches!(
+                state.queued_observations.pop_front(),
+                Some(GptLiveBrokerObservation::UnsupportedPrivateEvent)
+            ));
+            assert!(state.queued_observations.is_empty());
+            assert_eq!(state.pending_session_append, Some(GptLiveAppendToken(7)));
+            assert!(state.pending_client_delegations.is_empty());
+        }
     }
 
     #[derive(Default)]

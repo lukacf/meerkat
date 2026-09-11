@@ -64,6 +64,7 @@ copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 realtime = ["dep:oai-rt-rs", "dep:sha2", "dep:tokio-tungstenite"]
 experimental-gpt-live = [
     "dep:oai-rt-rs",
+    "dep:sha2",
     "meerkat-llm-core/experimental-gpt-live",
     "oai-rt-rs/experimental-gpt-live",
 ]

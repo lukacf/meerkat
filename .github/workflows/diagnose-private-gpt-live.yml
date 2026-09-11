@@ -1,0 +1,51 @@
+name: Diagnose private GPT Live
+
+on:
+  push:
+    branches:
+      - ci/private-gpt-live-*
+  workflow_dispatch:
+
+concurrency:
+  group: diagnose-private-gpt-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: S96 diagnostic only, not release certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+      MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
+    steps:
+      - name: Checkout diagnostic source
+        uses: actions/checkout@v6
+
+      - name: Setup BuildBuddy submitter
+        uses: ./.github/actions/setup-buildbuddy-ci
+        with:
+          profile: submitter
+
+      - name: Run only the private GPT Live scenario
+        shell: bash
+        env:
+          MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON: ${{ secrets.MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${BUILDBUDDY_API_KEY}" || -z "${MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON}" ]]; then
+            echo "::error::BuildBuddy and private GPT Live OAuth inputs are required."
+            exit 1
+          fi
+          oauth_override_base64="$(
+            printf 'MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON=%s' \
+              "${MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON}" | base64 | tr -d '\n'
+          )"
+          echo "::add-mask::${oauth_override_base64}"
+          unset MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON
+          echo "Diagnostic scope: scenario 96 only; this run is not full Turbo S release evidence."
+          MEERKAT_BUILDBUDDY_SECRET_ENV_OVERRIDES_BASE64="${oauth_override_base64}" \
+            scripts/buildbuddy-dev e2e-smoke-turbo-s //:e2e_smoke_turbo_s_s96

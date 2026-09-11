@@ -6,9 +6,7 @@
 use anyhow::{Context, Result};
 
 fn assert_released_ordinals(path: &str, name: &str, released: &[&str]) -> Result<()> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(path);
+    let path = xtask::public_contracts::repo_root()?.join(path);
     let source = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read enum source {}", path.display()))?;
     let file = syn::parse_file(&source).context("invalid Rust source")?;

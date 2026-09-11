@@ -384,9 +384,13 @@ dispatch_hook_cache="$(git -C "$DISPATCH_REPO" rev-parse --path-format=absolute 
 
 # The same cache root the dispatcher will resolve for its lane.
 dispatch_lane_target="$(cd "$DISPATCH_REPO" && XDG_CACHE_HOME="$DISPATCH_CACHE" \
+  CARGO_HOME="${DISPATCH_CACHE}/cargo-home" \
+  CARGO_TARGET_DIR="${DISPATCH_CACHE}/targets/v4/test-toolchain/${dispatch_lane}" \
   RUST_LANE_ID="$dispatch_lane" ./scripts/repo-cargo --print-env |
   sed -n 's/^CARGO_TARGET_DIR=//p')"
 [[ -n "$dispatch_lane_target" ]] || fail "could not resolve the dispatcher lane target"
+[[ "$dispatch_lane_target" == "${DISPATCH_CACHE}/"* ]] ||
+  fail "dispatcher fixture escaped its temporary cache" "$dispatch_lane_target"
 dispatch_toolchain_dir="$(dirname "$dispatch_lane_target")"
 PEER_X="pre-push-7777777777777777"
 PEER_Y="pre-push-8888888888888888"
@@ -408,6 +412,8 @@ run_dispatch() {
     cd "$DISPATCH_REPO"
     PATH="${DISPATCH_HARNESS}:$PATH" \
       XDG_CACHE_HOME="$DISPATCH_CACHE" \
+      CARGO_HOME="${DISPATCH_CACHE}/cargo-home" \
+      CARGO_TARGET_DIR="$dispatch_lane_target" \
       MEERKAT_FAKE_GATE_STATUS="$gate_status" \
       MEERKAT_SKIP_PRE_PUSH_TREE_CACHE=1 \
       MEERKAT_PRE_PUSH_BAZEL_OUTPUT_ROOT="${DISPATCH_HARNESS}/bazel-output" \

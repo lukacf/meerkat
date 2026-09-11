@@ -411,6 +411,8 @@ run_dispatch() {
       MEERKAT_FAKE_GATE_STATUS="$gate_status" \
       MEERKAT_SKIP_PRE_PUSH_TREE_CACHE=1 \
       MEERKAT_PRE_PUSH_BAZEL_OUTPUT_ROOT="${DISPATCH_HARNESS}/bazel-output" \
+      MEERKAT_PRE_PUSH_KEEP_LANES="" \
+      MEERKAT_PRE_PUSH_LANE_IDLE_SECS="" \
       RUST_LANE_ID="" \
       "$DISPATCHER" origin example.invalid \
       <<<"refs/heads/topic ${dispatch_head} refs/heads/topic ${dispatch_base}"

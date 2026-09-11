@@ -71,6 +71,10 @@ them.
   deferred; historical notice text is not fallback authority.
 - Added local real-provider-adapter Turbo S boundary and 650k-context suites
   using SQLite and fresh OS-process restart, without live provider credentials.
+- The experimental GPT Live broker validates and discards reflected sideband
+  input/output audio instead of treating it as an unsupported event. Reflected
+  media never acknowledges context, finalizes a turn, or authorizes delegation;
+  malformed media and unknown events still fail closed.
 
 ## [0.8.36] - 2026-09-09
 

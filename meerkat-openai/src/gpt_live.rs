@@ -19,10 +19,10 @@ use meerkat_llm_core::provider_runtime::{
 use oai_rt_rs::experimental::gpt_live::GptLiveEndpoints;
 use oai_rt_rs::experimental::gpt_live::{
     CallSession, ClientDelegation, ClientEvent, ContextChannel, CreateCallRequest, Delegation,
-    DelegationContextAppend, ExtraFields, FunctionTool, GptLiveCredentials, GptLiveTransport,
-    InputTextContent, ResponsesConfig, ResponsesDelegation, ServerEvent, SessionAudio,
-    SessionAudioOutput, SessionContextAppend, SidebandHeaders, SidebandReceiver, SidebandSender,
-    TransportError,
+    DelegationContextAppend, EventCarrier, ExtraFields, FunctionTool, GptLiveCredentials,
+    GptLiveTransport, InputTextContent, ReceivedServerEvent, ResponsesConfig, ResponsesDelegation,
+    ServerEvent, SessionAudio, SessionAudioOutput, SessionContextAppend, SidebandHeaders,
+    SidebandReceiver, SidebandSender, TransportError,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
@@ -896,10 +896,10 @@ impl GptLiveBrokerSession {
             if let Some(observation) = self.state.lock().await.queued_observations.pop_front() {
                 return Ok(Some(observation));
             }
-            let Some(event) = receiver.next_event().await? else {
+            let Some(event) = receiver.next_observation().await? else {
                 return Ok(None);
             };
-            self.state.lock().await.apply_event(event)?;
+            self.state.lock().await.apply_observation(event)?;
         }
     }
 
@@ -911,6 +911,20 @@ impl GptLiveBrokerSession {
 
 impl GptLiveBrokerSessionState {
     const MAX_CLIENT_JOIN_IDENTITIES: usize = 4096;
+
+    fn apply_observation(&mut self, event: ReceivedServerEvent) -> Result<(), GptLiveBrokerError> {
+        if event.carrier() != EventCarrier::Sideband {
+            return Err(protocol_error());
+        }
+        if let ServerEvent::Unknown(unknown) = event.event()
+            && validate_reflected_sideband_audio(unknown)?
+        {
+            // Reflected media is not a transcript, input-consumption
+            // acknowledgement, playback receipt, or delegation.
+            return Ok(());
+        }
+        self.apply_event(event.into_event())
+    }
 
     fn allocate_append_token(&mut self) -> GptLiveAppendToken {
         let token = GptLiveAppendToken(self.next_append_token);
@@ -1103,6 +1117,60 @@ fn protocol_error() -> GptLiveBrokerError {
     GptLiveBrokerError::Transport {
         class: GptLiveBrokerTerminalClass::Protocol,
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum ReflectedSidebandAudio<'a> {
+    #[serde(rename = "session.input_audio.append")]
+    Input {
+        #[serde(borrow)]
+        audio: &'a str,
+    },
+    #[serde(rename = "session.output_audio.delta")]
+    Output {
+        #[serde(borrow)]
+        delta: &'a str,
+        start_ms: u64,
+        end_ms: u64,
+    },
+}
+
+fn validate_reflected_sideband_audio(
+    event: &oai_rt_rs::experimental::gpt_live::UnknownEvent,
+) -> Result<bool, GptLiveBrokerError> {
+    use base64::Engine;
+    use serde::Deserialize;
+
+    if !matches!(
+        event.kind(),
+        "session.input_audio.append" | "session.output_audio.delta"
+    ) {
+        return Ok(false);
+    }
+    let audio =
+        match ReflectedSidebandAudio::deserialize(event.raw()).map_err(|_| protocol_error())? {
+            ReflectedSidebandAudio::Input { audio } => audio,
+            ReflectedSidebandAudio::Output {
+                delta,
+                start_ms,
+                end_ms,
+            } => {
+                if end_ms < start_ms {
+                    return Err(protocol_error());
+                }
+                delta
+            }
+        };
+    // The upstream codec bounds the whole frame. Validate PCM16 framing
+    // without projecting or retaining this duplicate of primary media.
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(audio)
+        .map_err(|_| protocol_error())?;
+    if decoded.len() % 2 != 0 {
+        return Err(protocol_error());
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1399,6 +1467,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reflected_sideband_audio_preserves_pending_authority_and_event_order() {
+        use base64::Engine;
+
+        let audio = base64::engine::general_purpose::STANDARD.encode([0u8; 9600]);
+        for mode in [
+            GptLiveBrokerDelegationMode::None,
+            GptLiveBrokerDelegationMode::Client,
+            GptLiveBrokerDelegationMode::Responses,
+        ] {
+            let mut state = broker_state(mode);
+            state.pending_session_append = Some(GptLiveAppendToken(7));
+            state.pending_delegation_append = Some((
+                GptLiveDelegationRef("private-delegation".into()),
+                GptLiveAppendToken(8),
+            ));
+            state
+                .queued_observations
+                .push_back(GptLiveBrokerObservation::SessionReady);
+            for wire in [
+                json!({"type":"session.input_audio.append","audio":audio}),
+                json!({"type":"session.output_audio.delta","delta":audio,"start_ms":0,"end_ms":200}),
+                json!({"type":"session.output_audio.delta","delta":"AAA=","start_ms":900,"end_ms":901}),
+            ] {
+                let event = oai_rt_rs::experimental::gpt_live::decode_received_server_event(
+                    EventCarrier::Sideband,
+                    &wire.to_string(),
+                )
+                .expect("reflected audio fixture");
+                state
+                    .apply_observation(event)
+                    .expect("valid reflected media");
+            }
+            assert_eq!(state.pending_session_append, Some(GptLiveAppendToken(7)));
+            assert!(matches!(
+                &state.pending_delegation_append,
+                Some((delegation, GptLiveAppendToken(8))) if delegation.0 == "private-delegation"
+            ));
+            assert_eq!(state.queued_observations.len(), 1);
+            assert!(matches!(
+                state.queued_observations.pop_front(),
+                Some(GptLiveBrokerObservation::SessionReady)
+            ));
+            assert!(state.pending_client_delegations.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_reflected_sideband_audio_fails_closed_without_acknowledgement() {
+        for wire in [
+            json!({"type":"session.input_audio.append"}),
+            json!({"type":"session.input_audio.append","audio":42}),
+            json!({"type":"session.input_audio.append","audio":"PRIVATE_INVALID_BASE64"}),
+            json!({"type":"session.input_audio.append","audio":"AA=="}),
+            json!({"type":"session.input_audio.append","audio":"AAA=","event_id":"not-an-ack"}),
+            json!({"type":"session.output_audio.delta","delta":"AAA="}),
+            json!({"type":"session.output_audio.delta","delta":"AAA=","start_ms":2,"end_ms":1}),
+            json!({"type":"session.output_audio.delta","delta":"AAA=","start_ms":-1,"end_ms":1}),
+            json!({"type":"session.output_audio.delta","delta":"AAA=","start_ms":0,"end_ms":1,"delegation_id":"not-authority"}),
+        ] {
+            let mut state = broker_state(GptLiveBrokerDelegationMode::Client);
+            state.pending_session_append = Some(GptLiveAppendToken(7));
+            let event = oai_rt_rs::experimental::gpt_live::decode_received_server_event(
+                EventCarrier::Sideband,
+                &wire.to_string(),
+            )
+            .expect("well-formed JSON fixture");
+            assert_protocol_error(state.apply_observation(event).expect_err("malformed media"));
+            assert_eq!(state.pending_session_append, Some(GptLiveAppendToken(7)));
+            assert!(state.queued_observations.is_empty());
+            assert!(state.pending_client_delegations.is_empty());
+        }
+    }
+
+    #[test]
+    fn reflected_audio_requires_sideband_carrier() {
+        let mut state = broker_state(GptLiveBrokerDelegationMode::Client);
+        state.pending_session_append = Some(GptLiveAppendToken(7));
+        let event = oai_rt_rs::experimental::gpt_live::decode_received_server_event(
+            EventCarrier::OrderedOaiEvents,
+            r#"{"type":"session.input_audio.append","audio":"AAA="}"#,
+        )
+        .expect("valid audio on wrong carrier");
+        assert_protocol_error(state.apply_observation(event).expect_err("wrong carrier"));
+        assert_eq!(state.pending_session_append, Some(GptLiveAppendToken(7)));
+        assert!(state.queued_observations.is_empty());
+    }
+
     #[derive(Default)]
     struct Capture {
         call_body: Option<Value>,
@@ -1455,6 +1611,17 @@ mod tests {
     }
 
     async fn serve_sideband(mut socket: WebSocket, capture: SharedCapture) {
+        use base64::Engine;
+
+        let reflected_audio = base64::engine::general_purpose::STANDARD.encode([0u8; 9600]);
+        socket
+            .send(AxumMessage::Text(
+                json!({"type":"session.input_audio.append","audio":reflected_audio})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("reflect primary media before context acknowledgement");
         if let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
             capture
                 .lock()
@@ -1489,6 +1656,12 @@ mod tests {
         }
 
         for event in [
+            json!({
+                "type": "session.output_audio.delta",
+                "delta": "AAA=",
+                "start_ms": 4,
+                "end_ms": 5
+            }),
             json!({
                 "type": "output_transcript.added",
                 "start_ms": 5,

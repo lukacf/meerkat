@@ -2144,12 +2144,12 @@ fn image_projection_messages(
 #[cfg(not(target_arch = "wasm32"))]
 fn model_realtime_capable(provider: meerkat_core::Provider, model: &str) -> bool {
     meerkat_models::capabilities_for(provider, model)
-        .map(|caps| caps.realtime)
+        .map(|caps| caps.is_realtime())
         .unwrap_or(false)
 }
 
 /// Return `true` when the OpenAI model ID advertises
-/// `ModelCapabilities.realtime == true` in the curated catalog.
+/// A realtime interaction kind in the curated catalog.
 ///
 /// Drives the AgentFactory branch that routes text turns over the OpenAI
 /// Realtime WebSocket instead of the Responses API. OpenAI rejects
@@ -2158,7 +2158,7 @@ fn model_realtime_capable(provider: meerkat_core::Provider, model: &str) -> bool
 /// realtime-capable must use the WebSocket text adapter.
 fn is_openai_realtime_capable(model: &str) -> bool {
     meerkat_models::capabilities_for(meerkat_core::Provider::OpenAI, model)
-        .map(|caps| caps.realtime)
+        .map(|caps| caps.is_realtime())
         .unwrap_or(false)
 }
 
@@ -5440,7 +5440,7 @@ impl AgentFactory {
                     meerkat_core::lifecycle::run_primitive::ModelId::new(model.clone()),
                     model_profile
                         .as_ref()
-                        .is_some_and(|profile| profile.realtime),
+                        .is_some_and(|profile| profile.is_realtime()),
                 )
                 .map_err(|err| BuildAgentError::Config(format!("model routing baseline: {err}")))?;
             bindings
@@ -9225,7 +9225,7 @@ mod tests {
             vision: false,
             image_input: false,
             image_tool_results: false,
-            realtime: false,
+            interaction_kind: meerkat_core::model_profile::ModelInteractionKind::Text,
             supports_web_search: true,
             supports_mid_conversation_system_messages: true,
             image_generation: false,

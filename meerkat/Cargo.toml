@@ -139,6 +139,7 @@ openai = [
     "meerkat-providers/openai",
 ]
 openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
+openai-live = ["openai", "live", "meerkat-openai/live"]
 # Pre-release live execution path. This is deliberately separate from public
 # OpenAI Realtime and off by default. Runtime admission additionally requires
 # explicit operator, realm, and Gate0 qualification evidence.

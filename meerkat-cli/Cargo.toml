@@ -118,6 +118,12 @@ openai-realtime = [
     "dep:meerkat-live",
     "meerkat-rpc?/openai-realtime",
 ]
+openai-live = [
+    "openai",
+    "meerkat/openai-live",
+    "dep:meerkat-live",
+    "meerkat-rpc?/openai-live",
+]
 gemini = ["meerkat/gemini"]
 copilot = [
     "anthropic",

@@ -1778,7 +1778,7 @@ fn profile_to_capability_surface(
         supports_mid_conversation_system_messages: profile
             .supports_mid_conversation_system_messages,
         image_generation: profile.image_generation,
-        realtime: profile.realtime,
+        realtime: profile.is_realtime(),
         call_timeout_secs: profile.call_timeout_secs,
     }
 }
@@ -12154,7 +12154,7 @@ mod tests {
         let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime-2")
             .expect("gpt-realtime-2 should be present in the catalog");
         assert!(
-            realtime.realtime,
+            realtime.is_realtime(),
             "gpt-realtime-2 is the canonical realtime model; capability row must mark it realtime"
         );
         // Round-5 catalog cleanup retired `gpt-realtime` and
@@ -12168,7 +12168,7 @@ mod tests {
         let codex = capabilities_for(Provider::OpenAI, "gpt-5.3-codex")
             .expect("gpt-5.3-codex should be present in the catalog");
         assert!(
-            !codex.realtime,
+            !codex.is_realtime(),
             "non-realtime catalog entries must report realtime=false"
         );
 

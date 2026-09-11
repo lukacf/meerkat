@@ -1841,6 +1841,7 @@ pub enum BridgeReply {
     HostRebound(BridgeHostReboundResponse),
     HostRevoked(BridgeHostRevokedResponse),
     MemberHistoryPage(BridgeMemberHistoryPage),
+    MemberLiveObservationPage(super::live_observation::LiveObservationPage),
     MemberEventsPage(BridgeMemberEventsPage),
     MemberMaterialized(BridgeMaterializedResponse),
     MemberReleased(BridgeMemberReleasedResponse),

@@ -3,7 +3,7 @@
 //! Implements [`LlmClient`] for realtime-capable OpenAI models (currently
 //! `gpt-realtime-2`). The Responses API endpoint `/v1/responses` rejects
 //! realtime model IDs with `model_not_found`, so any session whose resolved
-//! model advertises `ModelCapabilities.realtime == true` must reach the
+//! model advertises a turn-based realtime interaction kind must reach the
 //! model through the Realtime WebSocket instead.
 //!
 //! Strategy (per-turn, stateless replay):

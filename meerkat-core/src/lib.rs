@@ -48,6 +48,7 @@ pub mod interaction;
 pub mod lifecycle;
 pub mod live_adapter;
 pub mod live_execution;
+pub mod live_observation;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
@@ -297,7 +298,7 @@ pub use memory::{
 };
 pub use model_defaults::ModelOperationalDefaultsResolver;
 pub use model_profile::catalog::ModelReleaseStage;
-pub use model_profile::{ModelCatalog, ModelProfile};
+pub use model_profile::{ModelCatalog, ModelInteractionKind, ModelProfile};
 pub use model_registry::{
     ModelCapability, ModelProfileWitness, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
     UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,

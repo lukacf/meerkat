@@ -69,7 +69,7 @@ pub fn profile_to_capability_surface(
         supports_mid_conversation_system_messages: profile
             .supports_mid_conversation_system_messages,
         image_generation: profile.image_generation,
-        realtime: profile.realtime,
+        realtime: profile.is_realtime(),
         call_timeout_secs: profile.call_timeout_secs,
     }
 }

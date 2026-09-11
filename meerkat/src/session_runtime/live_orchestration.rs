@@ -50,7 +50,7 @@ use crate::session_runtime::errors::LiveOpenPrecheckError;
 /// adapter.
 pub fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPrecheckError> {
     let realtime_capable = meerkat_models::capabilities_for(identity.provider, &identity.model)
-        .map(|caps| caps.realtime)
+        .map(|caps| caps.is_realtime())
         .unwrap_or(false);
     apply_precheck_gates(identity.provider, &identity.model, realtime_capable)
 }

@@ -554,6 +554,7 @@ test_suite(
         "//meerkat-mob:shadow_state_absent_test",
         "//meerkat-models:catalog_data_test",
         "//meerkat-models:meerkat_models_unit_test",
+        "//meerkat-models:model_interaction_test",
         "//meerkat-openai:meerkat_openai_unit_test",
         "//meerkat-openai:mock_realtime_ws_selftest_test",
         "//meerkat-openai:oauth_resolve_test",

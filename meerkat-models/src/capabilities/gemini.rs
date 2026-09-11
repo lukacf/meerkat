@@ -5,6 +5,7 @@
 //! and `ai.google.dev/gemini-api/docs/gemini-3`.
 
 use meerkat_core::Provider;
+use meerkat_core::model_profile::ModelInteractionKind;
 use meerkat_core::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
 use meerkat_core::model_profile::catalog::{ModelReleaseStage, ModelTier};
 
@@ -35,7 +36,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: true,
         inline_video: true,
-        realtime: false,
+        interaction_kind: ModelInteractionKind::Text,
         realtime_supports_provider_managed_turns: false,
         realtime_supports_explicit_commit: false,
         realtime_interrupt_supported: false,
@@ -85,7 +86,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: true,
         inline_video: true,
-        realtime: false,
+        interaction_kind: ModelInteractionKind::Text,
         realtime_supports_provider_managed_turns: false,
         realtime_supports_explicit_commit: false,
         realtime_interrupt_supported: false,
@@ -136,7 +137,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: true,
         inline_video: true,
-        realtime: false,
+        interaction_kind: ModelInteractionKind::Text,
         realtime_supports_provider_managed_turns: false,
         realtime_supports_explicit_commit: false,
         realtime_interrupt_supported: false,
@@ -188,7 +189,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: true,
         inline_video: true,
-        realtime: false,
+        interaction_kind: ModelInteractionKind::Text,
         realtime_supports_provider_managed_turns: false,
         realtime_supports_explicit_commit: false,
         realtime_interrupt_supported: false,
@@ -236,7 +237,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: true,
         inline_video: true,
-        realtime: false,
+        interaction_kind: ModelInteractionKind::Text,
         realtime_supports_provider_managed_turns: false,
         realtime_supports_explicit_commit: false,
         realtime_interrupt_supported: false,

@@ -139,7 +139,7 @@ mod tests {
             .find(|entry| {
                 registry
                     .profile_for_provider(Provider::OpenAI, &entry.id)
-                    .is_some_and(|profile| profile.realtime)
+                    .is_some_and(|profile| profile.is_realtime())
             })
             .expect("canonical realtime model");
         let identity = SessionLlmIdentity {

@@ -727,9 +727,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
         ProviderClientError,
     > {
-        if !target.profile().profile().realtime {
+        if target.profile().profile().interaction_kind
+            != meerkat_core::model_profile::ModelInteractionKind::TurnBasedRealtime
+        {
             return Err(ProviderClientError::ClientInit(
-                "resolved model profile does not admit realtime transport".to_string(),
+                "resolved model profile does not admit turn-based realtime transport".to_string(),
             ));
         }
         if target.profile().profile().release_stage != meerkat_core::ModelReleaseStage::Stable {
@@ -1013,7 +1015,7 @@ mod tests {
                 entry.release_stage == meerkat_core::ModelReleaseStage::Stable
                     && registry
                         .profile_for_provider(Provider::OpenAI, &entry.id)
-                        .is_some_and(|profile| profile.realtime)
+                        .is_some_and(|profile| profile.is_realtime())
             })
             .map(|entry| entry.id.clone())
             .expect("stable OpenAI realtime model");

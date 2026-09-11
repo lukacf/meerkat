@@ -229,7 +229,7 @@ pub fn standalone_session_runtime_authorities(
                 supports_mid_conversation_system_messages: profile
                     .supports_mid_conversation_system_messages,
                 image_generation: profile.image_generation,
-                realtime: profile.realtime,
+                realtime: profile.is_realtime(),
                 call_timeout_secs: profile.call_timeout_secs,
             }),
             dsl::SessionLlmCapabilitySurfaceStatus::Resolved,
@@ -250,7 +250,7 @@ pub fn standalone_session_runtime_authorities(
         &mut authority,
         dsl::MeerkatMachineInput::SetModelRoutingBaseline {
             baseline_model: current_identity.model.clone(),
-            realtime_capable: model_profile.is_some_and(|profile| profile.realtime),
+            realtime_capable: model_profile.is_some_and(|profile| profile.is_realtime()),
         },
     )
     .map_err(|err| dsl_authority::map_error(err, "standalone model routing baseline"))?;

@@ -171,8 +171,8 @@ pub struct ModelCapabilities {
     pub image_tool_results: bool,
     /// Whether the model accepts inline video content in user messages.
     pub inline_video: bool,
-    /// Whether the model supports a realtime bidirectional streaming transport.
-    pub realtime: bool,
+    /// Catalog-owned interaction contract; realtime is its coarse projection.
+    pub interaction_kind: super::ModelInteractionKind,
     /// Realtime transport: whether the model's realtime session supports
     /// provider-managed turn detection (server VAD). Only meaningful when
     /// `realtime` is true; `false` on non-realtime rows.
@@ -249,6 +249,14 @@ pub struct ModelCapabilities {
     /// Authoritative default call timeout in seconds for this model.
     /// `None` means the model has no profiled default (unknown family).
     pub call_timeout_secs: Option<u64>,
+}
+
+impl ModelCapabilities {
+    /// Coarse capability projection; protocol selection uses `interaction_kind`.
+    #[must_use]
+    pub const fn is_realtime(&self) -> bool {
+        self.interaction_kind.is_realtime()
+    }
 }
 
 /// A capability value that is only available when a specific beta header is set.

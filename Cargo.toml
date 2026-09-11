@@ -74,7 +74,8 @@ async-stream = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = { version = "1.0", features = ["raw_value"] }
+# Canonical JSON receipts require exact f64 read-back in downstream builds too.
+serde_json = { version = "1.0", features = ["raw_value", "float_roundtrip"] }
 toml = "0.9"
 toml_edit = "0.25"
 sha2 = "0.10"
@@ -182,7 +183,7 @@ meerkat-machine-dsl = { version = "0.8.37", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.37", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.37", path = "meerkat-store", default-features = false }
 meerkat-store-conformance = { version = "0.8.37", path = "meerkat-store-conformance" }
-oai-rt-rs = { version = "=0.4.1", features = ["experimental-gpt-live"] }
+oai-rt-rs = { version = "=0.5.0" }
 
 [profile.dev]
 split-debuginfo = "off"

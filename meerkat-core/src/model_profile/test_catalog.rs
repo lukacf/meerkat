@@ -34,7 +34,7 @@ const BASE_CAPS: ModelCapabilities = ModelCapabilities {
     vision: true,
     image_tool_results: false,
     inline_video: false,
-    realtime: false,
+    interaction_kind: super::ModelInteractionKind::Text,
     realtime_supports_provider_managed_turns: false,
     realtime_supports_explicit_commit: false,
     realtime_interrupt_supported: false,

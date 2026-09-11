@@ -76,13 +76,6 @@ TurnTerminalCauseKind = Literal['unknown', 'hook_denied', 'hook_failure', 'llm_f
 TurnTerminalOutcome = Literal['none', 'completed', 'failed', 'cancelled', 'budget_exhausted', 'time_budget_exceeded', 'structured_output_validation_failed']
 
 
-class AgentErrorReasonModelFallbackResumeHeld(TypedDict, total=False):
-    model: Required[str]
-    provider: Required[Provider]
-    reason: Required[ModelFallbackSkipReason]
-    reason_type: Required[Literal['model_fallback_resume_held']]
-
-
 class AgentErrorReasonLlmRateLimited(TypedDict, total=False):
     reason_type: Required[Literal['llm_rate_limited']]
     retry_after_ms: NotRequired[Optional[int]]
@@ -174,7 +167,14 @@ class AgentErrorReasonTurnTerminalCause(TypedDict, total=False):
     reason_type: Required[Literal['turn_terminal_cause']]
 
 
-AgentErrorReason = AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause
+class AgentErrorReasonModelFallbackResumeHeld(TypedDict, total=False):
+    model: Required[str]
+    provider: Required[Provider]
+    reason: Required[ModelFallbackSkipReason]
+    reason_type: Required[Literal['model_fallback_resume_held']]
+
+
+AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld
 
 
 class AgentErrorReport(TypedDict, total=False):
@@ -1725,33 +1725,6 @@ class AgentEventRetrying(TypedDict, total=False):
     type: Required[Literal['retrying']]
 
 
-class AgentEventModelFallbackSkipped(TypedDict, total=False):
-    retry: Required[LlmRetrySchedule]
-    target: Required[ModelFallbackSkippedTarget]
-    type: Required[Literal['model_fallback_skipped']]
-
-
-class AgentEventModelFallbackStaged(TypedDict, total=False):
-    previous: Required[SessionLlmIdentity]
-    retry: Required[LlmRetrySchedule]
-    target: Required[SessionLlmIdentity]
-    type: Required[Literal['model_fallback_staged']]
-
-
-class AgentEventModelFallbackCommitted(TypedDict, total=False):
-    previous: Required[SessionLlmIdentity]
-    retry: Required[LlmRetrySchedule]
-    target: Required[SessionLlmIdentity]
-    type: Required[Literal['model_fallback_committed']]
-
-
-class AgentEventModelFallbackTargetFailed(TypedDict, total=False):
-    error: Required[AgentErrorReport]
-    previous: Required[SessionLlmIdentity]
-    target: Required[SessionLlmIdentity]
-    type: Required[Literal['model_fallback_target_failed']]
-
-
 class AgentEventSkillsResolved(TypedDict, total=False):
     """Skills resolved for this turn.
     """
@@ -1930,10 +1903,37 @@ class AgentEventTurnUsageAccountingIdentityDisputed(TypedDict, total=False):
     type: Required[Literal['turn_usage_accounting_identity_disputed']]
 
 
+class AgentEventModelFallbackSkipped(TypedDict, total=False):
+    retry: Required[LlmRetrySchedule]
+    target: Required[ModelFallbackSkippedTarget]
+    type: Required[Literal['model_fallback_skipped']]
+
+
+class AgentEventModelFallbackStaged(TypedDict, total=False):
+    previous: Required[SessionLlmIdentity]
+    retry: Required[LlmRetrySchedule]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_staged']]
+
+
+class AgentEventModelFallbackCommitted(TypedDict, total=False):
+    previous: Required[SessionLlmIdentity]
+    retry: Required[LlmRetrySchedule]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_committed']]
+
+
+class AgentEventModelFallbackTargetFailed(TypedDict, total=False):
+    error: Required[AgentErrorReport]
+    previous: Required[SessionLlmIdentity]
+    target: Required[SessionLlmIdentity]
+    type: Required[Literal['model_fallback_target_failed']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

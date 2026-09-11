@@ -13,7 +13,6 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
-    InvalidModelFallback,
     /// A skill referenced by a profile is not defined in the skills section.
     MissingSkillRef,
     /// The orchestrator profile is not defined.
@@ -69,6 +68,8 @@ pub enum DiagnosticCode {
     /// `MobDefinition::parse_toml`, because the typed definition no longer
     /// holds the key once parsed.
     UnknownProfileKey,
+    /// A runtime or profile model-fallback configuration is invalid.
+    InvalidModelFallback,
 }
 
 impl fmt::Display for DiagnosticCode {

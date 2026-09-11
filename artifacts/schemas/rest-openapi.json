@@ -36,30 +36,6 @@
         "oneOf": [
           {
             "properties": {
-              "model": {
-                "type": "string"
-              },
-              "provider": {
-                "$ref": "#/components/schemas/Provider"
-              },
-              "reason": {
-                "$ref": "#/components/schemas/ModelFallbackSkipReason"
-              },
-              "reason_type": {
-                "const": "model_fallback_resume_held",
-                "type": "string"
-              }
-            },
-            "required": [
-              "reason_type",
-              "provider",
-              "model",
-              "reason"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
               "reason_type": {
                 "const": "llm_rate_limited",
                 "type": "string"
@@ -373,6 +349,30 @@
               "reason_type",
               "outcome",
               "cause_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "$ref": "#/components/schemas/Provider"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/ModelFallbackSkipReason"
+              },
+              "reason_type": {
+                "const": "model_fallback_resume_held",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider",
+              "model",
+              "reason"
             ],
             "type": "object"
           }
@@ -1104,98 +1104,6 @@
             "type": "object"
           },
           {
-            "properties": {
-              "retry": {
-                "$ref": "#/components/schemas/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/components/schemas/ModelFallbackSkippedTarget"
-              },
-              "type": {
-                "const": "model_fallback_skipped",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "previous": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "retry": {
-                "$ref": "#/components/schemas/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_staged",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "previous",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "previous": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "retry": {
-                "$ref": "#/components/schemas/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_committed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "previous",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "error": {
-                "$ref": "#/components/schemas/AgentErrorReport"
-              },
-              "previous": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "target": {
-                "$ref": "#/components/schemas/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_target_failed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "previous",
-              "target",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Skills resolved for this turn.",
             "properties": {
               "injection_bytes": {
@@ -1555,6 +1463,98 @@
               "type",
               "session_id",
               "dispute"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/ModelFallbackSkippedTarget"
+              },
+              "type": {
+                "const": "model_fallback_skipped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_staged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "$ref": "#/components/schemas/AgentErrorReport"
+              },
+              "previous": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "target": {
+                "$ref": "#/components/schemas/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_target_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "previous",
+              "target",
+              "error"
             ],
             "type": "object"
           }

@@ -83,11 +83,6 @@ export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" |
 export type TurnTerminalOutcome = "none" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "time_budget_exceeded" | "structured_output_validation_failed";
 
 export type AgentErrorReason = {
-  model: string;
-  provider: Provider;
-  reason: ModelFallbackSkipReason;
-  reason_type: "model_fallback_resume_held";
-} | {
   reason_type: "llm_rate_limited";
   retry_after_ms?: number | null;
 } | {
@@ -146,6 +141,11 @@ export type AgentErrorReason = {
   cause_kind: TurnTerminalCauseKind;
   outcome: TurnTerminalOutcome;
   reason_type: "turn_terminal_cause";
+} | {
+  model: string;
+  provider: Provider;
+  reason: ModelFallbackSkipReason;
+  reason_type: "model_fallback_resume_held";
 };
 
 export type AgentErrorReport = {
@@ -1230,25 +1230,6 @@ export type AgentEvent = {
   retry: LlmRetrySchedule;
   type: "retrying";
 } | {
-  retry: LlmRetrySchedule;
-  target: ModelFallbackSkippedTarget;
-  type: "model_fallback_skipped";
-} | {
-  previous: SessionLlmIdentity;
-  retry: LlmRetrySchedule;
-  target: SessionLlmIdentity;
-  type: "model_fallback_staged";
-} | {
-  previous: SessionLlmIdentity;
-  retry: LlmRetrySchedule;
-  target: SessionLlmIdentity;
-  type: "model_fallback_committed";
-} | {
-  error: AgentErrorReport;
-  previous: SessionLlmIdentity;
-  target: SessionLlmIdentity;
-  type: "model_fallback_target_failed";
-} | {
   injection_bytes: number;
   skills: SkillKey[];
   type: "skills_resolved";
@@ -1311,6 +1292,25 @@ export type AgentEvent = {
   dispute: DisputedTurnUsageAccountingIdentity;
   session_id: SessionId;
   type: "turn_usage_accounting_identity_disputed";
+} | {
+  retry: LlmRetrySchedule;
+  target: ModelFallbackSkippedTarget;
+  type: "model_fallback_skipped";
+} | {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_staged";
+} | {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_committed";
+} | {
+  error: AgentErrorReport;
+  previous: SessionLlmIdentity;
+  target: SessionLlmIdentity;
+  type: "model_fallback_target_failed";
 };
 
 /**

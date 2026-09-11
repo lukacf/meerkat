@@ -269,11 +269,6 @@ fn value_kind(value: &Value) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason_type", rename_all = "snake_case")]
 pub enum AgentErrorReason {
-    ModelFallbackResumeHeld {
-        provider: crate::Provider,
-        model: String,
-        reason: crate::model_fallback::ModelFallbackSkipReason,
-    },
     LlmRateLimited {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
@@ -336,6 +331,11 @@ pub enum AgentErrorReason {
     TurnTerminalCause {
         outcome: TurnTerminalOutcome,
         cause_kind: TurnTerminalCauseKind,
+    },
+    ModelFallbackResumeHeld {
+        provider: crate::Provider,
+        model: String,
+        reason: crate::model_fallback::ModelFallbackSkipReason,
     },
 }
 
@@ -2296,25 +2296,6 @@ pub enum AgentEvent {
     /// kind/provider/diagnostic and plan attempt/delay); display strings are
     /// derived from it, never carried beside it.
     Retrying { retry: LlmRetrySchedule },
-    ModelFallbackSkipped {
-        retry: LlmRetrySchedule,
-        target: crate::model_fallback::ModelFallbackSkippedTarget,
-    },
-    ModelFallbackStaged {
-        retry: LlmRetrySchedule,
-        previous: crate::SessionLlmIdentity,
-        target: crate::SessionLlmIdentity,
-    },
-    ModelFallbackCommitted {
-        retry: LlmRetrySchedule,
-        previous: crate::SessionLlmIdentity,
-        target: crate::SessionLlmIdentity,
-    },
-    ModelFallbackTargetFailed {
-        previous: crate::SessionLlmIdentity,
-        target: crate::SessionLlmIdentity,
-        error: AgentErrorReport,
-    },
 
     // === Skill Events ===
     /// Skills resolved for this turn.
@@ -2489,6 +2470,27 @@ pub enum AgentEvent {
     TurnUsageAccountingIdentityDisputed {
         session_id: SessionId,
         dispute: crate::provider_evidence::DisputedTurnUsageAccountingIdentity,
+    },
+
+    // Append new variants to preserve released implicit discriminants.
+    ModelFallbackSkipped {
+        retry: LlmRetrySchedule,
+        target: crate::model_fallback::ModelFallbackSkippedTarget,
+    },
+    ModelFallbackStaged {
+        retry: LlmRetrySchedule,
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+    },
+    ModelFallbackCommitted {
+        retry: LlmRetrySchedule,
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+    },
+    ModelFallbackTargetFailed {
+        previous: crate::SessionLlmIdentity,
+        target: crate::SessionLlmIdentity,
+        error: AgentErrorReport,
     },
 }
 

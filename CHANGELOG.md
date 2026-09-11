@@ -53,7 +53,9 @@ them.
 - **Typed fallback diagnostics:** `AgentEvent` gains `ModelFallbackSkipped`,
   `ModelFallbackStaged`, `ModelFallbackCommitted`, and
   `ModelFallbackTargetFailed`. `AgentError` and `AgentErrorReason` gain
-  `ModelFallbackResumeHeld`. Update exhaustive matches.
+  `ModelFallbackResumeHeld`. `DiagnosticCode` gains `InvalidModelFallback`.
+  Update exhaustive matches. Existing `AgentEvent`, `AgentErrorReason`, and
+  `DiagnosticCode` variants retain their 0.8.36 order and ordinals.
 
 ### Fixed
 

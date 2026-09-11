@@ -4,11 +4,6 @@
 export type AgentErrorClass = "llm" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 export type AgentErrorReason = {
-  model: string;
-  provider: Provider;
-  reason: ModelFallbackSkipReason;
-  reason_type: "model_fallback_resume_held";
-} | {
   reason_type: "llm_rate_limited";
   retry_after_ms?: number | null;
 } | {
@@ -67,6 +62,11 @@ export type AgentErrorReason = {
   cause_kind: TurnTerminalCauseKind;
   outcome: TurnTerminalOutcome;
   reason_type: "turn_terminal_cause";
+} | {
+  model: string;
+  provider: Provider;
+  reason: ModelFallbackSkipReason;
+  reason_type: "model_fallback_resume_held";
 };
 
 export type AgentErrorReport = {
@@ -965,33 +965,6 @@ export interface RetryingEvent {
   type: "retrying";
 }
 
-export interface ModelFallbackSkippedEvent {
-  retry: LlmRetrySchedule;
-  target: ModelFallbackSkippedTarget;
-  type: "model_fallback_skipped";
-}
-
-export interface ModelFallbackStagedEvent {
-  previous: SessionLlmIdentity;
-  retry: LlmRetrySchedule;
-  target: SessionLlmIdentity;
-  type: "model_fallback_staged";
-}
-
-export interface ModelFallbackCommittedEvent {
-  previous: SessionLlmIdentity;
-  retry: LlmRetrySchedule;
-  target: SessionLlmIdentity;
-  type: "model_fallback_committed";
-}
-
-export interface ModelFallbackTargetFailedEvent {
-  error: AgentErrorReport;
-  previous: SessionLlmIdentity;
-  target: SessionLlmIdentity;
-  type: "model_fallback_target_failed";
-}
-
 export interface SkillsResolvedEvent {
   injection_bytes: number;
   skills: SkillKey[];
@@ -1083,6 +1056,33 @@ export interface TurnUsageAccountingIdentityDisputedEvent {
   type: "turn_usage_accounting_identity_disputed";
 }
 
+export interface ModelFallbackSkippedEvent {
+  retry: LlmRetrySchedule;
+  target: ModelFallbackSkippedTarget;
+  type: "model_fallback_skipped";
+}
+
+export interface ModelFallbackStagedEvent {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_staged";
+}
+
+export interface ModelFallbackCommittedEvent {
+  previous: SessionLlmIdentity;
+  retry: LlmRetrySchedule;
+  target: SessionLlmIdentity;
+  type: "model_fallback_committed";
+}
+
+export interface ModelFallbackTargetFailedEvent {
+  error: AgentErrorReport;
+  previous: SessionLlmIdentity;
+  target: SessionLlmIdentity;
+  type: "model_fallback_target_failed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1155,10 +1155,6 @@ export type AgentEvent =
   CompactionFailedEvent |
   BudgetWarningEvent |
   RetryingEvent |
-  ModelFallbackSkippedEvent |
-  ModelFallbackStagedEvent |
-  ModelFallbackCommittedEvent |
-  ModelFallbackTargetFailedEvent |
   SkillsResolvedEvent |
   SkillResolutionFailedEvent |
   InteractionCompleteEvent |
@@ -1172,4 +1168,8 @@ export type AgentEvent =
   ProviderCacheBreakpointsDiscardedEvent |
   PeerContentIngestedEvent |
   TurnUsageAccountingUnmeasuredEvent |
-  TurnUsageAccountingIdentityDisputedEvent;
+  TurnUsageAccountingIdentityDisputedEvent |
+  ModelFallbackSkippedEvent |
+  ModelFallbackStagedEvent |
+  ModelFallbackCommittedEvent |
+  ModelFallbackTargetFailedEvent;

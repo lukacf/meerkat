@@ -731,30 +731,6 @@
         "oneOf": [
           {
             "properties": {
-              "model": {
-                "type": "string"
-              },
-              "provider": {
-                "$ref": "#/$defs/Provider"
-              },
-              "reason": {
-                "$ref": "#/$defs/ModelFallbackSkipReason"
-              },
-              "reason_type": {
-                "const": "model_fallback_resume_held",
-                "type": "string"
-              }
-            },
-            "required": [
-              "reason_type",
-              "provider",
-              "model",
-              "reason"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
               "reason_type": {
                 "const": "llm_rate_limited",
                 "type": "string"
@@ -1068,6 +1044,30 @@
               "reason_type",
               "outcome",
               "cause_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "$ref": "#/$defs/Provider"
+              },
+              "reason": {
+                "$ref": "#/$defs/ModelFallbackSkipReason"
+              },
+              "reason_type": {
+                "const": "model_fallback_resume_held",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "provider",
+              "model",
+              "reason"
             ],
             "type": "object"
           }
@@ -1799,98 +1799,6 @@
             "type": "object"
           },
           {
-            "properties": {
-              "retry": {
-                "$ref": "#/$defs/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/$defs/ModelFallbackSkippedTarget"
-              },
-              "type": {
-                "const": "model_fallback_skipped",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "previous": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "retry": {
-                "$ref": "#/$defs/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_staged",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "previous",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "previous": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "retry": {
-                "$ref": "#/$defs/LlmRetrySchedule"
-              },
-              "target": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_committed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "retry",
-              "previous",
-              "target"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "error": {
-                "$ref": "#/$defs/AgentErrorReport"
-              },
-              "previous": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "target": {
-                "$ref": "#/$defs/SessionLlmIdentity"
-              },
-              "type": {
-                "const": "model_fallback_target_failed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "previous",
-              "target",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Skills resolved for this turn.",
             "properties": {
               "injection_bytes": {
@@ -2250,6 +2158,98 @@
               "type",
               "session_id",
               "dispute"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "retry": {
+                "$ref": "#/$defs/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/$defs/ModelFallbackSkippedTarget"
+              },
+              "type": {
+                "const": "model_fallback_skipped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/$defs/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_staged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "previous": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "retry": {
+                "$ref": "#/$defs/LlmRetrySchedule"
+              },
+              "target": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "retry",
+              "previous",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/AgentErrorReport"
+              },
+              "previous": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "target": {
+                "$ref": "#/$defs/SessionLlmIdentity"
+              },
+              "type": {
+                "const": "model_fallback_target_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "previous",
+              "target",
+              "error"
             ],
             "type": "object"
           }

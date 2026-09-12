@@ -37,8 +37,6 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true, optional = true }
-# Development integration stays on the workspace-owned immutable source pin.
-# A coordinated release replaces this with the published protocol dependency.
 oai-rt-rs = { workspace = true, optional = true }
 # Pinned to the tokio-tungstenite major used by oai-rt-rs so the typed
 # `tungstenite::Error` discriminants can be matched when classifying
@@ -62,6 +60,7 @@ default = ["oauth", "copilot"]
 oauth = ["meerkat-auth-core/oauth"]
 copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 realtime = ["dep:oai-rt-rs", "dep:sha2", "dep:tokio-tungstenite"]
+live = ["dep:oai-rt-rs", "dep:sha2"]
 experimental-gpt-live = [
     "dep:oai-rt-rs",
     "meerkat-llm-core/experimental-gpt-live",
@@ -71,6 +70,16 @@ experimental-gpt-live = [
 # qualified experimental admission carrier and advertises no capability.
 experimental-gpt-live-gate0-harness = ["experimental-gpt-live"]
 test-realtime-fixtures = []
+
+[[test]]
+name = "public_live_contracts"
+path = "tests/public_live_contracts.rs"
+required-features = ["live"]
+
+[[test]]
+name = "public_live_backend_facts"
+path = "tests/public_live_backend_facts.rs"
+required-features = ["live"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "base64", "indexmap", "tempfile"]

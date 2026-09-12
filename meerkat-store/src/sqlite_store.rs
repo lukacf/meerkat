@@ -295,15 +295,16 @@ pub fn open_connection_with_options(
     path: &Path,
     options: SqliteConnectionOptions,
 ) -> Result<Connection, StoreError> {
-    meerkat_sqlite::open_with(
+    meerkat_sqlite::open_with_co_tenant_requirements(
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
         meerkat_sqlite::OpenOptions {
             busy_timeout: Some(options.busy_timeout),
-            // Schema-eligibility refusal must fire before the Primary
-            // profile's journal-mode conversion mutates the file.
+            // Schema and co-tenant refusal must precede the Primary
+            // profile's journal-mode conversion.
             schema_preflight: &[&SESSION_STORE_DOMAIN],
         },
+        SESSION_RUNTIME_REQUIREMENTS,
     )
     .map_err(StoreError::from)
 }
@@ -1054,11 +1055,28 @@ fn migrate_released_head_envelopes(tx: &Transaction<'_>) -> Result<(), rusqlite:
     Ok(())
 }
 
-fn initialize_current_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+fn initialize_session_v4_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     migration_0001_session_schema(tx)?;
     migration_0002_strand_links(tx)?;
     migration_0003_authenticated_head_sidecars(tx)?;
     migration_0004_head_canonical_v2_authority(tx)
+}
+
+fn migration_0005_live_co_tenant_compatibility(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE session_runtime_component_requirements (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            minimum_runtime_schema_version INTEGER NOT NULL CHECK (minimum_runtime_schema_version = 4)
+         );
+         INSERT INTO session_runtime_component_requirements VALUES (1, 4);",
+    )
+}
+
+fn initialize_current_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    initialize_session_v4_schema(tx)?;
+    migration_0005_live_co_tenant_compatibility(tx)
 }
 
 fn build_released_0_8_10_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1281,7 +1299,29 @@ fn verify_released_v3_session_schema(conn: &Connection) -> Result<(), String> {
     )
 }
 
+fn verify_released_v4_session_schema(conn: &Connection) -> Result<(), String> {
+    let objects = SESSION_STORE_DOMAIN
+        .owned_objects
+        .iter()
+        .copied()
+        .filter(|object| object.name != "session_runtime_component_requirements")
+        .collect::<Vec<_>>();
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &SESSION_STORE_DOMAIN,
+        &objects,
+        initialize_session_v4_schema,
+    )
+}
+
 /// The session store's schema domain in the per-file migration ledger.
+///
+/// Version 5 declares compatibility with independent runtime components.
+/// A standalone session store still needs no runtime domain; a co-tenant
+/// runtime must meet the persisted minimum. The facade activates both schema
+/// barriers atomically before publishing either store.
+/// Direct session-only constructors refuse an existing pre-barrier runtime
+/// before changing either domain; they cannot migrate runtime-owned tables.
 pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "session-store",
     migrations: &[
@@ -1305,9 +1345,14 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
             name: "head-canonical-v2-authority",
             apply: migration_0004_head_canonical_v2_authority,
         },
+        meerkat_sqlite::Migration {
+            version: 5,
+            name: "live-co-tenant-compatibility",
+            apply: migration_0005_live_co_tenant_compatibility,
+        },
     ],
     initialize_current: initialize_current_session_schema,
-    allowed_existing_versions: &[1, 2, 3, 4],
+    allowed_existing_versions: &[1, 2, 3, 4, 5],
     bridge_recoverable_versions: &[1],
     released_predecessors: &[
         meerkat_sqlite::SchemaPredecessor {
@@ -1322,8 +1367,16 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
             version: 3,
             verify: verify_released_v3_session_schema,
         },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 4,
+            verify: verify_released_v4_session_schema,
+        },
     ],
     owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "session_runtime_component_requirements",
+        },
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
             name: "sessions",
@@ -1513,7 +1566,7 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("upgrade");
         assert_eq!(report.from_version, 2);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, 5);
     }
 
     /// The exact catalog of a realm created before the schema ledger: the
@@ -1660,7 +1713,7 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("cross v1 head to v2 authority");
 
-        assert_eq!((report.from_version, report.to_version), (3, 4));
+        assert_eq!((report.from_version, report.to_version), (3, 5));
         let tx = conn
             .transaction()
             .expect("verify converted head transaction");
@@ -1849,7 +1902,7 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("advance schema around current authority");
 
-        assert_eq!((report.from_version, report.to_version), (3, 4));
+        assert_eq!((report.from_version, report.to_version), (3, 5));
         let tx = conn
             .transaction()
             .expect("read preserved authority transaction");
@@ -1934,7 +1987,7 @@ mod schema_floor_tests {
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("upgrade");
 
-        assert_eq!((report.from_version, report.to_version), (2, 4));
+        assert_eq!((report.from_version, report.to_version), (2, 5));
         let (row_version, migrated_json, migrated_token) = raw_head(&conn, &id);
         assert_eq!(
             row_version,
@@ -1970,7 +2023,7 @@ mod schema_floor_tests {
 
         let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
             .expect("v2 to current");
-        assert_eq!((report.from_version, report.to_version), (2, 4));
+        assert_eq!((report.from_version, report.to_version), (2, 5));
 
         assert_eq!(raw_head(&conn, &older_id), (1, older_json, older_token));
         assert_eq!(
@@ -2075,7 +2128,7 @@ fn open_session_connection(
     options: SqliteConnectionOptions,
 ) -> Result<Connection, StoreError> {
     let mut conn = open_connection_with_options(path, options)?;
-    meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)?;
+    ensure_schema(&mut conn)?;
     Ok(conn)
 }
 
@@ -2103,7 +2156,36 @@ pub fn begin_immediate_transaction_with_options(
 /// ([`StoreError::SchemaFromTheFuture`]) before anything runs. There is no
 /// unledgered DDL entry point.
 pub fn ensure_schema(conn: &mut Connection) -> Result<(), StoreError> {
-    meerkat_sqlite::apply_domain_migrations(conn, &SESSION_STORE_DOMAIN)?;
+    meerkat_sqlite::apply_domain_migrations_with_requirements(
+        conn,
+        &[&SESSION_STORE_DOMAIN],
+        SESSION_RUNTIME_REQUIREMENTS,
+    )?;
+    verify_runtime_component_compatibility(conn)?;
+    Ok(())
+}
+
+const SESSION_RUNTIME_REQUIREMENTS: &[meerkat_sqlite::CoTenantRequirement] =
+    &[meerkat_sqlite::CoTenantRequirement {
+        domain: "runtime-store",
+        minimum_version: 4,
+    }];
+
+/// A session-only file needs no runtime domain. Once a runtime co-tenants the
+/// file, its independent-component format must satisfy the stored requirement.
+/// This is an open-time compatibility check, not authority to mutate live rows.
+pub fn verify_runtime_component_compatibility(conn: &Connection) -> Result<(), StoreError> {
+    let required: i64 = conn.query_row(
+        "SELECT minimum_runtime_schema_version
+         FROM session_runtime_component_requirements WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if let Some(found) = meerkat_sqlite::domain_version(conn, "runtime-store")?
+        && found < required
+    {
+        return Err(StoreError::RuntimeComponentSchemaIncompatible { found, required });
+    }
     Ok(())
 }
 
@@ -9162,8 +9244,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn exact_released_0810_corpus_imports_and_fully_loads_current_session() {
+    #[test]
+    fn exact_released_0810_corpus_requires_joint_owner_before_session_migration() {
         let workspace_root = std::env::var_os("MEERKAT_WORKSPACE_ROOT")
             .map(PathBuf::from)
             .or_else(|| {
@@ -9183,69 +9265,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("sessions.sqlite3");
         std::fs::copy(&source, &path).expect("copy exact released 0.8.10 corpus database");
-
-        let raw = open_connection(&path).unwrap();
-        let raw_id = raw
-            .query_row(
-                "SELECT session_id FROM session_heads ORDER BY session_id LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("released corpus head identity");
-        drop(raw);
-        let id = SessionId::parse(&raw_id).expect("released corpus session identity");
-
-        let store = SqliteSessionStore::open(&path)
-            .expect("current store migrates the exact released 0.8.10 corpus");
-        let session = store
-            .load(&id)
-            .await
-            .expect("fully materialize migrated released session")
-            .expect("released corpus session remains present");
-        assert_eq!(session.version(), meerkat_core::SESSION_VERSION);
-        assert_eq!(session.messages().len(), 5);
-        assert!(
-            !session
-                .metadata()
-                .contains_key("session_checkpoint_stamp_v1"),
-            "the frozen importer must retire released checkpoint metadata"
-        );
-        assert!(
-            !session
-                .metadata()
-                .contains_key("session_system_context_state"),
-            "the frozen importer must adopt and retire released System context"
-        );
-        session
-            .validated_transcript_history_state()
-            .expect("imported transcript history must use the current validated wire");
-
-        let head = IncrementalSessionStore::load_head(&store, &id)
-            .await
-            .expect("load migrated released head")
-            .expect("released corpus head remains present");
-        assert_eq!(head.version, meerkat_core::SESSION_VERSION);
-
-        let migrated = open_connection(&path).unwrap();
-        let (row_version, embedded_version, stored_token): (i64, u32, String) = migrated
-            .query_row(
-                "SELECT version, head_json, cas_token
-                 FROM session_heads
-                 WHERE session_id = ?1",
-                params![id.to_string()],
-                |row| {
-                    let head_json = row.get::<_, JsonColumnBytes>(1)?.into_bytes();
-                    let head: SessionHead =
-                        serde_json::from_slice(&head_json).expect("decode migrated corpus head");
-                    Ok((row.get(0)?, head.version, row.get(2)?))
-                },
-            )
-            .expect("read migrated corpus head envelope");
-        assert_eq!(row_version, i64::from(meerkat_core::SESSION_VERSION));
-        assert_eq!(embedded_version, meerkat_core::SESSION_VERSION);
+        let before = std::fs::read(&path).expect("exact predecessor bytes");
+        assert!(matches!(
+            SqliteSessionStore::open(&path),
+            Err(StoreError::CoTenantActivationRequired {
+                found: 1,
+                required: 4,
+                ..
+            })
+        ));
+        let mut conn = meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+            .expect("inspect refused predecessor");
+        assert!(matches!(
+            ensure_schema(&mut conn),
+            Err(StoreError::CoTenantActivationRequired {
+                found: 1,
+                required: 4,
+                ..
+            })
+        ));
         assert_eq!(
-            stored_token,
-            session_head_cas_token(&head).expect("migrated corpus head token")
+            meerkat_sqlite::domain_version(&conn, "session-store").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
+            Some(1)
+        );
+        drop(conn);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "refusal must retain all schema and logical content bytes"
         );
     }
 

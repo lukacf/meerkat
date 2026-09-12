@@ -59,6 +59,10 @@ fn process_holds_exclusive(lock_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn process_holds_database_fence(db_path: &Path) -> bool {
+    process_holds_exclusive(&fence_lock_path(db_path))
+}
+
 /// Suffix appended to a database file name to form its fence lock file.
 pub const FENCE_LOCK_SUFFIX: &str = "mfence";
 

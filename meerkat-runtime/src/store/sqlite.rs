@@ -2,6 +2,11 @@
 
 #[cfg(feature = "sqlite-store")]
 mod inner {
+    mod live_composite {
+        use super::*;
+        include!("sqlite_live_composite.rs");
+        include!("sqlite_live_write.rs");
+    }
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -2325,7 +2330,10 @@ END";
             .owned_objects
             .iter()
             .copied()
-            .filter(|object| object.name != "runtime_direct_member_high_waters")
+            .filter(|object| {
+                object.name != "runtime_direct_member_high_waters"
+                    && !super::super::live_schema::OBJECT_NAMES.contains(&object.name)
+            })
             .collect::<Vec<_>>();
         meerkat_sqlite::verify_released_schema_fingerprint(
             conn,
@@ -2335,12 +2343,32 @@ END";
         )
     }
 
-    fn initialize_current_runtime_schema(
-        tx: &rusqlite::Transaction<'_>,
-    ) -> Result<(), rusqlite::Error> {
+    fn initialize_runtime_v3_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
         migration_0001_runtime_schema(tx)?;
         migration_0002_current_runtime_schema(tx)?;
         migration_0003_direct_member_high_water(tx)
+    }
+
+    fn verify_released_runtime_v3_schema(conn: &Connection) -> Result<(), String> {
+        let objects = RUNTIME_STORE_DOMAIN
+            .owned_objects
+            .iter()
+            .copied()
+            .filter(|object| !super::super::live_schema::OBJECT_NAMES.contains(&object.name))
+            .collect::<Vec<_>>();
+        meerkat_sqlite::verify_released_schema_fingerprint(
+            conn,
+            &RUNTIME_STORE_DOMAIN,
+            &objects,
+            initialize_runtime_v3_schema,
+        )
+    }
+
+    fn initialize_current_runtime_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        initialize_runtime_v3_schema(tx)?;
+        super::super::live_schema::initialize(tx)
     }
 
     const PRE_MOB_HOST_RUNTIME_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
@@ -2529,6 +2557,10 @@ END";
     /// Version 3 adds the receiver-owned semantic high-water that fences
     /// delayed direct-member binds across runtime replacement and cold
     /// restart. It stores no runtime bearer token.
+    /// Version 4 installs the independent continuous-Live head/event/source/
+    /// attempt tables. Their revisions are separate from actor authority.
+    /// Shared head-canonical files activate session-store v5 in the same
+    /// fenced transaction, so old session-only writers also refuse the file.
     ///
     /// This intentionally makes older binaries refuse the file: they do not
     /// understand the authority split and must never resume writing the frozen
@@ -2551,9 +2583,14 @@ END";
                 name: "direct-member-high-water",
                 apply: migration_0003_direct_member_high_water,
             },
+            meerkat_sqlite::Migration {
+                version: 4,
+                name: "independent-live-ledger",
+                apply: super::super::live_schema::initialize,
+            },
         ],
         initialize_current: initialize_current_runtime_schema,
-        allowed_existing_versions: &[1, 2, 3],
+        allowed_existing_versions: &[1, 2, 3, 4],
         bridge_recoverable_versions: &[1],
         released_predecessors: &[
             meerkat_sqlite::SchemaPredecessor {
@@ -2564,8 +2601,28 @@ END";
                 version: 2,
                 verify: verify_released_runtime_v2_schema,
             },
+            meerkat_sqlite::SchemaPredecessor {
+                version: 3,
+                verify: verify_released_runtime_v3_schema,
+            },
         ],
         owned_objects: &[
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_live_heads",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_live_events",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_live_sources",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_live_attempts",
+            },
             meerkat_sqlite::SchemaObject {
                 kind: meerkat_sqlite::SchemaObjectKind::Table,
                 name: "runtime_input_states",
@@ -2892,7 +2949,7 @@ END";
             let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
                 .expect("upgrade");
             assert_eq!(report.from_version, 1);
-            assert_eq!(report.to_version, 3);
+            assert_eq!(report.to_version, 4);
         }
 
         #[test]
@@ -2901,7 +2958,7 @@ END";
             let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
                 .expect("upgrade");
             assert_eq!(report.from_version, 2);
-            assert_eq!(report.to_version, 3);
+            assert_eq!(report.to_version, 4);
             assert!(table_exists(&conn, "runtime_direct_member_high_waters"));
         }
 
@@ -2918,11 +2975,11 @@ END";
             .expect("bridge exact pre-mob-host predecessor");
 
             assert_eq!(report.from_version, 1);
-            assert_eq!(report.to_version, 3);
+            assert_eq!(report.to_version, 4);
             assert_eq!(report.prepared, 0);
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, RUNTIME_STORE_DOMAIN.name).expect("ledger"),
-                Some(3)
+                Some(4)
             );
             assert!(table_exists(&conn, "runtime_mob_host_bindings"));
             assert!(table_exists(&conn, "runtime_mob_host_revocations"));
@@ -3918,6 +3975,15 @@ END";
 
     fn map_shared_sqlite_error(err: meerkat_sqlite::SqliteStoreError) -> RuntimeStoreError {
         match err {
+            meerkat_sqlite::SqliteStoreError::CoTenantActivationRequired {
+                domain,
+                found,
+                required,
+            } => RuntimeStoreError::CoTenantActivationRequired {
+                domain,
+                found,
+                required,
+            },
             meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture {
                 domain,
                 found,
@@ -3983,28 +4049,40 @@ END";
         }
     }
 
+    const RUNTIME_SESSION_REQUIREMENTS: &[meerkat_sqlite::CoTenantRequirement] =
+        &[meerkat_sqlite::CoTenantRequirement {
+            domain: "session-store",
+            minimum_version: 5,
+        }];
+
     #[track_caller]
     fn open_runtime_connection(path: &Path) -> Result<RuntimeConn, RuntimeStoreError> {
         let caller = std::panic::Location::caller();
         let guard =
             meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
-        let mut conn = meerkat_sqlite::open_with(
+        let mut conn = meerkat_sqlite::open_with_co_tenant_requirements(
             path,
             meerkat_sqlite::ConnectionProfile::PRIMARY,
             meerkat_sqlite::OpenOptions {
-                // The runtime store preflights its own domain (not its
-                // co-tenants'): an ineligible runtime-store file is refused
-                // typed before the Primary profile's WAL conversion.
+                // Runtime owns this domain's full preflight. The explicit
+                // read-only peer-version requirement below cannot migrate
+                // session-owned tables and also precedes WAL conversion.
                 schema_preflight: &[&RUNTIME_STORE_DOMAIN],
                 ..meerkat_sqlite::OpenOptions::default()
             },
+            RUNTIME_SESSION_REQUIREMENTS,
         )
         .map_err(|error| {
             map_runtime_connection_error(path, "runtime open/preflight", caller, error)
         })?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN).map_err(
-            |error| map_runtime_connection_error(path, "runtime schema migration", caller, error),
-        )?;
+        meerkat_sqlite::apply_domain_migrations_with_requirements(
+            &mut conn,
+            &[&RUNTIME_STORE_DOMAIN],
+            RUNTIME_SESSION_REQUIREMENTS,
+        )
+        .map_err(|error| {
+            map_runtime_connection_error(path, "runtime schema migration", caller, error)
+        })?;
         Ok(RuntimeConn {
             conn,
             _guard: guard,
@@ -4039,16 +4117,18 @@ END";
         .map_err(|error| {
             map_runtime_connection_error(path, "head-canonical open/preflight", caller, error)
         })?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN).map_err(
-            |error| map_runtime_connection_error(path, "runtime schema migration", caller, error),
-        )?;
-        meerkat_sqlite::apply_domain_migrations(
+        meerkat_sqlite::apply_domain_migrations_atomically(
             &mut conn,
-            &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+            &[
+                &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                &RUNTIME_STORE_DOMAIN,
+            ],
         )
         .map_err(|error| {
-            map_runtime_connection_error(path, "session schema migration", caller, error)
+            map_runtime_connection_error(path, "co-tenant schema migration", caller, error)
         })?;
+        meerkat_store::sqlite_store::verify_runtime_component_compatibility(&conn)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
         Ok(RuntimeConn {
             conn,
             _guard: guard,
@@ -9511,6 +9591,8 @@ ORDER BY runtime_id";
     pub struct SqliteRuntimeStore {
         path: PathBuf,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
+        #[cfg(any(test, feature = "test-support"))]
+        live_composite_test_pause: Option<crate::store::live_read::LiveCompositeTestPause>,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
@@ -9532,6 +9614,13 @@ ORDER BY runtime_id";
         /// Open an explicit whole-BLOB runtime authority.
         pub fn new_whole_blob(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
+            meerkat_sqlite::activate_file_domains_with_requirements(
+                &path,
+                &[&RUNTIME_STORE_DOMAIN],
+                RUNTIME_SESSION_REQUIREMENTS,
+                Duration::from_secs(10),
+            )
+            .map_err(map_shared_sqlite_error)?;
             let conn = open_runtime_connection(&path)?;
             if head_canonical_profile_has_durable_claim(&conn)? {
                 return Err(RuntimeStoreError::Unsupported(
@@ -9543,6 +9632,8 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
+                #[cfg(any(test, feature = "test-support"))]
+                live_composite_test_pause: None,
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9562,6 +9653,15 @@ ORDER BY runtime_id";
         /// O(document) migration into the first ordinary service boundary.
         pub fn new_head_canonical(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
+            meerkat_sqlite::activate_file_domains(
+                &path,
+                &[
+                    &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                    &RUNTIME_STORE_DOMAIN,
+                ],
+                Duration::from_secs(10),
+            )
+            .map_err(map_shared_sqlite_error)?;
             let mut conn = open_head_canonical_runtime_connection(&path)?;
             pin_head_canonical_profile(&mut conn)?;
             activate_head_canonical_profiles(&mut conn)?;
@@ -9569,6 +9669,8 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                #[cfg(any(test, feature = "test-support"))]
+                live_composite_test_pause: None,
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9580,6 +9682,23 @@ ORDER BY runtime_id";
 
         pub fn path(&self) -> &Path {
             &self.path
+        }
+
+        /// Pause a real atomic read between its Live head and actor reads.
+        /// Test-only scheduling control; it cannot replace captured data.
+        #[cfg(any(test, feature = "test-support"))]
+        #[doc(hidden)]
+        pub fn with_live_composite_test_pause(
+            mut self,
+            reached: std::sync::mpsc::Sender<()>,
+            resume: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
+            self.live_composite_test_pause =
+                Some(crate::store::live_read::LiveCompositeTestPause {
+                    reached,
+                    resume: Arc::new(std::sync::Mutex::new(resume)),
+                });
+            self
         }
 
         fn require_whole_blob_session_operation(
@@ -12676,6 +12795,9 @@ ORDER BY runtime_id";
 
     #[async_trait::async_trait]
     impl RuntimeStore for SqliteRuntimeStore {
+        fn live_ledger_ops(&self) -> Option<&dyn crate::store::live_read::RuntimeLiveLedgerOps> {
+            Some(self)
+        }
         fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
             self
         }
@@ -21657,8 +21779,8 @@ ORDER BY runtime_id";
         // ── upgrade/rollback ledger contract for the delivery domain ──────
         //
         // Head-canonical runtime authority intentionally advances the released
-        // v1 runtime domain through v3: older binaries do not understand the
-        // frozen-BLOB ownership split or direct-member high-water and must
+        // v1 runtime domain through v4: older binaries do not understand the
+        // independent Live component, frozen-BLOB split, or member high-water and must
         // refuse rather than resume writing it.
         // Durable delivery remains a separate lazily provisioned domain;
         // merely opening or reading a realm never stamps that domain.
@@ -21669,7 +21791,7 @@ ORDER BY runtime_id";
             let conn = Connection::open(store.path()).unwrap();
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
-                Some(3),
+                Some(4),
                 "runtime-store must install the complete head-canonical authority contract"
             );
             assert_eq!(
@@ -21891,7 +22013,7 @@ ORDER BY runtime_id";
             );
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
-                Some(3),
+                Some(4),
                 "delivery use must not move the runtime-store domain"
             );
             drop(conn);

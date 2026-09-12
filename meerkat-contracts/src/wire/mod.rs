@@ -13,6 +13,7 @@ mod host;
 mod image_generation;
 pub mod jobs;
 mod live;
+pub mod live_observation;
 mod mcp_live;
 mod mob;
 mod models;

@@ -292,7 +292,7 @@ separate facts:
 
 | Gate | Requirement |
 |------|-------------|
-| Realtime model | The selected `ModelProfile.realtime` is `true` |
+| Realtime model | The selected Rust `ModelProfile::is_realtime()` projection is `true` |
 | Live orchestration | The host is built with `live` and the appropriate realtime provider support, such as `openai-realtime` |
 | Direct WebSocket | `rkat-rpc` starts with `--live-ws <addr>` |
 | WebRTC | `rkat-rpc` is built with `live-webrtc` and starts with `--live-webrtc` |
@@ -321,14 +321,23 @@ output are derived projections.
 
 ## Model capabilities
 
-`ModelProfile` describes per-model capabilities used for feature gating and tool visibility. Two fields are relevant to multimodal content support:
+`ModelProfile` describes per-model capabilities used for feature gating and tool
+visibility. Its Rust `interaction_kind` is the catalog-owned contract:
+`Text`, `TurnBasedRealtime`, or `ContinuousLive`. `is_realtime()` derives the
+coarse live capability from that value; it is not a separately stored boolean.
+The public wire `realtime` field remains that derived capability projection.
+Providers select a protocol from the typed interaction kind, not a model-name
+prefix or the coarse boolean. A live-capable catalog declaration still requires
+the corresponding provider factory and host transport.
+
+The modality and feature projections include:
 
 | Capability | Description | Anthropic | OpenAI | Gemini |
 |------------|-------------|-----------|--------|--------|
 | `vision` | Model can process image content in user messages | Yes | Yes | Yes |
 | `image_tool_results` | Model can process image content in tool results | Yes | Yes for current chat and Responses rows; no for `gpt-realtime-2` | Yes |
 | `inline_video` | Model can process video content in user messages, including inline bytes and provider-readable URI references | No | No | Yes |
-| `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
+| `realtime` (wire), `is_realtime()` (Rust) | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
 | `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2` / Codex | Yes |
 
 These fields are set in `meerkat-models/src/capabilities/**` (the types live in `meerkat-core/src/model_profile/**`) and exposed via `ModelProfile`. They control:

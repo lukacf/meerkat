@@ -20,7 +20,7 @@ use meerkat_core::{StopReason, TurnUsage, types::Usage};
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionEvent, RealtimeSessionFactory,
-    RealtimeSessionOpenConfig,
+    RealtimeSessionOpenConfig, UnsupportedRealtimeTurningMode, validate_realtime_turning_mode,
 };
 use oai_rt_rs::error::{ApiErrorType, ServerError as OpenAiServerError};
 use oai_rt_rs::protocol::models::{
@@ -434,6 +434,7 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
+        validate_realtime_turning_mode(open_config.turning_mode)?;
         let client = RealtimeClient::connect(
             &self.api_key,
             Some(&openai_realtime_connect_model(&open_config.llm_identity)),
@@ -807,6 +808,9 @@ fn openai_session_update(
             interrupt_response: Some(true),
         })),
         RealtimeTurningMode::ExplicitCommit => Some(Nullable::Null),
+        RealtimeTurningMode::Continuous => {
+            return Err(UnsupportedRealtimeTurningMode.into());
+        }
     };
 
     Ok(SessionUpdate {
@@ -1936,6 +1940,7 @@ impl OpenAiRealtimeSession {
     }
 
     fn raw_mut(&mut self) -> Result<&mut (dyn OpenAiLiveSession + '_), LlmError> {
+        validate_realtime_turning_mode(self.turning_mode)?;
         match self.raw.as_mut() {
             Some(raw) => Ok(raw.as_mut()),
             None => Err(LlmError::ConnectionReset),
@@ -3085,6 +3090,7 @@ impl OpenAiRealtimeSession {
         &mut self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<(), LlmError> {
+        validate_realtime_turning_mode(open_config.turning_mode)?;
         let session_update = openai_projection_session_update(open_config, &self.realtime_policy)?;
         self.raw_mut()?
             .send_raw(ClientEvent::SessionUpdate {
@@ -3412,6 +3418,7 @@ impl OpenAiRealtimeSession {
         chunk: RealtimeInputChunk,
         command_budget: Option<OwnedSemaphorePermit>,
     ) -> Result<(), LlmError> {
+        validate_realtime_turning_mode(self.turning_mode)?;
         if !matches!(chunk, RealtimeInputChunk::ImageChunk(_))
             && !self.pending_image_inputs.is_empty()
         {
@@ -3513,6 +3520,9 @@ impl OpenAiRealtimeSession {
                                 command_budget,
                             },
                         );
+                    }
+                    RealtimeTurningMode::Continuous => {
+                        return Err(UnsupportedRealtimeTurningMode.into());
                     }
                 }
                 Ok(())
@@ -4081,6 +4091,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+        validate_realtime_turning_mode(open_config.turning_mode)?;
         // Hold the take-once runtime lease (or fresh direct-factory fallback)
         // until every canonical seed item has received provider ACK.
         let _open_projection_lease = self.take_or_acquire_open_projection_lease(open_config)?;
@@ -4123,6 +4134,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         target: &RealtimeExternalSessionTarget,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+        validate_realtime_turning_mode(open_config.turning_mode)?;
         // Attach does not replay canonical history, but a runtime-built config
         // may still carry pre-hydration custody. Consume it exactly once and
         // release it when this attach attempt returns so a retained config
@@ -4171,6 +4183,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Arc<dyn LiveAdapter>, LlmError> {
+        validate_realtime_turning_mode(open_config.turning_mode)?;
         // Direct Rust callers can construct configs without the runtime's
         // pre-hydration lease. Acquire the same process owner before any seed
         // event/data-URL materialization so the factory surface cannot bypass
@@ -7126,6 +7139,113 @@ mod tests {
             ],
         )
         .expect("sample transcript must produce a realtime projection")
+    }
+
+    #[tokio::test]
+    async fn continuous_mode_rejects_all_legacy_factory_entries_before_raw_io() {
+        let raw = Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::from([Err(LlmError::ConnectionReset)])),
+            attached_sessions: Mutex::new(VecDeque::from([Err(LlmError::ConnectionReset)])),
+            open_configs: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = OpenAiRealtimeSessionFactory::new(raw.clone());
+        let mut config = sample_open_config(RealtimeTurningMode::ProviderManaged);
+        // Direct Rust callers may mutate this public field after construction.
+        config.turning_mode = RealtimeTurningMode::Continuous;
+        let results = [
+            factory.open_session(&config).await.map(|_| ()),
+            factory.open_live_adapter(&config).await.map(|_| ()),
+            factory
+                .attach_external_session(
+                    &RealtimeExternalSessionTarget::new("existing-call").expect("valid target"),
+                    &config,
+                )
+                .await
+                .map(|_| ()),
+        ];
+        for result in results {
+            assert!(matches!(result, Err(LlmError::InvalidRequest { message })
+                if message == UnsupportedRealtimeTurningMode.to_string()));
+        }
+        assert!(raw.open_configs.lock().await.is_empty());
+        assert_eq!(raw.opened_sessions.lock().await.len(), 1);
+        assert_eq!(raw.attached_sessions.lock().await.len(), 1);
+        assert!(openai_session_update(&config, &OpenAiRealtimePolicy::default()).is_err());
+        assert!(
+            !factory
+                .capabilities()
+                .turning_modes
+                .contains(&RealtimeTurningMode::Continuous)
+        );
+    }
+
+    #[tokio::test]
+    async fn continuous_refresh_rejects_incoming_mode_before_any_raw_io() {
+        let mut violations = Vec::new();
+        for original in [
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let events = Arc::new(Mutex::new(VecDeque::from([Ok(Some(
+                ServerEvent::SessionUpdated {
+                    event_id: "refresh-ack".into(),
+                    session: sample_server_session("gpt-realtime-2"),
+                },
+            ))])));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::clone(&seen),
+                    next_events: Arc::clone(&events),
+                }),
+                original,
+            );
+            let mut config = sample_open_config(original);
+            config.turning_mode = RealtimeTurningMode::Continuous;
+            let result = RealtimeSession::refresh_projection(&mut session, &config).await;
+            let writes = seen.lock().await.len();
+            if !matches!(&result, Err(LlmError::InvalidRequest { message })
+                if message == &UnsupportedRealtimeTurningMode.to_string())
+                || writes != 0
+            {
+                violations.push(format!("{original:?}: {result:?}, writes={writes}"));
+            }
+            assert_eq!(session.turning_mode(), original);
+            if writes == 0 {
+                assert_eq!(events.lock().await.len(), 1);
+                config.turning_mode = original;
+                RealtimeSession::refresh_projection(&mut session, &config)
+                    .await
+                    .expect("supported legacy refresh");
+                assert_eq!(seen.lock().await.len(), 1);
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "continuous refresh escaped preflight: {violations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_continuous_legacy_session_refuses_text_before_any_provider_write() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::Continuous,
+        );
+        let result = session
+            .send_input(RealtimeInputChunk::TextChunk(
+                meerkat_contracts::RealtimeTextChunk {
+                    text: "must not become instructions".into(),
+                },
+            ))
+            .await;
+        assert!(matches!(result, Err(LlmError::InvalidRequest { message })
+            if message == UnsupportedRealtimeTurningMode.to_string()));
+        assert!(seen.lock().await.is_empty());
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

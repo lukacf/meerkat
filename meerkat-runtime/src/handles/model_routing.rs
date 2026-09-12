@@ -28,7 +28,7 @@ fn capability_surface_from_profile(profile: &ModelProfile) -> mm_dsl::SessionLlm
         supports_mid_conversation_system_messages: profile
             .supports_mid_conversation_system_messages,
         image_generation: profile.image_generation,
-        realtime: profile.realtime,
+        realtime: profile.is_realtime(),
         call_timeout_secs: profile.call_timeout_secs,
     }
 }
@@ -148,7 +148,7 @@ impl RuntimeModelRoutingHandle {
             target_capability_base_filter: mm_dsl::ToolFilter::from_domain(
                 &visibility_plan.next_state.capability_base_filter,
             ),
-            target_realtime_capable: target_profile.realtime,
+            target_realtime_capable: target_profile.is_realtime(),
             view_image_tool_available: visibility_plan.view_image_tool_available,
             previous_view_image_visible: visibility_plan.previous_view_image_visible,
             next_view_image_visible: visibility_plan.next_view_image_visible,

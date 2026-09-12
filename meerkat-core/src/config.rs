@@ -59,6 +59,11 @@ pub struct Config {
     pub self_hosted: SelfHostedConfig,
     pub provider_tools: ProviderToolsConfig,
     pub model_fallback: ModelFallbackConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::live_execution::profile::LiveProfilesConfig::is_empty"
+    )]
+    pub live: crate::live_execution::profile::LiveProfilesConfig,
     pub presentation: PresentationConfig,
     /// Realm-scoped connection sets (backend profiles, auth profiles,
     /// bindings). TOML keys use the singular `[realm.<id>.*]` namespace
@@ -96,6 +101,7 @@ impl Default for Config {
             self_hosted: SelfHostedConfig::default(),
             provider_tools: ProviderToolsConfig::default(),
             model_fallback: ModelFallbackConfig::default(),
+            live: crate::live_execution::profile::LiveProfilesConfig::default(),
             presentation: PresentationConfig::default(),
             realm: BTreeMap::new(),
         }
@@ -349,6 +355,7 @@ impl Config {
         for (id, entry) in other.models.custom {
             self.models.custom.insert(id, entry);
         }
+        self.live.profiles.extend(other.live.profiles);
         if other.max_tokens.is_some() {
             self.max_tokens = other.max_tokens;
         }

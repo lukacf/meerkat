@@ -945,42 +945,7 @@ pub fn build_models_catalog_response(
                                 entry.id
                             ))
                         })?;
-                    let profile = Some(meerkat_contracts::WireModelProfile {
-                        release_stage: match model_profile.release_stage {
-                            meerkat_core::ModelReleaseStage::Stable => {
-                                meerkat_contracts::WireModelReleaseStage::Stable
-                            }
-                            meerkat_core::ModelReleaseStage::Experimental => {
-                                meerkat_contracts::WireModelReleaseStage::Experimental
-                            }
-                            meerkat_core::ModelReleaseStage::OperatorDefined => {
-                                meerkat_contracts::WireModelReleaseStage::OperatorDefined
-                            }
-                        },
-                        model_family: model_profile.model_family.clone(),
-                        supports_temperature: model_profile.supports_temperature,
-                        supports_thinking: model_profile.supports_thinking,
-                        supports_reasoning: model_profile.supports_reasoning,
-                        supports_web_search: model_profile.supports_web_search,
-                        supports_mid_conversation_system_messages: model_profile
-                            .supports_mid_conversation_system_messages,
-                        vision: model_profile.vision,
-                        image_input: model_profile.image_input,
-                        image_tool_results: model_profile.image_tool_results,
-                        inline_video: model_profile.inline_video,
-                        realtime: model_profile.realtime,
-                        image_generation: model_profile.image_generation,
-                        params_schema: model_profile.params_schema.clone(),
-                        beta_headers: model_profile
-                            .beta_headers
-                            .iter()
-                            .map(|header| meerkat_contracts::WireModelBetaHeader {
-                                feature: header.feature.clone(),
-                                header_name: header.header_name.clone(),
-                                header_value: header.header_value.clone(),
-                            })
-                            .collect(),
-                    });
+                    let profile = Some(meerkat_contracts::WireModelProfile::from(&model_profile));
                     Ok(meerkat_contracts::CatalogModelEntry {
                         id: entry.id.clone(),
                         display_name: entry.display_name.clone(),

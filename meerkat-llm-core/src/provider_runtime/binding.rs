@@ -437,7 +437,7 @@ impl ExperimentalRealtimeAdmissionAuthority {
         if !target.profile().matches_identity(target.identity())
             || target.profile().profile().release_stage
                 != meerkat_core::ModelReleaseStage::Experimental
-            || !target.profile().profile().realtime
+            || !target.profile().profile().is_realtime()
         {
             return Err(ExperimentalRealtimeAdmissionError::TargetNotExperimentalRealtime);
         }

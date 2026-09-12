@@ -9,6 +9,24 @@ use sha2::{Digest, Sha256};
 
 use crate::interaction::InteractionId;
 
+pub mod activation;
+pub mod backend;
+pub mod evidence;
+pub mod frontend;
+pub mod observation;
+pub mod profile;
+pub mod request;
+
+/// Disclosure intent is independent of execution permission and playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum LiveContextIntent {
+    Instructions,
+    Thinking,
+    Commentary,
+}
+
 const LIVE_CONTEXT_PREFIX_DOMAIN: &[u8] = b"meerkat.live-context-prefix.v1\0";
 const LIVE_NORMALIZED_USER_INPUT_DOMAIN: &[u8] = b"meerkat.live-normalized-user-input.v1\0";
 const LIVE_BRIDGE_REQUEST_DOMAIN: &[u8] = b"meerkat.live-bridge-request.v1\0";

@@ -248,7 +248,7 @@ async fn effort_levels_accepted() {
         let caps = caps_for(entry);
         // Realtime models advertise effort for their bidirectional transport,
         // not the request/response client exercised by this lane.
-        if caps.realtime {
+        if caps.is_realtime() {
             continue;
         }
         if caps.effort_levels.is_empty() {

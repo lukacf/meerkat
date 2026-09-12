@@ -174,7 +174,7 @@ impl Gate0CandidateRealtimeTarget {
         }
         let profile = target.profile().profile();
         if profile.release_stage != meerkat_core::ModelReleaseStage::Experimental
-            || !profile.realtime
+            || !profile.is_realtime()
         {
             return Err(Gate0CandidateError::TargetRejected);
         }

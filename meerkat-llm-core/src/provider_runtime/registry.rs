@@ -163,6 +163,62 @@ pub struct ProviderRuntimeRegistry {
     runtimes: BTreeMap<Provider, Arc<dyn ProviderRuntime>>,
 }
 
+/// Registry-issued pairing of an exact selected binding and its resolved
+/// credential authority. Account-backed bindings retain Account identity;
+/// callers cannot re-pair a raw connection with a different binding.
+#[derive(Clone)]
+pub struct ResolvedLiveConnection {
+    auth_binding: AuthBindingRef,
+    connection: ResolvedConnection,
+}
+
+impl ResolvedLiveConnection {
+    pub fn auth_binding(&self) -> &AuthBindingRef {
+        &self.auth_binding
+    }
+
+    pub fn connection(&self) -> &ResolvedConnection {
+        &self.connection
+    }
+}
+
+impl std::fmt::Debug for ResolvedLiveConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResolvedLiveConnection([REDACTED])")
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LiveConnectionResolutionError {
+    #[error(transparent)]
+    Resolution(#[from] ProviderAuthError),
+    #[error("live provider resolved credential authority different from the selected binding")]
+    CredentialIdentityMismatch,
+}
+
+fn validated_binding(
+    realm: &RealmConnectionSet,
+    auth_binding: &AuthBindingRef,
+) -> Result<ValidatedBinding, ProviderAuthError> {
+    let (binding, backend, auth) = realm
+        .lookup_auth_binding(auth_binding)
+        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+    if auth_binding.realm != realm.realm_id {
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "auth_binding realm '{}' does not match resolved realm '{}'",
+            auth_binding.realm, realm.realm_id
+        )));
+    }
+    ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+        auth_binding,
+        binding.credential_identity(auth_binding),
+        backend,
+        auth,
+        &binding.policy,
+    )
+    .map_err(ProviderAuthError::Binding)
+}
+
 impl ProviderRuntimeRegistry {
     /// Empty registry — no runtimes registered.
     pub fn empty() -> Self {
@@ -200,28 +256,40 @@ impl ProviderRuntimeRegistry {
         auth_binding: &AuthBindingRef,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        let (binding, backend, auth) = realm
-            .lookup_auth_binding(auth_binding)
-            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-        if auth_binding.realm != realm.realm_id {
-            return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                "auth_binding realm '{}' does not match resolved realm '{}'",
-                auth_binding.realm, realm.realm_id
-            )));
-        }
-        let validated = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
-            auth_binding,
-            binding.credential_identity(auth_binding),
-            backend,
-            auth,
-            &binding.policy,
-        )
-        .map_err(ProviderAuthError::Binding)?;
+        let validated = validated_binding(realm, auth_binding)?;
         let runtime = self
             .runtimes
             .get(&validated.provider())
             .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
         runtime.resolve_binding(&validated, env).await
+    }
+
+    pub async fn resolve_live_connection(
+        &self,
+        realm: &RealmConnectionSet,
+        auth_binding: &AuthBindingRef,
+        env: &ResolverEnvironment,
+    ) -> Result<ResolvedLiveConnection, LiveConnectionResolutionError> {
+        let validated = validated_binding(realm, auth_binding)?;
+        let runtime = self
+            .runtimes
+            .get(&validated.provider())
+            .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
+        let connection = runtime.resolve_binding(&validated, env).await?;
+        if &connection.credential_identity != validated.credential_identity() {
+            return Err(LiveConnectionResolutionError::CredentialIdentityMismatch);
+        }
+        if connection.provider != validated.provider() {
+            return Err(ProviderAuthError::ResolvedProviderMismatch {
+                expected: validated.provider(),
+                resolved: connection.provider,
+            }
+            .into());
+        }
+        Ok(ResolvedLiveConnection {
+            auth_binding: auth_binding.clone(),
+            connection,
+        })
     }
 
     /// Build a client from a resolved connection through the matching

@@ -1346,6 +1346,7 @@ pub(super) enum MobCommand {
     /// holds zero live-channel facts (DL2).
     MemberLiveOpen {
         agent_identity: AgentIdentity,
+        profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
         turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
         transport: Option<super::bridge_protocol::LiveOpenTransport>,
         reply_tx: oneshot::Sender<Result<MemberLiveOpenDelivery, MobError>>,

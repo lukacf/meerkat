@@ -3190,6 +3190,7 @@ class MeerkatClient:
         *,
         turning_mode: RealtimeTurningMode | None = None,
         transport: MobMemberLiveTransport | None = None,
+        profile_id: str | None = None,
     ) -> LiveOpenResult:
         """Open a member live channel while preserving its opaque bootstrap."""
         params = MobMemberLiveOpenParams(
@@ -3197,6 +3198,7 @@ class MeerkatClient:
             agent_identity=agent_identity,
             turning_mode=turning_mode,
             transport=transport,
+            profile_id=profile_id,
         )
         result = await self._request("mob/member_live_open", _wire_params(params))
         return self._parse_live_open_result(
@@ -4326,9 +4328,10 @@ class MeerkatClient:
     async def live_open(
         self,
         session_id: str,
-        turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        turning_mode: RealtimeTurningMode | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
         seed_max_chars: int | None = None,
+        profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Open a live audio/text channel with model-gated image input.
 
@@ -4365,6 +4368,8 @@ class MeerkatClient:
         the value must be positive; the server rejects zero.
         """
         params: dict[str, Any] = {"session_id": session_id}
+        if profile_id is not None:
+            params["profile_id"] = profile_id
         if turning_mode is not None:
             params["turning_mode"] = turning_mode
         if transport is not None:

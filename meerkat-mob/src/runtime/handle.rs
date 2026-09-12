@@ -7434,11 +7434,36 @@ impl MobHandle {
         turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
         transport: Option<super::bridge_protocol::LiveOpenTransport>,
     ) -> Result<super::bridge_protocol::LiveOpenResult, MobError> {
+        self.member_live_open_selected(caller, identity, None, turning_mode, transport)
+            .await
+    }
+
+    pub async fn member_live_open_with_profile(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        profile_id: meerkat_core::live_execution::profile::LiveProfileId,
+        turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
+        transport: Option<super::bridge_protocol::LiveOpenTransport>,
+    ) -> Result<super::bridge_protocol::LiveOpenResult, MobError> {
+        self.member_live_open_selected(caller, identity, Some(profile_id), turning_mode, transport)
+            .await
+    }
+
+    async fn member_live_open_selected(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
+        turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
+        transport: Option<super::bridge_protocol::LiveOpenTransport>,
+    ) -> Result<super::bridge_protocol::LiveOpenResult, MobError> {
         let delivery = self
             .clone()
             .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
             .send_actor_command(|reply_tx| super::state::MobCommand::MemberLiveOpen {
                 agent_identity: identity,
+                profile_id,
                 turning_mode,
                 transport,
                 reply_tx,

@@ -2896,7 +2896,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
             "properties": {
               "command": {
                 "const": "open_member_live_channel",
@@ -2909,6 +2908,9 @@
               },
               "expected_member": {
                 "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "profile": {
+                "$ref": "#/components/schemas/BridgeLiveProfileSelection"
               },
               "protocol_version": {
                 "$ref": "#/components/schemas/BridgeProtocolVersion"
@@ -4522,6 +4524,31 @@
           }
         ]
       },
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BridgeMemberIncarnation": {
         "additionalProperties": false,
         "description": "Exact cross-host member residency addressed by one directed delivery.",
@@ -5663,6 +5690,62 @@
               "result",
               "generation",
               "page"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "after_sequence": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "encoding_profile": {
+                "$ref": "#/components/schemas/LiveObservationEncodingProfile"
+              },
+              "filter": {
+                "$ref": "#/components/schemas/LiveObservationFilter"
+              },
+              "has_more": {
+                "type": "boolean"
+              },
+              "next_cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LiveObservationCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "owner": {
+                "$ref": "#/components/schemas/LiveObservationOwner"
+              },
+              "records": {
+                "items": {
+                  "$ref": "#/components/schemas/LiveObservationRecord"
+                },
+                "type": "array"
+              },
+              "result": {
+                "const": "member_live_observation_page",
+                "type": "string"
+              },
+              "snapshot": {
+                "$ref": "#/components/schemas/LiveObservationSnapshot"
+              }
+            },
+            "required": [
+              "result",
+              "encoding_profile",
+              "owner",
+              "filter",
+              "snapshot",
+              "after_sequence",
+              "records",
+              "has_more"
             ],
             "type": "object"
           },
@@ -7659,6 +7742,9 @@
           "compaction": true,
           "hooks": true,
           "limits": true,
+          "live": {
+            "$ref": "#/components/schemas/LiveProfilesConfig"
+          },
           "max_tokens": {
             "format": "uint32",
             "minimum": 1,
@@ -9832,6 +9918,17 @@
         "title": "ListSessionsResult",
         "type": "object"
       },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveClientRequestPolicy": {
+        "enum": [
+          "snapshot_at_delegation",
+          "explicit_application_request"
+        ],
+        "type": "string"
+      },
       "LiveCloseStatus": {
         "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
         "oneOf": [
@@ -9852,6 +9949,13 @@
           }
         ]
       },
+      "LiveContextProjectionPolicy": {
+        "enum": [
+          "reject",
+          "recent_authorized_suffix"
+        ],
+        "type": "string"
+      },
       "LiveInterruptStatus": {
         "description": "Typed public result class for `live/interrupt`.\n\nToday generated runtime authority emits only `Interrupted`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
         "oneOf": [
@@ -9861,6 +9965,181 @@
             "type": "string"
           }
         ]
+      },
+      "LiveManagedBackendModel": {
+        "additionalProperties": false,
+        "description": "Managed backend selection does not carry a second credential. Whether the\nselected provider/model can share the voice connection is provider-owned.",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ],
+        "type": "object"
+      },
+      "LiveObservationCoverage": {
+        "enum": [
+          "complete_accepted_prefix",
+          "known_local_gap",
+          "unknown_extent_crash_discontinuity"
+        ],
+        "type": "string"
+      },
+      "LiveObservationCursor": {
+        "description": "Opaque query token, never a read authorization or bearer credential.",
+        "type": "string"
+      },
+      "LiveObservationEncodingProfile": {
+        "enum": [
+          "v1"
+        ],
+        "type": "string"
+      },
+      "LiveObservationFilter": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_channels",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel_id": {
+                "$ref": "#/components/schemas/LiveChannelId"
+              },
+              "kind": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "channel_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveObservationOwner": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveObservationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "channel_id": {
+            "$ref": "#/components/schemas/LiveChannelId"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/LiveTranscriptObservation"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/LiveObservationSeq"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel_id",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "LiveObservationSeq": {
+        "description": "A Meerkat-assigned ordinal within one session's committed Live ledger.\n\nThis is never a provider event, response, item, or turn identifier.",
+        "format": "uint64",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "LiveObservationSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/LiveObservationCoverage"
+          },
+          "end_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prefix_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation",
+          "revision",
+          "end_sequence",
+          "prefix_digest",
+          "coverage"
+        ],
+        "type": "object"
       },
       "LiveOpenResult": {
         "description": "Response payload for `live/open`.\n\n`capabilities`, `continuity`, and `transport` are typed wire-side mirrors\nof the core `LiveChannelCapabilities` / `LiveContinuityMode` /\n`LiveTransportBootstrap` so SDK codegen sees the real shape (typed\nbooleans, internally-tagged variant payloads, discriminated transport\nunion) instead of an opaque JSON blob. CC5/CC6 (PR #650 verifier\nfollow-up); G8 (P2): `transport` typed-mirror.\n\n`Eq`: all fields are strings/enums/bools, and the bridge reply chain\n(`BridgeReply::MemberLiveChannelOpened`) requires it.",
@@ -9894,6 +10173,202 @@
         ],
         "type": "string"
       },
+      "LiveProfileAuthBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/BindingId"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/BindingOrigin",
+            "default": "configured"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "realm": {
+            "$ref": "#/components/schemas/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "LiveProfileDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "context_projection": {
+            "$ref": "#/components/schemas/LiveContextProjectionPolicy"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/LiveProfileExecution"
+          },
+          "instructions": {
+            "description": "Trusted voice guidance, never copied from executor System/tool state.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "voice": {
+            "description": "Provider-owned voice selector; omission leaves selection to the\nprovider declaration, not to the surface.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "voice_identity": {
+            "$ref": "#/components/schemas/LiveProfileVoiceIdentity"
+          }
+        },
+        "required": [
+          "voice_identity",
+          "execution",
+          "context_projection"
+        ],
+        "type": "object"
+      },
+      "LiveProfileEntry": {
+        "description": "Absence of an entry inherits its owner profile; Disabled explicitly blocks\nthat inherited entry. Neither state grants permission to execute work.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "definition": {
+                "$ref": "#/components/schemas/LiveProfileDefinition"
+              },
+              "state": {
+                "const": "configured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "definition"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveProfileExecution": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "client_context",
+                "type": "string"
+              },
+              "request_policy": {
+                "$ref": "#/components/schemas/LiveClientRequestPolicy"
+              }
+            },
+            "required": [
+              "mode",
+              "request_policy"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "backend": {
+                "$ref": "#/components/schemas/LiveManagedBackendModel"
+              },
+              "mode": {
+                "const": "function_bridge",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "backend"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveProfileVoiceIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveProfileAuthBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider"
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "self_hosted_server_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "LiveProfilesConfig": {
+        "additionalProperties": false,
+        "description": "Declarative profiles only. Trusted activation lives in a separate host\nsource and cannot be written through ordinary config mutation.",
+        "properties": {
+          "profiles": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/LiveProfileEntry"
+            },
+            "default": {},
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "LiveRefreshStatus": {
         "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps\nSDK codegen on the simple-struct path.",
         "oneOf": [
@@ -9903,6 +10378,56 @@
             "type": "string"
           }
         ]
+      },
+      "LiveTranscriptDirection": {
+        "description": "Direction of observed speech, not a completed transcript role.",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "type": "string"
+      },
+      "LiveTranscriptObservation": {
+        "additionalProperties": false,
+        "description": "Exact observed transcript text before canonical sequence assignment.\n\nWhitespace and empty deltas are content facts. Request construction and\npermission are separate owners and must not turn this value into a final\nuser transcript or an executable task by itself.",
+        "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/LiveTranscriptDirection"
+          },
+          "range": {
+            "$ref": "#/components/schemas/LiveTranscriptRange"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction",
+          "range",
+          "text"
+        ],
+        "type": "object"
+      },
+      "LiveTranscriptRange": {
+        "additionalProperties": false,
+        "description": "Finite session-relative half-open interval in milliseconds.\n\nFractional values, overlaps with other observations, and zero-width\nintervals are retained. An interval proves neither a turn boundary nor\nplayback completion.",
+        "properties": {
+          "end_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "start_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "start_ms",
+          "end_ms"
+        ],
+        "type": "object"
       },
       "LiveTruncateStatus": {
         "description": "Typed public result class for `live/truncate`.\n\nToday generated runtime authority emits only `Truncated`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",
@@ -13500,10 +14025,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },

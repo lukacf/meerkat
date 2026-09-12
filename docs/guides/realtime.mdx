@@ -65,6 +65,21 @@ Use `GET /models/catalog` (REST) or `models/catalog` (RPC) to inspect which mode
 A live channel is opened by creating a session on a realtime-capable model and
 then calling `live/open`. These are separate lifecycle steps.
 
+`turning_mode` distinguishes `provider_managed` (provider-owned turn detection),
+`explicit_commit` (caller commits), and `continuous` (observations without
+provider-defined user turns). Legacy realtime channels support only the first
+two; omission preserves `provider_managed`. They reject `continuous` before
+provider connection or attachment. The continuous value is reserved for a
+separately activated public Live profile, not a way to switch an ordinary
+session's model or grant execution permission.
+
+The optional `profile_id` field selects a named public continuous profile on
+the owning host. It must be a non-null profile identifier; it cannot be combined
+with a private `execution_identity`, a legacy turning mode, or `seed_max_chars`.
+An omitted selector preserves the legacy open path. Hosts without public-profile
+control reject the request before provider I/O rather than treating the profile
+as an executor model. Profile configuration alone never supplies activation.
+
 ### Create, then open
 
 Create a session on a realtime-capable model, then call `live/open`:

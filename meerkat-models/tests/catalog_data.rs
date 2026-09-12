@@ -259,7 +259,7 @@ fn gpt_56_family_remains_cataloged_without_changing_explicit_selection() {
         assert!(profile.supports_reasoning);
         assert!(profile.supports_web_search);
         assert!(!profile.inline_video);
-        assert!(!profile.realtime);
+        assert!(!profile.is_realtime());
         assert!(!profile.supports_temperature);
     }
 
@@ -279,7 +279,7 @@ fn gpt_6_astra_owns_defaults_and_projects_independent_input_limit() {
     assert!(caps.vision && caps.image_tool_results);
     assert!(caps.supports_reasoning && caps.supports_web_search);
     assert!(caps.supports_structured_output);
-    assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
+    assert!(!caps.inline_video && !caps.is_realtime() && !caps.image_generation);
     assert!(image_generation_model(Provider::OpenAI, "gpt-6-astra").is_none());
     assert_eq!(image_generation_provider_for_model("gpt-6-astra"), None);
     assert!(image_generation_provider_defaults().iter().all(|provider| {

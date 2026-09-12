@@ -5734,6 +5734,7 @@ async fn try_handle_supervisor_bridge_command(
             let comms_runtime = Arc::clone(comms_runtime);
             let candidate = candidate.clone();
             let expected_member = payload.expected_member;
+            let profile = payload.profile;
             let turning_mode = payload.turning_mode;
             let transport = payload.transport;
             crate::tokio::spawn(async move {
@@ -5751,7 +5752,18 @@ async fn try_handle_supervisor_bridge_command(
                         return;
                     }
                 };
-                let result = live.open(&session_id, turning_mode, transport).await;
+                let result = match profile {
+                    Some(profile) => {
+                        live.open_profile(
+                            &session_id,
+                            profile.profile_id(),
+                            turning_mode,
+                            transport,
+                        )
+                        .await
+                    }
+                    None => live.open(&session_id, turning_mode, transport).await,
+                };
                 drop(effect_authority);
                 match result {
                     Ok(open) => {
@@ -16552,6 +16564,34 @@ mod tests {
     /// `status(None)` active-channel probe shape (ADJ-P6B-2), and the
     /// session pin argument = the drain's bound member session.
     #[tokio::test]
+    async fn public_member_profile_is_not_ignored_by_a_legacy_only_host() {
+        let fixture = LiveArmFixture::bound("public-profile-unavailable").await;
+        let live = Arc::new(ScriptedMemberLive::default());
+        fixture
+            .adapter
+            .set_member_live_host(Arc::clone(&live) as Arc<dyn MemberLiveHost>);
+        let (supervisor, epoch, protocol_version) = fixture.supervisor_payload();
+        fixture.serve(&BridgeCommand::OpenMemberLiveChannel(BridgeLiveOpenPayload {
+            supervisor, epoch, protocol_version, expected_member: fixture.incarnation.clone(),
+            profile: Some(meerkat_contracts::wire::supervisor_bridge::BridgeLiveProfileSelection::V1 {
+                profile_id: meerkat_core::live_execution::profile::LiveProfileId::parse("voice").expect("profile"),
+            }),
+            turning_mode: Some(RealtimeTurningMode::Continuous), transport: None,
+        })).await;
+        assert!(matches!(
+            fixture.next_reply("profile refusal").await,
+            BridgeReply::Rejected {
+                cause: BridgeRejectionCause::Unavailable,
+                ..
+            }
+        ));
+        assert!(
+            live.recorded().is_empty(),
+            "selector must not fall through to legacy open"
+        );
+    }
+
+    #[tokio::test]
     async fn member_live_verbs_round_trip_payload_to_trait_to_reply() {
         let fixture = LiveArmFixture::bound("roundtrip").await;
         let live = Arc::new(ScriptedMemberLive::default());
@@ -16567,6 +16607,7 @@ mod tests {
                     epoch,
                     protocol_version,
                     expected_member: fixture.incarnation.clone(),
+                    profile: None,
                     turning_mode: None,
                     transport: None,
                 },
@@ -16790,6 +16831,7 @@ mod tests {
                     epoch,
                     protocol_version,
                     expected_member: fixture.incarnation.clone(),
+                    profile: None,
                     turning_mode: None,
                     transport: None,
                 },

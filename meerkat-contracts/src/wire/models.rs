@@ -71,6 +71,45 @@ pub struct WireModelProfile {
     pub beta_headers: Vec<WireModelBetaHeader>,
 }
 
+impl From<&meerkat_core::ModelProfile> for WireModelProfile {
+    fn from(profile: &meerkat_core::ModelProfile) -> Self {
+        Self {
+            release_stage: match profile.release_stage {
+                meerkat_core::ModelReleaseStage::Stable => WireModelReleaseStage::Stable,
+                meerkat_core::ModelReleaseStage::Experimental => {
+                    WireModelReleaseStage::Experimental
+                }
+                meerkat_core::ModelReleaseStage::OperatorDefined => {
+                    WireModelReleaseStage::OperatorDefined
+                }
+            },
+            model_family: profile.model_family.clone(),
+            supports_temperature: profile.supports_temperature,
+            supports_thinking: profile.supports_thinking,
+            supports_reasoning: profile.supports_reasoning,
+            supports_web_search: profile.supports_web_search,
+            supports_mid_conversation_system_messages: profile
+                .supports_mid_conversation_system_messages,
+            vision: profile.vision,
+            image_input: profile.image_input,
+            image_tool_results: profile.image_tool_results,
+            inline_video: profile.inline_video,
+            realtime: profile.is_realtime(),
+            image_generation: profile.image_generation,
+            params_schema: profile.params_schema.clone(),
+            beta_headers: profile
+                .beta_headers
+                .iter()
+                .map(|header| WireModelBetaHeader {
+                    feature: header.feature.clone(),
+                    header_name: header.header_name.clone(),
+                    header_value: header.header_value.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Catalog-owned beta header metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

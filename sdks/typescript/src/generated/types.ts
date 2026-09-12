@@ -2116,6 +2116,7 @@ export interface MobHardCancelResult {
 export interface MobMemberLiveOpenParams {
   agent_identity: string;
   mob_id: string;
+  profile_id?: string;
   transport?: LiveOpenTransport | null;
   turning_mode?: RealtimeTurningMode | null;
 }
@@ -3945,7 +3946,7 @@ export type WireRenderSalience = "background" | "normal" | "important" | "urgent
 
 export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
-export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
+export type RealtimeTurningMode = "provider_managed" | "explicit_commit" | "continuous";
 
 export type RealtimeInputKind = "text" | "audio" | "video" | "image";
 
@@ -4191,6 +4192,7 @@ export interface BridgeCommandOpenMemberLiveChannel {
   command: "open_member_live_channel";
   epoch: number;
   expected_member: BridgeMemberIncarnation;
+  profile?: Record<string, unknown>;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
   transport?: LiveOpenTransport | null;
@@ -4678,6 +4680,18 @@ export interface BridgeReplyMemberHistoryPage {
   result: "member_history_page";
 }
 
+export interface BridgeReplyMemberLiveObservationPage {
+  after_sequence: number;
+  encoding_profile: "v1";
+  filter: { kind: "all_channels" } | Record<string, unknown>;
+  has_more: boolean;
+  next_cursor?: string | null;
+  owner: Record<string, unknown>;
+  records: Record<string, unknown>[];
+  result: "member_live_observation_page";
+  snapshot: Record<string, unknown>;
+}
+
 export interface BridgeReplyMemberEventsPage {
   events: Record<string, unknown>[];
   fence_token: number;
@@ -4759,7 +4773,7 @@ export interface BridgeReplyForkedParticipantRevoked {
   result: "forked_participant_revoked";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberLiveObservationPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
 
 export interface ContentBlockText {
   text: string;
@@ -4990,6 +5004,7 @@ export interface RealtimeImageChunk {
 
 export interface LiveOpenParams {
   execution_identity?: Record<string, unknown> | null;
+  profile_id?: string;
   seed_max_chars?: number | null;
   session_id: string;
   transport?: LiveOpenTransport | null;

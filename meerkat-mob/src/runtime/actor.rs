@@ -25903,11 +25903,12 @@ impl MobActor {
                 }
                 MobCommand::MemberLiveOpen {
                     agent_identity,
+                    profile_id,
                     turning_mode,
                     transport,
                     reply_tx,
                 } => {
-                    self.handle_member_live_open(agent_identity, turning_mode, transport, reply_tx)
+                    self.handle_member_live_open(agent_identity, profile_id, turning_mode, transport, reply_tx)
                         .await;
                 }
                 MobCommand::MemberLiveClose {
@@ -35649,6 +35650,7 @@ impl MobActor {
     async fn handle_member_live_open(
         &mut self,
         agent_identity: AgentIdentity,
+        profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
         turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
         transport: Option<super::bridge_protocol::LiveOpenTransport>,
         reply_tx: oneshot::Sender<Result<super::state::MemberLiveOpenDelivery, MobError>>,
@@ -35715,6 +35717,7 @@ impl MobActor {
                             &bridge,
                             &peer,
                             expected_member,
+                            profile_id,
                             turning_mode,
                             transport,
                         ),
@@ -35768,10 +35771,16 @@ impl MobActor {
                 self.member_live_mutation_tasks.spawn(async move {
                     let timeout = super::member_live_proxy::LIVE_OPEN_BRIDGE_TIMEOUT;
                     let attempted = std::panic::AssertUnwindSafe(async {
-                        match tokio::time::timeout(
-                            timeout,
-                            live_host.open(&session_id, turning_mode, transport),
-                        )
+                        match tokio::time::timeout(timeout, async {
+                            match &profile_id {
+                                Some(profile) => {
+                                    live_host
+                                        .open_profile(&session_id, profile, turning_mode, transport)
+                                        .await
+                                }
+                                None => live_host.open(&session_id, turning_mode, transport).await,
+                            }
+                        })
                         .await
                         {
                             Ok(result) => {

@@ -778,6 +778,7 @@ mod tests {
         assert_eq!(
             MobCommand::MemberLiveOpen {
                 agent_identity: crate::ids::AgentIdentity::from("m"),
+                profile_id: None,
                 turning_mode: None,
                 transport: None,
                 reply_tx: tx,
@@ -840,6 +841,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         MobCommand::MemberLiveOpen {
             agent_identity: crate::ids::AgentIdentity::from("m"),
+            profile_id: None,
             turning_mode: None,
             transport: None,
             reply_tx,

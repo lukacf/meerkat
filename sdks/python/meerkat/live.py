@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+from .generated.types import RealtimeTurningMode
+
 if TYPE_CHECKING:
     from .client import MeerkatClient
     from .generated.types import (
@@ -54,15 +56,17 @@ class LiveChannel:
         client: MeerkatClient,
         session_id: str,
         *,
-        turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        turning_mode: RealtimeTurningMode | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
         seed_max_chars: int | None = None,
+        profile_id: str | None = None,
     ) -> None:
         self._client = client
         self._session_id = session_id
         self._turning_mode = turning_mode
         self._transport = transport
         self._seed_max_chars = seed_max_chars
+        self._profile_id = profile_id
         self._channel_id: str | None = None
 
     @classmethod
@@ -71,9 +75,10 @@ class LiveChannel:
         client: MeerkatClient,
         session_id: str,
         *,
-        turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        turning_mode: RealtimeTurningMode | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
         seed_max_chars: int | None = None,
+        profile_id: str | None = None,
     ) -> LiveChannel:
         """Create a ``LiveChannel`` bound to a standalone session.
 
@@ -86,6 +91,7 @@ class LiveChannel:
             turning_mode=turning_mode,
             transport=transport,
             seed_max_chars=seed_max_chars,
+            profile_id=profile_id,
         )
 
     @property
@@ -117,12 +123,14 @@ class LiveChannel:
         continuity. The resolved root is never dropped and must fit; runtime
         context and canonical image sidecars stay outside the message window.
         """
-        result = await self._client.live_open(
-            self._session_id,
-            turning_mode=self._turning_mode,
-            transport=self._transport,
-            seed_max_chars=self._seed_max_chars,
-        )
+        options: dict[str, Any] = {
+            "turning_mode": self._turning_mode,
+            "transport": self._transport,
+            "seed_max_chars": self._seed_max_chars,
+        }
+        if self._profile_id is not None:
+            options["profile_id"] = self._profile_id
+        result = await self._client.live_open(self._session_id, **options)
         self._channel_id = result.get("channel_id") or result.get("channelId")
         return result
 

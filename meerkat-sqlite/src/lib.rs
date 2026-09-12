@@ -23,7 +23,10 @@
 //!   typed refusals for future, pre-floor, gap, unledgered-owned, and
 //!   fingerprint-mismatched shapes. Ledger state that is malformed (wrong
 //!   shape, duplicate rows, non-positive versions) is refused typed, never
-//!   healed.
+//!   healed. [`apply_domain_migrations_atomically`] activates an explicitly
+//!   selected co-tenant group in one transaction; [`activate_file_domains`]
+//!   additionally holds the maintenance fence across a file's format change.
+//!   Already-current activation is a guarded read, not a writer reservation.
 //! - [`json_column`]: the TEXT-or-BLOB tolerant JSON column codec.
 //! - [`fence`]: the per-operation maintenance-fence guards. Store operations
 //!   take a shared guard; offline migration takes the exclusive side and
@@ -57,15 +60,18 @@ pub use error::{
 pub use fence::{ExclusiveFence, OperationGuard, fence_lock_path};
 pub use json_column::JsonColumnBytes;
 pub use ledger::{
-    LedgerReport, MaintenanceBridgeReport, MaintenancePrepareFn, MaintenancePrepareReport,
-    MaintenanceRecordRefusal, Migration, SchemaDomain, SchemaObject, SchemaObjectKind,
-    SchemaPredecessor, apply_domain_migrations, bridge_unledgered_domain, domain_version,
+    CoTenantRequirement, LedgerReport, MaintenanceBridgeReport, MaintenancePrepareFn,
+    MaintenancePrepareReport, MaintenanceRecordRefusal, Migration, SchemaDomain, SchemaObject,
+    SchemaObjectKind, SchemaPredecessor, activate_file_domains,
+    activate_file_domains_with_requirements, apply_domain_migrations,
+    apply_domain_migrations_atomically, apply_domain_migrations_with_requirements,
+    bridge_unledgered_domain, domain_version, preflight_co_tenant_requirements,
     preflight_schema_eligibility, verify_released_schema_fingerprint,
     verify_released_schema_structure,
 };
 pub use profile::{
     ConnectionProfile, JournalPolicy, OpenOptions, SHARED_BUSY_TIMEOUT, WriteContact,
-    begin_immediate, open, open_with,
+    begin_immediate, open, open_with, open_with_co_tenant_requirements,
 };
 /// The connection type [`open`] returns, so callers can name it without
 /// taking their own direct `rusqlite` dependency.

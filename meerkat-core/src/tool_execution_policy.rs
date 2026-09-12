@@ -130,7 +130,19 @@ impl ToolExecutionPolicyError {
 /// inferred from the name or the schema. `Unknown` is the default because an
 /// undeclared tool must not be treated as safe: read-only intent denies
 /// everything that is not positively declared read-only.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolMutationClass {
     /// The tool cannot change state outside this session's own transcript:
     /// no filesystem writes, no network writes, no store mutation, no

@@ -143,6 +143,57 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "public_live_profile_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-llm-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "public_live_profile_contract",
+    crate_root = "tests/public_live_profile_contract.rs",
+    crate_features = [
+        "experimental-gpt-live",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/public_live_profile_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_BIN_NAME": "public_live_profile_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-llm-core",
+    },
+    tags = [
+        "live",
+    ],
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-llm-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
+    ] + all_crate_deps(
+        package_name = "meerkat-llm-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [

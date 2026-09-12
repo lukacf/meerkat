@@ -229,7 +229,7 @@ pub fn standalone_session_runtime_authorities(
                 supports_mid_conversation_system_messages: profile
                     .supports_mid_conversation_system_messages,
                 image_generation: profile.image_generation,
-                realtime: profile.realtime,
+                realtime: profile.is_realtime(),
                 call_timeout_secs: profile.call_timeout_secs,
             }),
             dsl::SessionLlmCapabilitySurfaceStatus::Resolved,
@@ -250,7 +250,7 @@ pub fn standalone_session_runtime_authorities(
         &mut authority,
         dsl::MeerkatMachineInput::SetModelRoutingBaseline {
             baseline_model: current_identity.model.clone(),
-            realtime_capable: model_profile.is_some_and(|profile| profile.realtime),
+            realtime_capable: model_profile.is_some_and(|profile| profile.is_realtime()),
         },
     )
     .map_err(|err| dsl_authority::map_error(err, "standalone model routing baseline"))?;
@@ -8197,6 +8197,22 @@ impl MeerkatMachine {
             .member_live_host
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    /// Delegate profile resolution/opening to the installed owning host. A
+    /// profile name never substitutes for an activation or a realtime model.
+    pub async fn open_live_profile(
+        &self,
+        session: &SessionId,
+        profile: &meerkat_core::live_execution::profile::LiveProfileId,
+        turning_mode: Option<meerkat_contracts::RealtimeTurningMode>,
+        transport: Option<meerkat_contracts::LiveOpenTransport>,
+    ) -> Result<meerkat_contracts::LiveOpenResult, crate::member_live::MemberLiveError> {
+        let host = self
+            .member_live_host()
+            .ok_or(crate::member_live::MemberLiveError::TransportUnavailable)?;
+        host.open_profile(session, profile, turning_mode, transport)
+            .await
     }
 
     /// Resolve the injected member live host, if composed.

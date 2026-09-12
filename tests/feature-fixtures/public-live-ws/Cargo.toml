@@ -1,0 +1,17 @@
+[package]
+name = "public-live-ws-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+meerkat = { path = "../../../meerkat", default-features = false, features = [
+    "openai-live",
+    "sqlite-store",
+    "session-store",
+] }
+
+[lib]
+path = "../public-live-shared/lib.rs"

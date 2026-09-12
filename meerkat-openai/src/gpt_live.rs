@@ -71,7 +71,7 @@ impl GptLiveResponsesSessionConfig {
     pub(crate) fn try_from_catalog_model(
         model: &ModelProfileWitness,
     ) -> Result<Self, GptLiveBrokerError> {
-        if model.provider() != Provider::OpenAI || model.profile().realtime {
+        if model.provider() != Provider::OpenAI || model.profile().is_realtime() {
             return Err(GptLiveBrokerError::InvalidResponsesProfile);
         }
         Ok(Self {
@@ -594,7 +594,7 @@ impl GptLiveBrokerFactory {
                 "openai-experimental-gpt-live-model",
             ));
         }
-        if !profile.realtime {
+        if !profile.is_realtime() {
             return Err(ProviderClientError::MissingFeature(
                 "openai-experimental-gpt-live-realtime",
             ));
@@ -1194,7 +1194,7 @@ mod tests {
                 entry.release_stage == release_stage
                     && registry
                         .profile_for_provider(Provider::OpenAI, &entry.id)
-                        .is_some_and(|profile| profile.realtime)
+                        .is_some_and(|profile| profile.is_realtime())
             })
             .expect("realtime model for requested release stage");
         let identity = SessionLlmIdentity {
@@ -1244,7 +1244,7 @@ mod tests {
             .find(|entry| {
                 registry
                     .profile_for_provider(Provider::OpenAI, &entry.id)
-                    .is_some_and(|profile| !profile.realtime)
+                    .is_some_and(|profile| !profile.is_realtime())
             })
             .expect("catalogued non-realtime OpenAI model");
         registry

@@ -591,7 +591,7 @@ impl ExperimentalLiveAdmissionOwner {
         if profile.profile().release_stage != ModelReleaseStage::Experimental {
             return Err(ExperimentalLiveAdmissionError::TargetNotExperimental);
         }
-        if !profile.profile().realtime {
+        if !profile.profile().is_realtime() {
             return Err(ExperimentalLiveAdmissionError::TargetNotRealtime);
         }
         if identity.provider != Provider::OpenAI || identity.model != "gpt-live-1-codex" {

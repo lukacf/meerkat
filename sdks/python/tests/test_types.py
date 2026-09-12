@@ -726,7 +726,7 @@ def test_multi_host_contracts_and_member_live_types_are_public_and_closed():
     generated_open_hints = get_type_hints(MobMemberLiveOpenParams)
     client_open_hints = get_type_hints(MeerkatClient.open_mob_member_live)
     mob_open_hints = get_type_hints(Mob.member_live_open)
-    expected_turning_modes = {"provider_managed", "explicit_commit"}
+    expected_turning_modes = {"provider_managed", "explicit_commit", "continuous"}
     expected_transports = {"websocket", "webrtc"}
 
     assert (
@@ -6802,6 +6802,86 @@ async def test_client_live_open_omits_optional_open_parameters_when_default():
     assert captured == [("live/open", {"session_id": "session-42"})]
     assert "turning_mode" not in captured[0][1]
     assert "seed_max_chars" not in captured[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_member_live_profile_selector_is_forwarded_to_the_owning_host(wrapped):
+    from meerkat.mob import Mob
+    from meerkat.errors import MeerkatError
+
+    client = MeerkatClient()
+    captured = []
+    refusal = MeerkatError("CAPABILITY_UNAVAILABLE", "owner has no public profile control")
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        raise refusal
+
+    client._request = fake_request  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as result:
+        if wrapped:
+            await Mob(client, "mob-id").member_live_open("worker", profile_id="voice")
+        else:
+            await client.open_mob_member_live("mob-id", "worker", profile_id="voice")
+    assert result.value is refusal
+    assert captured == [("mob/member_live_open", {
+        "mob_id": "mob-id", "agent_identity": "worker", "profile_id": "voice",
+    })]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_public_live_profile_selector_is_forwarded_without_inventing_activation(wrapped):
+    from meerkat import LiveChannel
+    from meerkat.errors import MeerkatError
+
+    client = MeerkatClient()
+    captured = []
+    refusal = MeerkatError("CAPABILITY_UNAVAILABLE", "public profile control is not installed")
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        raise refusal
+
+    client._request = fake_request  # type: ignore[method-assign]
+    channel = LiveChannel.session(client, "session-profile", profile_id="voice")
+    with pytest.raises(MeerkatError) as result:
+        if wrapped:
+            await channel.open()
+        else:
+            await client.live_open("session-profile", profile_id="voice")
+    assert result.value is refusal
+    assert channel.channel_id is None
+    assert captured == [("live/open", {"session_id": "session-profile", "profile_id": "voice"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_continuous_live_mode_preserves_request_and_server_refusal(wrapped):
+    from meerkat import LiveChannel
+    from meerkat.errors import MeerkatError
+
+    client = MeerkatClient()
+    captured = []
+    refusal = MeerkatError("INVALID_PARAMS", "continuous requires a public Live profile")
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        raise refusal
+
+    client._request = fake_request  # type: ignore[method-assign]
+    channel = LiveChannel.session(client, "session-continuous", turning_mode="continuous")
+    with pytest.raises(MeerkatError) as result:
+        if wrapped:
+            await channel.open()
+        else:
+            await client.live_open("session-continuous", turning_mode="continuous")
+    assert result.value is refusal
+    assert channel.channel_id is None
+    assert captured == [
+        ("live/open", {"session_id": "session-continuous", "turning_mode": "continuous"})
+    ]
 
 
 @pytest.mark.asyncio

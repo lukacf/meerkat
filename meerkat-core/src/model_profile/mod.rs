@@ -24,6 +24,27 @@ use crate::model_profile::catalog::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Catalog-owned interaction contract, independent of a provider's model name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInteractionKind {
+    Text,
+    TurnBasedRealtime,
+    ContinuousLive,
+}
+
+impl ModelInteractionKind {
+    #[must_use]
+    pub const fn is_realtime(self) -> bool {
+        matches!(self, Self::TurnBasedRealtime | Self::ContinuousLive)
+    }
+
+    #[must_use]
+    pub const fn supports_text_execution(self) -> bool {
+        matches!(self, Self::Text | Self::TurnBasedRealtime)
+    }
+}
+
 /// Runtime profile for a model, describing its capabilities and operational defaults.
 ///
 /// This is a **capability-plus-operational-defaults catalog**: it owns both model
@@ -54,9 +75,8 @@ pub struct ModelProfile {
     /// Whether the model can process image blocks in tool results.
     /// When false, `view_image` is hidden from the tool list.
     pub image_tool_results: bool,
-    /// Whether the model supports a realtime bidirectional streaming transport.
-    /// Drives capability-based realtime transport attach/detach in the runtime.
-    pub realtime: bool,
+    /// Interaction and transport contract selected by the model catalog.
+    pub interaction_kind: ModelInteractionKind,
     /// Whether the model supports provider-native web search tools.
     pub supports_web_search: bool,
     /// Whether the model accepts ordered System messages after the leading
@@ -84,6 +104,14 @@ pub struct ModelBetaHeader {
     pub feature: String,
     pub header_name: String,
     pub header_value: String,
+}
+
+impl ModelProfile {
+    /// Coarse capability projection; protocol selection uses `interaction_kind`.
+    #[must_use]
+    pub const fn is_realtime(&self) -> bool {
+        self.interaction_kind.is_realtime()
+    }
 }
 
 impl From<&BetaHeader> for ModelBetaHeader {
@@ -114,7 +142,7 @@ pub fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         vision: caps.vision,
         image_input: caps.vision,
         image_tool_results: caps.image_tool_results,
-        realtime: caps.realtime,
+        interaction_kind: caps.interaction_kind,
         image_generation: caps.image_generation,
         params_schema: schema_builder::build_params_schema(caps),
         beta_headers: caps
@@ -353,10 +381,8 @@ mod tests {
     use super::test_catalog::TEST_CATALOG;
     use super::*;
 
-    /// Fields that `ModelProfile` must expose, mirrored by `WireModelProfile`
-    /// in `meerkat-contracts::wire::models`. Adding a field here is a
-    /// wire-contract change that needs parallel updates in `meerkat-contracts`
-    /// and a schema regeneration.
+    /// Stored core profile fields. The wire profile separately projects
+    /// `interaction_kind` into its coarse `realtime` boolean.
     const EXPECTED_MODEL_PROFILE_FIELDS: &[&str] = &[
         "provider",
         "release_stage",
@@ -370,7 +396,7 @@ mod tests {
         "vision",
         "image_input",
         "image_tool_results",
-        "realtime",
+        "interaction_kind",
         "image_generation",
         "params_schema",
         "call_timeout_secs",
@@ -394,8 +420,8 @@ mod tests {
             .collect();
         assert_eq!(
             props, expected,
-            "ModelProfile field set drift — update meerkat-contracts::WireModelProfile \
-             in lockstep, regenerate artifact schemas (make regen-schemas), and update \
+            "ModelProfile stored field set drift — check the explicit wire projection, \
+             regenerate artifact schemas (make regen-schemas), and update \
              EXPECTED_MODEL_PROFILE_FIELDS if this change is intentional."
         );
     }

@@ -43,12 +43,12 @@ oai-rt-rs = { workspace = true, optional = true }
 # Pinned to the tokio-tungstenite major used by oai-rt-rs so the typed
 # `tungstenite::Error` discriminants can be matched when classifying
 # realtime websocket faults (no error-string parsing).
-tokio-tungstenite = { version = "0.26", optional = true }
+tokio-tungstenite = { version = "0.30", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 meerkat-runtime = { workspace = true }

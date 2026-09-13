@@ -4,7 +4,7 @@ description: "Configuration reference for MobKit: module definitions, runtime op
 icon: "gear"
 ---
 
-*This page documents MobKit v0.8.33 (mirrored from [v0.8.33](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.33)).*
+*This page documents MobKit v0.8.34 (mirrored from [v0.8.34](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.34)).*
 
 MobKit is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -120,6 +120,60 @@ The stock SDK gateway (`rpc_gateway`) consumes the `runtime_options` object of `
 | `workgraph` | Boolean or directory string | WorkGraph construction switch, default `true`. `false` disables the store, the member `workgraph_*` tools, the attention overlays and the `mobkit/workgraph/*` RPCs; a non-empty string is an explicit directory for the durable store (`workgraph.sqlite3` is created inside it); any other value fails initialization. Python `.workgraph(enabled)` and TypeScript `.workgraph(enabled)` take `true`, `false` or the directory string; an unused setter sends nothing and the gateway default applies. Store placement per launch mode, the auto-issued namespace grant and the memory-backed fallback are in [WorkGraph](#workgraph). |
 
 Unsupported nested fields fail initialization with `-32602` instead of being silently ignored.
+
+### Model fallback
+
+Automatic model fallback is **off by default**. An enabled policy requires an
+explicit, non-empty chain; an empty chain never walks the model catalog.
+Meerkat owns retry eligibility, target admission, credentials, and committed
+model routing. MobKit forwards that policy without adding its own retry loop.
+
+The host file selected by `meerkat_config_path` accepts `[model_fallback]`.
+Rust embedders can pass the same `meerkat::Config` to
+`UnifiedRuntimeBuilder::meerkat_config`. In `mob.toml`, use
+`[runtime.model_fallback]` for a mob default or
+`[profiles.<name>.model_fallback]` on an inline profile:
+
+```toml
+[runtime.model_fallback]
+enabled = true
+chain = [{ model = "gpt-5.5", provider = "openai" }]
+
+[runtime.model_fallback.policy]
+cross_provider = false
+min_context_headroom = 0.10
+require_tool_parity = true
+trigger_after_attempts = 3
+triggers = ["provider_unavailable", "capacity"]
+
+# A profile can explicitly disable an inherited policy.
+[profiles.coordinator.model_fallback]
+enabled = false
+```
+
+The first present **whole table** wins: profile, then mob runtime, then host
+configuration. Omission inherits; an explicit `enabled = false` wins over an
+enabled parent. Tables are not merged field by field, so a profile does not
+silently borrow its parent's chain. A realm-profile reference cannot carry a
+sibling fallback override; put it on the referenced profile or the mob runtime.
+Unknown fallback keys, `use_catalog_default_chain`, invalid policy values, and
+`enabled = true` without a chain are errors. There is no separate
+`runtime_options.model_fallback` gateway option.
+
+Cross-provider fallback requires explicit `cross_provider = true` and a usable
+authorized credential binding; omission does not authorize switching accounts.
+Targets must pass Meerkat's context, output-budget, tool and modality admission.
+Transport failures and empty output are not default fallback triggers.
+New fallback provenance can cause an unsafe restored route to be held with a
+typed error. Historical sessions without that provenance are **not** inferred
+to be fallback sessions, automatically reverted, or migrated. Existing explicit
+operator model/provider resume masks retain their authority.
+
+The host config setter affects builder-created member session services, not an
+already-built `.mob_spec()` service. Native background memory engines currently
+use their own default config (also fallback-off); this table does not configure
+those engines. This release does not add fallback overlays, automatic reversion,
+or a routing-repair CLI.
 
 ### One-shot mob definition update
 

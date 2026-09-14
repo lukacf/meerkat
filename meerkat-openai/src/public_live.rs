@@ -366,10 +366,12 @@ impl PublicLiveBrokerSession {
     /// Append canonical Meerkat context as commentary without granting it
     /// automatic speech.
     ///
-    /// Public acknowledgements carry no caller correlation, so pending appends
-    /// are acknowledged in wire order. A send failure is classified as
-    /// ambiguous and fails every later append closed so an unacknowledged
-    /// write can never be silently retried or misattributed.
+    /// Every append carries a `client_event_id`; the provider echoes it on the
+    /// acknowledgement, which is how pending appends are correlated. An
+    /// acknowledgement without an id is accepted only while exactly one append
+    /// is pending; otherwise it is ambiguous and fails closed. A send failure
+    /// is classified as ambiguous and fails every later append closed so an
+    /// unacknowledged write can never be silently retried or misattributed.
     pub async fn append_session_context(
         &self,
         text: impl Into<String>,
@@ -480,7 +482,21 @@ struct PendingAppend {
 struct OpenTurn {
     provider_ref: String,
     role: GptLiveTurnRole,
-    transcript: String,
+    /// Transcript deltas with their session-relative start offsets, so a
+    /// delegation can freeze exactly the prefix observed before its offset.
+    segments: Vec<TranscriptSegment>,
+}
+
+struct TranscriptSegment {
+    start_ms: f64,
+    text: String,
+}
+
+fn join_segments<'a>(segments: impl IntoIterator<Item = &'a TranscriptSegment>) -> String {
+    segments
+        .into_iter()
+        .map(|segment| segment.text.as_str())
+        .collect()
 }
 
 struct FinishedUserTurn {
@@ -551,10 +567,7 @@ impl SessionState {
                 self.finish_open_turn();
             }
             ServerEvent::CommentaryAppended { .. } => {
-                let pending = self
-                    .pending_appends
-                    .pop_front()
-                    .ok_or_else(protocol_error)?;
+                let pending = self.take_acknowledged_append(client_event_id.as_deref())?;
                 self.queued_observations.push_back(match pending.lane {
                     PendingAppendLane::Session => {
                         GptLiveBrokerObservation::SessionContextAppendAcknowledged {
@@ -574,14 +587,22 @@ impl SessionState {
             ServerEvent::InstructionsAppended { .. } | ServerEvent::ThinkingAppended { .. } => {
                 tracing::debug!("public Live acknowledged an append this broker did not send");
             }
-            ServerEvent::InputTranscriptDelta { delta, .. } => {
-                self.record_transcript_delta(GptLiveTurnRole::User, delta);
+            ServerEvent::InputTranscriptDelta {
+                delta, start_ms, ..
+            } => {
+                self.record_transcript_delta(GptLiveTurnRole::User, start_ms, delta);
             }
-            ServerEvent::OutputTranscriptDelta { delta, .. } => {
-                self.record_transcript_delta(GptLiveTurnRole::Assistant, delta);
+            ServerEvent::OutputTranscriptDelta {
+                delta, start_ms, ..
+            } => {
+                self.record_transcript_delta(GptLiveTurnRole::Assistant, start_ms, delta);
             }
-            ServerEvent::DelegationCreated { delegation, .. } => {
-                self.record_delegation(delegation)?;
+            ServerEvent::DelegationCreated {
+                delegation,
+                offset_ms,
+                ..
+            } => {
+                self.record_delegation(delegation, offset_ms)?;
             }
             // Reflected media, mute state, accounting telemetry, telephony
             // signalling, and informational notices carry no conversational,
@@ -609,13 +630,9 @@ impl SessionState {
                     .client_event_id
                     .as_deref()
                     .or(client_event_id.as_deref());
-                if let Some(rejected) = rejected
-                    && self
-                        .pending_appends
-                        .front()
-                        .is_some_and(|pending| pending_event_id(pending.token) == rejected)
-                {
-                    self.pending_appends.pop_front();
+                if let Some(rejected) = rejected {
+                    self.pending_appends
+                        .retain(|pending| pending_event_id(pending.token) != rejected);
                 }
                 let summary = summarize_unknown_provider_event("error", &raw);
                 tracing::warn!(
@@ -651,7 +668,27 @@ impl SessionState {
         Ok(())
     }
 
-    fn record_transcript_delta(&mut self, role: GptLiveTurnRole, delta: String) {
+    /// Resolve which pending append an acknowledgement settles. The echoed
+    /// `client_event_id` is authoritative; without it only a single pending
+    /// append is unambiguous.
+    fn take_acknowledged_append(
+        &mut self,
+        client_event_id: Option<&str>,
+    ) -> Result<PendingAppend, GptLiveBrokerError> {
+        let index = match client_event_id {
+            Some(id) => self
+                .pending_appends
+                .iter()
+                .position(|pending| pending_event_id(pending.token) == id),
+            None if self.pending_appends.len() == 1 => Some(0),
+            None => None,
+        };
+        index
+            .and_then(|index| self.pending_appends.remove(index))
+            .ok_or_else(protocol_error)
+    }
+
+    fn record_transcript_delta(&mut self, role: GptLiveTurnRole, start_ms: f64, delta: String) {
         let turn = self.ensure_open_turn(role);
         self.next_transcript_item = self.next_transcript_item.saturating_add(1);
         let item = GptLiveTranscriptItemRef(format!(
@@ -680,7 +717,10 @@ impl SessionState {
                 delta: delta.clone(),
             });
         if let Some(open) = self.open_turn.as_mut() {
-            open.transcript.push_str(&delta);
+            open.segments.push(TranscriptSegment {
+                start_ms,
+                text: delta,
+            });
         }
     }
 
@@ -701,7 +741,7 @@ impl SessionState {
         self.open_turn = Some(OpenTurn {
             provider_ref: turn.0.clone(),
             role,
-            transcript: String::new(),
+            segments: Vec::new(),
         });
         turn
     }
@@ -722,20 +762,25 @@ impl SessionState {
         let Some(open) = self.open_turn.take() else {
             return;
         };
+        let transcript = join_segments(&open.segments);
         if open.role == GptLiveTurnRole::User {
             self.last_user_turn = Some(FinishedUserTurn {
-                transcript: open.transcript.clone(),
+                transcript: transcript.clone(),
             });
         }
         self.queued_observations
             .push_back(GptLiveBrokerObservation::TurnFinished {
                 turn: GptLiveTurnRef(open.provider_ref),
                 role: open.role,
-                transcript: open.transcript,
+                transcript,
             });
     }
 
-    fn record_delegation(&mut self, delegation: Delegation) -> Result<(), GptLiveBrokerError> {
+    fn record_delegation(
+        &mut self,
+        delegation: Delegation,
+        offset_ms: f64,
+    ) -> Result<(), GptLiveBrokerError> {
         if delegation.item_type != DelegationType::Delegation
             || delegation.id.trim().is_empty()
             || self.seen_delegation_ids.contains(&delegation.id)
@@ -753,17 +798,27 @@ impl SessionState {
             );
             return Ok(());
         }
-        // Join the delegation to the open user turn, which it terminates. A
+        // Join the delegation to the open user turn, which it terminates. The
+        // joined request is exactly the transcript prefix observed before the
+        // delegation offset; speech that started at or after the offset is
+        // not part of this request and continues as a fresh user turn. A
         // delegation arriving after the user stopped speaking (or while the
-        // assistant speaks) re-presents the most recent user transcript under
-        // a fresh detached turn so the facade's start/finish pairing stays
-        // exact and any open assistant turn continues undisturbed.
+        // assistant speaks) re-presents the most recent frozen user transcript
+        // under a fresh detached turn so the facade's start/finish pairing
+        // stays exact and any open assistant turn continues undisturbed.
+        let mut continued_segments = Vec::new();
         let (turn, transcript) = match self.open_turn.take() {
             Some(open) if open.role == GptLiveTurnRole::User => {
+                let (before, after): (Vec<_>, Vec<_>) = open
+                    .segments
+                    .into_iter()
+                    .partition(|segment| segment.start_ms < offset_ms);
+                let transcript = join_segments(&before);
                 self.last_user_turn = Some(FinishedUserTurn {
-                    transcript: open.transcript.clone(),
+                    transcript: transcript.clone(),
                 });
-                (GptLiveTurnRef(open.provider_ref), open.transcript)
+                continued_segments = after;
+                (GptLiveTurnRef(open.provider_ref), transcript)
             }
             other => {
                 self.open_turn = other;
@@ -787,6 +842,13 @@ impl SessionState {
                 turn,
                 transcript,
             });
+        if !continued_segments.is_empty() {
+            // Speech that started at or after the offset is a new user turn.
+            self.start_turn(GptLiveTurnRole::User);
+            if let Some(open) = self.open_turn.as_mut() {
+                open.segments = continued_segments;
+            }
+        }
         Ok(())
     }
 }
@@ -885,7 +947,19 @@ mod tests {
     }
 
     fn input_delta(text: &str) -> Value {
-        json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":0.0,"end_ms":1.0})
+        input_delta_at(text, 0.0)
+    }
+
+    fn input_delta_at(text: &str, start_ms: f64) -> Value {
+        json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":start_ms,"end_ms":start_ms + 1.0})
+    }
+
+    fn ack(client_event_id: Option<&str>) -> Value {
+        let mut value = json!({"type":"session.commentary.appended","event_id":"a","start_ms":1.0,"end_ms":1.0});
+        if let Some(id) = client_event_id {
+            value["client_event_id"] = json!(id);
+        }
+        value
     }
 
     fn output_delta(text: &str) -> Value {
@@ -1179,31 +1253,96 @@ mod tests {
     }
 
     #[test]
-    fn append_acknowledgements_resolve_in_wire_order_across_lanes() {
+    fn append_acknowledgements_correlate_by_client_event_id_not_position() {
         let mut state = SessionState::default();
         let session_token = state.reserve_append(PendingAppendLane::Session).unwrap();
         let delegation_token = state.reserve_append(PendingAppendLane::Delegation).unwrap();
         assert_ne!(session_token, delegation_token);
-        let ack = json!({"type":"session.commentary.appended","event_id":"a","start_ms":1.0,"end_ms":1.0});
-        state.apply_frame(frame(ack.clone())).unwrap();
-        state.apply_frame(frame(ack.clone())).unwrap();
-        let observations = drain(&mut state);
+        // Two appends pending: an acknowledgement without an id is ambiguous.
+        assert_protocol_error(
+            state
+                .apply_frame(frame(ack(None)))
+                .expect_err("uncorrelated acknowledgement with two pending appends"),
+        );
+        // Out-of-order acknowledgement resolves by echoed id, not by position.
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(delegation_token)))))
+            .unwrap();
         assert!(matches!(
-            observations.as_slice(),
-            [
-                GptLiveBrokerObservation::SessionContextAppendAcknowledged { token: first },
-                GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: second },
-            ] if *first == session_token && *second == delegation_token
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token }]
+                if *token == delegation_token
+        ));
+        // A single pending append accepts an id-less acknowledgement.
+        state.apply_frame(frame(ack(None))).unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::SessionContextAppendAcknowledged { token }]
+                if *token == session_token
         ));
         assert_protocol_error(
             state
-                .apply_frame(frame(ack))
+                .apply_frame(frame(ack(None)))
                 .expect_err("acknowledgement without a pending append"),
         );
+        let stray = state.reserve_append(PendingAppendLane::Session).unwrap();
+        assert_protocol_error(
+            state
+                .apply_frame(frame(ack(Some("meerkat-append-999"))))
+                .expect_err("acknowledgement for an unknown append id"),
+        );
+        assert_eq!(state.pending_appends.len(), 1);
+        let _ = stray;
         state.append_delivery_ambiguous = true;
         assert!(matches!(
             state.reserve_append(PendingAppendLane::Session),
             Err(GptLiveBrokerError::AppendInFlight)
+        ));
+    }
+
+    #[test]
+    fn delegation_freezes_only_the_transcript_prefix_before_its_offset() {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta_at("book a table ", 0.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_at("for two", 1.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_at(" and also", 9.0)))
+            .unwrap();
+        let started = drain(&mut state);
+        let GptLiveBrokerObservation::TurnStarted {
+            turn: first_turn, ..
+        } = &started[0]
+        else {
+            panic!("user turn start");
+        };
+        state
+            .apply_frame(frame(
+                json!({"type":"session.delegation.created","event_id":"d","offset_ms":4.2,
+                "delegation":{"type":"delegation","id":"dlg_prefix","target":"client"}}),
+            ))
+            .unwrap();
+        let joined = drain(&mut state);
+        assert!(matches!(
+            &joined[0],
+            GptLiveBrokerObservation::ClientDelegationFinal { turn, transcript, .. }
+                if turn == first_turn && transcript == "book a table for two"
+        ));
+        // Speech that started after the offset continues as a fresh user turn.
+        assert!(matches!(
+            &joined[1],
+            GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::User, turn } if turn != first_turn
+        ));
+        assert_eq!(joined.len(), 2);
+        state.apply_frame(frame(output_delta("sure"))).unwrap();
+        let next = drain(&mut state);
+        assert!(matches!(
+            &next[0],
+            GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
+                if transcript == " and also"
         ));
     }
 
@@ -1359,13 +1498,13 @@ mod tests {
         let seed = recv_json(&mut socket, &capture).await;
         assert_eq!(seed["type"], "session.commentary.append");
         assert!(seed["delegation_id"].is_null());
-        send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a1","start_ms":1.0,"end_ms":1.0})).await;
+        send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a1","client_event_id":seed["event_id"],"start_ms":1.0,"end_ms":1.0})).await;
         send_json(&mut socket, delegation_created("dlg_public", "client")).await;
         send_json(&mut socket, output_delta("one moment")).await;
         let release = recv_json(&mut socket, &capture).await;
         assert_eq!(release["type"], "session.commentary.append");
         assert_eq!(release["delegation_id"], "dlg_public");
-        send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":2.0,"end_ms":2.0})).await;
+        send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","client_event_id":release["event_id"],"start_ms":2.0,"end_ms":2.0})).await;
         let close = recv_json(&mut socket, &capture).await;
         assert_eq!(close["type"], "session.close");
         send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;

@@ -537,6 +537,53 @@ directly, such as a controller-local member. Controller `session/*` methods do
 not proxy a placed member's host-local session in multi-host v1, and
 `mob/member_live_open` rejects WebRTC.
 
+## GPT Live (public OpenAI Live API)
+
+`gpt-live-1` is OpenAI's continuous voice model on the public Live API. It is a
+different protocol from Realtime: audio runs continuously with provider-owned
+turn detection, and the voice model does not run tools. Instead the session is
+started with a *client delegation*: when the voice model decides a request
+needs tools, files, or reasoning, Meerkat runs the work through the channel's
+ordinary durable executor and returns the result as commentary that the voice
+model speaks from. The canonical conversation persists through Meerkat's normal
+transcript authority.
+
+The path is compiled with the `openai-live` feature (`meerkat`, `meerkat-rpc`,
+`meerkat-mob`, `meerkat-mob-mcp`; `meerkat-openai/live`). The host composes
+`ExperimentalGptLiveOpenAuthority::new_public(PublicGptLiveOpenAuthorityConfig)`
+with an OpenAI API-key binding in the realm, the model `gpt-live-1`, a voice,
+and optional trusted session instructions. No operator, Gate0, or realm
+admission applies: the catalog row and the configured binding are the
+admission. The `gpt-live` model family never selects the Realtime WebSocket
+factory.
+
+Consumers open the channel through the existing execution-identity seam:
+
+```json
+{"method":"live/open","params":{
+  "session_id":"...",
+  "transport":"webrtc",
+  "execution_identity":{"version":"v1","profile_id":"openai.gpt-live-1.client-context.v1"}
+}}
+```
+
+Then post the browser's SDP offer with `live/webrtc/answer` and apply the
+answer in the peer. The browser must not send `session.start`; the server
+already started the session. Capability atoms are `live.execution_identity.v1`
+and `live.execution.client_context.v1`, exactly as for the deprecated
+experimental profile.
+
+Public Live has no authoritative turn identifiers, completed-turn events, or
+delegation task text. Meerkat synthesizes turns from transcript role
+alternation and joins each delegation to the open or most recent user turn,
+frozen to the transcript prefix observed before the delegation offset; the
+resulting delegated transcript is a Meerkat-derived fact. Transcript
+boundaries never prove playback completed.
+
+The private ChatGPT-brokered path (`experimental-gpt-live`, `gpt-live-1-codex`)
+is deprecated and will be removed after the public path has shipped for at
+least one release.
+
 ## Limitations and known gaps
 
 - **OpenAI Realtime API only.** The shipped provider integration is OpenAI's Realtime API (`gpt-realtime-2`). Azure OpenAI (`azure_openai`) and other providers are not yet wired into the live transport layer.

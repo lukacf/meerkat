@@ -28,6 +28,78 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Shared GPT Live broker vocabulary (`meerkat-openai`):**
+  `GptLiveBrokerObservation::ClientDelegationFinal` loses its `handoff` field,
+  `GptLiveBrokerObservation::UnsupportedPrivateEvent` is renamed to
+  `GptLiveBrokerObservation::UnsupportedProviderEvent`, and
+  `GptLiveHandoffRef` is removed. The observation, error, token, and reference
+  types move to the new `meerkat_openai::gpt_live_broker` module (re-exported
+  from `gpt_live`) so the public and experimental brokers share one contract.
+  Update exhaustive matches and struct patterns.
+- **Feature layering:** the GPT Live runtime machinery (facade module
+  `meerkat::experimental_gpt_live`, mob live bridge, mob-mcp delegation
+  coordinator, RPC live handlers and `live/webrtc/answer`) is now gated by the
+  new `openai-live` feature in `meerkat`, `meerkat-mob`, `meerkat-mob-mcp`,
+  and `meerkat-rpc`. `experimental-gpt-live` implies `openai-live` and adds
+  only the deprecated private broker and its operator/realm/Gate0 admission.
+  Builds that enabled `experimental-gpt-live` keep compiling unchanged.
+- `oai-rt-rs` is pinned to `=0.5.1` (public Live API plus the session identity
+  fence). Behavior-only: `OpenAiProviderRuntime::build_realtime_session_factory`
+  rejects `gpt-live` family rows, which are served by the public Live broker
+  through `live/open` with an execution identity, never by the Realtime
+  WebSocket factory.
+
+### Added
+
+- **Public GPT Live (`gpt-live-1`) execution path.** `meerkat-openai/live`
+  adds `PublicLiveBrokerFactory` over the public OpenAI Live API
+  (`/v1/live/sessions` WebRTC create, sideband attach, client delegation,
+  commentary appends). The facade adds
+  `ExperimentalGptLiveOpenAuthority::new_public(PublicGptLiveOpenAuthorityConfig)`,
+  `ExperimentalGptLivePendingChannel::from_public_target`, the execution
+  profile `openai.gpt-live-1.client-context.v1`
+  (`GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID`), and
+  `AgentFactory::{resolve_public_live_binding_for_identity, resolve_public_live_target}`.
+  Hosts compose it with an ordinary OpenAI API-key binding; no operator, Gate0,
+  or realm admission exists for the public path. Consumers open channels
+  exactly as before: `live/open { transport: "webrtc", execution_identity:
+  { version: "v1", profile_id: "openai.gpt-live-1.client-context.v1" } }`,
+  then `live/webrtc/answer`, with the same capability atoms
+  `live.execution_identity.v1` and `live.execution.client_context.v1`.
+- Catalog row `gpt-live-1` (OpenAI, stable, realtime, provider-managed turns).
+- `LiveExecutionProfileSelection::from_public_profile` in `meerkat-runtime`.
+
+### Deferred
+
+- Two items from the earlier public Live design are explicitly not part of
+  this release: a top-level `profile_id` selector plus a `continuous` turning
+  mode on `live/open` (the existing `execution_identity.profile_id` seam is
+  the public contract for now), and the managed Responses function-bridge
+  delegation mode (client context is the only shipped mode, as before).
+
+### Deprecated
+
+- The private ChatGPT-brokered GPT Live path (`experimental-gpt-live`,
+  `gpt-live-1-codex`, profile `openai.gpt-live-1-codex.client-context.v1`,
+  `ExperimentalGptLiveOpenAuthority::new`, `ExperimentalLiveOperatorConfig`)
+  is deprecated in favor of the public path and is scheduled for removal
+  after the public path has shipped for at least one release. The facade
+  module name `experimental_gpt_live` is retained until then.
+
+### Fixed
+
+- The public Live API has no turn identifiers or delegation task text. The
+  public broker synthesizes user and assistant turns from transcript role
+  alternation and joins each client delegation to the open or most recent
+  user turn, so `DelegationRequested.final_transcript` is a Meerkat-derived
+  fact rather than provider evidence, frozen to the transcript prefix observed
+  before the delegation offset. Commentary acknowledgements are correlated by
+  the echoed `client_event_id`; an id-less acknowledgement is accepted only
+  while exactly one append is pending, and an ambiguous send fails every later
+  append closed.
+
 ## [0.8.37] - 2026-09-11
 
 ### Breaking

@@ -66,6 +66,9 @@ meerkat-providers = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Local public GPT Live wire fixture (HTTP create + WebSocket attach) for the
+# deterministic facade tests in src/experimental_gpt_live.rs.
+axum = { workspace = true, features = ["ws"] }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 tracing-subscriber = { workspace = true }
 meerkat-core = { workspace = true, features = [

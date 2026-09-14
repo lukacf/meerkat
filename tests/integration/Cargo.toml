@@ -52,7 +52,13 @@ uuid = { workspace = true, features = ["v4"] }
 
 [features]
 integration-real-tests = []
+openai-live-e2e = [
+    "meerkat/openai-live",
+    "meerkat-mob-mcp/openai-live",
+    "meerkat-rpc/openai-live",
+]
 experimental-gpt-live-e2e = [
+    "openai-live-e2e",
     "meerkat/experimental-gpt-live",
     "meerkat-mob-mcp/experimental-gpt-live",
     "meerkat-rpc/experimental-gpt-live",

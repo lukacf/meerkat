@@ -24230,7 +24230,7 @@ impl MobActor {
                         }
                     }
                 }
-                #[cfg(feature = "experimental-gpt-live")]
+                #[cfg(feature = "openai-live")]
                 MobCommand::ValidateLiveBridgeMemberEligibility {
                     agent_identity,
                     reply_tx,
@@ -24275,7 +24275,7 @@ impl MobActor {
                     .await;
                     let _ = reply_tx.send(result);
                 }
-                #[cfg(feature = "experimental-gpt-live")]
+                #[cfg(feature = "openai-live")]
                 MobCommand::ValidateLiveDurableSourceAvailability {
                     agent_identity,
                     reply_tx,
@@ -24328,7 +24328,7 @@ impl MobActor {
                     .await;
                     let _ = reply_tx.send(result);
                 }
-                #[cfg(feature = "experimental-gpt-live")]
+                #[cfg(feature = "openai-live")]
                 MobCommand::StartLiveBridgeOperation {
                     agent_identity,
                     request,

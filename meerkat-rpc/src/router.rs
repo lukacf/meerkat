@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[cfg(feature = "mob")]
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use std::sync::RwLock as StdRwLock;
 
 use futures::StreamExt;
@@ -1053,7 +1053,7 @@ fn lower_session_fork_replace_request(
 }
 
 /// One routed response plus any custody that ends at transport delivery.
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 #[derive(Clone, Copy)]
 enum ExperimentalLiveOpenDeliveryDisposition {
     Delivered,
@@ -1066,13 +1066,13 @@ enum ExperimentalLiveOpenDeliveryDisposition {
 /// confirms delivery. Dropping this owner closes the decision channel, which
 /// the coordinator treats as rejection and routes through the same exact
 /// publication-failure cleanup used for serialization failure.
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 pub(crate) struct ExperimentalLiveOpenDeliveryCustody {
     decision_tx: tokio::sync::oneshot::Sender<ExperimentalLiveOpenDeliveryDisposition>,
     cleanup_task: tokio::task::JoinHandle<Result<(), String>>,
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 impl ExperimentalLiveOpenDeliveryCustody {
     fn new(
         runtime: Arc<SessionRuntime>,
@@ -1134,7 +1134,7 @@ impl ExperimentalLiveOpenDeliveryCustody {
     }
 }
 
-#[cfg(all(test, feature = "experimental-gpt-live"))]
+#[cfg(all(test, feature = "openai-live"))]
 pub(crate) fn test_experimental_live_open_delivery_custody() -> (
     ExperimentalLiveOpenDeliveryCustody,
     tokio::sync::oneshot::Receiver<bool>,
@@ -1162,7 +1162,7 @@ pub(crate) struct RoutedRpcResponse {
     pub(crate) response: RpcResponse,
     #[cfg(feature = "live-webrtc")]
     live_webrtc_answer_delivery: Option<handlers::live::LiveWebrtcAnswerDeliveryCustody>,
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     experimental_live_open_delivery: Option<ExperimentalLiveOpenDeliveryCustody>,
 }
 
@@ -1172,7 +1172,7 @@ impl RoutedRpcResponse {
             response,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_answer_delivery: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_open_delivery: None,
         }
     }
@@ -1190,12 +1190,12 @@ impl RoutedRpcResponse {
         Self {
             response,
             live_webrtc_answer_delivery: delivery,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_open_delivery: None,
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub(crate) fn with_experimental_live_open(
         response: RpcResponse,
         custody: Option<ExperimentalLiveOpenDeliveryCustody>,
@@ -1217,7 +1217,7 @@ impl RoutedRpcResponse {
                 custody.rejected().await?;
             }
         }
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         if let Some(custody) = self.experimental_live_open_delivery.take() {
             if delivered {
                 custody.delivered().await?;
@@ -1256,22 +1256,18 @@ pub struct MethodRouter {
     live_webrtc_state: Option<Arc<meerkat_live::LiveWebrtcState>>,
     #[cfg(feature = "live-webrtc")]
     live_webrtc_answer_transport: Option<Arc<dyn meerkat_live::LiveWebrtcAnswerTransport>>,
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     experimental_live_open_authority:
         Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>>,
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     experimental_live_public_observation_publisher:
         Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>>,
-    #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+    #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
     experimental_live_playback_custodies: handlers::live::ExperimentalLivePlaybackCustodies,
-    #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+    #[cfg(all(feature = "openai-live", feature = "mob"))]
     experimental_live_delegation_coordinator:
         Arc<meerkat_mob_mcp::live_delegation::ExperimentalLiveDelegationCoordinator>,
-    #[cfg(all(
-        feature = "experimental-gpt-live",
-        feature = "mob",
-        feature = "live-webrtc"
-    ))]
+    #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
     experimental_live_context_mirror_host: Arc<
         StdRwLock<
             Option<
@@ -1313,7 +1309,7 @@ impl MethodRouter {
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state.clone(),
         )));
-        #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+        #[cfg(all(feature = "openai-live", feature = "mob"))]
         let experimental_live_delegation_coordinator =
             meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
                 Arc::clone(&runtime_adapter),
@@ -1358,19 +1354,15 @@ impl MethodRouter {
             live_webrtc_state: None,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_answer_transport: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_open_authority: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_public_observation_publisher: None,
-            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
             experimental_live_playback_custodies: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+            #[cfg(all(feature = "openai-live", feature = "mob"))]
             experimental_live_delegation_coordinator,
-            #[cfg(all(
-                feature = "experimental-gpt-live",
-                feature = "mob",
-                feature = "live-webrtc"
-            ))]
+            #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
             experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
         }
@@ -1437,11 +1429,7 @@ impl MethodRouter {
             None => live_host,
         };
         let live_host = Arc::new(live_host);
-        #[cfg(all(
-            feature = "experimental-gpt-live",
-            feature = "mob",
-            feature = "live-webrtc"
-        ))]
+        #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
         if let Some(authority) = self.experimental_live_open_authority.as_ref() {
             let context_host = meerkat::surface::ExperimentalGptLiveContextMirrorHost::new(
                 Arc::clone(&self.runtime_adapter),
@@ -1489,7 +1477,7 @@ impl MethodRouter {
     /// Install the host-owned authority that may admit strict channel-scoped
     /// execution identity requests. Capability advertisement must be wired
     /// from the same configured authority by the embedding host.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub fn with_experimental_live_open_authority(
         mut self,
         authority: Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
@@ -1502,7 +1490,7 @@ impl MethodRouter {
     /// Install the connection-scoped publisher that acknowledges an
     /// experimental assistant output only after the outer JSON-RPC writer has
     /// flushed its sanitized notification.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub(crate) fn with_experimental_live_public_observation_publisher(
         mut self,
         publisher: Arc<
@@ -1513,7 +1501,7 @@ impl MethodRouter {
         self
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn experimental_live_bound_channel_activator(
         &self,
     ) -> Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator>>
@@ -1543,11 +1531,7 @@ impl MethodRouter {
         }
     }
 
-    #[cfg(all(
-        feature = "experimental-gpt-live",
-        feature = "mob",
-        feature = "live-webrtc"
-    ))]
+    #[cfg(all(feature = "openai-live", feature = "mob", feature = "live-webrtc"))]
     pub async fn pending_experimental_live_replacement_required(
         &self,
         session_id: &SessionId,
@@ -1836,7 +1820,7 @@ impl MethodRouter {
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state.clone(),
         )));
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         let experimental_live_delegation_coordinator =
             meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
                 Arc::clone(&runtime_adapter),
@@ -1878,15 +1862,15 @@ impl MethodRouter {
             live_webrtc_state: None,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_answer_transport: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_open_authority: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_public_observation_publisher: None,
-            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
             experimental_live_playback_custodies: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_delegation_coordinator,
-            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
             experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
         }
@@ -1896,7 +1880,7 @@ impl MethodRouter {
     /// (e.g., persistent-backed for durable runtime semantics).
     pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = Arc::clone(&adapter);
-        #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+        #[cfg(all(feature = "openai-live", feature = "mob"))]
         {
             self.experimental_live_delegation_coordinator =
                 meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
@@ -2631,17 +2615,17 @@ impl MethodRouter {
                         live_webrtc: self.live_webrtc_state.as_deref(),
                         runtime: &self.runtime,
                         session_factory: self.live_session_factory.as_ref().map(Arc::as_ref),
-                        #[cfg(feature = "experimental-gpt-live")]
+                        #[cfg(feature = "openai-live")]
                         experimental_live_open_authority: self
                             .experimental_live_open_authority
                             .as_ref(),
-                        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+                        #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
                         experimental_live_playback_custodies: &self
                             .experimental_live_playback_custodies,
                     },
                 )
                 .await;
-                #[cfg(feature = "experimental-gpt-live")]
+                #[cfg(feature = "openai-live")]
                 {
                     let handlers::live::LiveOpenHandlerResult {
                         response,
@@ -2660,7 +2644,7 @@ impl MethodRouter {
                         response, custody,
                     ));
                 }
-                #[cfg(not(feature = "experimental-gpt-live"))]
+                #[cfg(not(feature = "openai-live"))]
                 result.response
             }
             #[cfg(feature = "live-webrtc")]
@@ -2672,15 +2656,15 @@ impl MethodRouter {
                             params,
                             answer_transport,
                             &self.runtime,
-                            #[cfg(feature = "experimental-gpt-live")]
+                            #[cfg(feature = "openai-live")]
                             self.experimental_live_open_authority.as_deref(),
-                            #[cfg(feature = "experimental-gpt-live")]
+                            #[cfg(feature = "openai-live")]
                             self.experimental_live_bound_channel_activator(),
-                            #[cfg(feature = "experimental-gpt-live")]
+                            #[cfg(feature = "openai-live")]
                             self.experimental_live_public_observation_publisher.clone(),
-                            #[cfg(feature = "experimental-gpt-live")]
+                            #[cfg(feature = "openai-live")]
                             &self.live_adapter_host,
-                            #[cfg(feature = "experimental-gpt-live")]
+                            #[cfg(feature = "openai-live")]
                             &self.experimental_live_playback_custodies,
                         )
                         .await,
@@ -2709,7 +2693,7 @@ impl MethodRouter {
                     &self.runtime,
                     #[cfg(feature = "live-webrtc")]
                     self.live_webrtc_answer_transport.as_deref(),
-                    #[cfg(feature = "experimental-gpt-live")]
+                    #[cfg(feature = "openai-live")]
                     self.experimental_live_open_authority.as_deref(),
                 )
                 .await
@@ -12754,14 +12738,14 @@ mod tests {
         assert_eq!(err.code, error::METHOD_NOT_FOUND);
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct ExperimentalAuthorityTestAdapter;
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     static STRICT_LIVE_OPEN_EFFECT_TEST_LOCK: tokio::sync::Mutex<()> =
         tokio::sync::Mutex::const_new(());
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::live_adapter::LiveAdapter for ExperimentalAuthorityTestAdapter {
         async fn send_command(
@@ -12803,14 +12787,14 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct ExperimentalAuthorityTestPending {
         log: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
         identity: meerkat_core::SessionLlmIdentity,
         execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_client::realtime_session::RealtimeSessionFactory for ExperimentalAuthorityTestPending {
         fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
@@ -12864,7 +12848,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat::experimental_gpt_live::ExperimentalLivePendingOpen
         for ExperimentalAuthorityTestPending
@@ -12900,13 +12884,13 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct ExperimentalAuthorityTestProvider {
         log: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
         deny: bool,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider
         for ExperimentalAuthorityTestProvider
@@ -12967,7 +12951,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn attach_experimental_test_webrtc(router: MethodRouter) -> MethodRouter {
         let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
             meerkat_live::NoOpProjectionSink,
@@ -12984,7 +12968,7 @@ mod tests {
         )))
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn experimental_open_request(session_id: &SessionId) -> RpcRequest {
         make_request(
             "live/open",
@@ -12999,7 +12983,7 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_router_composes_shared_mob_delegation_activator() {
         let (router, _notifications) = test_router().await;
@@ -13009,7 +12993,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn strict_live_open_absent_authority_fails_before_runtime_or_channel_effects() {
         let (router, _notifications) = test_router().await;
@@ -13026,7 +13010,7 @@ mod tests {
         assert!(router.live_adapter_host.active_channels().await.is_empty());
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn strict_live_open_denial_has_zero_projection_factory_and_channel_effects() {
         let (router, _notifications) = test_router().await;
@@ -13050,7 +13034,7 @@ mod tests {
         assert!(router.live_adapter_host.active_channels().await.is_empty());
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn strict_live_open_shipping_call_graph_binds_only_after_shared_factory_open() {
         let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;
@@ -13123,7 +13107,7 @@ mod tests {
         assert_eq!(bound.provider, meerkat_core::Provider::OpenAI);
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn strict_live_open_transport_rejection_runs_exact_publication_cleanup() {
         let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;
@@ -13219,7 +13203,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn strict_live_answer_without_connection_custody_stops_before_provider_io() {
         let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;

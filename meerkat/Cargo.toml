@@ -139,13 +139,16 @@ openai = [
     "meerkat-providers/openai",
 ]
 openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
-# Pre-release live execution path. This is deliberately separate from public
-# OpenAI Realtime and off by default. Runtime admission additionally requires
-# explicit operator, realm, and Gate0 qualification evidence.
+# Public OpenAI Live (gpt-live-1) execution path: WebRTC channel with a
+# server-side sideband, client delegation to the channel-bound Meerkat
+# executor, and the GPT Live runtime machinery. Off by default.
+openai-live = ["openai", "live-webrtc", "session-store", "meerkat-openai/live"]
+# DEPRECATED: private ChatGPT-brokered GPT Live protocol. Builds on the same
+# runtime machinery as `openai-live` and adds the experimental broker plus its
+# operator/realm/Gate0 admission. Scheduled for removal once the public path
+# is qualified for all consumers.
 experimental-gpt-live = [
-    "openai",
-    "live-webrtc",
-    "session-store",
+    "openai-live",
     "meerkat-llm-core/experimental-gpt-live",
     "meerkat-openai/experimental-gpt-live",
 ]

@@ -2880,6 +2880,82 @@ impl AgentFactory {
             .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))
     }
 
+    /// Resolve the configured auth binding the public Live host identity uses
+    /// in `realm`, without reading credentials or touching provider runtime.
+    /// The host authorizes this exact binding for the durable session before
+    /// [`Self::resolve_public_live_target`] materializes the credential.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "openai-live"))]
+    pub fn resolve_public_live_binding_for_identity(
+        &self,
+        config: &Config,
+        realm: &RealmId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<AuthBindingRef, FactoryError> {
+        let (_, _, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            Some(realm),
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        Ok(auth_binding)
+    }
+
+    /// Materialize the public Live (`gpt-live-1`) realtime target for the
+    /// host identity, honoring the exact authorized binding-use witness and
+    /// the generated AuthMachine lease for the same durable session.
+    ///
+    /// The catalog witness, not the model name, admits the identity; the
+    /// public Live broker further requires the plain OpenAI API backend.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "openai-live"))]
+    pub async fn resolve_public_live_target(
+        &self,
+        config: &Config,
+        realm: &RealmId,
+        identity: &SessionLlmIdentity,
+        binding_use_witness: meerkat_core::AuthBindingUseWitness,
+        auth_lease_handle: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<meerkat_providers::ResolvedRealtimeTarget, FactoryError> {
+        let (binding_realm, _, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            Some(realm),
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        if auth_binding != *binding_use_witness.auth_binding() {
+            return Err(FactoryError::ClientCreationFailed(
+                "public live binding-use witness does not match the host identity binding"
+                    .to_string(),
+            ));
+        }
+        let connection = self
+            .resolve_realtime_connection_for_selected_binding(
+                binding_realm,
+                auth_binding,
+                Some(auth_lease_handle),
+            )
+            .await?;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        let profile = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "public live target is not registered for {}:{}",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+        meerkat_providers::ResolvedRealtimeTarget::new(identity.clone(), profile, connection)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(
+                    "resolved public live target identity/profile/connection mismatch".to_string(),
+                )
+            })
+    }
+
     /// Materialize one prepared target only after the host supplies the
     /// nonforgeable exact binding-use witness minted from authenticated state
     /// and the generated AuthMachine lease for the same durable session.

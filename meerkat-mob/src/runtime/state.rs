@@ -843,7 +843,7 @@ pub(super) enum MobCommand {
         attempts: u32,
         automatic_retry: bool,
     },
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     StartLiveBridgeOperation {
         agent_identity: AgentIdentity,
         request: super::LiveBridgeOperationRequest,
@@ -852,7 +852,7 @@ pub(super) enum MobCommand {
             Result<super::LiveBridgeOperationTerminalFuture, super::LiveBridgeOperationStartError>,
         >,
     },
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     ValidateLiveBridgeMemberEligibility {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), super::LiveBridgeOperationStartError>>,
@@ -861,7 +861,7 @@ pub(super) enum MobCommand {
     /// the source of a separate live executor. Unlike direct bridge
     /// eligibility, this validates only exact current source ownership and
     /// availability; callback policy belongs to the forked executor.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     ValidateLiveDurableSourceAvailability {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), super::LiveBridgeOperationStartError>>,
@@ -1637,13 +1637,13 @@ impl MobCommand {
             Self::ResumeTopologyCompleted { .. } => "ResumeTopologyCompleted",
             #[cfg(feature = "runtime-adapter")]
             Self::ResumeTopologyEffectHeld { .. } => "ResumeTopologyEffectHeld",
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. } => "StartLiveBridgeOperation",
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::ValidateLiveBridgeMemberEligibility { .. } => {
                 "ValidateLiveBridgeMemberEligibility"
             }
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::ValidateLiveDurableSourceAvailability { .. } => {
                 "ValidateLiveDurableSourceAvailability"
             }

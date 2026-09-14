@@ -62,6 +62,8 @@ default = ["oauth", "copilot"]
 oauth = ["meerkat-auth-core/oauth"]
 copilot = ["dep:meerkat-copilot", "meerkat-copilot/oauth"]
 realtime = ["dep:oai-rt-rs", "dep:sha2", "dep:tokio-tungstenite"]
+# Public OpenAI Live API (gpt-live-1) broker over `oai_rt_rs::live`.
+live = ["dep:oai-rt-rs", "dep:sha2"]
 experimental-gpt-live = [
     "dep:oai-rt-rs",
     "dep:sha2",

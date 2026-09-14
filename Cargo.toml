@@ -182,7 +182,7 @@ meerkat-machine-dsl = { version = "0.8.37", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.37", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.37", path = "meerkat-store", default-features = false }
 meerkat-store-conformance = { version = "0.8.37", path = "meerkat-store-conformance" }
-oai-rt-rs = { version = "=0.4.1", features = ["experimental-gpt-live"] }
+oai-rt-rs = { version = "=0.5.1", features = ["experimental-gpt-live"] }
 
 [profile.dev]
 split-debuginfo = "off"
@@ -289,3 +289,4 @@ tag-message = "Release v{{version}}"
 pre-release-hook = ["bash", "-c", "$(git rev-parse --show-toplevel)/scripts/release-hook.sh {{version}}"]
 publish = false
 push = true
+

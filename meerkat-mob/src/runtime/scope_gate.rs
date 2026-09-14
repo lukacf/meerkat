@@ -84,7 +84,7 @@ impl MobCommand {
             // acquisition; both halves already require SendCommand.
             | Self::SpawnAttachedForkedParticipant { .. } => Some(ControlScope::SendCommand),
 
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { .. }
             | Self::ValidateLiveBridgeMemberEligibility { .. }
             | Self::ValidateLiveDurableSourceAvailability { .. } => Some(ControlScope::Live),
@@ -312,19 +312,19 @@ impl MobCommand {
             Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::StartLiveBridgeOperation { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(
                     super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
                 ));
             }
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::ValidateLiveBridgeMemberEligibility { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(
                     super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
                 ));
             }
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             Self::ValidateLiveDurableSourceAvailability { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(
                     super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,

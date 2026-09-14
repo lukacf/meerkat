@@ -124,7 +124,9 @@ runtime-adapter = []
 # Shared production bridge for committed Mob turns into the experimental live
 # context outbox. This remains opt-in with the experimental provider surface;
 # ordinary runtime-backed Mob builds retain the trait's zero-effect default.
-experimental-gpt-live = ["runtime-adapter", "meerkat-session/live", "meerkat-runtime/live"]
+openai-live = ["runtime-adapter", "meerkat-session/live", "meerkat-runtime/live"]
+# DEPRECATED alias kept while the private GPT Live protocol is still shipped.
+experimental-gpt-live = ["openai-live"]
 # ATIF trajectory export vocabulary, re-exported for hosts that assemble mob
 # member trajectories. Off by default: nothing inside this crate consumes it,
 # so a host that does not export trajectories does not compile it.

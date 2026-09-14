@@ -223,7 +223,7 @@ mod handle;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
 mod identity_recovery_test_support;
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 mod live_bridge_operation;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
@@ -384,7 +384,7 @@ pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey,
 };
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 pub use live_bridge_operation::{
     DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
     LiveBridgeAcceptedExecution, LiveBridgeExecutionSnapshot,

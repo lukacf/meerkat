@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+/// Catalog model family served by the public Live broker rather than the
+/// Realtime WebSocket factory.
+pub const GPT_LIVE_MODEL_FAMILY: &str = "gpt-live";
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_core::AuthError;
 use meerkat_core::{AuthLease, AuthMetadata, Provider};
@@ -359,6 +363,7 @@ fn build_openai_client(
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+
 impl ProviderRuntime for OpenAiProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::OpenAI
@@ -735,6 +740,15 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         if target.profile().profile().release_stage != meerkat_core::ModelReleaseStage::Stable {
             return Err(ProviderClientError::ClientInit(
                 "experimental realtime models require their dedicated admitted factory".to_string(),
+            ));
+        }
+        if target.profile().profile().model_family == GPT_LIVE_MODEL_FAMILY {
+            // The public Live API is a different protocol (continuous audio,
+            // client delegation over a WebRTC sideband); it is reached through
+            // the `live/open` execution-identity seam, never this factory.
+            return Err(ProviderClientError::ClientInit(
+                "gpt-live models use the public Live broker, not the Realtime WebSocket factory"
+                    .to_string(),
             ));
         }
         let (_, _, connection) = target.into_parts();

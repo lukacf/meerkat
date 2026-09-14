@@ -694,6 +694,20 @@ impl LiveExecutionProfileSelection {
         Ok(Self { definition })
     }
 
+    /// Select a public (non-experimental) live execution profile. The public
+    /// path has no qualification witness: the released catalog row and the
+    /// host's configured binding are its admission, so the host facade owns
+    /// the profile catalogue and calls this for exactly those profiles.
+    #[cfg(feature = "live")]
+    pub fn from_public_profile(
+        profile_id: impl Into<String>,
+        mode: LiveExecutionMode,
+        capabilities: LiveExecutionCapabilities,
+    ) -> Result<Self, LiveExecutionAuthorityError> {
+        let definition = LiveExecutionProfileDefinition::new(profile_id, mode, capabilities)?;
+        Ok(Self { definition })
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn __test_new(

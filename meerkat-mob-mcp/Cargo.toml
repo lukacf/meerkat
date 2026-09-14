@@ -41,10 +41,16 @@ jsonschema = { workspace = true }
 
 [features]
 default = []
+openai-live = [
+    "meerkat/openai-live",
+    "meerkat-mob/openai-live",
+    "dep:meerkat-live",
+]
+# DEPRECATED: private GPT Live protocol on top of the public machinery.
 experimental-gpt-live = [
+    "openai-live",
     "meerkat/experimental-gpt-live",
     "meerkat-mob/experimental-gpt-live",
-    "dep:meerkat-live",
 ]
 experimental-gpt-live-gate0-harness = [
     "experimental-gpt-live",

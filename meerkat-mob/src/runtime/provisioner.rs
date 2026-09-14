@@ -5003,7 +5003,7 @@ async fn enqueue_committed_parent_projection_after_runtime_completion(
     if !should_enqueue_committed_parent_projection(owns_committed_parent_projection, completion) {
         return Ok(());
     }
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     {
         return session_service
             .enqueue_committed_parent_session_boundary_after_runtime_turn(
@@ -5014,7 +5014,7 @@ async fn enqueue_committed_parent_projection_after_runtime_completion(
             .map(drop)
             .map_err(|error| session_turn_error_to_mob_error(session_id, error));
     }
-    #[cfg(not(feature = "experimental-gpt-live"))]
+    #[cfg(not(feature = "openai-live"))]
     {
         let _ = (session_service, runtime_adapter, session_id);
         Ok(())

@@ -604,6 +604,57 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         // synchronous provider operation around the channel lifecycle.
         call_timeout_secs: Some(600),
     },
+    // GPT Live 1
+    //
+    // Public OpenAI Live API voice model (`/v1/live/sessions`). Live audio runs
+    // continuously with provider-owned turn detection; the voice model speaks
+    // while a client delegation hands work to the channel-bound Meerkat
+    // executor. The `gpt-live` family never selects the Realtime WebSocket
+    // factory: it is reached only through the WebRTC `live/open` seam with an
+    // execution identity. Context and output limits are not published for the
+    // Live API and stay unknown rather than being copied from Realtime.
+    ModelCapabilities {
+        id: "gpt-live-1",
+        provider: Provider::OpenAI,
+        display_name: "GPT Live 1",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-live",
+        context_window: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: false,
+        image_tool_results: false,
+        inline_video: false,
+        realtime: true,
+        realtime_supports_provider_managed_turns: true,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: true,
+        realtime_transcript_supported: true,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: false,
+        effort_levels: &[],
+        openai_responses_params: None,
+        supports_web_search: false,
+        supports_mid_conversation_system_messages: false,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: false,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        // Live transport owns its finer-grained readiness, finalization, and
+        // close deadlines. This is the catalog-required loose ceiling for any
+        // synchronous provider operation around the channel lifecycle.
+        call_timeout_secs: Some(600),
+    },
     // gpt-realtime-2
     //
     // OpenAI's canonical realtime model (supersedes gpt-realtime / gpt-4o-realtime-preview).

@@ -557,6 +557,15 @@ admission applies: the catalog row and the configured binding are the
 admission. The `gpt-live` model family never selects the Realtime WebSocket
 factory.
 
+The voice must be one of the public Live voices: `alloy`, `ash`, `ballad`,
+`beacon`, `bossa`, `cedar`, `cinder`, `coral`, `delta`, `echo`, `gleam`,
+`marin`, `meridian`, `quartz`, `ripple`, `sage`, `shimmer`, `stone`, `tempo`,
+`verse`, `vesper`, `willow`. This set does not overlap with the private
+experimental protocol's voices; an unknown name (for example `cove`) is
+refused by the provider with HTTP 403 "Voice session access denied", which is
+not an entitlement failure. The broker logs a warning naming the known voices
+when a configured voice is outside this list.
+
 Consumers open the channel through the existing execution-identity seam:
 
 ```json

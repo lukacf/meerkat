@@ -3604,6 +3604,11 @@ fn spawn_sideband_actors(
                     break;
                 }
             };
+            tracing::debug!(
+                observation = ?observation,
+                outcome = ?outcome,
+                "live adapter observation applied"
+            );
             if let meerkat_live::ObservationOutcome::AssistantOutputAvailable(ref output) = outcome
             {
                 let public = ExperimentalLivePublicObservation::assistant_output_available(

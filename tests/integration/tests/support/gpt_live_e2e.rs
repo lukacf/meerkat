@@ -170,7 +170,12 @@ impl JsonlRpcClient {
         loop {
             let mut line = String::new();
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if timeout(remaining, self.reader.read_line(&mut line)).await?? == 0 {
+            let read = timeout(remaining, self.reader.read_line(&mut line))
+                .await
+                .map_err(|_| {
+                    format!("timed out after {timeout_secs}s waiting for the RPC reply to {method}")
+                })??;
+            if read == 0 {
                 return Err("RPC server closed".into());
             }
             let message: Value = serde_json::from_str(line.trim())?;
@@ -209,7 +214,22 @@ impl JsonlRpcClient {
         loop {
             let mut line = String::new();
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if timeout(remaining, self.reader.read_line(&mut line)).await?? == 0 {
+            let read = match timeout(remaining, self.reader.read_line(&mut line)).await {
+                Ok(read) => read?,
+                Err(_) => {
+                    let seen: Vec<String> = self
+                        .notifications
+                        .iter()
+                        .filter_map(|message| message["method"].as_str().map(str::to_string))
+                        .collect();
+                    return Err(format!(
+                        "timed out after {timeout_secs}s waiting for RPC notification {method}; \
+                         other notifications queued meanwhile: {seen:?}"
+                    )
+                    .into());
+                }
+            };
+            if read == 0 {
                 return Err("RPC server closed while awaiting notification".into());
             }
             let message: Value = serde_json::from_str(line.trim())?;

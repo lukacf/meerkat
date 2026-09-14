@@ -14,6 +14,9 @@
 //! outside this module.
 
 use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use meerkat_core::model_profile::catalog::ModelReleaseStage;
 use meerkat_llm_core::provider_runtime::errors::ProviderClientError;
@@ -63,6 +66,16 @@ impl PublicLiveOpenConfig {
         let voice = voice.into();
         if voice.trim().is_empty() {
             return Err(GptLiveBrokerError::MissingVoice);
+        }
+        if !oai_rt_rs::live::VOICES.contains(&voice.as_str()) {
+            // Public voice names are extensible and custom voices exist, so
+            // this is not a rejection; the provider answers an unknown name
+            // with HTTP 403 "Voice session access denied", which this note
+            // makes diagnosable without exposing the configured value.
+            tracing::warn!(
+                known_voices = ?oai_rt_rs::live::VOICES,
+                "public Live voice is not one of the released public voice names"
+            );
         }
         Ok(Self {
             offer_sdp,
@@ -444,10 +457,33 @@ impl PublicLiveBrokerSession {
     ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
         let mut receiver = self.receiver.lock().await;
         loop {
-            if let Some(observation) = self.state.lock().await.queued_observations.pop_front() {
-                return Ok(Some(observation));
-            }
-            let Some(frame) = receiver.next_event().await.map_err(map_live_error)? else {
+            let quiet_deadline = {
+                let mut state = self.state.lock().await;
+                if let Some(observation) = state.queued_observations.pop_front() {
+                    tracing::debug!(?observation, "public Live lowered a sideband observation");
+                    return Ok(Some(observation));
+                }
+                state.assistant_quiet_deadline()
+            };
+            let next = match quiet_deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline, receiver.next_event()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            // The provider has no assistant completion event. A
+                            // quiet output stream is the boundary of the spoken
+                            // assistant turn; a later output starts a new turn.
+                            tracing::debug!(
+                                "public Live assistant output went quiet; finishing the turn"
+                            );
+                            self.state.lock().await.finish_open_turn();
+                            continue;
+                        }
+                    }
+                }
+                None => receiver.next_event().await,
+            };
+            let Some(frame) = next.map_err(map_live_error)? else {
                 self.state.lock().await.finish_open_turn();
                 if let Some(observation) = self.state.lock().await.queued_observations.pop_front() {
                     return Ok(Some(observation));
@@ -485,6 +521,10 @@ struct OpenTurn {
     /// Transcript deltas with their session-relative start offsets, so a
     /// delegation can freeze exactly the prefix observed before its offset.
     segments: Vec<TranscriptSegment>,
+    /// Last output transcript delta for an assistant turn; the turn finishes
+    /// once the transcript has been quiet for
+    /// [`SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD`].
+    last_output_activity: Instant,
 }
 
 struct TranscriptSegment {
@@ -513,6 +553,10 @@ struct SessionState {
     last_user_turn: Option<FinishedUserTurn>,
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
+    reflected_output_audio_frames: u64,
+    /// Client delegations joined but not yet answered with an acknowledged
+    /// result append.
+    outstanding_delegations: usize,
 }
 
 impl Default for SessionState {
@@ -527,6 +571,8 @@ impl Default for SessionState {
             last_user_turn: None,
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
+            reflected_output_audio_frames: 0,
+            outstanding_delegations: 0,
         }
     }
 }
@@ -534,6 +580,16 @@ impl Default for SessionState {
 impl SessionState {
     const MAX_DELEGATION_IDENTITIES: usize = 4096;
     const MAX_PENDING_APPENDS: usize = 64;
+    /// The public API emits no assistant completion event. Once the output
+    /// transcript has been quiet this long, the open assistant turn is
+    /// finished so playback settlement and canonical history do not wait for
+    /// the next speaker change.
+    const ASSISTANT_OUTPUT_QUIET_PERIOD: Duration = Duration::from_millis(1500);
+    /// After a delegation result is acknowledged the voice model needs a
+    /// moment before its readout deltas arrive. The open assistant turn is
+    /// held that long so the readout continues the same spoken turn instead
+    /// of starting one the runtime has no awaiting interaction for.
+    const RESULT_READOUT_GRACE: Duration = Duration::from_millis(2500);
 
     fn reserve_append(
         &mut self,
@@ -575,6 +631,15 @@ impl SessionState {
                         }
                     }
                     PendingAppendLane::Delegation => {
+                        self.outstanding_delegations =
+                            self.outstanding_delegations.saturating_sub(1);
+                        if let Some(open) = self
+                            .open_turn
+                            .as_mut()
+                            .filter(|open| open.role == GptLiveTurnRole::Assistant)
+                        {
+                            open.last_output_activity = Instant::now() + Self::RESULT_READOUT_GRACE;
+                        }
                         GptLiveBrokerObservation::DelegationContextAppendAcknowledged {
                             token: pending.token,
                         }
@@ -607,8 +672,21 @@ impl SessionState {
             // Reflected media, mute state, accounting telemetry, telephony
             // signalling, and informational notices carry no conversational,
             // transcript, delegation, or effect authority.
-            ServerEvent::OutputAudioDelta { .. }
-            | ServerEvent::InputAudio { .. }
+            ServerEvent::OutputAudioDelta { .. } => {
+                // Reflected output media is not a transcript and is not turn
+                // activity: the sideband can carry output audio frames while
+                // the model is not speaking, so only transcript deltas keep an
+                // assistant turn open.
+                self.reflected_output_audio_frames =
+                    self.reflected_output_audio_frames.saturating_add(1);
+                if self.reflected_output_audio_frames.is_multiple_of(50) {
+                    tracing::debug!(
+                        frames = self.reflected_output_audio_frames,
+                        "public Live sideband reflected output audio"
+                    );
+                }
+            }
+            ServerEvent::InputAudio { .. }
             | ServerEvent::InputAudioMuted { .. }
             | ServerEvent::InputAudioUnmuted { .. }
             | ServerEvent::UsageUpdated { .. }
@@ -688,8 +766,37 @@ impl SessionState {
             .ok_or_else(protocol_error)
     }
 
+    /// Deadline after which an open assistant turn is treated as spoken to
+    /// completion because the provider stopped producing output for it.
+    fn assistant_quiet_deadline(&self) -> Option<Instant> {
+        // While a client delegation is outstanding the assistant's spoken
+        // acknowledgment and the later result readout are one turn, exactly
+        // as the provider-native turn behaves: finishing early would leave the
+        // readout without an awaiting interaction.
+        if self.outstanding_delegations > 0 {
+            return None;
+        }
+        self.open_turn
+            .as_ref()
+            .filter(|open| open.role == GptLiveTurnRole::Assistant)
+            .map(|open| open.last_output_activity + Self::ASSISTANT_OUTPUT_QUIET_PERIOD)
+    }
+
+    fn note_output_activity(&mut self) {
+        if let Some(open) = self
+            .open_turn
+            .as_mut()
+            .filter(|open| open.role == GptLiveTurnRole::Assistant)
+        {
+            open.last_output_activity = Instant::now();
+        }
+    }
+
     fn record_transcript_delta(&mut self, role: GptLiveTurnRole, start_ms: f64, delta: String) {
         let turn = self.ensure_open_turn(role);
+        if role == GptLiveTurnRole::Assistant {
+            self.note_output_activity();
+        }
         self.next_transcript_item = self.next_transcript_item.saturating_add(1);
         let item = GptLiveTranscriptItemRef(format!(
             "{}:{}",
@@ -742,6 +849,7 @@ impl SessionState {
             provider_ref: turn.0.clone(),
             role,
             segments: Vec::new(),
+            last_output_activity: Instant::now(),
         });
         turn
     }
@@ -835,6 +943,7 @@ impl SessionState {
                 (self.mint_turn(GptLiveTurnRole::User), transcript)
             }
         };
+        self.outstanding_delegations = self.outstanding_delegations.saturating_add(1);
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: reference,
@@ -874,8 +983,8 @@ fn map_live_error(error: LiveError) -> GptLiveBrokerError {
             tracing::warn!(
                 status,
                 request_id = request_id.as_deref().unwrap_or("<none>"),
-                entitlement_hint = status == 403,
-                "public Live HTTP request was rejected by the provider"
+                forbidden_hint = status == 403,
+                "public Live HTTP request was rejected by the provider (403: unknown voice name or organization without Live access)"
             );
             GptLiveBrokerTerminalClass::Http
         }
@@ -1628,13 +1737,17 @@ mod tests {
             Some(GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: acked }) if acked == token
         ));
         session.close().await.expect("close requested");
-        // The terminal event flushes the open assistant turn, then the stream ends.
+        // The assistant turn finishes exactly once (by output quiet period or
+        // by the terminal event), then the stream ends.
+        let mut finished = Vec::new();
+        while let Some(observation) = session.next_observation().await.unwrap() {
+            finished.push(observation);
+        }
         assert!(matches!(
-            session.next_observation().await.unwrap(),
-            Some(GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, transcript, .. })
+            finished.as_slice(),
+            [GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, transcript, .. }]
                 if transcript == "one moment"
         ));
-        assert!(session.next_observation().await.unwrap().is_none());
         let events = capture.lock().expect("capture lock").client_events.clone();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0]["content"], "{\"canonical_messages\":[]}");
@@ -1645,6 +1758,108 @@ mod tests {
                 .all(|event| event["event_id"].is_string())
         );
         assert_eq!(events[2]["type"], "session.close");
+        server.abort();
+    }
+
+    #[test]
+    fn outstanding_delegation_holds_the_assistant_turn_open_until_the_result_is_acknowledged() {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("book a table")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_hold", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta("one moment")))
+            .unwrap();
+        drain(&mut state);
+        assert!(
+            state.assistant_quiet_deadline().is_none(),
+            "no quiet boundary while the delegation is outstanding"
+        );
+        let token = state.reserve_append(PendingAppendLane::Delegation).unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(token)))))
+            .unwrap();
+        let deadline = state
+            .assistant_quiet_deadline()
+            .expect("quiet boundary resumes once the result is acknowledged");
+        assert!(
+            deadline >= Instant::now() + SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD,
+            "the readout gets a grace window after the acknowledgement"
+        );
+        assert_eq!(state.outstanding_delegations, 0);
+    }
+
+    #[tokio::test]
+    async fn assistant_turn_finishes_after_quiet_output_period() {
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        async fn quiet_after_output(mut socket: WebSocket, _capture: SharedCapture) {
+            let snapshot = json!({"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0});
+            send_json(
+                &mut socket,
+                json!({"type":"session.started","event_id":"s","session":snapshot}),
+            )
+            .await;
+            send_json(&mut socket, output_delta("all done")).await;
+            send_json(&mut socket, json!({"type":"session.output_audio.delta","delta":"AAAA","start_ms":1.0,"end_ms":2.0})).await;
+            // No further output: the provider never announces completion.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        async fn attach_quiet(
+            State(capture): State<SharedCapture>,
+            upgrade: WebSocketUpgrade,
+        ) -> Response {
+            upgrade.on_upgrade(move |socket| quiet_after_output(socket, capture))
+        }
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route("/v1/live/sessions/{session_id}/attach", get(attach_quiet))
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .expect("admitted factory");
+        let (_, session) = factory
+            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+            .await
+            .expect("bootstrap")
+            .into_parts();
+        let started = std::time::Instant::now();
+        let mut observations = Vec::new();
+        for _ in 0..4 {
+            let observation = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                session.next_observation(),
+            )
+            .await
+            .expect("quiet period must finish the assistant turn")
+            .unwrap()
+            .expect("stream stays open");
+            observations.push(observation);
+        }
+        assert!(matches!(
+            observations.as_slice(),
+            [
+                GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::Assistant, turn: started_turn },
+                GptLiveBrokerObservation::AssistantTranscriptFragment { .. },
+                GptLiveBrokerObservation::TurnSnapshotDelta { .. },
+                GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, turn: finished_turn, transcript },
+            ] if started_turn == finished_turn && transcript == "all done"
+        ));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD
+                && elapsed < std::time::Duration::from_secs(5),
+            "assistant turn finished after {elapsed:?}"
+        );
         server.abort();
     }
 

@@ -36,8 +36,7 @@ use tokio::time::{Duration, Instant, sleep};
 
 use support::{
     BrowserPeer, BrowserPeerProtocol, ExplicitScenarioBindingAuthority, FixedConfigSource,
-    JsonlRpcClient, delegated_executor_diagnostic, execution_identity, wait_for_events,
-    wait_for_spoken_output,
+    JsonlRpcClient, execution_identity, wait_for_events, wait_for_spoken_output,
 };
 
 const REALM: &str = "scenario-97-gpt-live-public";
@@ -165,7 +164,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=warn,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -308,7 +307,10 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
             },
             realm: binding.realm.clone(),
             transport: Arc::clone(&public_transport),
-            voice: "cove".to_string(),
+            // Public Live voice names differ from the private protocol: an
+            // unknown voice (for example "cove") is refused with HTTP 403
+            // "Voice session access denied", not a validation error.
+            voice: "marin".to_string(),
             session_instructions: None,
         },
     )?);
@@ -382,10 +384,10 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
     let offer = peer.call(json!({"type":"prepare"})).await?;
     assert_eq!(offer["protocol"], "public");
     // The answer step is where the host creates the provider session. The
-    // broker sanitizes provider HTTP failures to `remote_unavailable`; the
-    // most common cause with a valid key is an organization without public
-    // Live voice-session access (`POST /v1/live/sessions` -> 403 forbidden,
-    // "Voice session access denied.").
+    // broker sanitizes provider HTTP failures to `remote_unavailable` and
+    // logs the status. A 403 "Voice session access denied" from
+    // `POST /v1/live/sessions` means either a voice name the public API does
+    // not offer or an organization without Live voice-session access.
     let answer = rpc
         .call(
             open["transport"]["answer_method"]
@@ -398,7 +400,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         .await
         .map_err(|error| {
             format!(
-                "{error}; the public Live session could not be created for the configured {API_KEY_ENV}: verify the key's organization has OpenAI Live (gpt-live-1) voice-session access"
+                "{error}; the public Live session could not be created for the configured {API_KEY_ENV}: verify the configured voice is a public Live voice and the key's organization has OpenAI Live (gpt-live-1) voice-session access"
             )
         })?;
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
@@ -413,7 +415,17 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
     let greeting_audio_baseline = peer.audio_evidence().await?;
     let before = peer.events().await?.len();
     peer.call(json!({"type":"play","name":"greeting"})).await?;
-    let interrupted_output = rpc.wait_for_notification(OUTPUT_AVAILABLE, 45).await?;
+    let interrupted_output = match rpc.wait_for_notification(OUTPUT_AVAILABLE, 45).await {
+        Ok(output) => output,
+        Err(error) => {
+            let events = peer.events().await?;
+            return Err(format!(
+                "greeting produced no admitted assistant output: {error}; browser events: {}",
+                peer.event_summary(&events[before..])
+            )
+            .into());
+        }
+    };
     assert_eq!(interrupted_output["channel_id"], channel_id);
     let truncated = rpc
         .call(
@@ -514,9 +526,13 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         peer.event_summary(&joined[before..])
     );
 
+    // The delegated worker is a durable fork that the runtime retires as soon
+    // as it reaches realized terminality, so the live roster is not reliable
+    // evidence. Canonical mob events are: `member_spawned` for a
+    // `live-delegation-*` identity followed by its `member_retired`.
     let executor_deadline = Instant::now() + Duration::from_secs(300);
     let mut delegation_outputs = 0usize;
-    let executor = loop {
+    let worker_identity = loop {
         // Keep acknowledging assistant outputs (spoken acknowledgement and
         // result readout) so the machine can admit each synthesized turn.
         while let Some(output) = rpc
@@ -526,14 +542,23 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
             complete_playback(&mut rpc, &channel_id, &output).await?;
             delegation_outputs += 1;
         }
-        let diagnostic = delegated_executor_diagnostic(&mut rpc, &mob_id).await;
-        if diagnostic.worker_identity.is_some() && diagnostic.has_assistant_final {
-            break diagnostic;
+        let events = rpc
+            .call(
+                "mob/events",
+                json!({"mob_id":mob_id,"after_cursor":0,"limit":200,"strict":true}),
+                30,
+            )
+            .await?;
+        let lifecycle = delegated_worker_lifecycle(&events);
+        if let (Some(identity), true) = (&lifecycle.spawned, lifecycle.retired) {
+            break identity.clone();
         }
         if Instant::now() >= executor_deadline {
             let events = peer.events().await?;
             return Err(format!(
-                "timed out waiting for the delegated executor to finish; {diagnostic}; {}",
+                "timed out waiting for the delegated executor to finish; spawned={:?} retired={}; {}",
+                lifecycle.spawned,
+                lifecycle.retired,
                 peer.event_summary(&events[before..])
             )
             .into());
@@ -594,11 +619,44 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
     drop(rpc);
     server_task.abort();
     println!(
-        "GPT_LIVE_PUBLIC_E2E_OK delegation_ref_digest={provider_delegation_ref_digest} delegation_index={delegation_index} delegation_outputs={delegation_outputs} commentary_acks_seen_by_browser={commentary_acks} executor_has_tool_result={} worker={}",
-        executor.has_tool_result,
-        executor.worker_identity.as_deref().unwrap_or("<absent>")
+        "GPT_LIVE_PUBLIC_E2E_OK delegation_ref_digest={provider_delegation_ref_digest} delegation_index={delegation_index} delegation_outputs={delegation_outputs} commentary_acks_seen_by_browser={commentary_acks} worker={}",
+        worker_identity
     );
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct DelegatedWorkerLifecycle {
+    spawned: Option<String>,
+    retired: bool,
+}
+
+/// Canonical mob-event evidence for the durable delegated worker: its spawn
+/// and, once the bounded turn reached terminality, its retirement.
+fn delegated_worker_lifecycle(events: &Value) -> DelegatedWorkerLifecycle {
+    let mut lifecycle = DelegatedWorkerLifecycle::default();
+    let Some(events) = events["events"].as_array() else {
+        return lifecycle;
+    };
+    for event in events {
+        let kind = event.pointer("/kind/type").and_then(Value::as_str);
+        let identity = event
+            .pointer("/kind/agent_identity")
+            .and_then(Value::as_str)
+            .filter(|identity| identity.starts_with("live-delegation-"));
+        match (kind, identity) {
+            (Some("member_spawned"), Some(identity)) => {
+                lifecycle.spawned = Some(identity.to_string());
+            }
+            (Some("member_retired"), Some(identity))
+                if lifecycle.spawned.as_deref() == Some(identity) =>
+            {
+                lifecycle.retired = true;
+            }
+            _ => {}
+        }
+    }
+    lifecycle
 }
 
 #[cfg(test)]

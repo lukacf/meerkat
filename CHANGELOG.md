@@ -92,6 +92,9 @@ them.
 
 ### Fixed
 
+- CI: the GitHub-hosted Mob unit-test archive lane and the push-to-terminal
+  gate budget now leave room for release commits, which invalidate every
+  compiled workspace crate and previously cancelled CI on the release SHA.
 - The public Live API has no turn identifiers or delegation task text. The
   public broker synthesizes user and assistant turns from transcript role
   alternation and joins each client delegation to the open or most recent

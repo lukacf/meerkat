@@ -164,6 +164,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "mob/revoke_scopes": (Mob, "revoke_scopes"),
     "mob/grants": (Mob, "grants"),
     "mob/member_history": (Mob, "member_history"),
+    "mob/member_live_observations": (Mob, "member_live_observations"),
     "mob/hosts": (Mob, "hosts"),
     "mob/route_installs": (Mob, "route_installs"),
     "mob/bind_host": (Mob, "bind_host"),

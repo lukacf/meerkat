@@ -737,6 +737,8 @@ pub struct HostMemberObservation {
     runtime_incarnation: BridgeHostRuntimeIncarnation,
     session_service: Arc<dyn MobSessionService>,
     durable_log: Option<Arc<dyn DurableEventLogRead>>,
+    live_observation_reader:
+        Option<Arc<dyn meerkat_runtime::live_ledger::history::LiveObservationHistoryReader>>,
     projection: watch::Receiver<HostObservationProjection>,
     pending_tx: mpsc::Sender<HostTurnOutcomePendingRequest>,
     outcome_ack_tx: mpsc::Sender<HostTurnOutcomeAckRequest>,
@@ -993,6 +995,7 @@ impl HostMemberObservation {
             runtime_incarnation,
             session_service,
             durable_log,
+            live_observation_reader: None,
             projection,
             pending_tx,
             outcome_ack_tx,
@@ -1013,6 +1016,15 @@ impl HostMemberObservation {
     #[must_use]
     pub fn with_event_ring_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.event_ring_capacity = capacity.get();
+        self
+    }
+
+    #[must_use]
+    pub fn with_live_observation_reader(
+        mut self,
+        reader: Arc<dyn meerkat_runtime::live_ledger::history::LiveObservationHistoryReader>,
+    ) -> Self {
+        self.live_observation_reader = Some(reader);
         self
     }
 
@@ -1921,6 +1933,49 @@ impl MemberObservationHost for HostMemberObservation {
         Ok(self.session_facts(session)?.generation)
     }
 
+    async fn read_live_observations(
+        &self,
+        session: &SessionId,
+        query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+    ) -> Result<
+        meerkat_contracts::wire::live_observation::LiveObservationPage,
+        MemberObservationError,
+    > {
+        use meerkat_contracts::wire::live_observation::{
+            LiveObservationOwner, LiveObservationReadFailure,
+        };
+        let before = self.session_facts(session)?;
+        let reader = self.live_observation_reader.as_ref().ok_or_else(|| {
+            MemberObservationError::LiveHistory {
+                failure: LiveObservationReadFailure::Unsupported,
+                reason: "host has no independent retained Live ledger reader".into(),
+            }
+        })?;
+        let result = reader
+            .read(
+                LiveObservationOwner::Member {
+                    session_id: session.clone(),
+                    mob_id: before.mob_id.clone(),
+                    agent_identity: before.agent_identity.clone(),
+                },
+                query,
+            )
+            .await;
+        let after = self.session_facts(session)?;
+        if after.incarnation != before.incarnation
+            || after.mob_id != before.mob_id
+            || after.agent_identity != before.agent_identity
+        {
+            return Err(MemberObservationError::StaleIncarnation {
+                reason: "member Live observation owner changed during read".into(),
+            });
+        }
+        result.map_err(|error| MemberObservationError::LiveHistory {
+            failure: error.failure(),
+            reason: error.to_string(),
+        })
+    }
+
     async fn read_history(
         &self,
         session: &SessionId,
@@ -2771,7 +2826,9 @@ impl CompletionTerminalExpectation {
                 kind: Some(TurnTerminalKind::InteractionCallbackPending),
                 reason: format!("callback pending for tool '{tool_name}': {args}"),
             },
-            CompletionOutcome::CallbackBatchPending { pending_tool_calls } => Self::Failed {
+            CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls, ..
+            } => Self::Failed {
                 kind: Some(TurnTerminalKind::InteractionCallbackPending),
                 reason: format!(
                     "callback pending for {} tools: {}",

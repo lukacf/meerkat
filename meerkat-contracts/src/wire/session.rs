@@ -1266,6 +1266,11 @@ impl TranscriptRewriteMessage {
                         debug: "compaction_summary".to_string(),
                     });
                 }
+                if transcript_role.is_delegated_request() {
+                    return Err(crate::wire::error::WireConversionError::TranscriptRole {
+                        debug: "delegated_request".to_string(),
+                    });
+                }
                 let content = ContentInput::try_from(content)
                     .map_err(
                         |err| crate::wire::error::WireConversionError::TranscriptMessage {

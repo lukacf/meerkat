@@ -129,6 +129,22 @@ impl AgentLlmClientDefaultMethod {
 ///
 /// Adding a default-bodied trait method requires an explicit review here.
 const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
+    AgentLlmClientDefaultMethod::fail_closed(
+        "scoped_model_effect_support",
+        "custom clients advertise no physical scoped-model claim capability by default",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "prepare_scoped_request_attempt",
+        "custom clients refuse rather than erase an exact scoped physical-model request",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "native_tool_policy_support",
+        "custom clients advertise no provider-native tool restriction capability by default",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
+        "prepare_request_attempt_with_native_tool_policy",
+        "Inherit preserves ordinary preparation; explicit DisableAll refuses unsupported enforcement",
+    ),
     AgentLlmClientDefaultMethod::compatibility(
         "prepare_request_attempt",
         "stable custom clients retain direct single-client request attempts",
@@ -193,9 +209,12 @@ const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
     "turn_finalization_boundary_handle",
     "pre_dequeue_handle",
     "apply",
+    "apply_with_execution_authority",
+    "apply_scoped",
     "checkpoint_committed_session_snapshot",
     "acknowledge_committed_session_boundary",
     "reconcile_committed_compaction_projections",
+    "acknowledge_finalized_compaction_projections",
     "abort_uncommitted_compaction_projections",
     "abort_rejected_run_projections",
     "publish_interaction_terminals",

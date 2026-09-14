@@ -1191,6 +1191,8 @@ pub enum Expr {
         over: Box<Expr>,
         body: Box<Expr>,
     },
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -1335,6 +1337,8 @@ impl Expr {
             | Self::Neq(left, right)
             | Self::Add(left, right)
             | Self::Sub(left, right)
+            | Self::Mul(left, right)
+            | Self::Div(left, right)
             | Self::Gt(left, right)
             | Self::Gte(left, right)
             | Self::Lt(left, right)
@@ -1905,6 +1909,8 @@ fn validate_string_enum_named_variants_expr(
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)

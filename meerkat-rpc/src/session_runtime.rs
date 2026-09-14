@@ -977,6 +977,15 @@ impl SessionService for RpcMobSessionService {
             .await
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .acknowledge_finalized_compaction_projections(id)
+            .await
+    }
+
     async fn abort_uncommitted_compaction_projections(
         &self,
         id: &SessionId,
@@ -11366,6 +11375,7 @@ fn completion_outcome_to_rpc_result(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("callback pending for tool '{tool_name}'"),
@@ -11377,7 +11387,9 @@ fn completion_outcome_to_rpc_result(
                 "args": args,
             })),
         }),
-        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+        CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls, ..
+        } => {
             let first = pending_tool_calls.first();
             let tool_name = first
                 .map(|call| call.tool_name.as_str())
@@ -13959,6 +13971,7 @@ mod tests {
 
     fn runtime_content_turn_primitive() -> RunPrimitive {
         RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::Immediate,
             appends: Vec::new(),
             contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
@@ -13975,6 +13988,7 @@ mod tests {
 
     fn runtime_resume_pending_primitive() -> RunPrimitive {
         RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::Immediate,
             appends: Vec::new(),
             contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
@@ -26864,6 +26878,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({ "value": "browser" }),
+                callback_identity: None,
             },
             &session_id,
         )

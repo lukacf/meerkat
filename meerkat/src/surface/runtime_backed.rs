@@ -1792,10 +1792,33 @@ async fn validate_workgraph_attention_primitive(
         .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
 }
 
-fn start_turn_request_from_primitive(
+async fn start_turn_request_from_primitive<F>(
     primitive: &RunPrimitive,
-) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError> {
+    resolve_scope: impl FnOnce(meerkat_core::execution_scope::ScopedRunAuthority) -> F,
+) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError>
+where
+    F: std::future::Future<
+            Output = Result<
+                meerkat_core::execution_scope::ScopedExecutionContext,
+                CoreExecutorError,
+            >,
+        >,
+{
+    use meerkat_core::execution_scope::{RunExecutionAuthority, RunExecutionContext};
+
     let metadata = primitive.turn_metadata();
+    let execution_context = match primitive.execution_authority() {
+        RunExecutionAuthority::SessionPolicy => RunExecutionContext::SessionPolicy,
+        RunExecutionAuthority::Scoped(scope) => {
+            let context = resolve_scope(scope.clone()).await?;
+            if context.scope() != scope {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    "effect host handoff changed the primitive's exact run scope",
+                ));
+            }
+            RunExecutionContext::Scoped(context)
+        }
+    };
 
     Ok(meerkat_core::service::StartTurnRequest {
         injected_context: Vec::new(),
@@ -1803,7 +1826,8 @@ fn start_turn_request_from_primitive(
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(HandlingMode::Queue, None, metadata.cloned())
-            .with_typed_turn_appends(primitive.typed_turn_appends()),
+            .with_typed_turn_appends(primitive.typed_turn_appends())
+            .with_execution_context(execution_context),
     })
 }
 
@@ -1868,6 +1892,9 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        primitive
+            .validate_execution_authority(&run_id)
+            .map_err(CoreExecutorError::apply_failed_primitive_rejected)?;
         validate_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive).await?;
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
@@ -1877,7 +1904,27 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
 
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
-        let mut req = start_turn_request_from_primitive(&primitive)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let adapter = &self.adapter;
+        let mut req = start_turn_request_from_primitive(&primitive, |scope| async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                adapter
+                    .scoped_actor_execution_context(scope)
+                    .await
+                    .map_err(|error| {
+                        CoreExecutorError::apply_failed_primitive_rejected(error.to_string())
+                    })
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Err(CoreExecutorError::apply_failed_primitive_rejected(format!(
+                    "native effect host is unavailable for scope {} on this target",
+                    scope.scope_id().as_uuid()
+                )))
+            }
+        })
+        .await?;
         super::inject_workgraph_attention_turn_overlay(
             self.service.as_ref(),
             self.workgraph_service.as_ref(),
@@ -1950,6 +1997,17 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_finalized_compaction_projections_under_runtime_turn_boundary(
+                &self.session_id,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
@@ -2046,10 +2104,11 @@ mod typed_transcript_contract_tests {
     use super::*;
     use meerkat_core::lifecycle::run_primitive::CoreRenderable;
 
-    #[test]
-    fn start_turn_request_carries_typed_turn_appends() {
+    #[tokio::test]
+    async fn start_turn_request_carries_typed_turn_appends() {
         let primitive = RunPrimitive::StagedInput(
             meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
                     role:
@@ -2066,7 +2125,13 @@ mod typed_transcript_contract_tests {
             },
         );
 
-        let req = start_turn_request_from_primitive(&primitive).expect("request");
+        let req = start_turn_request_from_primitive(&primitive, |_| async {
+            Err(CoreExecutorError::apply_failed_primitive_rejected(
+                "ordinary primitive must not resolve a scoped host",
+            ))
+        })
+        .await
+        .expect("request");
 
         assert_eq!(
             req.runtime.typed_turn_appends,
@@ -2157,8 +2222,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_primitive_carries_runtime_metadata_into_start_turn_request() {
+    #[tokio::test]
+    async fn run_primitive_carries_runtime_metadata_into_start_turn_request() {
         let skill = meerkat_core::skills::SkillKey::builtin(
             meerkat_core::skills::SkillName::parse("runtime-metadata").expect("valid skill"),
         );
@@ -2182,6 +2247,7 @@ mod tests {
         };
         let primitive =
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
                     role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
@@ -2194,8 +2260,13 @@ mod tests {
                 turn_metadata: Some(metadata.clone()),
             });
 
-        let req = start_turn_request_from_primitive(&primitive)
-            .expect("metadata should be carried, not rejected");
+        let req = start_turn_request_from_primitive(&primitive, |_| async {
+            Err(CoreExecutorError::apply_failed_primitive_rejected(
+                "ordinary primitive must not resolve a scoped host",
+            ))
+        })
+        .await
+        .expect("metadata should be carried, not rejected");
 
         assert_eq!(
             req.runtime.handling_mode,
@@ -3487,6 +3558,7 @@ mod tests {
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
+                    execution_authority: Default::default(),
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
                         role: ConversationAppendRole::User,
@@ -3679,6 +3751,7 @@ mod tests {
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
+                    execution_authority: Default::default(),
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
                         role: ConversationAppendRole::User,
@@ -3733,6 +3806,7 @@ mod tests {
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
+                    execution_authority: Default::default(),
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
                         role: ConversationAppendRole::User,
@@ -3798,6 +3872,7 @@ mod tests {
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
+                    execution_authority: Default::default(),
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
                         role: ConversationAppendRole::SystemNotice,
@@ -3864,6 +3939,7 @@ mod tests {
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
+                    execution_authority: Default::default(),
                     boundary: RunApplyBoundary::Immediate,
                     appends: vec![ConversationAppend {
                         role: ConversationAppendRole::SystemNotice,

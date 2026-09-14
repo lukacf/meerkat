@@ -121,6 +121,9 @@ impl LiveWorkLimits {
         self.max_effects_per_request
     }
 
+    /// Observed normalized-token budget. Reaching it refuses subsequent model
+    /// claims, not an already-completed answer. Missing usage advances no known
+    /// counter, so this is not a hard ceiling on actual or billed tokens.
     pub const fn max_tokens_per_request(self) -> NonZeroU64 {
         self.max_tokens_per_request
     }

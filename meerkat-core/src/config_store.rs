@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
+mod observation;
+pub use observation::{
+    ConfigDocumentObservation, ConfigObservationDigest, EffectiveConfigObservation,
+};
+
 /// Resolved paths attached to a config store context.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,6 +67,15 @@ pub trait ConfigStore: Send + Sync {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait RealmConfigSource: Send + Sync {
+    /// Observe typed content and key presence from the same document read.
+    /// The result is candidate content, not a filesystem lease or permission.
+    async fn observe_config_for_realm(
+        &self,
+        _realm: &crate::connection::RealmId,
+    ) -> Result<Option<ConfigDocumentObservation>, ConfigError> {
+        Err(ConfigError::CoherentObservationUnsupported)
+    }
+
     /// Fetch the OWN config document for `realm`, or `None` if absent.
     async fn config_for_realm(
         &self,

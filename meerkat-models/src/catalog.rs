@@ -326,6 +326,29 @@ mod tests {
     use meerkat_core::ModelReleaseStage;
 
     #[test]
+    fn public_live_catalog_is_distinct_from_private_and_turn_based_models()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let live = capabilities::all_capabilities()
+            .find(|model| model.id == "gpt-live-1")
+            .ok_or("public Live model")?;
+        assert_eq!(live.release_stage, ModelReleaseStage::Stable);
+        assert_eq!(
+            live.interaction_kind,
+            meerkat_core::model_profile::ModelInteractionKind::ContinuousLive
+        );
+        assert!(!live.interaction_kind.supports_text_execution());
+        assert!(live.realtime_transcript_supported);
+        assert!(
+            !live.realtime_supports_explicit_commit
+                && !live.realtime_supports_provider_managed_turns
+                && !live.realtime_interrupt_supported
+        );
+        assert!(live.context_window.is_none() && live.max_output_tokens.is_none());
+        assert!(!live.vision && !live.inline_video && !live.supports_web_search);
+        Ok(())
+    }
+
+    #[test]
     fn release_stage_is_projected_from_capability_authority() {
         let entries = catalog();
         for capabilities in capabilities::all_capabilities() {

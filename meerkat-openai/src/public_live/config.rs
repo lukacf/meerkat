@@ -32,6 +32,9 @@ pub fn session_config(
     target: &ResolvedLiveTarget,
     settings: PublicLiveVoiceSettings<'_>,
 ) -> Result<SessionConfig, PublicLiveConfigError> {
+    if target.voice_identity().provider_params.is_some() {
+        return Err(PublicLiveConfigError::VoiceParametersUnsupported);
+    }
     lower_session_config(
         target.voice_identity().model.as_str(),
         target.execution(),
@@ -113,6 +116,8 @@ fn lower_session_config(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PublicLiveConfigError {
+    #[error("public Live voice provider_params are unsupported; use the voice profile settings")]
+    VoiceParametersUnsupported,
     #[error("public Live voice instructions exceed the local UTF-8 byte bound")]
     InstructionsTooLarge,
     #[error("public Live voice name must contain 1-128 UTF-8 bytes")]
@@ -202,12 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_preserve_omission_and_reject_bounds_without_a_smaller_retry() {
+    fn settings_preserve_omission_and_reject_bounds_without_a_smaller_retry()
+    -> Result<(), PublicLiveConfigError> {
         let mode = ResolvedLiveExecution::ClientContext {
             request_policy: LiveClientRequestPolicy::ExplicitApplicationRequest,
         };
-        let omitted = lower_session_config("gpt-live-1", &mode, PublicLiveVoiceSettings::default())
-            .expect("valid");
+        let omitted =
+            lower_session_config("gpt-live-1", &mode, PublicLiveVoiceSettings::default())?;
         assert!(matches!(omitted.instructions, Field::Absent));
         let oversized = "x".repeat(8193);
         for settings in [
@@ -222,5 +228,6 @@ mod tests {
         ] {
             assert!(lower_session_config("gpt-live-1", &mode, settings).is_err());
         }
+        Ok(())
     }
 }

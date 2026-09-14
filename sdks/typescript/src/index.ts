@@ -347,6 +347,8 @@ export type {
   MobHostsResult,
   MobMemberHistoryParams,
   MobMemberHistoryResult,
+  MobMemberLiveObservationsParams,
+  MobMemberLiveObservationsResult,
   MobMemberLiveChannelParams,
   MobMemberLiveControlParams,
   MobMemberLiveOpenParams,

@@ -32,6 +32,87 @@ use support::{
 
 const WAIT: Duration = Duration::from_secs(60);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn public_live_history_dispatch_requires_v7_and_reauthorizes_each_page() {
+    use meerkat_contracts::wire::live_observation::LiveObservationPageQuery;
+    use meerkat_mob::runtime::bridge_protocol::BridgeProtocolVersion;
+    use meerkat_mob::{ControlScope, MobError};
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let legacy = support::spawn_scripted_host_peer("public-history-v6-host").await;
+    legacy.advertise_protocol_versions(vec![BridgeProtocolVersion::V4, BridgeProtocolVersion::V6]);
+    let controlling = create_controlling_mob("public-history-v6").await;
+    let report = controlling.bind_scripted(&legacy).await;
+    controlling
+        .spawn_placed("worker", "retained", &report.host_id)
+        .await
+        .expect("legacy member");
+    let viewer = controlling.handle_as("reader");
+    let caller = support::control_principal("reader");
+    let denied = viewer
+        .member_live_observations(
+            caller.clone(),
+            identity("retained"),
+            LiveObservationPageQuery::default(),
+        )
+        .await
+        .expect_err("no ReadHistory grant");
+    assert!(
+        matches!(denied, MobError::ScopeDenied(denial) if denial.required == ControlScope::ReadHistory)
+    );
+    controlling
+        .grant("reader", &[ControlScope::ReadHistory], None)
+        .await;
+    let rejected = viewer
+        .member_live_observations(
+            caller.clone(),
+            identity("retained"),
+            LiveObservationPageQuery::default(),
+        )
+        .await
+        .expect_err("older owner cannot serve V7");
+    assert!(matches!(rejected,
+        MobError::BridgeCommandRejected { cause: BridgeRejectionCause::Unsupported, reason }
+            if reason == "member owner has not declared bridge V7 public Live support"));
+    let selected = controlling
+        .handle
+        .member_live_open_with_profile(
+            MobControlPrincipal::Owner,
+            identity("retained"),
+            meerkat_core::live_execution::profile::LiveProfileId::parse("voice").expect("profile"),
+            None,
+            None,
+        )
+        .await
+        .expect_err("selected public profile also requires V7");
+    assert!(matches!(
+        selected,
+        MobError::BridgeCommandRejected {
+            cause: BridgeRejectionCause::Unsupported,
+            ..
+        }
+    ));
+    controlling
+        .handle
+        .revoke_scopes(
+            MobControlPrincipal::Owner,
+            support::principal_id("reader"),
+            None,
+        )
+        .await
+        .expect("revoke");
+    let denied_again = viewer
+        .member_live_observations(
+            caller,
+            identity("retained"),
+            LiveObservationPageQuery::default(),
+        )
+        .await
+        .expect_err("every page is authorized anew");
+    assert!(
+        matches!(denied_again, MobError::ScopeDenied(denial) if denial.required == ControlScope::ReadHistory)
+    );
+}
+
 fn identity(name: &str) -> AgentIdentity {
     AgentIdentity::from(name)
 }

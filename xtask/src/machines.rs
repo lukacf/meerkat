@@ -30,6 +30,10 @@ use serde::Serialize;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
+#[cfg(test)]
+use crate::machine_owner_tests::owner_test_specs_for_machine;
+use crate::machine_owner_tests::run_machine_owner_tests;
+
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
     /// Operate on every registered machine and composition.
@@ -506,7 +510,7 @@ fn machine_verify_at_root(
     if run_cargo_tests {
         run_generated_kernel_tests(root)?;
         for machine in &selection.machines {
-            run_machine_owner_tests(root, machine)?;
+            run_machine_owner_tests(root, machine.schema.machine.as_str(), &machine.slug)?;
         }
     } else {
         println!("skipping Cargo-backed machine kernel/owner tests");
@@ -4123,8 +4127,7 @@ fn maybe_run_tlc_in_dir_with_config(
         .current_dir(&root)
         .env("JAVA_TOOL_OPTIONS", merged_java_tool_options());
 
-    let output = cmd
-        .output()
+    let output = crate::tlc_runner::run_tlc(&mut cmd, &metadir)
         .with_context(|| format!("run tlc for {slug}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4307,87 +4310,6 @@ fn run_generated_kernel_tests(root: &Path) -> Result<()> {
     if !status.success() {
         bail!("generated machine kernel tests failed");
     }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OwnerTestSpec {
-    package: &'static str,
-    target: &'static str,
-    filter: &'static str,
-}
-
-fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
-    const MEERKAT: &[OwnerTestSpec] = &[
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_attached_state_reached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
-        },
-    ];
-    const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
-        package: "meerkat-mob",
-        target: "lib",
-        filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
-    }];
-
-    match slug {
-        "meerkat_machine" => MEERKAT,
-        "mob_machine" => MOB,
-        _ => &[],
-    }
-}
-
-fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
-    for spec in owner_test_specs_for_machine(&machine.slug) {
-        println!(
-            "owner-test: {} -> {}::{}/{}",
-            machine.schema.machine, spec.package, spec.target, spec.filter
-        );
-        let mut cmd = repo_cargo_command(root);
-        cmd.arg("test").arg("-p").arg(spec.package).arg(spec.filter);
-        if spec.target == "lib" {
-            cmd.arg("--lib");
-        } else {
-            cmd.arg("--test").arg(spec.target);
-        }
-        cmd.arg("--")
-            .arg("--exact")
-            .arg("--test-threads=1")
-            .current_dir(root);
-
-        let status = cmd.status().with_context(|| {
-            format!(
-                "run owner test {}::{}/{}",
-                spec.package, spec.target, spec.filter
-            )
-        })?;
-        if !status.success() {
-            bail!(
-                "owner test failed for {}: {}::{}/{}",
-                machine.schema.machine,
-                spec.package,
-                spec.target,
-                spec.filter
-            );
-        }
-    }
-
     Ok(())
 }
 
@@ -5190,8 +5112,7 @@ fn dump_tlc_dot_for_target(
         .current_dir(root)
         .env("JAVA_TOOL_OPTIONS", merged_java_tool_options());
 
-    let output = cmd
-        .output()
+    let output = crate::tlc_runner::run_tlc(&mut cmd, artifact_dir)
         .with_context(|| format!("run tlc hopcroft dump for {}", target.display_name))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

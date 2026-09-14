@@ -579,6 +579,16 @@ pub trait ToolConsequencePolicySnapshot: Send + Sync + 'static {
     fn evaluate(&self, request: &ToolConsequenceRequest) -> ToolConsequenceVerdict;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PolicyPublicationError {
+    #[error("policy provider does not support fenced publication")]
+    Unsupported,
+    #[error("evaluated policy is no longer current")]
+    NotCurrent,
+    #[error("policy publication contract failed: {reason}")]
+    ContractViolation { reason: String },
+}
+
 pub trait ToolConsequenceNarrowingPolicy: Send + Sync + 'static {
     fn provider_id(&self) -> &PolicyProviderId;
     fn generation(&self) -> PolicyProviderGeneration;
@@ -592,6 +602,71 @@ pub trait ToolConsequenceNarrowingPolicy: Send + Sync + 'static {
         &self,
         policy_id: &PolicyId,
     ) -> Result<Arc<dyn ToolConsequencePolicySnapshot>, ToolConsequenceFailure>;
+
+    /// Run `publication` synchronously while this exact policy and provider
+    /// generation cannot change. Compare both revision and digest under the
+    /// same owner lock used to replace the snapshot. On refusal, do not invoke
+    /// the callback; success requires invoking it exactly once before returning.
+    ///
+    /// A snapshot read followed by an unlocked callback does not satisfy this
+    /// contract. Existing providers remain usable for ordinary evaluation but
+    /// must explicitly implement this seam for durable scoped effect claims.
+    fn publish_if_current(
+        &self,
+        _policy_id: &PolicyId,
+        _generation: PolicyProviderGeneration,
+        _provenance: &PolicyEvaluationProvenance,
+        _publication: Box<dyn FnOnce() + '_>,
+    ) -> Result<(), PolicyPublicationError> {
+        Err(PolicyPublicationError::Unsupported)
+    }
+}
+
+/// An actual allowed evaluation, retaining its exact request and policy owner.
+/// This is a candidate witness, not permission to start a physical effect.
+/// It cannot be constructed or restored from caller-supplied provenance.
+pub struct AllowedToolConsequenceEvaluation {
+    provider: Arc<dyn ToolConsequenceNarrowingPolicy>,
+    generation: PolicyProviderGeneration,
+    provenance: PolicyEvaluationProvenance,
+    request: ToolConsequenceRequest,
+}
+
+impl AllowedToolConsequenceEvaluation {
+    pub fn request(&self) -> &ToolConsequenceRequest {
+        &self.request
+    }
+
+    pub const fn generation(&self) -> PolicyProviderGeneration {
+        self.generation
+    }
+
+    pub fn provenance(&self) -> &PolicyEvaluationProvenance {
+        &self.provenance
+    }
+
+    pub fn publish_if_current<R>(
+        &self,
+        publication: impl FnOnce() -> R,
+    ) -> Result<R, PolicyPublicationError> {
+        let mut result = None;
+        let outcome = self.provider.publish_if_current(
+            &self.request.policy_id,
+            self.generation,
+            &self.provenance,
+            Box::new(|| result = Some(publication())),
+        );
+        match (outcome, result) {
+            (Ok(()), Some(result)) => Ok(result),
+            (Err(error), None) => Err(error),
+            (Ok(()), None) => Err(PolicyPublicationError::ContractViolation {
+                reason: "provider reported success without invoking publication".to_string(),
+            }),
+            (Err(error), Some(_)) => Err(PolicyPublicationError::ContractViolation {
+                reason: format!("provider reported refusal after invoking publication: {error}"),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +1024,14 @@ impl BoundToolConsequencePolicy {
         call: ToolCallView<'_>,
         run_id: Option<RunId>,
     ) -> Result<(), crate::ToolError> {
+        self.evaluate_with_witness(call, run_id).await.map(drop)
+    }
+
+    pub async fn evaluate_with_witness(
+        &self,
+        call: ToolCallView<'_>,
+        run_id: Option<RunId>,
+    ) -> Result<AllowedToolConsequenceEvaluation, crate::ToolError> {
         let request = ToolConsequenceRequest::from_call(
             self.member.clone(),
             call,
@@ -991,7 +1074,12 @@ impl BoundToolConsequencePolicy {
             .await
             .unwrap_or_else(ToolConsequenceVerdict::Indeterminate);
         match verdict {
-            ToolConsequenceVerdict::Allow => Ok(()),
+            ToolConsequenceVerdict::Allow => Ok(AllowedToolConsequenceEvaluation {
+                provider: Arc::clone(provider),
+                generation,
+                provenance,
+                request,
+            }),
             ToolConsequenceVerdict::Deny(denial) => {
                 self.registry.observer.observe(ToolConsequenceObservation {
                     member: self.member.clone(),

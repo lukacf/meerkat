@@ -318,6 +318,7 @@ mod tests {
             model.to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider,
+                interaction_kind: None,
                 display_name: Some(format!("Test {model}")),
                 context_window: Some(128_000),
                 max_input_tokens: None,

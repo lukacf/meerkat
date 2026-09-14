@@ -46,9 +46,12 @@ function expectWireBoolean(value: unknown, context: string): boolean {
   return value;
 }
 
-function expectWireInteger(value: unknown, context: string): number {
+function expectWireInteger(value: unknown, context: string, minimum: number | null = null, maximum: number | null = null): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     throw wireParseError(context, "expected safe integer");
+  }
+  if ((minimum !== null && value < minimum) || (maximum !== null && value > maximum)) {
+    throw wireParseError(context, "integer outside schema bounds");
   }
   return value;
 }
@@ -60,9 +63,12 @@ function expectWireNumber(value: unknown, context: string): number {
   return value;
 }
 
-function expectWireArray(value: unknown, context: string): unknown[] {
+function expectWireArray(value: unknown, context: string, minimum: number | null = null, maximum: number | null = null): unknown[] {
   if (!Array.isArray(value)) {
     throw wireParseError(context, "expected array");
+  }
+  if ((minimum !== null && value.length < minimum) || (maximum !== null && value.length > maximum)) {
+    throw wireParseError(context, "array length outside schema bounds");
   }
   return value;
 }
@@ -686,7 +692,7 @@ export interface HelpRequest {
 export interface HelpResponse {
   extraction_error?: Record<string, unknown> | null;
   schema_warnings?: Record<string, unknown>[] | null;
-  session_id: string;
+  session_id: SessionId;
   session_ref?: string | null;
   skill_diagnostics?: Record<string, unknown> | null;
   structured_output?: unknown;
@@ -710,7 +716,7 @@ export interface InjectSystemContextResult {
 
 export interface InstructionActivationIdentity {
   activation_id: string;
-  origin_session_id: string;
+  origin_session_id: SessionId;
   render_version: number;
   revision: Record<string, unknown>;
   supersedes?: string | null;
@@ -720,14 +726,14 @@ export interface InstructionActivationReadPage {
   key_state?: Record<string, unknown> | null;
   next_offset?: number | null;
   records: Record<string, unknown>[];
-  session_id: string;
+  session_id: SessionId;
 }
 
 export interface InstructionActivationRecord {
   activation_ordinal: number;
   identity: InstructionActivationIdentity;
   projection_witness: Record<string, unknown>;
-  session_id: string;
+  session_id: SessionId;
 }
 
 export interface InstructionActivationRequest {
@@ -951,7 +957,7 @@ export interface SystemPromptUpdateResult {
   commit?: Record<string, unknown> | null;
   key: SystemPromptKey;
   message_index: number;
-  session_id: string;
+  session_id: SessionId;
   status: "applied" | "duplicate";
   transcript_revision: string;
   version: SystemPromptVersion;
@@ -2032,6 +2038,20 @@ export interface MobMemberHistoryResult {
   provenance: WireProjectionProvenance;
 }
 
+export interface MobMemberLiveObservationsParams {
+  agent_identity: string;
+  channel_id?: LiveChannelId | null;
+  cursor?: string | null;
+  limit?: number | null;
+  mob_id: string;
+}
+
+export interface MobMemberLiveObservationsResult {
+  page: LiveObservationPage;
+  placement?: WireHostRef | null;
+  provenance: WireProjectionProvenance;
+}
+
 export interface WireMemberHistoryPageBody {
   complete: boolean;
   from_index: number;
@@ -2314,6 +2334,7 @@ export interface CustomModelConfig {
   call_timeout_secs?: number | null;
   context_window?: number | null;
   display_name?: string | null;
+  interaction_kind?: ModelInteractionKind | null;
   max_input_tokens?: number | null;
   max_output_tokens?: number | null;
   provider: Provider;
@@ -2710,6 +2731,10 @@ export interface WorkItemExternalRef {
 export interface WorkItemOwner {
   display_name?: string | null;
   key: WorkOwnerKey;
+}
+
+export interface TranscriptUserRoleDelegatedRequestPayload {
+  provenance: DelegatedRequestProvenance;
 }
 
 export interface BridgeAck {
@@ -3643,6 +3668,10 @@ export type BindingId = string;
 
 export type ModelFallbackTrigger = "capacity" | "provider_unavailable" | "transport" | "empty_output";
 
+export type ModelInteractionKind = "text" | "turn_based_realtime" | "continuous_live";
+
+export type ContinuousLiveInputError = "unsupported_input_kind" | "unsupported_frontend_modality" | "unsupported_capability" | "requires_owner_control" | "audio_uses_another_transport" | "invalid_audio_format" | "invalid_audio_frame";
+
 export type MeerkatSchema = unknown;
 
 export interface PortableMcpDeclStdio {
@@ -3847,7 +3876,7 @@ export type AttentionDelegatedAuthority = "add_evidence" | "close_own_review_ite
 
 export interface GoalAttentionTargetSession {
   kind: "session";
-  session_id: string;
+  session_id: SessionId;
 }
 
 export interface GoalAttentionTargetOwner {
@@ -3880,7 +3909,7 @@ export type WorkAttentionStatus = WorkAttentionStatusActive | WorkAttentionStatu
 
 export interface WorkAttentionTargetSession {
   kind: "session";
-  session_id: string;
+  session_id: SessionId;
 }
 
 export interface WorkAttentionTargetLoweredOwner {
@@ -4175,6 +4204,15 @@ export interface BridgeCommandReadMemberHistory {
   supervisor: BridgePeerSpec;
 }
 
+export interface BridgeCommandReadMemberLiveObservations {
+  command: "read_member_live_observations";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  query: Record<string, unknown>;
+  supervisor: BridgePeerSpec;
+}
+
 export interface BridgeCommandPollMemberEvents {
   command: "poll_member_events";
   cursor: BridgeEventCursor;
@@ -4373,7 +4411,7 @@ export interface BridgeCommandRevokeForkedParticipant {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandReadMemberLiveObservations | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -4471,6 +4509,14 @@ export interface BridgeRejectionCauseHistoryRowTooLargePayload {
 
 export interface BridgeRejectionCauseHistoryRowTooLarge {
   history_row_too_large: BridgeRejectionCauseHistoryRowTooLargePayload;
+}
+
+export interface BridgeRejectionCauseLiveObservationReadPayload {
+  failure: "unsupported" | "unavailable" | "invalid_query" | "cursor_mismatch" | "cursor_expired" | "integrity";
+}
+
+export interface BridgeRejectionCauseLiveObservationRead {
+  live_observation_read: BridgeRejectionCauseLiveObservationReadPayload;
 }
 
 export interface BridgeRejectionCauseRuntimeRetirementInProgressPayload {
@@ -4581,7 +4627,7 @@ export interface BridgeRejectionCauseSessionOwnershipConflict {
   session_ownership_conflict: BridgeRejectionCauseSessionOwnershipConflictPayload;
 }
 
-export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | BridgeRejectionCauseLiveObservationRead | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -4682,14 +4728,14 @@ export interface BridgeReplyMemberHistoryPage {
 
 export interface BridgeReplyMemberLiveObservationPage {
   after_sequence: number;
-  encoding_profile: "v1";
-  filter: { kind: "all_channels" } | Record<string, unknown>;
+  encoding_profile: LiveObservationEncodingProfile;
+  filter: LiveObservationFilter;
   has_more: boolean;
-  next_cursor?: string | null;
-  owner: Record<string, unknown>;
-  records: Record<string, unknown>[];
+  next_cursor?: LiveObservationCursor | null;
+  owner: LiveObservationOwner;
+  records: LiveObservationRecord[];
   result: "member_live_observation_page";
-  snapshot: Record<string, unknown>;
+  snapshot: LiveObservationSnapshot;
 }
 
 export interface BridgeReplyMemberEventsPage {
@@ -5463,6 +5509,11 @@ export interface WireLiveConfigRejectionReasonUnknown {
 
 export type WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonImageInputUnsupportedMime | WireLiveConfigRejectionReasonImageInputContentMismatch | WireLiveConfigRejectionReasonImageInputInvalidBase64 | WireLiveConfigRejectionReasonImageInputTooLarge | WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid | WireLiveConfigRejectionReasonImageInputIdempotencyConflict | WireLiveConfigRejectionReasonImageInputHistoryBudgetExceeded | WireLiveConfigRejectionReasonImageInputRequiresCommit | WireLiveConfigRejectionReasonInputTooLarge | WireLiveConfigRejectionReasonInputBackpressured | WireLiveConfigRejectionReasonImageInputBackpressured | WireLiveConfigRejectionReasonImageInputTransportUnsupported | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown;
 
+export interface WireLiveAdapterErrorCodeContinuousInputRejected {
+  code: "continuous_input_rejected";
+  reason: ContinuousLiveInputError;
+}
+
 export interface WireLiveAdapterErrorCodeConnectionFailed {
   code: "connection_failed";
 }
@@ -5498,7 +5549,12 @@ export interface WireLiveAdapterErrorCodeUnknown {
   debug: string;
 }
 
-export type WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown;
+export type WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeContinuousInputRejected | WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown;
+
+export interface WireLiveAdapterObservationLiveObservationCommitted {
+  observation: "live_observation_committed";
+  record: LiveObservationRecord;
+}
 
 export interface WireLiveAdapterObservationReady {
   observation: "ready";
@@ -5618,7 +5674,7 @@ export interface WireLiveAdapterObservationUnknown {
   observation: "unknown";
 }
 
-export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
+export type WireLiveAdapterObservation = WireLiveAdapterObservationLiveObservationCommitted | WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
 
 export interface RuntimeAcceptResult {
   existing_id?: string | null;
@@ -6123,6 +6179,58 @@ export interface TranscriptRewriteSelectionCompactionMessageRange {
 
 export type TranscriptRewriteSelection = TranscriptRewriteSelectionMessageRange | TranscriptRewriteSelectionEditMessageRange | TranscriptRewriteSelectionCompactionMessageRange;
 
+export type LiveRequestEvidenceKind = "application_snapshot" | "structured_function_request";
+
+export type LiveChannelId = string;
+
+export type LiveApplicationRequestId = string;
+
+export type LiveProviderReference = string;
+
+export interface LiveSourceIdentityClientDelegation {
+  delegation: LiveProviderReference;
+  kind: "client_delegation";
+}
+
+export interface LiveSourceIdentityFunctionCall {
+  call: LiveProviderReference;
+  delegation: LiveProviderReference;
+  kind: "function_call";
+  response: LiveProviderReference;
+}
+
+export interface LiveSourceIdentityApplicationRequest {
+  kind: "application_request";
+  request_id: LiveApplicationRequestId;
+}
+
+export type LiveSourceIdentity = LiveSourceIdentityClientDelegation | LiveSourceIdentityFunctionCall | LiveSourceIdentityApplicationRequest;
+
+export type SessionId = string;
+
+export interface LiveSourceKey {
+  channel_id: LiveChannelId;
+  session_id: SessionId;
+  source: LiveSourceIdentity;
+}
+
+export interface DelegatedRequestProvenance {
+  evidence_kind: LiveRequestEvidenceKind;
+  request_digest: number[];
+  request_id: OperationId;
+  source: LiveSourceKey;
+}
+
+export interface TranscriptUserRoleDelegatedRequestPayload {
+  provenance: DelegatedRequestProvenance;
+}
+
+export interface TranscriptUserRoleDelegatedRequest {
+  delegated_request: TranscriptUserRoleDelegatedRequestPayload;
+}
+
+export type TranscriptUserRole = "conversational" | "compaction_summary" | "injected_context" | TranscriptUserRoleDelegatedRequest;
+
 export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
 
 export type CommsNoticeKind = string;
@@ -6208,8 +6316,6 @@ export interface SystemPromptVersionIdentity {
   key: SystemPromptKey;
   version: SystemPromptVersion;
 }
-
-export type TranscriptUserRole = "conversational" | "compaction_summary" | "injected_context";
 
 export type AssistantImageId = string;
 
@@ -6458,6 +6564,77 @@ export type WireSessionMessage = WireSessionMessageSystem | WireSessionMessageSy
 
 export type WireHistoryRow = WireSessionMessage;
 
+export type LiveObservationCoverage = "complete_accepted_prefix" | "known_local_gap" | "unknown_extent_crash_discontinuity";
+
+export type LiveObservationCursor = string;
+
+export type LiveObservationEncodingProfile = "v1";
+
+export interface LiveObservationFilterAllChannels {
+  kind: "all_channels";
+}
+
+export interface LiveObservationFilterChannel {
+  channel_id: LiveChannelId;
+  kind: "channel";
+}
+
+export type LiveObservationFilter = LiveObservationFilterAllChannels | LiveObservationFilterChannel;
+
+export interface LiveObservationOwnerSession {
+  kind: "session";
+  session_id: SessionId;
+}
+
+export interface LiveObservationOwnerMember {
+  agent_identity: string;
+  kind: "member";
+  mob_id: string;
+  session_id: SessionId;
+}
+
+export type LiveObservationOwner = LiveObservationOwnerSession | LiveObservationOwnerMember;
+
+export type LiveObservationSeq = number;
+
+export type LiveTranscriptDirection = "input" | "output";
+
+export interface LiveTranscriptRange {
+  end_ms: number;
+  start_ms: number;
+}
+
+export interface LiveTranscriptObservation {
+  direction: LiveTranscriptDirection;
+  range: LiveTranscriptRange;
+  text: string;
+}
+
+export interface LiveObservationRecord {
+  channel_id: LiveChannelId;
+  observation: LiveTranscriptObservation;
+  sequence: LiveObservationSeq;
+}
+
+export interface LiveObservationSnapshot {
+  coverage: LiveObservationCoverage;
+  end_sequence: number;
+  generation: number;
+  prefix_digest: string;
+  revision: number;
+}
+
+export interface LiveObservationPage {
+  after_sequence: number;
+  encoding_profile: LiveObservationEncodingProfile;
+  filter: LiveObservationFilter;
+  has_more: boolean;
+  next_cursor?: LiveObservationCursor | null;
+  owner: LiveObservationOwner;
+  records: LiveObservationRecord[];
+  snapshot: LiveObservationSnapshot;
+}
+
 /** Fail-closed wire parser for WorkItem (K21): throws MeerkatError(INVALID_RESPONSE). */
 export function parseWorkItem(value: unknown): WorkItem {
   const data = expectWireObject(value, "WorkItem");
@@ -6468,18 +6645,18 @@ export function parseWorkItem(value: unknown): WorkItem {
     created_at: expectWireString(requireWireField(data, "created_at", "WorkItem"), "WorkItem.created_at"),
     ...(data["description"] === undefined || data["description"] === null ? {} : { description: expectWireString(data["description"], "WorkItem.description") }),
     ...(data["due_at"] === undefined || data["due_at"] === null ? {} : { due_at: expectWireString(data["due_at"], "WorkItem.due_at") }),
-    ...(data["evidence_refs"] === undefined || data["evidence_refs"] === null ? {} : { evidence_refs: expectWireArray(data["evidence_refs"], "WorkItem.evidence_refs").map((entry) => parseWorkEvidenceRef(entry)) }),
-    ...(data["external_refs"] === undefined || data["external_refs"] === null ? {} : { external_refs: expectWireArray(data["external_refs"], "WorkItem.external_refs").map((entry) => parseWorkItemExternalRef(entry)) }),
+    ...(data["evidence_refs"] === undefined || data["evidence_refs"] === null ? {} : { evidence_refs: expectWireArray(data["evidence_refs"], "WorkItem.evidence_refs", null, null).map((entry) => parseWorkEvidenceRef(entry)) }),
+    ...(data["external_refs"] === undefined || data["external_refs"] === null ? {} : { external_refs: expectWireArray(data["external_refs"], "WorkItem.external_refs", null, null).map((entry) => parseWorkItemExternalRef(entry)) }),
     failed_child_join_policy: expectWireEnum(requireWireField(data, "failed_child_join_policy", "WorkItem"), ["require_success", "propagate", "accept"], "WorkItem.failed_child_join_policy") as "require_success" | "propagate" | "accept",
     id: expectWireString(requireWireField(data, "id", "WorkItem"), "WorkItem.id"),
-    ...(data["labels"] === undefined || data["labels"] === null ? {} : { labels: expectWireArray(data["labels"], "WorkItem.labels").map((entry) => expectWireString(entry, "WorkItem.labels[]")) }),
+    ...(data["labels"] === undefined || data["labels"] === null ? {} : { labels: expectWireArray(data["labels"], "WorkItem.labels", null, null).map((entry) => expectWireString(entry, "WorkItem.labels[]")) }),
     machine_state: expectWireObject(requireWireField(data, "machine_state", "WorkItem"), "WorkItem.machine_state"),
     namespace: expectWireString(requireWireField(data, "namespace", "WorkItem"), "WorkItem.namespace"),
     ...(data["not_before"] === undefined || data["not_before"] === null ? {} : { not_before: expectWireString(data["not_before"], "WorkItem.not_before") }),
     ...(data["owner"] === undefined || data["owner"] === null ? {} : { owner: parseWorkItemOwner(data["owner"]) }),
     priority: expectWireEnum(requireWireField(data, "priority", "WorkItem"), ["low", "medium", "high"], "WorkItem.priority") as "low" | "medium" | "high",
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkItem"), "WorkItem.realm_id"),
-    revision: expectWireInteger(requireWireField(data, "revision", "WorkItem"), "WorkItem.revision"),
+    revision: expectWireInteger(requireWireField(data, "revision", "WorkItem"), "WorkItem.revision", 0, null),
     ...(data["snoozed_until"] === undefined || data["snoozed_until"] === null ? {} : { snoozed_until: expectWireString(data["snoozed_until"], "WorkItem.snoozed_until") }),
     status: expectWireEnum(requireWireField(data, "status", "WorkItem"), ["open", "in_progress", "blocked", "completed", "cancelled", "failed"], "WorkItem.status") as "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed",
     ...(data["terminal_at"] === undefined || data["terminal_at"] === null ? {} : { terminal_at: expectWireString(data["terminal_at"], "WorkItem.terminal_at") }),
@@ -6506,13 +6683,13 @@ export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
   const data = expectWireObject(value, "WorkGraphEvent");
   return {
     at: expectWireString(requireWireField(data, "at", "WorkGraphEvent"), "WorkGraphEvent.at"),
-    ...(data["facts"] === undefined || data["facts"] === null ? {} : { facts: expectWireArray(data["facts"], "WorkGraphEvent.facts") }),
+    ...(data["facts"] === undefined || data["facts"] === null ? {} : { facts: expectWireArray(data["facts"], "WorkGraphEvent.facts", null, null) }),
     ...(data["item_id"] === undefined || data["item_id"] === null ? {} : { item_id: expectWireString(data["item_id"], "WorkGraphEvent.item_id") }),
     kind: parseWorkGraphEventKind(requireWireField(data, "kind", "WorkGraphEvent")),
     namespace: expectWireString(requireWireField(data, "namespace", "WorkGraphEvent"), "WorkGraphEvent.namespace"),
     ...(data["payload"] === undefined || data["payload"] === null ? {} : { payload: data["payload"] }),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphEvent"), "WorkGraphEvent.realm_id"),
-    ...(data["seq"] === undefined || data["seq"] === null ? {} : { seq: expectWireInteger(data["seq"], "WorkGraphEvent.seq") }),
+    ...(data["seq"] === undefined || data["seq"] === null ? {} : { seq: expectWireInteger(data["seq"], "WorkGraphEvent.seq", null, null) }),
   };
 }
 
@@ -6520,7 +6697,7 @@ export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
 export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsResponse {
   const data = expectWireObject(value, "WorkGraphItemsResponse");
   return {
-    items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+    items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items", null, null).map((entry) => parseWorkItem(entry)),
   };
 }
 
@@ -6528,7 +6705,7 @@ export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsRespo
 export function parseWorkGraphEventsResponse(value: unknown): WorkGraphEventsResponse {
   const data = expectWireObject(value, "WorkGraphEventsResponse");
   return {
-    events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events").map((entry) => parseWorkGraphEvent(entry)),
+    events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events", null, null).map((entry) => parseWorkGraphEvent(entry)),
   };
 }
 
@@ -6537,13 +6714,13 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
   const data = expectWireObject(value, "WorkGraphSnapshot");
   return {
     all_namespaces: expectWireBoolean(requireWireField(data, "all_namespaces", "WorkGraphSnapshot"), "WorkGraphSnapshot.all_namespaces"),
-    ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention").map((entry) => parseWorkAttentionBinding(entry)) }),
+    ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention", null, null).map((entry) => parseWorkAttentionBinding(entry)) }),
     captured_at: expectWireString(requireWireField(data, "captured_at", "WorkGraphSnapshot"), "WorkGraphSnapshot.captured_at"),
-    edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges").map((entry) => parseWorkEdge(entry)),
-    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark") }),
-    items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items").map((entry) => parseWorkItem(entry)),
+    edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges", null, null).map((entry) => parseWorkEdge(entry)),
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark", null, null) }),
+    items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items", null, null).map((entry) => parseWorkItem(entry)),
     ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
-    ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
+    ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids", null, null).map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
   };
 }
@@ -6552,7 +6729,7 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
 export function parseWorkItemsResult(value: unknown): WorkItemsResult {
   const data = expectWireObject(value, "WorkItemsResult");
   return {
-    items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+    items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items", null, null),
   };
 }
 
@@ -6560,7 +6737,7 @@ export function parseWorkItemsResult(value: unknown): WorkItemsResult {
 export function parseWorkEventsResult(value: unknown): WorkEventsResult {
   const data = expectWireObject(value, "WorkEventsResult");
   return {
-    events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events"),
+    events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events", null, null),
   };
 }
 
@@ -6577,8 +6754,32 @@ export function parseGoalStatusResult(value: unknown): GoalStatusResult {
 export function parseAttentionListResult(value: unknown): AttentionListResult {
   const data = expectWireObject(value, "AttentionListResult");
   return {
-    attention: expectWireArray(requireWireField(data, "attention", "AttentionListResult"), "AttentionListResult.attention").map((entry) => parseWorkAttentionBinding(entry)),
+    attention: expectWireArray(requireWireField(data, "attention", "AttentionListResult"), "AttentionListResult.attention", null, null).map((entry) => parseWorkAttentionBinding(entry)),
   };
+}
+
+/** Fail-closed wire parser for MobMemberLiveObservationsResult (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseMobMemberLiveObservationsResult(value: unknown): MobMemberLiveObservationsResult {
+  const data = expectWireObject(value, "MobMemberLiveObservationsResult");
+  if (Object.keys(data).some((key) => !["page", "placement", "provenance"].includes(key))) {
+    throw wireParseError("MobMemberLiveObservationsResult", "unknown field");
+  }
+  return {
+    page: parseLiveObservationPage(requireWireField(data, "page", "MobMemberLiveObservationsResult")),
+    ...(data["placement"] === undefined || data["placement"] === null ? {} : { placement: expectWireString(data["placement"], "MobMemberLiveObservationsResult.placement") }),
+    provenance: parseWireProjectionProvenance(requireWireField(data, "provenance", "MobMemberLiveObservationsResult")),
+  };
+}
+
+export function parseTranscriptUserRole(value: unknown, context: string = "TranscriptUserRole"): TranscriptUserRole {
+  if (typeof value === "string") {
+    return expectWireEnum(value, ["conversational", "compaction_summary", "injected_context"], context) as TranscriptUserRole;
+  }
+  const data = expectWireObject(value, context);
+  if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, "delegated_request")) {
+    return { "delegated_request": parseTranscriptUserRoleDelegatedRequestPayload(data["delegated_request"]) };
+  }
+  throw wireParseError(context, "expected exactly one known enum variant");
 }
 
 /** Fail-closed wire parser for WorkItemClaim (K21): throws MeerkatError(INVALID_RESPONSE). */
@@ -6617,7 +6818,7 @@ export function parseWorkCompletionPolicy(value: unknown): WorkCompletionPolicy 
     case "reviewer_quorum":
       return {
         kind: "reviewer_quorum",
-        threshold: expectWireInteger(requireWireField(data, "threshold", "WorkCompletionPolicy"), "WorkCompletionPolicy.reviewer_quorum.threshold"),
+        threshold: expectWireInteger(requireWireField(data, "threshold", "WorkCompletionPolicy"), "WorkCompletionPolicy.reviewer_quorum.threshold", 1, 64),
       };
     default:
       throw wireParseError("WorkCompletionPolicy", `unknown \`kind\` value \`${tag}\``);
@@ -6684,6 +6885,40 @@ export function parseWorkAttentionBinding(value: unknown): WorkAttentionBinding 
   };
 }
 
+/** Fail-closed wire parser for LiveObservationPage (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationPage(value: unknown): LiveObservationPage {
+  const data = expectWireObject(value, "LiveObservationPage");
+  if (Object.keys(data).some((key) => !["after_sequence", "encoding_profile", "filter", "has_more", "next_cursor", "owner", "records", "snapshot"].includes(key))) {
+    throw wireParseError("LiveObservationPage", "unknown field");
+  }
+  return {
+    after_sequence: expectWireInteger(requireWireField(data, "after_sequence", "LiveObservationPage"), "LiveObservationPage.after_sequence", 0, null),
+    encoding_profile: parseLiveObservationEncodingProfile(requireWireField(data, "encoding_profile", "LiveObservationPage")),
+    filter: parseLiveObservationFilter(requireWireField(data, "filter", "LiveObservationPage")),
+    has_more: expectWireBoolean(requireWireField(data, "has_more", "LiveObservationPage"), "LiveObservationPage.has_more"),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "LiveObservationPage.next_cursor") }),
+    owner: parseLiveObservationOwner(requireWireField(data, "owner", "LiveObservationPage")),
+    records: expectWireArray(requireWireField(data, "records", "LiveObservationPage"), "LiveObservationPage.records", null, null).map((entry) => parseLiveObservationRecord(entry)),
+    snapshot: parseLiveObservationSnapshot(requireWireField(data, "snapshot", "LiveObservationPage")),
+  };
+}
+
+/** Fail-closed wire parser for WireProjectionProvenance (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseWireProjectionProvenance(value: unknown): WireProjectionProvenance {
+  return expectWireEnum(value, ["host_claimed", "controlling_host_verified"], "WireProjectionProvenance") as WireProjectionProvenance;
+}
+
+/** Fail-closed wire parser for TranscriptUserRoleDelegatedRequestPayload (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseTranscriptUserRoleDelegatedRequestPayload(value: unknown): TranscriptUserRoleDelegatedRequestPayload {
+  const data = expectWireObject(value, "TranscriptUserRoleDelegatedRequestPayload");
+  if (Object.keys(data).some((key) => !["provenance"].includes(key))) {
+    throw wireParseError("TranscriptUserRoleDelegatedRequestPayload", "unknown field");
+  }
+  return {
+    provenance: parseDelegatedRequestProvenance(requireWireField(data, "provenance", "TranscriptUserRoleDelegatedRequestPayload")),
+  };
+}
+
 /** Fail-closed wire parser for WorkOwnerKey (K21): throws MeerkatError(INVALID_RESPONSE). */
 export function parseWorkOwnerKey(value: unknown): WorkOwnerKey {
   const data = expectWireObject(value, "WorkOwnerKey");
@@ -6713,7 +6948,7 @@ export function parseAttentionProjectionPolicy(value: unknown): AttentionProject
   const data = expectWireObject(value, "AttentionProjectionPolicy");
   return {
     ...(data["include_parent_context"] === undefined || data["include_parent_context"] === null ? {} : { include_parent_context: expectWireBoolean(data["include_parent_context"], "AttentionProjectionPolicy.include_parent_context") }),
-    ...(data["max_text_chars"] === undefined || data["max_text_chars"] === null ? {} : { max_text_chars: expectWireInteger(data["max_text_chars"], "AttentionProjectionPolicy.max_text_chars") }),
+    ...(data["max_text_chars"] === undefined || data["max_text_chars"] === null ? {} : { max_text_chars: expectWireInteger(data["max_text_chars"], "AttentionProjectionPolicy.max_text_chars", 0, null) }),
   };
 }
 
@@ -6774,7 +7009,196 @@ export function parseWorkItemRef(value: unknown): WorkItemRef {
   };
 }
 
+/** Fail-closed wire parser for LiveObservationEncodingProfile (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationEncodingProfile(value: unknown): LiveObservationEncodingProfile {
+  return expectWireEnum(value, ["v1"], "LiveObservationEncodingProfile") as LiveObservationEncodingProfile;
+}
+
+/** Fail-closed wire parser for LiveObservationFilter (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationFilter(value: unknown): LiveObservationFilter {
+  const data = expectWireObject(value, "LiveObservationFilter");
+  const tag = expectWireString(requireWireField(data, "kind", "LiveObservationFilter"), "LiveObservationFilter.kind");
+  switch (tag) {
+    case "all_channels":
+      if (Object.keys(data).some((key) => !["kind"].includes(key))) {
+        throw wireParseError("LiveObservationFilter", "unknown variant field");
+      }
+      return {
+        kind: "all_channels",
+      };
+    case "channel":
+      if (Object.keys(data).some((key) => !["channel_id", "kind"].includes(key))) {
+        throw wireParseError("LiveObservationFilter", "unknown variant field");
+      }
+      return {
+        kind: "channel",
+        channel_id: expectWireString(requireWireField(data, "channel_id", "LiveObservationFilter"), "LiveObservationFilter.channel.channel_id"),
+      };
+    default:
+      throw wireParseError("LiveObservationFilter", `unknown \`kind\` value \`${tag}\``);
+  }
+}
+
+/** Fail-closed wire parser for LiveObservationOwner (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationOwner(value: unknown): LiveObservationOwner {
+  const data = expectWireObject(value, "LiveObservationOwner");
+  const tag = expectWireString(requireWireField(data, "kind", "LiveObservationOwner"), "LiveObservationOwner.kind");
+  switch (tag) {
+    case "session":
+      if (Object.keys(data).some((key) => !["kind", "session_id"].includes(key))) {
+        throw wireParseError("LiveObservationOwner", "unknown variant field");
+      }
+      return {
+        kind: "session",
+        session_id: expectWireString(requireWireField(data, "session_id", "LiveObservationOwner"), "LiveObservationOwner.session.session_id"),
+      };
+    case "member":
+      if (Object.keys(data).some((key) => !["agent_identity", "kind", "mob_id", "session_id"].includes(key))) {
+        throw wireParseError("LiveObservationOwner", "unknown variant field");
+      }
+      return {
+        kind: "member",
+        agent_identity: expectWireString(requireWireField(data, "agent_identity", "LiveObservationOwner"), "LiveObservationOwner.member.agent_identity"),
+        mob_id: expectWireString(requireWireField(data, "mob_id", "LiveObservationOwner"), "LiveObservationOwner.member.mob_id"),
+        session_id: expectWireString(requireWireField(data, "session_id", "LiveObservationOwner"), "LiveObservationOwner.member.session_id"),
+      };
+    default:
+      throw wireParseError("LiveObservationOwner", `unknown \`kind\` value \`${tag}\``);
+  }
+}
+
+/** Fail-closed wire parser for LiveObservationRecord (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationRecord(value: unknown): LiveObservationRecord {
+  const data = expectWireObject(value, "LiveObservationRecord");
+  if (Object.keys(data).some((key) => !["channel_id", "observation", "sequence"].includes(key))) {
+    throw wireParseError("LiveObservationRecord", "unknown field");
+  }
+  return {
+    channel_id: expectWireString(requireWireField(data, "channel_id", "LiveObservationRecord"), "LiveObservationRecord.channel_id"),
+    observation: parseLiveTranscriptObservation(requireWireField(data, "observation", "LiveObservationRecord")),
+    sequence: expectWireInteger(requireWireField(data, "sequence", "LiveObservationRecord"), "LiveObservationRecord.sequence", 1, null),
+  };
+}
+
+/** Fail-closed wire parser for LiveObservationSnapshot (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationSnapshot(value: unknown): LiveObservationSnapshot {
+  const data = expectWireObject(value, "LiveObservationSnapshot");
+  if (Object.keys(data).some((key) => !["coverage", "end_sequence", "generation", "prefix_digest", "revision"].includes(key))) {
+    throw wireParseError("LiveObservationSnapshot", "unknown field");
+  }
+  return {
+    coverage: parseLiveObservationCoverage(requireWireField(data, "coverage", "LiveObservationSnapshot")),
+    end_sequence: expectWireInteger(requireWireField(data, "end_sequence", "LiveObservationSnapshot"), "LiveObservationSnapshot.end_sequence", 0, null),
+    generation: expectWireInteger(requireWireField(data, "generation", "LiveObservationSnapshot"), "LiveObservationSnapshot.generation", 0, null),
+    prefix_digest: expectWireString(requireWireField(data, "prefix_digest", "LiveObservationSnapshot"), "LiveObservationSnapshot.prefix_digest"),
+    revision: expectWireInteger(requireWireField(data, "revision", "LiveObservationSnapshot"), "LiveObservationSnapshot.revision", 0, null),
+  };
+}
+
+/** Fail-closed wire parser for DelegatedRequestProvenance (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseDelegatedRequestProvenance(value: unknown): DelegatedRequestProvenance {
+  const data = expectWireObject(value, "DelegatedRequestProvenance");
+  if (Object.keys(data).some((key) => !["evidence_kind", "request_digest", "request_id", "source"].includes(key))) {
+    throw wireParseError("DelegatedRequestProvenance", "unknown field");
+  }
+  return {
+    evidence_kind: parseLiveRequestEvidenceKind(requireWireField(data, "evidence_kind", "DelegatedRequestProvenance")),
+    request_digest: expectWireArray(requireWireField(data, "request_digest", "DelegatedRequestProvenance"), "DelegatedRequestProvenance.request_digest", 32, 32).map((entry) => expectWireInteger(entry, "DelegatedRequestProvenance.request_digest[]", 0, 255)),
+    request_id: expectWireString(requireWireField(data, "request_id", "DelegatedRequestProvenance"), "DelegatedRequestProvenance.request_id"),
+    source: parseLiveSourceKey(requireWireField(data, "source", "DelegatedRequestProvenance")),
+  };
+}
+
 /** Fail-closed wire parser for WorkOwnerKind (K21): throws MeerkatError(INVALID_RESPONSE). */
 export function parseWorkOwnerKind(value: unknown): WorkOwnerKind {
   return expectWireEnum(value, ["principal", "agent", "session", "mob", "label"], "WorkOwnerKind") as WorkOwnerKind;
+}
+
+/** Fail-closed wire parser for LiveTranscriptObservation (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveTranscriptObservation(value: unknown): LiveTranscriptObservation {
+  const data = expectWireObject(value, "LiveTranscriptObservation");
+  if (Object.keys(data).some((key) => !["direction", "range", "text"].includes(key))) {
+    throw wireParseError("LiveTranscriptObservation", "unknown field");
+  }
+  return {
+    direction: parseLiveTranscriptDirection(requireWireField(data, "direction", "LiveTranscriptObservation")),
+    range: parseLiveTranscriptRange(requireWireField(data, "range", "LiveTranscriptObservation")),
+    text: expectWireString(requireWireField(data, "text", "LiveTranscriptObservation"), "LiveTranscriptObservation.text"),
+  };
+}
+
+/** Fail-closed wire parser for LiveObservationCoverage (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveObservationCoverage(value: unknown): LiveObservationCoverage {
+  return expectWireEnum(value, ["complete_accepted_prefix", "known_local_gap", "unknown_extent_crash_discontinuity"], "LiveObservationCoverage") as LiveObservationCoverage;
+}
+
+/** Fail-closed wire parser for LiveRequestEvidenceKind (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveRequestEvidenceKind(value: unknown): LiveRequestEvidenceKind {
+  return expectWireEnum(value, ["application_snapshot", "structured_function_request"], "LiveRequestEvidenceKind") as LiveRequestEvidenceKind;
+}
+
+/** Fail-closed wire parser for LiveSourceKey (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveSourceKey(value: unknown): LiveSourceKey {
+  const data = expectWireObject(value, "LiveSourceKey");
+  if (Object.keys(data).some((key) => !["channel_id", "session_id", "source"].includes(key))) {
+    throw wireParseError("LiveSourceKey", "unknown field");
+  }
+  return {
+    channel_id: expectWireString(requireWireField(data, "channel_id", "LiveSourceKey"), "LiveSourceKey.channel_id"),
+    session_id: expectWireString(requireWireField(data, "session_id", "LiveSourceKey"), "LiveSourceKey.session_id"),
+    source: parseLiveSourceIdentity(requireWireField(data, "source", "LiveSourceKey")),
+  };
+}
+
+/** Fail-closed wire parser for LiveTranscriptDirection (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveTranscriptDirection(value: unknown): LiveTranscriptDirection {
+  return expectWireEnum(value, ["input", "output"], "LiveTranscriptDirection") as LiveTranscriptDirection;
+}
+
+/** Fail-closed wire parser for LiveTranscriptRange (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveTranscriptRange(value: unknown): LiveTranscriptRange {
+  const data = expectWireObject(value, "LiveTranscriptRange");
+  if (Object.keys(data).some((key) => !["end_ms", "start_ms"].includes(key))) {
+    throw wireParseError("LiveTranscriptRange", "unknown field");
+  }
+  return {
+    end_ms: expectWireNumber(requireWireField(data, "end_ms", "LiveTranscriptRange"), "LiveTranscriptRange.end_ms"),
+    start_ms: expectWireNumber(requireWireField(data, "start_ms", "LiveTranscriptRange"), "LiveTranscriptRange.start_ms"),
+  };
+}
+
+/** Fail-closed wire parser for LiveSourceIdentity (K21): throws MeerkatError(INVALID_RESPONSE). */
+export function parseLiveSourceIdentity(value: unknown): LiveSourceIdentity {
+  const data = expectWireObject(value, "LiveSourceIdentity");
+  const tag = expectWireString(requireWireField(data, "kind", "LiveSourceIdentity"), "LiveSourceIdentity.kind");
+  switch (tag) {
+    case "client_delegation":
+      if (Object.keys(data).some((key) => !["delegation", "kind"].includes(key))) {
+        throw wireParseError("LiveSourceIdentity", "unknown variant field");
+      }
+      return {
+        kind: "client_delegation",
+        delegation: expectWireString(requireWireField(data, "delegation", "LiveSourceIdentity"), "LiveSourceIdentity.client_delegation.delegation"),
+      };
+    case "function_call":
+      if (Object.keys(data).some((key) => !["call", "delegation", "kind", "response"].includes(key))) {
+        throw wireParseError("LiveSourceIdentity", "unknown variant field");
+      }
+      return {
+        kind: "function_call",
+        call: expectWireString(requireWireField(data, "call", "LiveSourceIdentity"), "LiveSourceIdentity.function_call.call"),
+        delegation: expectWireString(requireWireField(data, "delegation", "LiveSourceIdentity"), "LiveSourceIdentity.function_call.delegation"),
+        response: expectWireString(requireWireField(data, "response", "LiveSourceIdentity"), "LiveSourceIdentity.function_call.response"),
+      };
+    case "application_request":
+      if (Object.keys(data).some((key) => !["kind", "request_id"].includes(key))) {
+        throw wireParseError("LiveSourceIdentity", "unknown variant field");
+      }
+      return {
+        kind: "application_request",
+        request_id: expectWireString(requireWireField(data, "request_id", "LiveSourceIdentity"), "LiveSourceIdentity.application_request.request_id"),
+      };
+    default:
+      throw wireParseError("LiveSourceIdentity", `unknown \`kind\` value \`${tag}\``);
+  }
 }

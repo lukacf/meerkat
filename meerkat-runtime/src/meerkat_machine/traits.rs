@@ -14,6 +14,8 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::AcceptWithCompletion {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    pending_live: None,
                     session_id: session_id.clone(),
                     input,
                     register_completion: false,
@@ -1447,6 +1449,23 @@ impl MeerkatMachine {
         // or discard it in favor of the concurrent registration that won T.
         // No arbitrary store callback can therefore retain T indefinitely.
         let (registration_transaction_guard, entry_parts) = loop {
+            #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+            let archive_registration = self.current_session_registration_witness(session_id).await;
+            #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+            let archive_fence_absent = if let Some(store) = self.store.as_ref()
+                && store.live_ledger_ops().is_some()
+            {
+                crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+                    Arc::clone(store),
+                    session_id.clone(),
+                )
+                .fence_for_archive(archive_registration.as_ref())
+                .await
+                .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?
+                .is_none()
+            } else {
+                false
+            };
             let prepared_registration = match self.lookup_entry(&runtime_id).await {
                 Ok(_) => None,
                 Err(RuntimeControlPlaneError::NotFound(_)) => {
@@ -1545,8 +1564,17 @@ impl MeerkatMachine {
                 Err(error) => return Err(error),
             };
 
+            #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+            if archive_fence_absent && prepared_registration.is_some() {
+                continue;
+            }
             let registration_transaction_guard =
                 self.lock_session_registration_transaction(session_id).await;
+            #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+            if self.current_session_registration_witness(session_id).await != archive_registration {
+                drop(registration_transaction_guard);
+                continue;
+            }
             match self.lookup_entry(&runtime_id).await {
                 Ok(parts) => break (registration_transaction_guard, parts),
                 Err(RuntimeControlPlaneError::NotFound(_)) => {
@@ -3490,6 +3518,264 @@ mod tests {
             &runtime_id,
             "stored-only archive must retain the exact runtime identity"
         );
+    }
+
+    #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn archive_existing_session_fences_first_open_but_absence_creates_no_tombstone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = Arc::new(MeerkatMachine::persistent(
+            store.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        ));
+        let absent = SessionId::new();
+        assert!(
+            machine
+                .prepare_session_archive_lease(&absent)
+                .await?
+                .is_none()
+        );
+        assert!(
+            store
+                .live_ledger_ops()
+                .ok_or("ledger")?
+                .load_live_head(&absent)
+                .await?
+                .is_none()
+        );
+        assert!(
+            store
+                .load_session_boundary_authority(&LogicalRuntimeId::for_session(&absent))
+                .await?
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .observe_machine_lifecycle(&LogicalRuntimeId::for_session(&absent))
+                .await?,
+            crate::store::MachineLifecycleObservation::Missing
+        ));
+        let session_id = SessionId::new();
+        let _bindings = machine.prepare_bindings(session_id.clone()).await?;
+        assert!(
+            store
+                .live_ledger_ops()
+                .ok_or("ledger")?
+                .load_live_head(&session_id)
+                .await?
+                .is_none()
+        );
+        let lease = machine
+            .prepare_session_archive_lease(&session_id)
+            .await?
+            .ok_or("lease")?;
+        drop(lease);
+        let closed = store
+            .live_ledger_ops()
+            .ok_or("ledger")?
+            .load_live_head(&session_id)
+            .await?
+            .ok_or("tombstone")?;
+        let state =
+            crate::generated::live_transcript_state::decode(&closed.payload.transcript_snapshot)?;
+        assert!(!state.ingress_open);
+        assert!(state.channels.is_empty());
+        assert_eq!(closed.reference.event_count, 0);
+        let requests =
+            crate::generated::live_request_state::decode(&closed.payload.request_snapshot)?;
+        assert!(
+            requests.request_ids.is_empty()
+                && requests.request_inputs.is_empty()
+                && requests.run_requests.is_empty()
+        );
+        let lease = machine
+            .prepare_session_archive_lease(&session_id)
+            .await?
+            .ok_or("retry lease")?;
+        drop(lease);
+        let retried = store
+            .live_ledger_ops()
+            .ok_or("ledger")?
+            .load_live_head(&session_id)
+            .await?
+            .ok_or("retry tombstone")?;
+        assert_eq!(retried.payload, closed.payload);
+        assert_eq!(retried.reference.event_count, 0);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn archive_live_fence_retries_stale_capture_without_retaining_t_or_m()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::live_ledger::transcript_authority::LiveTranscriptStoreOwner;
+        use crate::store::{
+            RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
+        };
+        use meerkat_core::live_execution::LiveChannelId;
+        use meerkat_core::live_observation::{
+            LiveTranscriptDirection, LiveTranscriptObservation, LiveTranscriptRange,
+        };
+        struct CurrentFence;
+        impl RuntimeStoreWriteFence for CurrentFence {
+            fn execute_if_current(
+                &self,
+                operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+            ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+                operation()?;
+                Ok(RuntimeStoreWriteFenceOutcome::Applied)
+            }
+        }
+        struct ReleaseOnDrop(Arc<crate::tokio::sync::Notify>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        for existing_head in [false, true] {
+            let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+            let session = meerkat_core::Session::new();
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    crate::store::SerializedSessionSnapshot {
+                        session_snapshot: Arc::new(serde_json::to_vec(&session)?),
+                    },
+                )
+                .await?;
+            let machine = Arc::new(MeerkatMachine::persistent(
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            ));
+            let _bindings = machine.prepare_bindings(session_id.clone()).await?;
+            let lifecycle = store
+                .observe_machine_lifecycle(&runtime_id)
+                .await?
+                .version()
+                .ok_or("lifecycle")?
+                .clone();
+            let mut channel = if existing_head {
+                Some(
+                    LiveTranscriptStoreOwner::new(
+                        store.clone(),
+                        session_id.clone(),
+                        Arc::new(CurrentFence),
+                    )
+                    .activate_channel(LiveChannelId::new("voice"), lifecycle.clone())
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let observation = || -> Result<_, Box<dyn std::error::Error>> {
+                Ok(LiveTranscriptObservation::new(
+                    LiveTranscriptDirection::Input,
+                    LiveTranscriptRange::new(0.0, 1.0)?,
+                    "retained",
+                ))
+            };
+            if let Some(channel) = channel.as_mut() {
+                channel.append(observation()?).await?;
+            }
+            let entered = Arc::new(crate::tokio::sync::Notify::new());
+            let release = Arc::new(crate::tokio::sync::Notify::new());
+            let _release_guard = ReleaseOnDrop(Arc::clone(&release));
+            store.block_next_live_head_after_capture(Arc::clone(&entered), Arc::clone(&release));
+            let first_machine = Arc::clone(&machine);
+            let first_session = session_id.clone();
+            let first = crate::tokio::spawn(async move {
+                first_machine
+                    .prepare_session_archive_lease_before(
+                        &first_session,
+                        meerkat_core::time_compat::Instant::now()
+                            + std::time::Duration::from_millis(100),
+                    )
+                    .await
+            });
+            crate::tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await?;
+            let t = crate::tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                machine.lock_session_registration_transaction(&session_id),
+            )
+            .await?;
+            drop(t);
+            let (_, driver, _, _) = machine.lookup_entry(&runtime_id).await?;
+            let m = crate::tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                machine.lock_current_session_driver_gate(&session_id, &driver),
+            )
+            .await??;
+            drop(m);
+            let mut channel = match channel {
+                Some(channel) => channel,
+                None => {
+                    LiveTranscriptStoreOwner::new(
+                        store.clone(),
+                        session_id.clone(),
+                        Arc::new(CurrentFence),
+                    )
+                    .activate_channel(LiveChannelId::new("voice"), lifecycle.clone())
+                    .await?
+                }
+            };
+            let advanced = channel.append(observation()?).await?;
+            assert!(
+                matches!(first.await?, Err(RuntimeControlPlaneError::RetirementInProgress { ref stage, .. })
+            if stage == "archive_lease_preparation")
+            );
+            assert!(matches!(
+                machine
+                    .prepare_session_archive_lease_before(
+                        &session_id,
+                        meerkat_core::time_compat::Instant::now()
+                            + std::time::Duration::from_millis(100),
+                    )
+                    .await,
+                Err(RuntimeControlPlaneError::RetirementInProgress { .. })
+            ));
+            release.notify_one();
+            let lease = machine
+                .prepare_session_archive_lease_before(
+                    &session_id,
+                    meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .await?
+                .ok_or("archive lease")?;
+            let closed = store
+                .live_ledger_ops()
+                .ok_or("ledger")?
+                .load_live_head(&session_id)
+                .await?
+                .ok_or("head")?;
+            assert_eq!(closed.reference.event_count, advanced.event_count);
+            assert_eq!(closed.reference.revision, advanced.revision + 1);
+            let transcript = crate::generated::live_transcript_state::decode(
+                &closed.payload.transcript_snapshot,
+            )?;
+            assert!(!transcript.ingress_open);
+            assert_eq!(transcript.ingress_generation, 2);
+            assert_eq!(
+                transcript.receive_ordinals["voice"],
+                if existing_head { 2 } else { 1 }
+            );
+            drop(lease);
+            assert!(channel.append(observation()?).await.is_err());
+            assert!(
+                LiveTranscriptStoreOwner::new(
+                    store.clone(),
+                    session_id.clone(),
+                    Arc::new(CurrentFence),
+                )
+                .activate_channel(LiveChannelId::new("replacement"), lifecycle)
+                .await
+                .is_err()
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

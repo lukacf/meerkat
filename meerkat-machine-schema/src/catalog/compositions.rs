@@ -1045,6 +1045,112 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
     }
 }
 
+pub fn live_source_reservation_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: comp_id("live_source_reservation"),
+        machines: vec![
+            MachineInstance {
+                instance_id: mi_id("transcript"),
+                machine_name: mach_id("LiveTranscriptMachine"),
+                actor: act_id("transcript_authority"),
+            },
+            MachineInstance {
+                instance_id: mi_id("request"),
+                machine_name: mach_id("LiveRequestMachine"),
+                actor: act_id("request_authority"),
+            },
+        ],
+        actors: vec![machine_actor("transcript_authority"), machine_actor("request_authority")],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes: vec![Route {
+            name: route_id("selected_range_freezes_source"),
+            from_machine: mi_id("transcript"),
+            effect_variant: ev_id("RangeSelected"),
+            to: RouteTarget::new(mi_id("request"), rv(RouteTargetKind::Input, "Reserve")),
+            bindings: vec![
+                bind("content_discontinuous", "discontinuous"),
+                owner_bind("request_id"), owner_bind("source"), owner_bind("payload"),
+                owner_bind("evidence"), owner_bind("profile_revision"), owner_bind("parent_scope"),
+                owner_bind("grant_id"), owner_bind("generation"), owner_bind("executor"),
+                owner_bind("now"), owner_bind("credit_records"), owner_bind("credit_bytes"),
+                owner_bind("snapshot_ceiling"), owner_bind("content_complete"),
+                owner_bind("content_empty"), owner_bind("content_fits"),
+            ],
+            delivery: RouteDelivery::Immediate,
+            teardown: None,
+        }, Route {
+            name: route_id("ingress_close_fences_request_sources"),
+            from_machine: mi_id("transcript"),
+            effect_variant: ev_id("IngressClosed"),
+            to: RouteTarget::new(mi_id("request"), rv(RouteTargetKind::Input, "CloseIngress")),
+            bindings: vec![],
+            delivery: RouteDelivery::Immediate,
+            teardown: None,
+        }],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![transaction_plan(
+            "freeze_source_and_selected_frontier",
+            "reserve_selected_source",
+            "Exact source lookup precedes capture; the composite actor/Live witness and complete selected-range bytes bind one source row and both generated successors. Refusal spends no request, input or run; unavailable storage capacity publishes neither frontier nor key.",
+            "RuntimeLiveLedgerOps::commit_live_ledger",
+            &["selected_range_freezes_source"],
+        ), transaction_plan(
+            "fence_observations_and_requests_before_archive",
+            "fence_for_archive",
+            "The archive owner fences observation and source admission together before ordinary retirement; source cancellation preserves callback and unknown-effect obligations.",
+            "RuntimeLiveLedgerOps::commit_live_ledger",
+            &["ingress_close_fences_request_sources"],
+        )],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![CompositionInvariant {
+            name: "selected_frontier_and_source_publish_together".into(),
+            kind: CompositionInvariantKind::RoutePresent {
+                from_machine: mi_id("transcript"),
+                effect_variant: ev_id("RangeSelected"),
+                to_machine: mi_id("request"),
+                input_variant: rv(RouteTargetKind::Input, "Reserve"),
+            },
+            statement: "The captured selected range freezes exactly one source through the joint store CAS; neither a failed request transition nor a failed commit spends a frontier.".into(),
+            references_machines: vec![mi_id("transcript"), mi_id("request")],
+            references_actors: vec![act_id("transcript_authority"), act_id("request_authority")],
+        }],
+        witnesses: vec![CompositionWitness {
+            preload_inputs: vec![
+                witness_input("transcript", "ActivateChannel", vec![
+                    witness_field("voice_accounting", Expr::Bool(false)),
+                    witness_field("channel", Expr::String("channel_1".into())),
+                    witness_field("sequence", Expr::U64(1)),
+                    witness_field("ingress_generation", Expr::U64(1)),
+                    witness_field("credit_records", Expr::U64(2)),
+                    witness_field("credit_bytes", Expr::U64(2)),
+                    witness_field("maximum_record_charge", Expr::U64(1)),
+                ]),
+                witness_input("transcript", "ReservePrefix", vec![
+                    witness_field("channel", Expr::String("channel_1".into())),
+                    witness_field("after", Expr::U64(1)),
+                    witness_field("through", Expr::U64(1)),
+                    witness_field("received_through", Expr::U64(0)),
+                    witness_field("ingress_generation", Expr::U64(1)),
+                ]),
+            ],
+            ..witness("selected_range_freezes_source_route", &["selected_range_freezes_source"])
+        }, CompositionWitness {
+            preload_inputs: vec![witness_input("transcript", "CloseCurrentIngress", vec![])],
+            ..witness("archive_ingress_fence_route", &["ingress_close_fences_request_sources"])
+        }],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(default_ci_limits()),
+        // This transaction covers reservation, not the request owner's later
+        // execution and callback handoffs.
+        closed_world: false,
+    }
+}
+
 pub fn workgraph_attention_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: comp_id("workgraph_attention_bundle"),

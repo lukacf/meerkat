@@ -24,6 +24,13 @@ use meerkat_core::{SessionId, ops::OperationId};
 #[serde(transparent)]
 pub struct LiveSourceFingerprint([u8; 32]);
 
+/// Stable identity of the frozen source content, excluding mutable admission
+/// and cancellation state. Unlike the physical row CAS digest, it survives
+/// those lifecycle updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LiveSourceFrozenDigest([u8; 32]);
+
 impl LiveSourceFingerprint {
     pub fn client_delegation(offset_ms: f64) -> Result<Self, LiveSourceRecordError> {
         if !offset_ms.is_finite() || offset_ms < 0.0 {
@@ -94,6 +101,7 @@ impl LiveActorContextReference {
 pub enum LiveSourceReadCoverage {
     CompleteToCapturedHead,
     WindowContinues,
+    CompleteSelectedInterval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,25 +149,24 @@ impl LiveSourceContextReference {
             live_head: head.clone(),
             channel_id: source.channel_id().clone(),
             interval,
-            read_coverage: if read.has_more() {
-                LiveSourceReadCoverage::WindowContinues
-            } else {
+            read_coverage: if !read.has_more() {
                 LiveSourceReadCoverage::CompleteToCapturedHead
+            } else if interval.is_empty()
+                || read
+                    .records()
+                    .last()
+                    .is_some_and(|record| record.sequence().get() >= interval.through())
+            {
+                LiveSourceReadCoverage::CompleteSelectedInterval
+            } else {
+                LiveSourceReadCoverage::WindowContinues
             },
             record_window_digest: *authority.record_window_digest(),
         })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveSourceRefusal {
-    Empty,
-    Gap,
-    Budget,
-    Permission,
-    IngressClosed,
-}
+pub use crate::live_ledger::authority::dsl::LiveSourceRefusal;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -190,6 +197,17 @@ pub struct LiveSourceReservationRecord {
 }
 
 impl LiveSourceReservationRecord {
+    pub fn frozen_digest(&self) -> Result<LiveSourceFrozenDigest, LiveSourceRecordError> {
+        frozen_digest(&(
+            &self.source,
+            &self.request_id,
+            &self.fingerprint,
+            &self.context,
+            &self.frozen_request,
+            &self.grant,
+        ))
+    }
+
     pub fn source(&self) -> &LiveSourceKey {
         &self.source
     }
@@ -204,6 +222,36 @@ impl LiveSourceReservationRecord {
     }
     pub fn frozen_request(&self) -> Option<&LiveRequestEvidence> {
         self.frozen_request.as_ref()
+    }
+    pub fn grant(&self) -> Option<&ExecutionGrantRef> {
+        self.grant.as_ref()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cancellation(&self) -> Option<&LiveRequestCancellationReason> {
+        self.cancellation.as_ref()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_cancellation(mut self, reason: LiveRequestCancellationReason) -> Self {
+        let retained = *self.cancellation.get_or_insert(reason);
+        if matches!(self.disposition, LiveSourceDisposition::Reserved {}) {
+            self.disposition = LiveSourceDisposition::CancelledWithoutRun { reason: retained };
+        }
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_admission(
+        mut self,
+        receipt: AdmittedLiveExecutionRecord,
+    ) -> Result<Self, LiveSourceRecordError> {
+        if receipt.source() != &self.source || Some(receipt.grant()) != self.grant.as_ref() {
+            return Err(LiveSourceRecordError::AdmissionMismatch);
+        }
+        self.disposition = LiveSourceDisposition::Admitted {
+            receipt: Box::new(receipt),
+        };
+        Ok(self)
     }
     pub const fn reserved_frontier(&self) -> u64 {
         self.context.interval.through()
@@ -250,6 +298,29 @@ pub struct LiveSourceReservationParts {
     pub disposition: LiveSourceDisposition,
 }
 
+impl LiveSourceReservationParts {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn frozen_digest(&self) -> Result<LiveSourceFrozenDigest, LiveSourceRecordError> {
+        frozen_digest(&(
+            &self.source,
+            &self.request_id,
+            &self.fingerprint,
+            &self.context,
+            &self.frozen_request,
+            &self.grant,
+        ))
+    }
+}
+
+fn frozen_digest(value: &impl Serialize) -> Result<LiveSourceFrozenDigest, LiveSourceRecordError> {
+    let bytes = meerkat_contracts::wire::live_observation::LiveObservationWireCodecV1::encode_ledger_record(value)
+        .map_err(|_| LiveSourceRecordError::EncodingBoundExceeded)?;
+    let mut hash = Sha256::new();
+    hash.update(b"meerkat.live-source-frozen.v1\0");
+    hash.update(bytes);
+    Ok(LiveSourceFrozenDigest(hash.finalize().into()))
+}
+
 impl TryFrom<LiveSourceReservationParts> for LiveSourceReservationRecord {
     type Error = LiveSourceRecordError;
     fn try_from(value: LiveSourceReservationParts) -> Result<Self, Self::Error> {
@@ -267,13 +338,6 @@ impl TryFrom<LiveSourceReservationParts> for LiveSourceReservationRecord {
         }
         if value.context.interval.through() > value.context.live_head.event_count {
             return Err(LiveSourceRecordError::PastDurableWatermark);
-        }
-        if matches!(
-            value.source.source(),
-            LiveSourceIdentity::ClientDelegation { .. }
-        ) && value.context.interval.through() != value.context.live_head.event_count
-        {
-            return Err(LiveSourceRecordError::IncompleteSnapshot);
         }
         if matches!(
             value.source.source(),
@@ -299,9 +363,10 @@ impl TryFrom<LiveSourceReservationParts> for LiveSourceReservationRecord {
             LiveSourceDisposition::Refused {
                 reason: LiveSourceRefusal::Empty
             }
-        ) && !value.context.interval.is_empty()
+        ) && (value.frozen_request.is_some()
+            || value.context.read_coverage == LiveSourceReadCoverage::WindowContinues)
         {
-            return Err(LiveSourceRecordError::NonemptyEmptyRefusal);
+            return Err(LiveSourceRecordError::InvalidEmptyRefusal);
         }
         if let Some(evidence) = &value.frozen_request {
             match (value.source.source(), evidence) {
@@ -330,7 +395,7 @@ impl TryFrom<LiveSourceReservationParts> for LiveSourceReservationRecord {
         ) && matches!(
             value.disposition,
             LiveSourceDisposition::Reserved {} | LiveSourceDisposition::Admitted { .. }
-        ) && value.context.read_coverage != LiveSourceReadCoverage::CompleteToCapturedHead
+        ) && value.context.read_coverage == LiveSourceReadCoverage::WindowContinues
         {
             return Err(LiveSourceRecordError::IncompleteSnapshot);
         }
@@ -386,9 +451,11 @@ impl LiveSourceEntryRecord {
                         LiveSourceDisposition::Admitted { receipt } => matches!(
                             &new.disposition, LiveSourceDisposition::Admitted { receipt: next } if next == receipt
                         ),
-                        LiveSourceDisposition::Reserved {}
-                        | LiveSourceDisposition::Refused { .. }
-                        | LiveSourceDisposition::CancelledWithoutRun { .. } => true,
+                        LiveSourceDisposition::Reserved {} => true,
+                        LiveSourceDisposition::Refused { .. }
+                        | LiveSourceDisposition::CancelledWithoutRun { .. } => {
+                            old.disposition == new.disposition
+                        }
                     }
             }
             _ => false,
@@ -418,8 +485,8 @@ impl LiveSourceEntryRecord {
 pub enum LiveSourceRecordError {
     #[error("automatic client work cannot reserve an empty observation prefix")]
     EmptyAutomaticSnapshot,
-    #[error("an empty-prefix refusal must retain a zero-width interval")]
-    NonemptyEmptyRefusal,
+    #[error("an empty-content refusal requires complete coverage and no executable request")]
+    InvalidEmptyRefusal,
     #[error("live source offset must be finite and nonnegative")]
     InvalidOffset,
     #[error("live source key differs from the retained source")]

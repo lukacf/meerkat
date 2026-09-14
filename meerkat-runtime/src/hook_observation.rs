@@ -89,6 +89,8 @@ impl From<InputKind> for HookRuntimeInputKind {
             InputKind::ExternalEvent => Self::ExternalEvent,
             InputKind::Continuation => Self::Continuation,
             InputKind::Operation => Self::Operation,
+            InputKind::LiveRequest => Self::LiveRequest,
+            InputKind::LiveCallbackContinuation => Self::LiveCallbackContinuation,
         }
     }
 }
@@ -110,6 +112,7 @@ impl From<RuntimeState> for HookRuntimeState {
 impl From<&RejectReason> for HookRuntimeInputRejection {
     fn from(reason: &RejectReason) -> Self {
         match reason {
+            RejectReason::LiveRequestRequiresGrant => Self::LiveRequestRequiresGrant,
             RejectReason::NotReady { state } => Self::NotReady {
                 state: (*state).into(),
             },

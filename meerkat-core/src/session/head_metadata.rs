@@ -1240,6 +1240,79 @@ fn fold_proof(route: &[u8; 32], siblings: &[MerkleHash], mut hash: MerkleHash) -
 mod tests {
     use super::*;
 
+    #[test]
+    fn compaction_acknowledgement_rebases_only_the_exact_committed_metadata_delta()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY;
+        let mut actor = crate::Session::new();
+        actor.set_metadata_unchecked_for_test(key, serde_json::json!({"pending": "metadata-test"}));
+        actor.set_metadata("unrelated", serde_json::json!("original"));
+        let initial = actor.head_canonical_metadata_projection()?;
+        assert!(
+            actor
+                .acknowledge_head_canonical_compaction_metadata(initial.identity())
+                .is_err(),
+            "a control acknowledgement cannot invent the initial actor baseline"
+        );
+        actor.acknowledge_head_canonical_metadata_projection(&initial)?;
+
+        let mut durable = actor.clone();
+        durable.remove_metadata_unchecked(key);
+        let committed = durable.head_canonical_metadata_projection()?;
+        actor.remove_metadata_unchecked(key);
+        actor.set_metadata("unrelated", serde_json::json!("actor-local"));
+        actor.set_metadata("new-local", serde_json::json!([1, 2, 3]));
+        let uncommitted = actor.head_canonical_metadata_projection()?;
+
+        for wrong in [initial.identity(), uncommitted.identity()] {
+            assert!(
+                actor
+                    .acknowledge_head_canonical_compaction_metadata(wrong)
+                    .is_err()
+            );
+            let after_refusal = actor.head_canonical_metadata_projection()?;
+            assert_eq!(
+                after_refusal.predecessor_identity(),
+                Some(initial.identity())
+            );
+            assert_eq!(after_refusal.identity(), uncommitted.identity());
+            assert_eq!(after_refusal.mutations().len(), 3);
+        }
+
+        for _ in 0..2 {
+            actor.acknowledge_head_canonical_compaction_metadata(committed.identity())?;
+            let next = actor.head_canonical_metadata_projection()?;
+            assert_eq!(next.predecessor_identity(), Some(committed.identity()));
+            assert_eq!(next.identity(), uncommitted.identity());
+            assert_eq!(next.mutations().len(), 2);
+            assert!(
+                next.mutations()
+                    .iter()
+                    .all(|mutation| mutation.key() != key)
+            );
+            assert!(
+                next.mutations()
+                    .iter()
+                    .all(SessionHeadMetadataCellMutation::verify)
+            );
+        }
+        assert!(
+            actor
+                .acknowledge_head_canonical_compaction_metadata(initial.identity())
+                .is_err(),
+            "an old acknowledgement cannot roll back the adopted baseline"
+        );
+        let next = actor.head_canonical_metadata_projection()?;
+        actor.acknowledge_head_canonical_metadata_projection(&next)?;
+        assert!(
+            actor
+                .head_canonical_metadata_projection()?
+                .mutations()
+                .is_empty()
+        );
+        Ok(())
+    }
+
     fn cell(key: &str, value: serde_json::Value) -> Arc<SessionHeadMetadataCell> {
         Arc::new(
             SessionHeadMetadataCell::from_value(key, &value)

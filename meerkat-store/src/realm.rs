@@ -2242,6 +2242,21 @@ impl FilesystemRealmConfigSource {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
+    async fn observe_config_for_realm(
+        &self,
+        realm: &meerkat_core::connection::RealmId,
+    ) -> Result<Option<meerkat_core::ConfigDocumentObservation>, meerkat_core::config::ConfigError>
+    {
+        let bytes = match tokio::fs::read(self.config_doc_path(realm)).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| meerkat_core::config::ConfigError::InvalidDocumentObservation)?;
+        meerkat_core::ConfigDocumentObservation::from_toml(content).map(Some)
+    }
+
     async fn config_for_realm(
         &self,
         realm: &meerkat_core::connection::RealmId,

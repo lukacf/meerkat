@@ -326,6 +326,7 @@ mod tests {
             MODEL.to_string(),
             CustomModelConfig {
                 provider: Provider::OpenAI,
+                interaction_kind: None,
                 display_name: None,
                 context_window,
                 max_input_tokens,

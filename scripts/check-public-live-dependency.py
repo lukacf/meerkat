@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Verify the released public Live dependency and explicit private-feature boundary."""
 
+import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tomllib
 
@@ -105,10 +107,76 @@ def check(root: Path) -> list[str]:
     return errors
 
 
+def check_resolved_fixture(metadata: dict, root: Path, transport: str) -> list[str]:
+    """Check Cargo's resolved consumer graph, not manifest feature spelling."""
+    errors = []
+    fixture = root / "tests/feature-fixtures" / f"public-live-{transport}"
+    packages = {package["id"]: package for package in metadata["packages"]}
+    resolved = metadata["resolve"]
+    root_id = resolved["root"]
+    if (
+        Path(metadata["workspace_root"]).resolve() != fixture.resolve()
+        or metadata["workspace_members"] != [root_id]
+        or packages[root_id]["name"] != f"public-live-{transport}-fixture"
+    ):
+        errors.append("consumer must resolve in its own single-package fixture workspace")
+    nodes = {}
+    for node in resolved["nodes"]:
+        package = packages[node["id"]]
+        name = package["name"]
+        nodes.setdefault(name, []).append(node)
+        if "experimental-gpt-live" in node["features"]:
+            errors.append(f"public consumer resolves private Live through {name}")
+        if name in {"meerkat-integration-tests", "meerkat-mob", "meerkat-mob-mcp"}:
+            errors.append(f"public consumer resolves workspace integration support {name}")
+        if name == "oai-rt-rs" and (
+            package["version"] != VERSION
+            or package["source"] != "registry+https://github.com/rust-lang/crates.io-index"
+        ):
+            errors.append("consumer must resolve the released public registry dependency")
+
+    # Only these owners must be singular; ordinary transitive dependencies can
+    # legitimately resolve more than one version.
+    required = {
+        "meerkat": {"openai-live", "session-store", "sqlite-store"},
+        "meerkat-openai": {"live"},
+        "meerkat-runtime": {"live", "sqlite-store"},
+        "meerkat-live": set(),
+        "oai-rt-rs": set(),
+    }
+    for name, features in required.items():
+        matches = nodes.get(name, [])
+        if len(matches) != 1:
+            errors.append(f"fixture must resolve exactly one {name}")
+        elif not features.issubset(matches[0]["features"]):
+            errors.append(f"fixture omits required public features on {name}")
+    for name, feature in (("meerkat", "live-webrtc"), ("meerkat-live", "webrtc")):
+        for node in nodes.get(name, []):
+            if (feature in node["features"]) != (transport == "rtc"):
+                errors.append(f"{transport} fixture has the wrong {name}/{feature} state")
+    return errors
+
+
 def main() -> int:
-    root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--fixture", choices=("ws", "rtc"))
+    args = parser.parse_args()
+    root = args.root.resolve()
     try:
         errors = check(root)
+        if args.fixture:
+            manifest = root / "tests/feature-fixtures" / f"public-live-{args.fixture}" / "Cargo.toml"
+            result = subprocess.run(
+                [str(root / "scripts/repo-cargo"), "metadata", "--locked",
+                 "--format-version", "1", "--manifest-path", str(manifest)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            if result.returncode:
+                print(result.stderr, file=sys.stderr, end="")
+                print(f"{args.fixture} fixture metadata failed ({result.returncode})", file=sys.stderr)
+                return 1
+            errors.extend(check_resolved_fixture(json.loads(result.stdout), root, args.fixture))
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         print(f"public Live dependency inputs are unreadable or invalid: {type(error).__name__}", file=sys.stderr)
         return 1
@@ -117,6 +185,8 @@ def main() -> int:
     if errors:
         return 1
     print("Public Live uses registry oai-rt-rs 0.5.0 with exact checksum and explicit private-feature isolation")
+    if args.fixture:
+        print(f"Independent {args.fixture} consumer resolves only its declared public Live closure")
     return 0
 
 

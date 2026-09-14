@@ -3298,6 +3298,7 @@ mod tests {
             "claude-internal-preview".to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider: meerkat_core::Provider::Anthropic,
+                interaction_kind: None,
                 display_name: None,
                 context_window: Some(500_000),
                 max_input_tokens: None,

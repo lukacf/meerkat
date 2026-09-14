@@ -566,6 +566,14 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/live-observations",
+            vec![RestOperationDescriptor::json(
+                "get",
+                "Read retained Live observation records by member identity",
+                "MobMemberLiveObservationsResult",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/mob/{id}/hosts",
             vec![RestOperationDescriptor::json(
                 "get",

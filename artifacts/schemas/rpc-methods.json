@@ -930,6 +930,12 @@
       "result_type": "MobMemberHistoryResult"
     },
     {
+      "description": "Read retained Live observation records by member identity without an active channel",
+      "name": "mob/member_live_observations",
+      "params_type": "MobMemberLiveObservationsParams",
+      "result_type": "MobMemberLiveObservationsResult"
+    },
+    {
       "description": "List tracked member hosts with bind phase and declared capabilities",
       "name": "mob/hosts",
       "params_type": "MobIdParams",

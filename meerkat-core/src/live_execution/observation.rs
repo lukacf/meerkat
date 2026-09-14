@@ -5,6 +5,39 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub enum LiveProviderControlRefusal {
+    #[default]
+    ObservationClosed,
+    IdentityConflict,
+    Capacity,
+}
+
+/// Internal continuous-provider facts. These are neither public transport
+/// messages nor ordinary session transcript/turn mutations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContinuousLiveObservation {
+    ProviderStarted {
+        provider_session: super::request::LiveProviderReference,
+    },
+    Transcript(crate::live_observation::LiveTranscriptObservation),
+    TranscriptRejected(crate::live_observation::LiveObservationValueError),
+    ClientDelegation {
+        delegation: super::request::LiveProviderReference,
+        offset_ms: f64,
+    },
+    VoiceUsage(LiveUsageSnapshot),
+    ProviderClosed {
+        usage: LiveUsageSnapshot,
+    },
+    /// The physical observation stream ended. This does not negate an
+    /// earlier provider final and carries no fabricated usage value.
+    ObservationStreamEnded,
+    Diagnostic(super::backend::LiveProviderDiagnostic),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveReadinessEvidence {

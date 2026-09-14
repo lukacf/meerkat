@@ -176,3 +176,179 @@ fn confirmed_empty_batch_is_distinct_from_unknown_or_failed_batch() -> TestResul
     }
     Ok(())
 }
+
+fn completed_item(arguments: &str, index: u64) -> Value {
+    json!({
+        "type":"response.output_item.done", "sequence_number":2, "output_index":index,
+        "item":{"type":"function_call","id":"item","call_id":"call",
+            "name":INVOKE_MEERKAT,"arguments":arguments}
+    })
+}
+
+#[test]
+fn duplicate_item_is_idempotent_but_conflicting_content_or_late_terminal_poison_readiness()
+-> TestResult {
+    let key = ResponseKey {
+        response_id: "response".into(),
+        delegation_id: Some("delegation".into()),
+    };
+    let arguments = r#"{"request":" exact content "}"#;
+    for conflicting in [
+        completed_item(r#"{"request":"changed"}"#, 0),
+        completed_item(arguments, 1),
+        lifecycle("response.failed", "response", "failed"),
+        lifecycle("response.completed", "response", "in_progress"),
+    ] {
+        let mut tracker = FunctionCallTracker::default();
+        for event in [
+            lifecycle("response.created", "response", "in_progress"),
+            completed_item(arguments, 0),
+            lifecycle("response.completed", "response", "completed"),
+        ] {
+            observe_backend_scope(&mut tracker, &frame(Some(json!("delegation")), event)?)?;
+        }
+        let digest = ready_function_batch(&tracker, &key)?
+            .ok_or("ready")?
+            .digest()?;
+        for event in [
+            completed_item(arguments, 0),
+            lifecycle("response.completed", "response", "completed"),
+        ] {
+            observe_backend_scope(&mut tracker, &frame(Some(json!("delegation")), event)?)?;
+            let batch = ready_function_batch(&tracker, &key)?.ok_or("idempotent ready")?;
+            assert_eq!(batch.calls().len(), 1);
+            assert_eq!(batch.digest()?, digest);
+        }
+        assert!(
+            observe_backend_scope(
+                &mut tracker,
+                &frame(Some(json!("delegation")), conflicting)?
+            )
+            .is_err()
+        );
+        assert!(ready_function_batch(&tracker, &key)?.is_none());
+        assert_eq!(
+            tracker.calls(&key).ok_or("retained calls")?[0].args,
+            arguments
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_owned_evidence_prevents_later_completed_from_claiming_a_complete_batch() -> TestResult
+{
+    let mut tracker = FunctionCallTracker::default();
+    let key = ResponseKey {
+        response_id: "response".into(),
+        delegation_id: Some("delegation".into()),
+    };
+    observe_backend_scope(
+        &mut tracker,
+        &frame(
+            Some(json!("delegation")),
+            lifecycle("response.created", "response", "in_progress"),
+        )?,
+    )?;
+    let malformed = frame(
+        Some(json!("delegation")),
+        json!({
+            "type":"response.output_item.done","output_index":0,"item":null
+        }),
+    )?;
+    assert!(observe_backend_scope(&mut tracker, &malformed).is_err());
+    observe_backend_scope(
+        &mut tracker,
+        &frame(
+            Some(json!("delegation")),
+            lifecycle("response.completed", "response", "completed"),
+        )?,
+    )?;
+    assert!(ready_function_batch(&tracker, &key)?.is_none());
+    assert!(tracker.terminal(&key).is_some());
+    Ok(())
+}
+
+#[test]
+fn diagnostic_encoding_has_no_raw_payload_and_enforces_escaped_public_byte_ceiling() -> TestResult {
+    use meerkat_core::live_execution::backend::{
+        LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES, LiveProviderDiagnostic,
+    };
+    for category in [
+        "backend_advisory_error",
+        "protocol_inconsistency",
+        "accounting_unmeasured",
+        "accounting_disputed",
+        "unsupported_provider_event",
+        "uncorrelated_context_acknowledgment",
+    ] {
+        let image = json!({
+            "category":category,"attribution":{"kind":"unowned"},"occurrences":u64::MAX
+        });
+        let diagnostic: LiveProviderDiagnostic = serde_json::from_value(image.clone())?;
+        assert_eq!(serde_json::to_value(&diagnostic)?, image);
+        for field in [
+            "raw",
+            "instructions",
+            "message",
+            "arguments",
+            "provider_snapshot",
+            "terminal",
+        ] {
+            let mut unsafe_image = image.clone();
+            unsafe_image[field] = json!("private-sentinel");
+            assert!(serde_json::from_value::<LiveProviderDiagnostic>(unsafe_image).is_err());
+        }
+    }
+    let mut largest = 0;
+    let mut refused = 0;
+    for bytes in 1..=128 {
+        let image = json!({
+            "category":"protocol_inconsistency",
+            "attribution":{"kind":"owned","response":{
+                "response":"\0".repeat(bytes),"delegation":"\0".repeat(bytes)
+            }},
+            "occurrences":u64::MAX
+        });
+        let expected_bytes = serde_json::to_vec(&image)?.len();
+        match serde_json::from_value::<LiveProviderDiagnostic>(image) {
+            Ok(record) => {
+                let encoded = serde_json::to_vec(&record)?;
+                assert_eq!(encoded.len(), expected_bytes);
+                assert!(encoded.len() <= LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES);
+                largest = largest.max(encoded.len());
+            }
+            Err(_) => {
+                assert!(expected_bytes > LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES);
+                refused += 1;
+            }
+        }
+    }
+    assert!(largest > 1000 && refused > 0);
+    let mut exact = json!({
+        "category":"protocol_inconsistency",
+        "attribution":{"kind":"owned","response":{
+            "response":"\0".repeat(70),"delegation":"\0".repeat(70)
+        }},
+        "occurrences":u64::MAX
+    });
+    let padding = LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES
+        .checked_sub(serde_json::to_vec(&exact)?.len())
+        .ok_or("fixture already exceeds diagnostic budget")?;
+    assert!(70 + padding < 128);
+    exact["attribution"]["response"]["response"] =
+        json!(format!("{}{}", "\0".repeat(70), "x".repeat(padding)));
+    let accepted: LiveProviderDiagnostic = serde_json::from_value(exact.clone())?;
+    assert_eq!(
+        serde_json::to_vec(&accepted)?.len(),
+        LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES
+    );
+    exact["attribution"]["response"]["response"] =
+        json!(format!("{}{}", "\0".repeat(70), "x".repeat(padding + 1)));
+    assert_eq!(
+        serde_json::to_vec(&exact)?.len(),
+        LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES + 1
+    );
+    assert!(serde_json::from_value::<LiveProviderDiagnostic>(exact).is_err());
+    Ok(())
+}

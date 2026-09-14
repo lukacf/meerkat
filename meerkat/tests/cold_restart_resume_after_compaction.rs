@@ -216,6 +216,7 @@ mod tests {
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
     struct CallbackPendingAfterCompactionClient {
         ordinary_calls: AtomicUsize,
+        callback_ids: Vec<&'static str>,
     }
 
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
@@ -223,6 +224,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 ordinary_calls: AtomicUsize::new(0),
+                callback_ids: vec!["toolu_compaction_callback"],
             }
         }
     }
@@ -272,20 +274,25 @@ mod tests {
                     },
                 ]
             } else {
-                vec![
-                    LlmEvent::ToolCallComplete {
-                        id: "toolu_compaction_callback".to_string(),
+                let mut events: Vec<_> = self
+                    .callback_ids
+                    .iter()
+                    .map(|id| LlmEvent::ToolCallComplete {
+                        id: (*id).to_string(),
                         name: "external_callback".to_string(),
                         args: serde_json::json!({ "key": "after-compaction" }),
                         meta: None,
-                    },
+                    })
+                    .collect();
+                events.extend([
                     normalized_openai_usage(request),
                     LlmEvent::Done {
                         outcome: LlmDoneOutcome::Success {
                             stop_reason: meerkat_core::StopReason::ToolUse,
                         },
                     },
-                ]
+                ]);
+                events
             };
             Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
         }
@@ -371,13 +378,40 @@ mod tests {
         Arc<MeerkatMachine>,
         Arc<meerkat_runtime::store::SqliteRuntimeStore>,
     ) {
+        build_callback_memory_service_with_profile(
+            root,
+            client,
+            meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1,
+        )
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn build_callback_memory_service_with_profile(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+        profile: meerkat_runtime::store::RuntimeSessionPersistenceProfile,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+    ) {
         let sqlite_path = root.join("sessions.sqlite3");
         let session_store: Arc<dyn SessionStore> = Arc::new(
             meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
         );
         let runtime_store = Arc::new(
-            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
-                .expect("open runtime sqlite"),
+            match profile {
+                meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                    meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(sqlite_path)
+                }
+                meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                    meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
+                }
+                other => Err(meerkat_runtime::RuntimeStoreError::Unsupported(format!(
+                    "test persistence profile {other}"
+                ))),
+            }
+            .expect("open runtime sqlite"),
         );
         let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -658,19 +692,16 @@ mod tests {
     struct FailNextAtomicApplyStore {
         inner: Arc<meerkat_runtime::store::SqliteRuntimeStore>,
         fail_next: AtomicBool,
+        fail_compaction_finalization: AtomicBool,
     }
 
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
     impl FailNextAtomicApplyStore {
         fn new(inner: Arc<meerkat_runtime::store::SqliteRuntimeStore>) -> Self {
-            assert_eq!(
-                RuntimeStore::session_persistence_profile(inner.as_ref()),
-                meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1,
-                "FailNextAtomicApplyStore intentionally covers only the whole-blob profile"
-            );
             Self {
                 inner,
                 fail_next: AtomicBool::new(false),
+                fail_compaction_finalization: AtomicBool::new(false),
             }
         }
 
@@ -689,7 +720,7 @@ mod tests {
         fn session_persistence_profile(
             &self,
         ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
-            meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+            self.inner.session_persistence_profile()
         }
 
         fn session_boundary_authority_read_cost(
@@ -893,6 +924,11 @@ mod tests {
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
             projection: &meerkat_core::CompactionProjectionId,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            if self.fail_compaction_finalization.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "injected compaction finalization commit failure".into(),
+                ));
+            }
             self.inner
                 .mark_compaction_projection_finalized(runtime_id, projection)
                 .await
@@ -1230,13 +1266,41 @@ mod tests {
         Arc<FailNextAtomicApplyStore>,
         Arc<meerkat_runtime::store::SqliteRuntimeStore>,
     ) {
+        build_atomic_apply_failure_memory_service_with_profile(
+            root,
+            client,
+            meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1,
+        )
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn build_atomic_apply_failure_memory_service_with_profile(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+        profile: meerkat_runtime::store::RuntimeSessionPersistenceProfile,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<FailNextAtomicApplyStore>,
+        Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+    ) {
         let sqlite_path = root.join("sessions.sqlite3");
         let session_store: Arc<dyn SessionStore> = Arc::new(
             meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
         );
         let raw_runtime_store = Arc::new(
-            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
-                .expect("open runtime sqlite"),
+            match profile {
+                meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                    meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(sqlite_path)
+                }
+                meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                    meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
+                }
+                other => Err(meerkat_runtime::RuntimeStoreError::Unsupported(format!(
+                    "test persistence profile {other}"
+                ))),
+            }
+            .expect("open runtime sqlite"),
         );
         let fault_store = Arc::new(FailNextAtomicApplyStore::new(Arc::clone(
             &raw_runtime_store,
@@ -1497,6 +1561,308 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn callback_partial_results_accumulate_through_actual_persistent_service()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::session::StagedCallbackResultsObservation;
+        use meerkat_core::{
+            SessionServiceControlExt, StageToolResultsDisposition, StageToolResultsRequest,
+            ToolResult,
+        };
+
+        for profile in [
+            meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1,
+            meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let client = Arc::new(CallbackPendingAfterCompactionClient {
+                ordinary_calls: AtomicUsize::new(0),
+                callback_ids: vec!["callback_first", "callback_second"],
+            });
+            let (service, adapter, runtime_store) =
+                build_callback_memory_service_with_profile(temp.path(), client.clone(), profile);
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize_callback_memory_session(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first ordinary turn").await;
+            let completion =
+                run_prompt_capture(&adapter, &session_id, "request two callbacks").await?;
+            assert!(matches!(
+                completion,
+                CompletionOutcome::CallbackBatchPending { ref pending_tool_calls, .. }
+                    if pending_tool_calls.len() == 2
+            ));
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await?
+                .ok_or("callback session missing")?;
+            let before_messages = authoritative.messages().to_vec();
+            let target = completion
+                .callback_identity()
+                .cloned()
+                .ok_or("callback target missing")?;
+            let before_calls = client.ordinary_calls.load(Ordering::SeqCst);
+            let first = ToolResult::new("callback_first".into(), "first result".into(), false);
+            let second = ToolResult::new("callback_second".into(), "second result".into(), false);
+            for (result, expected) in [
+                (first.clone(), StageToolResultsDisposition::Staged),
+                (first.clone(), StageToolResultsDisposition::AlreadyStaged),
+            ] {
+                let staged = service
+                    .stage_tool_results(
+                        &session_id,
+                        StageToolResultsRequest {
+                            results: vec![result],
+                            callback_target: Some(target.clone()),
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("live partial staging ({profile}): {error}"))?;
+                assert_eq!(staged.disposition, expected);
+                assert_eq!(
+                    staged.accepted_result_count,
+                    usize::from(expected == StageToolResultsDisposition::Staged)
+                );
+                assert_eq!(client.ordinary_calls.load(Ordering::SeqCst), before_calls);
+            }
+            adapter.unregister_session(&session_id).await?;
+            service.try_shutdown().await?;
+            drop(authoritative);
+            drop(service);
+            drop(adapter);
+            drop(runtime_store);
+            let (service, adapter, runtime_store) =
+                build_callback_memory_service_with_profile(temp.path(), client.clone(), profile);
+            let retained = service
+                .load_authoritative_session(&session_id)
+                .await?
+                .ok_or("cold callback session missing")?;
+            assert_eq!(
+                retained.observe_staged_callback_results(&target)?,
+                StagedCallbackResultsObservation::Incomplete {
+                    missing_tool_use_ids: vec!["callback_second".into()],
+                }
+            );
+            let partial_observation = service
+                .observe_committed_callback_results(&session_id, &target)
+                .await?;
+            assert_eq!(partial_observation.target(), &target);
+            assert_eq!(
+                partial_observation.results(),
+                &retained.observe_staged_callback_results(&target)?
+            );
+            assert_eq!(
+                runtime_store
+                    .load_session_boundary_authority(
+                        &meerkat_runtime::LogicalRuntimeId::for_session(&session_id)
+                    )
+                    .await?
+                    .as_ref(),
+                Some(partial_observation.authority())
+            );
+            let partial_head_materialization =
+                if let Some(authority) = partial_observation.authority().head_canonical() {
+                    let store =
+                        meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))?;
+                    Some(store.materialize_head(authority.boundary_head()).await?)
+                } else {
+                    None
+                };
+            let deferred = retained
+                .deferred_turn_state()
+                .ok_or("cold staged results missing")?;
+            assert_eq!(deferred.pending_tool_results().len(), 1);
+            assert_eq!(
+                deferred.pending_tool_results()[0].results,
+                vec![first.clone()]
+            );
+            assert_eq!(
+                deferred.pending_tool_results()[0]
+                    .callback_identity
+                    .as_ref(),
+                Some(&target)
+            );
+            let before = serde_json::to_vec(&retained)?;
+            let mut wrong = serde_json::to_value(&target)?;
+            wrong["run_id"] = serde_json::to_value(meerkat_core::RunId::new())?;
+            for (result, callback_target) in [
+                (second.clone(), serde_json::from_value(wrong)?),
+                (
+                    ToolResult::new("callback_first".into(), "conflict".into(), false),
+                    target.clone(),
+                ),
+                (
+                    ToolResult::new("foreign".into(), "answer".into(), false),
+                    target.clone(),
+                ),
+            ] {
+                assert!(
+                    service
+                        .stage_tool_results(
+                            &session_id,
+                            StageToolResultsRequest {
+                                results: vec![result],
+                                callback_target: Some(callback_target),
+                            }
+                        )
+                        .await
+                        .is_err()
+                );
+                let unchanged = service
+                    .load_authoritative_session(&session_id)
+                    .await?
+                    .ok_or("callback session missing after refusal")?;
+                assert_eq!(serde_json::to_vec(&unchanged)?, before);
+            }
+            let staged = service
+                .stage_tool_results(
+                    &session_id,
+                    StageToolResultsRequest {
+                        results: vec![first.clone(), second.clone()],
+                        callback_target: Some(target.clone()),
+                    },
+                )
+                .await
+                .map_err(|error| format!("detached partial staging ({profile}): {error}"))?;
+            assert_eq!(staged.disposition, StageToolResultsDisposition::Staged);
+            assert_eq!(staged.accepted_result_count, 1);
+            assert_eq!(client.ordinary_calls.load(Ordering::SeqCst), before_calls);
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await?
+                .ok_or("staged callback session missing")?;
+            assert_eq!(authoritative.messages(), before_messages);
+            let staged: Vec<_> = authoritative
+                .deferred_turn_state()
+                .ok_or("deferred results missing")?
+                .pending_tool_results()
+                .iter()
+                .flat_map(|message| message.results.clone())
+                .collect();
+            assert_eq!(staged, vec![first.clone(), second]);
+            let readiness = authoritative.observe_staged_callback_results(&target)?;
+            let StagedCallbackResultsObservation::Complete(complete) = &readiness else {
+                return Err("durable complete callback batch was not observed".into());
+            };
+            assert_eq!(complete.identity(), &target);
+            assert_eq!(complete.ordered_results(), staged);
+            let complete_observation = service
+                .observe_committed_callback_results(&session_id, &target)
+                .await?;
+            assert_eq!(complete_observation.results(), &readiness);
+            assert_ne!(
+                partial_observation.authority(),
+                complete_observation.authority()
+            );
+            assert!(matches!(
+                partial_observation.results(),
+                StagedCallbackResultsObservation::Incomplete { .. }
+            ));
+            if let Some(partial_head) = partial_head_materialization {
+                let later_authority = complete_observation
+                    .authority()
+                    .head_canonical()
+                    .ok_or("complete HeadCanonical authority missing")?;
+                assert!(matches!(
+                    meerkat_runtime::store::CommittedSessionBodyObservation::from_head_canonical(
+                        later_authority.clone(),
+                        partial_head
+                    ),
+                    Err(
+                        meerkat_runtime::RuntimeStoreError::SessionPersistenceAuthorityConflict { .. }
+                    )
+                ));
+            }
+            service.try_shutdown().await?;
+            drop(authoritative);
+            drop(service);
+            drop(adapter);
+            drop(runtime_store);
+            let (service, adapter, runtime_store) =
+                build_callback_memory_service_with_profile(temp.path(), client.clone(), profile);
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await?
+                .ok_or("complete callback batch missing after reopen")?;
+            assert_eq!(
+                authoritative.observe_staged_callback_results(&target)?,
+                readiness
+            );
+            let reopened_observation = service
+                .observe_committed_callback_results(&session_id, &target)
+                .await?;
+            assert_eq!(
+                reopened_observation.results(),
+                complete_observation.results()
+            );
+            assert_eq!(
+                reopened_observation.authority(),
+                complete_observation.authority()
+            );
+            let mut resume_request = callback_memory_request();
+            resume_request.system_prompt = meerkat::SystemPromptOverride::Inherit;
+            let executor_service = service.clone();
+            let executor_adapter = adapter.clone();
+            Box::pin(materialize_session(
+                &service,
+                &adapter,
+                authoritative,
+                resume_request,
+                move |id| default_persistent_executor(executor_service, executor_adapter, id),
+            ))
+            .await?;
+            let (_, handle) = adapter
+                .accept_input_with_completion(
+                    &session_id,
+                    Input::Continuation(meerkat_runtime::input::ContinuationInput {
+                        header: PromptInput::new("", None).header,
+                        reason: "external_callback_results_staged".into(),
+                        continuation_kind: meerkat_runtime::input::ContinuationKind::Ordinary,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
+                        request_id: None,
+                        turn_tool_overlay: None,
+                        turn_append: None,
+                    }),
+                )
+                .await?;
+            let later = tokio::time::timeout(
+                Duration::from_secs(10),
+                handle
+                    .ok_or("callback continuation completion missing")?
+                    .wait(),
+            )
+            .await??;
+            let later_target = later
+                .callback_identity()
+                .ok_or_else(|| format!("later callback target missing ({profile}): {later:?}"))?;
+            assert_ne!(later_target, &target);
+            assert_eq!(
+                client.ordinary_calls.load(Ordering::SeqCst),
+                before_calls + 1
+            );
+            assert!(
+                service
+                    .stage_tool_results(
+                        &session_id,
+                        StageToolResultsRequest {
+                            results: vec![first],
+                            callback_target: Some(target),
+                        }
+                    )
+                    .await
+                    .is_err(),
+                "old target must not bind to reused call IDs"
+            );
+            adapter.unregister_session(&session_id).await?;
+            service.try_shutdown().await?;
+            drop(service);
+            drop(adapter);
+            drop(runtime_store);
+        }
+        Ok(())
+    }
+
     /// Callback-pending is a committed runtime terminal, not a run failure.
     /// When it follows a durable compaction stage, the same runtime boundary
     /// must atomically carry the typed rewrite into the outbox, finalize the
@@ -1504,11 +1870,12 @@ mod tests {
     /// after a cold reopen.
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
     #[tokio::test]
-    async fn callback_pending_compaction_projection_finalizes_before_cold_restart() {
+    async fn callback_pending_compaction_projection_finalizes_before_cold_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir().expect("tempdir");
         let discarded_source = "discarded callback source before compaction";
 
-        let session_id = {
+        let (session_id, expected_callback_identity) = {
             let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
             let (service, adapter, runtime_store) =
                 build_callback_memory_service(temp.path(), client);
@@ -1537,6 +1904,25 @@ mod tests {
                 .await
                 .expect("load authoritative callback-pending session")
                 .expect("callback-pending session must exist");
+            let Ok(CompletionOutcome::CallbackPending {
+                callback_identity: Some(callback_identity),
+                ..
+            }) = &callback
+            else {
+                return Err(
+                    "actual serialized callback terminal must retain its batch identity".into(),
+                );
+            };
+            let Some(meerkat_core::session::CallbackBatchObservation::Pending { identity, .. }) =
+                authoritative
+                    .callback_batch_observation()
+                    .expect("read exact persisted callback owner")
+            else {
+                return Err("callback terminal must identify an actual pending batch".into());
+            };
+            assert_eq!(callback_identity, &identity);
+            assert_eq!(callback_identity.session_id(), &session_id);
+            assert_eq!(callback_identity.execution_scope(), None);
             assert!(
                 has_compaction_summary(&authoritative),
                 "callback-pending commit must retain the typed compaction rewrite"
@@ -1604,7 +1990,7 @@ mod tests {
                 meerkat_core::MemorySource::Compaction { source_range }
                     if source_range.start() < source_range.end()
             ));
-            session_id
+            (session_id, identity)
         };
 
         // A new service, runtime store, agent, and HNSW handle over the same
@@ -1613,6 +1999,22 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
         let (service, adapter, runtime_store) = build_callback_memory_service(temp.path(), client);
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let mut retained_callbacks = 0;
+        for row in runtime_store.load_input_states_strict(&runtime_id).await? {
+            let encoded = serde_json::to_value(row)?;
+            let Some(outcome) = encoded["terminal_completion"].get("outcome") else {
+                continue;
+            };
+            let outcome: CompletionOutcome = serde_json::from_value(outcome.clone())?;
+            if outcome.callback_identity() == Some(&expected_callback_identity) {
+                retained_callbacks += 1;
+                assert!(encoded["terminal_completion"]["candidate"].is_null());
+            }
+        }
+        assert_eq!(
+            retained_callbacks, 1,
+            "cold finalized receipt must retain exact callback identity"
+        );
         assert!(
             runtime_store
                 .load_pending_compaction_projections(&runtime_id)
@@ -1626,6 +2028,12 @@ mod tests {
             .await
             .expect("load callback-pending session after cold reopen")
             .expect("callback-pending session must survive cold reopen");
+        let Some(meerkat_core::session::CallbackBatchObservation::Pending { identity, .. }) =
+            resume_source.callback_batch_observation()?
+        else {
+            return Err("cold session lost its pending callback identity".into());
+        };
+        assert_eq!(identity, expected_callback_identity);
         assert!(has_compaction_summary(&resume_source));
         assert!(
             resume_source
@@ -1656,6 +2064,122 @@ mod tests {
                 .any(|record| record.content.contains(discarded_source)),
             "discarded source memory must survive a cold HNSW reopen"
         );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn head_compaction_finalization_failure_refuses_acknowledgement_and_recovers_cold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::service::SessionServiceControlExt;
+
+        let temp = tempfile::tempdir()?;
+        let profile = meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1;
+        let session_id = {
+            let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+            let (service, adapter, fault_store, runtime_store) =
+                build_atomic_apply_failure_memory_service_with_profile(
+                    temp.path(),
+                    client,
+                    profile,
+                );
+            let session = Session::new();
+            let session_id = session.id().clone();
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+            materialize_callback_memory_session(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "source before failed finalization").await;
+            fault_store
+                .fail_compaction_finalization
+                .store(true, Ordering::Release);
+            let outcome =
+                run_prompt_capture(&adapter, &session_id, "compact and request callback").await;
+            assert!(
+                format!("{outcome:?}").contains("injected compaction finalization commit failure"),
+                "the actual store failure must surface instead of clean callback completion: {outcome:?}"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await?
+                    .len(),
+                1
+            );
+            let refusal = service
+                .acknowledge_finalized_compaction_projections_under_runtime_turn_boundary(
+                    &session_id,
+                )
+                .await;
+            assert!(
+                matches!(refusal, Err(ref error) if error.to_string().contains("durable outbox is pending")),
+                "failed store finalization cannot be acknowledged: {refusal:?}"
+            );
+            wait_for_canonical_unregister_completion(&adapter, &session_id).await;
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await?
+                    .len(),
+                1
+            );
+            session_id
+        };
+
+        let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+        let (service, adapter, runtime_store) =
+            build_callback_memory_service_with_profile(temp.path(), client, profile);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let store = meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))?;
+        let session = store
+            .load(&session_id)
+            .await?
+            .ok_or("missing retained session")?;
+        let Some(meerkat_core::session::CallbackBatchObservation::Pending {
+            identity: target, ..
+        }) = session.callback_batch_observation()?
+        else {
+            return Err("missing retained callback".into());
+        };
+        assert_eq!(session.compaction_projection_intents()?.len(), 1);
+        let mut request = callback_memory_request();
+        request.system_prompt = meerkat::SystemPromptOverride::Inherit;
+        let executor_service = Arc::clone(&service);
+        let executor_adapter = Arc::clone(&adapter);
+        Box::pin(materialize_session(
+            &service,
+            &adapter,
+            session,
+            request,
+            move |id| default_persistent_executor(executor_service, executor_adapter, id),
+        ))
+        .await?;
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await?
+                .is_empty()
+        );
+        for _ in 0..2 {
+            service
+                .acknowledge_finalized_compaction_projections_under_runtime_turn_boundary(
+                    &session_id,
+                )
+                .await?;
+        }
+        service
+            .stage_tool_results(
+                &session_id,
+                meerkat_core::StageToolResultsRequest {
+                    callback_target: Some(target),
+                    results: vec![meerkat_core::ToolResult::new(
+                        "toolu_compaction_callback".into(),
+                        "recovered".into(),
+                        false,
+                    )],
+                },
+            )
+            .await?;
+        adapter.unregister_session(&session_id).await?;
+        Ok(())
     }
 
     /// An audit-log I/O failure happens after the runtime atomically commits

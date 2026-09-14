@@ -2,6 +2,8 @@ pub mod audit_generated_headers;
 pub mod bridge_classifier;
 pub mod effect_authority;
 pub mod machine_alphabet;
+#[cfg(any(test, feature = "machine-authority"))]
+mod machine_owner_tests;
 #[cfg(feature = "machine-authority")]
 pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
@@ -15,6 +17,8 @@ pub mod rmat_policy;
 pub mod runtime_authority_bypass;
 pub mod seam_inventory;
 pub mod storage_ambient_gate;
+#[cfg(any(test, feature = "machine-authority"))]
+mod tlc_runner;
 pub mod typed_carrier;
 
 use anyhow::{Result, bail};

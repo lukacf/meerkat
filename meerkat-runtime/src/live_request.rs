@@ -33,18 +33,242 @@ pub enum InputRunIsolation {
 pub enum LiveExecutionRequestRecord {
     LiveRequest {
         provenance: meerkat_core::live_execution::evidence::DelegatedRequestProvenance,
-        source_row: crate::live_ledger::source::LiveSourceRowDigest,
+        source_row: crate::live_source::LiveSourceFrozenDigest,
+    },
+    CallbackContinuation {
+        provenance: meerkat_core::live_execution::evidence::DelegatedRequestProvenance,
+        source_row: crate::live_source::LiveSourceFrozenDigest,
+        continuation: meerkat_core::execution_scope::ScopedCallbackContinuationRecord,
+        admission_commit: ExecutionAdmissionCommitRef,
     },
 }
 
 impl LiveExecutionRequestRecord {
+    pub fn source_reference(
+        &self,
+    ) -> (
+        &meerkat_core::live_execution::evidence::DelegatedRequestProvenance,
+        &crate::live_source::LiveSourceFrozenDigest,
+    ) {
+        match self {
+            Self::LiveRequest {
+                provenance,
+                source_row,
+            }
+            | Self::CallbackContinuation {
+                provenance,
+                source_row,
+                ..
+            } => (provenance, source_row),
+        }
+    }
+
+    pub const fn is_callback_continuation(&self) -> bool {
+        matches!(self, Self::CallbackContinuation { .. })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn same_submission_content(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::CallbackContinuation {
+                    provenance,
+                    source_row,
+                    continuation,
+                    ..
+                },
+                Self::CallbackContinuation {
+                    provenance: other_provenance,
+                    source_row: other_source,
+                    continuation: other_continuation,
+                    ..
+                },
+            ) => {
+                provenance == other_provenance
+                    && source_row == other_source
+                    && continuation == other_continuation
+            }
+            _ => self == other,
+        }
+    }
+
+    /// Resolve immutable content from the current source row. This does not
+    /// authorize staging: current grant/run fences remain the generated owners'
+    /// responsibility, including after this read awaits.
+    pub async fn materialize(
+        &self,
+        store: &dyn crate::store::RuntimeStore,
+        input_id: &InputId,
+    ) -> Result<
+        Option<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+        LiveRequestMaterializationError,
+    > {
+        use crate::live_source::{LiveSourceDisposition, LiveSourceEntryRecord};
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, CoreRenderable,
+        };
+
+        let (provenance, source_row) = self.source_reference();
+        let ops = store
+            .live_ledger_ops()
+            .ok_or(LiveRequestMaterializationError::Unsupported)?;
+        let row = ops
+            .lookup_live_source(provenance.source())
+            .await?
+            .ok_or(LiveRequestMaterializationError::MissingSource)?;
+        let LiveSourceEntryRecord::Reservation { record } = row.record()? else {
+            return Err(LiveRequestMaterializationError::NotAdmitted);
+        };
+        if record.request_id() != provenance.request_id()
+            || record.source() != provenance.source()
+            || record.frozen_digest()? != *source_row
+        {
+            return Err(LiveRequestMaterializationError::SourceMismatch);
+        }
+        let LiveSourceDisposition::Admitted { receipt } = record.disposition() else {
+            return Err(LiveRequestMaterializationError::NotAdmitted);
+        };
+        if receipt.source() != provenance.source() || Some(receipt.grant()) != record.grant() {
+            return Err(LiveRequestMaterializationError::AdmissionMismatch);
+        }
+        let evidence = record
+            .frozen_request()
+            .ok_or(LiveRequestMaterializationError::MissingEvidence)?;
+        if evidence.kind() != provenance.evidence_kind() {
+            return Err(LiveRequestMaterializationError::SourceMismatch);
+        }
+        let text = evidence.request().as_str();
+        provenance.validate_request(text)?;
+        if self.is_callback_continuation() {
+            self.validate_committed_continuation(store, input_id)
+                .await?;
+            return Ok(None);
+        }
+        if receipt.input_id() != input_id {
+            return Err(LiveRequestMaterializationError::AdmissionMismatch);
+        }
+        Ok(Some(ConversationAppend {
+            role: ConversationAppendRole::DelegatedRequest {
+                provenance: Box::new(provenance.clone()),
+            },
+            content: CoreRenderable::Text {
+                text: text.to_owned(),
+            },
+            identity: None,
+        }))
+    }
+
     pub fn isolation(&self) -> InputRunIsolation {
-        let Self::LiveRequest { provenance, .. } = self;
+        let (provenance, _) = self.source_reference();
         InputRunIsolation::ExclusiveLiveRequest {
             request_id: provenance.request_id().clone(),
             source: provenance.source().clone(),
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn validate_committed_continuation(
+        &self,
+        store: &dyn crate::store::RuntimeStore,
+        input_id: &InputId,
+    ) -> Result<(), LiveRequestMaterializationError> {
+        let (provenance, _) = self.source_reference();
+        let head = store
+            .live_ledger_ops()
+            .ok_or(LiveRequestMaterializationError::Unsupported)?
+            .load_live_head(provenance.source().session_id())
+            .await?
+            .ok_or(LiveRequestMaterializationError::ContinuationMismatch)?;
+        head.validate_payload()?;
+        let state = crate::generated::live_request_state::decode(&head.payload.request_snapshot)
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let owner =
+            crate::live_ledger::authority::dsl::LiveRequestMachineAuthority::recover_from_state(
+                state,
+            )
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        self.validate_continuation_binding(owner.state(), input_id)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn validate_committed_continuation(
+        &self,
+        _store: &dyn crate::store::RuntimeStore,
+        _input_id: &InputId,
+    ) -> Result<(), LiveRequestMaterializationError> {
+        Err(LiveRequestMaterializationError::Unsupported)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn validate_continuation_binding(
+        &self,
+        state: &crate::live_ledger::authority::dsl::LiveRequestMachineState,
+        input_id: &InputId,
+    ) -> Result<(), LiveRequestMaterializationError> {
+        let Self::CallbackContinuation {
+            provenance,
+            source_row,
+            continuation,
+            admission_commit,
+        } = self
+        else {
+            return Err(LiveRequestMaterializationError::ContinuationMismatch);
+        };
+        let target = &continuation.target;
+        let run = target.run_id().to_string();
+        let request = provenance.request_id().to_string();
+        let digest: sha2::digest::Output<sha2::Sha256> = continuation.results_digest.into();
+        let encoded_target = serde_json::to_string(target)
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let encoded_commit = serde_json::to_string(admission_commit)
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let encoded_source = serde_json::to_string(provenance.source())
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let encoded_payload = serde_json::to_string(source_row)
+            .map_err(|error| crate::store::RuntimeStoreError::ReadFailed(error.to_string()))?;
+        if target.session_id() != provenance.source().session_id()
+            || target.execution_scope().is_none()
+            || state.request_sources.get(&request) != Some(&encoded_source)
+            || state.request_payloads.get(&request) != Some(&encoded_payload)
+            || state.run_requests.get(&run) != Some(&request)
+            || state.run_scopes.get(&run)
+                != target
+                    .execution_scope()
+                    .map(|id| id.as_uuid().to_string())
+                    .as_ref()
+            || state.run_callback_records.get(&run) != Some(&encoded_target)
+            || state.run_continuation_inputs.get(&run) != Some(&input_id.to_string())
+            || state.run_continuation_admission_commits.get(&run) != Some(&encoded_commit)
+            || state.run_continuation_result_digests.get(&run) != Some(&format!("{digest:x}"))
+        {
+            return Err(LiveRequestMaterializationError::ContinuationMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LiveRequestMaterializationError {
+    #[error("the runtime store does not support immutable Live source reads")]
+    Unsupported,
+    #[error("the admitted Live source row is missing")]
+    MissingSource,
+    #[error("the Live source row has no admitted request")]
+    NotAdmitted,
+    #[error("the Live source does not match the immutable input reference")]
+    SourceMismatch,
+    #[error("the Live source admission does not match the ordinary input")]
+    AdmissionMismatch,
+    #[error("the callback continuation does not match its committed run-chain admission")]
+    ContinuationMismatch,
+    #[error("the admitted Live source has no frozen evidence")]
+    MissingEvidence,
+    #[error(transparent)]
+    Store(#[from] crate::store::RuntimeStoreError),
+    #[error(transparent)]
+    Source(#[from] crate::live_source::LiveSourceRecordError),
+    #[error(transparent)]
+    Evidence(#[from] meerkat_core::live_execution::evidence::LiveEvidenceError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +338,14 @@ impl AdmittedLiveExecutionRecord {
     pub fn grant(&self) -> &ExecutionGrantRef {
         &self.grant
     }
+
+    pub fn admission_commit(&self) -> &ExecutionAdmissionCommitRef {
+        &self.commit
+    }
+
+    pub fn ingress_generation_at_admission(&self) -> NonZeroU64 {
+        self.ingress_generation_at_admission
+    }
 }
 
 /// In-memory handoff from the atomic admission owner, not a deserializable
@@ -129,6 +361,15 @@ pub struct AdmittedLiveExecutionAuthority {
 }
 
 impl AdmittedLiveExecutionAuthority {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_committed_admission(
+        committed: crate::live_ledger::authority::store::CommittedLiveAdmission,
+    ) -> Self {
+        Self {
+            record: committed.into_record(),
+        }
+    }
+
     pub fn record(&self) -> &AdmittedLiveExecutionRecord {
         &self.record
     }

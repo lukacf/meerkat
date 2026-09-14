@@ -21,6 +21,7 @@ use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStrea
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default connect timeout
@@ -410,7 +411,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
                 )?,
                 render_metadata: user.render_metadata.clone(),
                 identity: user.identity.clone(),
-                transcript_role: user.transcript_role,
+                transcript_role: user.transcript_role.clone(),
                 created_at: user.created_at,
             })),
             Message::BlockAssistant(assistant) => {
@@ -631,6 +632,7 @@ impl AnthropicClient {
 
     /// Build request body for Anthropic API
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        request.validate_native_tool_policy()?;
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
         let mut leading_system_prefix = true;
@@ -1019,6 +1021,25 @@ impl AnthropicClient {
             }
         }
 
+        if !request.provider_native_tools.is_inherit() {
+            if body.get("tools").is_none() {
+                body["tools"] = Value::Array(Vec::new());
+            }
+            let valid = body["tools"].as_array().is_some_and(|tools| {
+                tools.len() == request.tools.len()
+                    && tools.iter().zip(&request.tools).all(|(wire, expected)| {
+                        wire.get("type").is_none()
+                            && wire["name"].as_str() == Some(expected.name.as_str())
+                    })
+            });
+            if !valid {
+                return Err(LlmError::InvalidRequest {
+                    message:
+                        "request-scoped native-tool restriction rejects non-catalog Anthropic tools"
+                            .into(),
+                });
+            }
+        }
         Ok(body)
     }
 
@@ -1157,10 +1178,16 @@ impl AnthropicClient {
         url: &str,
         body: &Value,
         betas: &[String],
-        has_images: bool,
-    ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
-        #[cfg(target_arch = "wasm32")]
-        let _ = has_images;
+        llm_request: &LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> Result<
+        (
+            reqwest::Response,
+            meerkat_core::HttpAuthorizationReceipt,
+            Option<meerkat_core::execution_scope::ScopedModelEffectCustody>,
+        ),
+        LlmError,
+    > {
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
@@ -1175,7 +1202,9 @@ impl AnthropicClient {
             let mut extra = Vec::new();
             authorizer
                 .append_content_headers(
-                    meerkat_core::HttpAuthorizationContent { has_images },
+                    meerkat_core::HttpAuthorizationContent {
+                        has_images: llm_request.has_images(),
+                    },
                     &mut extra,
                 )
                 .map_err(|error| LlmError::AuthenticationFailed {
@@ -1220,12 +1249,26 @@ impl AnthropicClient {
         if !request_betas.is_empty() {
             request = request.header("anthropic-beta", request_betas.join(","));
         }
-        let response = request
-            .json(body)
-            .send()
-            .await
-            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })?;
-        Ok((response, receipt))
+        let (response, custody) = http::send_model_request(
+            scope,
+            http::ModelRequestSendEvidence {
+                provider: Provider::Anthropic,
+                encoding: meerkat_core::LoweredRequestEncoding::AnthropicMessagesJson,
+                model: &llm_request.model,
+                route: url,
+                body,
+                native_tools: llm_request.provider_native_tools,
+            },
+            async {
+                request
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
+            },
+        )
+        .await?;
+        Ok((response, receipt, custody))
     }
 
     /// Parse an SSE event from the response.
@@ -1325,6 +1368,16 @@ fn attach_normalized_usage(model: &str, usage: &mut Usage) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for AnthropicClient {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        meerkat_core::execution_scope::ScopedModelEffectSupport::PhysicalDispatch
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        meerkat_core::NativeToolPolicySupport::RequestScoped
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_anthropic_replay_messages(messages)
     }
@@ -1487,7 +1540,19 @@ impl LlmClient for AnthropicClient {
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_execution_context(request, None)
+    }
+
+    fn stream_with_execution_context<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> LlmStream<'a> {
+        let feedback = streaming::ScopedModelStreamFeedback::new(scope.as_ref());
+        let response_feedback = feedback.clone();
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut scope = scope;
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;
@@ -1544,17 +1609,24 @@ impl LlmClient for AnthropicClient {
             }
 
             let url = format!("{}/v1/messages", self.base_url);
-            let has_images = request.has_images();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas, has_images).await?;
+                self.send_messages_request(&url, &body, &betas, request, scope.clone()).await?;
             #[cfg(not(target_arch = "wasm32"))]
-            let (mut response, receipt) = response_with_receipt;
+            let (mut response, receipt, mut custody) = response_with_receipt;
             #[cfg(target_arch = "wasm32")]
-            let (response, _receipt) = response_with_receipt;
+            let (response, _receipt, custody) = response_with_receipt;
             #[cfg(not(target_arch = "wasm32"))]
             let mut status_code = response.status().as_u16();
             #[cfg(target_arch = "wasm32")]
             let status_code = response.status().as_u16();
+            #[cfg(not(target_arch = "wasm32"))]
+            if !(200..=299).contains(&status_code)
+                && let Some(claimed) = custody.take()
+            {
+                scope = Some(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                    message: format!("Anthropic rejection feedback failed: {error}"),
+                })?);
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if !(200..=299).contains(&status_code)
                 && let Some(authorizer) = &self.authorizer
@@ -1574,11 +1646,19 @@ impl LlmClient for AnthropicClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_messages_request(&url, &body, &betas, has_images)
+                    .send_messages_request(&url, &body, &betas, request, scope)
                     .await?;
                 response = retried.0;
                 let retry_receipt = retried.1;
+                custody = retried.2;
                 status_code = response.status().as_u16();
+                if !(200..=299).contains(&status_code)
+                    && let Some(claimed) = custody.take()
+                {
+                    drop(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                        message: format!("Anthropic retry rejection feedback failed: {error}"),
+                    })?);
+                }
                 authorizer
                     .observe_response_with_receipt(
                         retry_receipt,
@@ -1594,10 +1674,18 @@ impl LlmClient for AnthropicClient {
                     })?;
             }
             let stream_result = if (200..=299).contains(&status_code) {
+                response_feedback.install(custody)?;
                 Ok(response.bytes_stream())
             } else {
+                if let Some(claimed) = custody {
+                    drop(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                        message: format!("Anthropic rejection feedback failed: {error}"),
+                    })?);
+                }
                 let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
+                let text = response.text().await.map_err(|error| LlmError::StreamParseError {
+                    message: format!("cannot read Anthropic rejection body: {error}"),
+                })?;
                 Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
@@ -2026,7 +2114,7 @@ impl LlmClient for AnthropicClient {
 
         });
 
-        streaming::ensure_terminal_done(inner)
+        streaming::ensure_terminal_done(feedback.wrap(inner))
     }
 
     fn provider(&self) -> Provider {
@@ -4805,6 +4893,63 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_policy_preserves_functions_and_refuses_server_tools_at_pressure() {
+        let client = AnthropicClient::new("test-key".to_string()).expect("client");
+        let request = LlmRequest::new("claude-sonnet-4-6", Vec::new())
+            .with_tools(vec![Arc::new(meerkat_core::ToolDef::new(
+                "read",
+                "read",
+                serde_json::json!({"type": "object", "properties": {}}),
+            ))])
+            .with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::DisableAll);
+        let body = client
+            .build_request_body(&request)
+            .expect("function-only request");
+        assert_eq!(body["tools"][0]["name"], "read");
+        let pressure = client
+            .request_pressure(&request)
+            .expect("pressure")
+            .expect("exact");
+        assert_eq!(
+            pressure.encoded_bytes,
+            serde_json::to_vec(&body).expect("body").len() as u64
+        );
+        let empty = request.clone().with_tools(Vec::new());
+        assert_eq!(
+            client.build_request_body(&empty).expect("empty")["tools"],
+            serde_json::json!([])
+        );
+        for native in [
+            "web_search_20250305",
+            "computer_20250124",
+            "bash_20250124",
+            "custom",
+        ] {
+            let injected = request.clone().with_anthropic_tag_merge(|tag| {
+                tag.web_search = Some(
+                    meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": native, "name": "read"}),
+                    ),
+                );
+            });
+            assert!(matches!(
+                client.build_request_body(&injected),
+                Err(LlmError::InvalidRequest { .. })
+            ));
+            assert!(matches!(
+                client.request_pressure(&injected),
+                Err(LlmError::InvalidRequest { .. })
+            ));
+        }
+        let ordinary =
+            request.with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::Inherit);
+        assert_eq!(
+            client.build_request_body(&ordinary).expect("ordinary"),
+            body
+        );
+    }
+
+    #[test]
     fn test_no_web_search_when_absent() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
         let tool = std::sync::Arc::new(meerkat_core::ToolDef::new(
@@ -4844,6 +4989,82 @@ mod tests {
             "web_search should not be a top-level body key"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_tool_policy_reaches_actual_wire_and_restores_ordinary_defaults() {
+        use meerkat_core::{AgentLlmClient, ProviderNativeToolPolicy};
+        use meerkat_llm_core::LlmClientAdapter;
+
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ].join("\n");
+        let (base_url, seen, server) = spawn_anthropic_replay_capture_server(payload).await;
+        let native = serde_json::json!({"type": "web_search_20250305", "name": "web_search"});
+        let adapter = Arc::new(
+            LlmClientAdapter::new(
+                Arc::new(
+                    AnthropicClient::builder("test-key".into())
+                        .base_url(base_url)
+                        .build()
+                        .expect("client"),
+                ),
+                "claude-sonnet-4-6".into(),
+            )
+            .with_provider_params(Some(ProviderTag::Anthropic(
+                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
+                    web_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &native,
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ))),
+        );
+        for policy in [
+            ProviderNativeToolPolicy::DisableAll,
+            ProviderNativeToolPolicy::Inherit,
+        ] {
+            let attempt = adapter
+                .clone()
+                .prepare_request_attempt_with_native_tool_policy(
+                    Arc::new(vec![Message::User(UserMessage::text("read"))]),
+                    Arc::from([]),
+                    1024,
+                    None,
+                    None,
+                    policy,
+                )
+                .expect("attempt");
+            let pressure = attempt
+                .request_pressure()
+                .expect("pressure")
+                .expect("exact pressure");
+            attempt.stream_response().await.expect("actual stream");
+            let bodies = seen.lock().expect("bodies");
+            let body = bodies.last().expect("captured request");
+            assert_eq!(
+                pressure.encoded_bytes,
+                serde_json::to_vec(body).expect("body").len() as u64
+            );
+            if policy == ProviderNativeToolPolicy::DisableAll {
+                assert_eq!(body["tools"], serde_json::json!([]));
+            } else {
+                assert_eq!(body["tools"], serde_json::json!([native]));
+            }
+        }
+        assert_eq!(seen.lock().expect("bodies").len(), 2);
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("server cancellation")
+                .is_cancelled()
+        );
     }
 
     #[tokio::test]

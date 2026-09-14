@@ -314,6 +314,28 @@ pub enum RuntimeBindingsError {
     RegistrationNotCurrent(SessionId),
     #[error("materialization registration for session {0} has another owner")]
     RegistrationOwned(SessionId),
+    #[error("runtime bindings for session {session_id} are held for recovery: {reason}")]
+    RecoveryHeld {
+        session_id: SessionId,
+        evidence_digest: Option<String>,
+        reason: String,
+    },
+}
+
+impl RuntimeBindingsError {
+    fn from_driver_error(session_id: SessionId, error: RuntimeDriverError) -> Self {
+        match error {
+            RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest,
+                reason,
+            } => Self::RecoveryHeld {
+                session_id,
+                evidence_digest,
+                reason,
+            },
+            error => Self::PrepareFailed(session_id, error.to_string()),
+        }
+    }
 }
 
 /// Generated public projection for an input-state seed.
@@ -1084,8 +1106,12 @@ pub mod dsl;
 pub(crate) mod dsl_authority;
 mod dsl_effects;
 mod durability_health;
+#[cfg(test)]
+mod live_input_tests;
 mod llm_reconfigure;
 mod runtime_control;
+#[cfg(not(target_arch = "wasm32"))]
+mod scoped_effect_host;
 mod session_management;
 mod traits;
 mod visibility;
@@ -4927,6 +4953,18 @@ impl RuntimeSessionEntry {
 }
 
 impl MeerkatMachine {
+    /// Mechanical retained reads over this runtime's existing store. This
+    /// accessor confers no member authorization or Live activation capability.
+    pub fn live_observation_reader(
+        &self,
+    ) -> Option<Arc<dyn crate::live_ledger::history::LiveObservationHistoryReader>> {
+        self.store.as_ref().map(|store| {
+            Arc::new(
+                crate::live_ledger::history::RuntimeLiveObservationReader::new(Arc::clone(store)),
+            ) as Arc<dyn crate::live_ledger::history::LiveObservationHistoryReader>
+        })
+    }
+
     pub(crate) async fn post_commit_hooks_for_session(
         &self,
         session_id: &SessionId,

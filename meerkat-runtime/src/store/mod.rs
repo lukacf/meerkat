@@ -9,11 +9,15 @@ pub mod live_read;
 #[cfg(feature = "sqlite-store")]
 mod live_schema;
 pub mod memory;
+mod session_observation;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
 mod whole_blob_rewrite;
 
 pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
+pub use session_observation::{
+    CommittedCallbackResultsObservation, CommittedSessionBodyObservation,
+};
 pub use whole_blob_rewrite::{
     PreparedWholeBlobRewriteBoundary, PreparedWholeBlobRewriteStoreParts,
     VerifiedCommittedWholeBlobPayload,
@@ -2343,6 +2347,11 @@ pub enum RuntimeStoreError {
     /// Write failed.
     #[error("Store write failed: {0}")]
     WriteFailed(String),
+    #[error("prepared Live ledger state exceeds used-plus-reserved storage capacity")]
+    LiveLedgerCapacityExceeded,
+    /// The Live owner refused before invoking the locked publication callback.
+    #[error("Live request publication rejected before write: {reason}")]
+    LiveRequestPublicationRejected { reason: String },
     /// Read failed.
     #[error("Store read failed: {0}")]
     ReadFailed(String),
@@ -2662,7 +2671,7 @@ fn is_canonical_sha256_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Exact stored input row resolved through the durable idempotency-key index.
+/// Exact stored input row resolved by identity or the durable idempotency-key index.
 #[derive(Debug, Clone)]
 pub struct ExactInputStateObservation {
     state: StoredInputState,
@@ -8745,6 +8754,25 @@ pub trait RuntimeStore: Send + Sync {
         }
         Err(RuntimeStoreError::Unsupported(
             "load_input_states_by_ids".to_string(),
+        ))
+    }
+
+    /// Read a bounded input batch together with exact physical row digests.
+    ///
+    /// Cardinality, ordering, duplicate rejection and snapshot consistency match
+    /// `load_input_states_by_ids`. Digests must describe the bytes read, not a
+    /// subsequently reserialized projection.
+    async fn load_input_states_by_ids_with_versions(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<Option<ExactInputStateObservation>>, RuntimeStoreError> {
+        validate_input_state_batch_read_ids(input_ids)?;
+        if input_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(RuntimeStoreError::Unsupported(
+            "load_input_states_by_ids_with_versions".to_string(),
         ))
     }
 

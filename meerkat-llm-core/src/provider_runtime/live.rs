@@ -61,14 +61,7 @@ impl ResolvedLiveTarget {
         if connection.auth_binding() != binding {
             return Err(LiveTargetError::CredentialOwnerMismatch);
         }
-        if let ResolvedLiveExecution::FunctionBridge { backend } = &execution {
-            if backend.provider() != voice_identity.provider {
-                return Err(LiveTargetError::BackendProviderMismatch);
-            }
-            if backend.profile().interaction_kind != ModelInteractionKind::Text {
-                return Err(LiveTargetError::BackendNotText);
-            }
-        }
+        execution.validate_for_voice(voice_identity.provider)?;
         Ok(Self {
             profile_id,
             voice_identity,
@@ -134,6 +127,21 @@ impl std::fmt::Debug for ResolvedLiveTarget {
 }
 
 impl ResolvedLiveExecution {
+    pub fn validate_for_voice(
+        &self,
+        provider: meerkat_core::Provider,
+    ) -> Result<(), LiveTargetError> {
+        if let Self::FunctionBridge { backend } = self {
+            if backend.provider() != provider {
+                return Err(LiveTargetError::BackendProviderMismatch);
+            }
+            if backend.profile().interaction_kind != ModelInteractionKind::Text {
+                return Err(LiveTargetError::BackendNotText);
+            }
+        }
+        Ok(())
+    }
+
     /// Bind a configured managed model to the registry result without model
     /// prefix inference or substituting the executor's profile.
     pub fn function_bridge(

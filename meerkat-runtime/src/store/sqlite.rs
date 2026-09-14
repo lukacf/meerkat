@@ -884,7 +884,9 @@ CREATE TABLE IF NOT EXISTS runtime_direct_member_high_waters (
                     error.to_string(),
                 )
             })?;
-        if !matches!(ledger_version, None | Some(1..=3)) {
+        if ledger_version.is_some_and(|version| {
+            !(1..=RUNTIME_STORE_DOMAIN.supported_version()).contains(&version)
+        }) {
             return Err(pre_0_8_10_input_import_error(
                 RUNTIME_STORE_DOMAIN.name,
                 "<ledger>",
@@ -9403,6 +9405,31 @@ ORDER BY runtime_id";
         Ok(())
     }
 
+    fn enforce_input_row_expected_version(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        input_id: &meerkat_core::lifecycle::InputId,
+        expected: &str,
+    ) -> Result<(), RuntimeStoreError> {
+        let existing = tx
+            .query_row(
+                "SELECT state_json FROM runtime_input_states WHERE runtime_id=?1 AND input_id=?2",
+                params![runtime_id_text(runtime_id), input_id.to_string()],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        if existing
+            .as_deref()
+            .is_none_or(|bytes| input_row_version_digest(bytes) != expected)
+        {
+            return Err(RuntimeStoreError::InputRowVersionConflict {
+                input_id: input_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn upsert_input_states(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
@@ -9414,28 +9441,12 @@ ORDER BY runtime_id";
         // final-image semantics as the in-memory implementation.
         for (bundle, expected_row_digest) in input_states {
             if let Some(expected) = expected_row_digest {
-                let existing = tx
-                    .query_row(
-                        r"
-                        SELECT state_json FROM runtime_input_states
-                        WHERE runtime_id = ?1 AND input_id = ?2
-                        ",
-                        params![
-                            runtime_id_text(runtime_id),
-                            bundle.state.input_id.0.to_string()
-                        ],
-                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                    )
-                    .optional()
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                let matches = existing
-                    .as_deref()
-                    .is_some_and(|bytes| input_row_version_digest(bytes) == *expected);
-                if !matches {
-                    return Err(RuntimeStoreError::InputRowVersionConflict {
-                        input_id: bundle.state.input_id.0.to_string(),
-                    });
-                }
+                enforce_input_row_expected_version(
+                    tx,
+                    runtime_id,
+                    &bundle.state.input_id,
+                    expected,
+                )?;
             }
         }
         release_input_idempotency_keys_for_mutation_set(
@@ -14662,6 +14673,19 @@ ORDER BY runtime_id";
             runtime_id: &LogicalRuntimeId,
             input_ids: &[InputId],
         ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+            Ok(self
+                .load_input_states_by_ids_with_versions(runtime_id, input_ids)
+                .await?
+                .into_iter()
+                .map(|row| row.map(|row| row.into_parts().0))
+                .collect())
+        }
+
+        async fn load_input_states_by_ids_with_versions(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_ids: &[InputId],
+        ) -> Result<Vec<Option<ExactInputStateObservation>>, RuntimeStoreError> {
             validate_input_state_batch_read_ids(input_ids)?;
             if input_ids.is_empty() {
                 return Ok(Vec::new());
@@ -14710,7 +14734,11 @@ ORDER BY runtime_id";
                             "input state row key `{stored_key}` differs from its encoded identity"
                         )));
                     }
-                    if by_id.insert(stored_key.clone(), decoded).is_some() {
+                    let observation = ExactInputStateObservation::from_exact_stored_row(
+                        decoded,
+                        input_row_version_digest(&bytes),
+                    )?;
+                    if by_id.insert(stored_key.clone(), observation).is_some() {
                         return Err(RuntimeStoreError::ReadFailed(format!(
                             "duplicate input state row `{stored_key}`"
                         )));

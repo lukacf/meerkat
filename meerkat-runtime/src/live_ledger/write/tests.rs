@@ -12,6 +12,25 @@ use meerkat_core::{Session, SessionStore};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "joint_input_tests.rs"]
+mod joint_input_tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "commit_clock_tests.rs"]
+mod commit_clock_tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "owned_admission_tests.rs"]
+mod owned_admission_tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "credit_tests.rs"]
+mod credit_tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "transcript_tests.rs"]
+mod transcript_tests;
+
 #[derive(Clone, Copy, Debug)]
 enum Backend {
     Memory,
@@ -41,8 +60,11 @@ struct Fixture {
 
 impl Fixture {
     async fn new(backend: Backend) -> TestResult<Self> {
+        Self::with_session(backend, Session::new()).await
+    }
+
+    async fn with_session(backend: Backend, session: Session) -> TestResult<Self> {
         let directory = tempfile::tempdir()?;
-        let session = Session::new();
         #[cfg(feature = "sqlite-store")]
         let path = directory.path().join("runtime.sqlite3");
         let store: Arc<dyn RuntimeStore> = match backend {
@@ -122,6 +144,1041 @@ fn current_fence() -> Arc<dyn RuntimeStoreWriteFence> {
     Arc::new(Fence(RuntimeStoreWriteFenceOutcome::Applied))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+trait FixtureClockOwner {
+    fn with_fixture_clock(store: Arc<dyn RuntimeStore>, session_id: SessionId) -> Self;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FixtureClockOwner for crate::live_ledger::authority::store::LiveRequestStoreOwner {
+    fn with_fixture_clock(store: Arc<dyn RuntimeStore>, session_id: SessionId) -> Self {
+        Self::new(store, session_id).with_clock(Arc::new(|| Ok(1)))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn install_grant_executor(
+    fixture: &Fixture,
+    epoch: &meerkat_core::RuntimeEpochId,
+    generation: u64,
+) -> TestResult {
+    fixture
+        .store
+        .commit_machine_lifecycle(
+            &LogicalRuntimeId::for_session(fixture.session.id()),
+            crate::store::MachineLifecycleCommit::new_with_binding(
+                crate::RuntimeState::Idle,
+                crate::store::MachineLifecycleBindingFacts::new(
+                    Some("registered-executor".into()),
+                    Some(1),
+                    Some(generation),
+                    Some(epoch.to_string()),
+                ),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            ),
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn grant_activation_request(
+    fixture: &Fixture,
+    epoch: &meerkat_core::RuntimeEpochId,
+) -> TestResult<crate::live_grant::LiveGrantActivationRequest<()>> {
+    use crate::live_grant::LiveGrantActivationRequest;
+    let session_id = fixture.session.id();
+    Ok(LiveGrantActivationRequest {
+        activation_id: meerkat_core::live_execution::activation::LiveActivationId::parse(
+            "voice-activation",
+        )?,
+        declaration: serde_json::from_value(serde_json::json!({
+            "issuer_realm": "owner",
+            "profile_id": "voice",
+            "profile_revision": vec![2; 32],
+            "requesting_realms": ["caller"],
+            "executor": {"kind": "session", "session_id": session_id},
+            "allowed_evidence": ["application_snapshot"],
+            "permission": {
+                "allowed_mutations": ["read_only"],
+                "tools": {"kind": "allow_listed", "names": ["allowed_tool"]},
+                "limits": {
+                    "max_requests": 2, "max_concurrent_requests": 1,
+                    "max_effects_per_request": 2, "max_tokens_per_request": 1000,
+                    "max_duration_ms": 100
+                }
+            },
+            "generation": 1,
+            "revoke_policy": "cancel_pending_and_request_running_cancellation"
+        }))?,
+        requesting_realm: serde_json::from_value(serde_json::json!("caller"))?,
+        executor: serde_json::from_value(serde_json::json!({
+            "selector": {"kind": "session", "session_id": session_id},
+            "binding": {
+                "session_id": session_id, "realm": "executor",
+                "runtime_epoch": epoch, "binding_generation": 1
+            }
+        }))?,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn trusted_native_issuer_commits_complete_permission_to_current_lifecycle() -> TestResult {
+    use crate::live_grant::{LiveExecutionGrantIssuer, LiveGrantActivationError};
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        let epoch = meerkat_core::RuntimeEpochId::new();
+        let issuer = LiveExecutionGrantIssuer::new(Arc::clone(&fixture.store));
+        assert!(matches!(
+            issuer
+                .activate(grant_activation_request(&fixture, &epoch)?, current_fence())
+                .await,
+            Err(LiveGrantActivationError::ExecutorNotCurrent)
+        ));
+        install_grant_executor(&fixture, &epoch, 1).await?;
+        let wrong_epoch = meerkat_core::RuntimeEpochId::new();
+        assert!(matches!(
+            issuer
+                .activate(
+                    grant_activation_request(&fixture, &wrong_epoch)?,
+                    current_fence()
+                )
+                .await,
+            Err(LiveGrantActivationError::ExecutorNotCurrent)
+        ));
+        let blocked = Arc::new(Fence(RuntimeStoreWriteFenceOutcome::Conflict {
+            reason: "registration replaced".into(),
+        }));
+        assert!(
+            issuer
+                .activate(grant_activation_request(&fixture, &epoch)?, blocked)
+                .await
+                .is_err()
+        );
+        assert!(
+            fixture
+                .ops()?
+                .load_live_head(fixture.session.id())
+                .await?
+                .is_none()
+        );
+        let grant = issuer
+            .activate(grant_activation_request(&fixture, &epoch)?, current_fence())
+            .await?;
+        let head = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        assert_eq!(grant.activation_commit(), &head.reference);
+        let state = crate::generated::live_request_state::decode(&head.payload.request_snapshot)?;
+        assert_eq!(state.grant_record, serde_json::to_string(grant.record())?);
+        assert_eq!(state.grant_max_requests, 2);
+        assert_eq!(state.grant_max_concurrent_requests, 1);
+        assert_eq!(state.grant_max_effects, 2);
+        assert_eq!(state.grant_max_tokens, 1000);
+        assert_eq!(state.grant_max_duration_ms, 100);
+        assert_eq!(state.grant_tools, ["allowed_tool".into()].into());
+        assert!(state.grant_tools_restricted);
+        assert_eq!(
+            state.grant_mutations,
+            [meerkat_core::ToolMutationClass::ReadOnly].into()
+        );
+        assert_eq!(
+            state.grant_evidence,
+            [meerkat_core::live_execution::request::LiveRequestEvidenceKind::ApplicationSnapshot]
+                .into()
+        );
+        assert_eq!(grant.record().grant_ref().issuer_realm.as_str(), "owner");
+        assert_eq!(grant.record().requesting_realm().as_str(), "caller");
+        assert_eq!(grant.record().executor().binding.realm.as_str(), "executor");
+        drop(issuer);
+        #[cfg(feature = "sqlite-store")]
+        if !matches!(backend, Backend::Memory) {
+            let Fixture {
+                store,
+                session,
+                _directory,
+                path,
+            } = fixture;
+            drop(store);
+            let reopened = match backend {
+                Backend::WholeBlob => crate::store::SqliteRuntimeStore::new_whole_blob(&path)?,
+                Backend::HeadCanonical => {
+                    crate::store::SqliteRuntimeStore::new_head_canonical(&path)?
+                }
+                Backend::Memory => return Err("expected durable backend".into()),
+            };
+            assert_eq!(
+                reopened
+                    .live_ledger_ops()
+                    .ok_or("Live ops")?
+                    .load_live_head(session.id())
+                    .await?,
+                Some(head)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn activation_commit_compares_lifecycle_inside_each_store_transaction() -> TestResult {
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        let epoch = meerkat_core::RuntimeEpochId::new();
+        install_grant_executor(&fixture, &epoch, 1).await?;
+        let observation = fixture
+            .store
+            .observe_machine_lifecycle(&LogicalRuntimeId::for_session(fixture.session.id()))
+            .await?;
+        let stale = observation.version().ok_or("version")?.clone();
+        install_grant_executor(&fixture, &epoch, 2).await?;
+        let owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        assert!(matches!(
+            owner
+                .commit_for_runtime(generated_activation(1), stale, current_fence())
+                .await,
+            Err(LiveRequestAuthorityError::Store(
+                RuntimeStoreError::MachineLifecycleVersionConflict { .. }
+            ))
+        ));
+        assert!(
+            fixture
+                .ops()?
+                .load_live_head(fixture.session.id())
+                .await?
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn generated_activation(generation: u64) -> crate::live_ledger::authority::dsl::LiveRequestInput {
+    use crate::live_ledger::authority::dsl::{LiveRequestEvidenceKind, ToolMutationClass};
+    crate::live_ledger::authority::dsl::LiveRequestInput::Activate {
+        grant_id: "grant".into(),
+        generation,
+        expires_at: 100,
+        executor: "binding".into(),
+        record: format!("complete-grant-record-{generation}"),
+        profile_revision: "profile-revision".into(),
+        evidence: [LiveRequestEvidenceKind::ApplicationSnapshot].into(),
+        mutations: [ToolMutationClass::ReadOnly].into(),
+        tools_restricted: true,
+        tools: ["allowed_tool".into()].into(),
+        max_requests: 2,
+        max_concurrent_requests: 1,
+        max_effects: 2,
+        max_tokens: 1000,
+        max_duration_ms: 100,
+        now: 1,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const GENERATED_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000001";
+const GENERATED_CLAIM_ID: &str = "00000000-0000-4000-8000-000000000002";
+
+fn generated_request_setup() -> Vec<crate::live_ledger::authority::dsl::LiveRequestInput> {
+    use crate::live_ledger::authority::dsl::{LiveRequestEvidenceKind, LiveRequestInput as Input};
+    let budget =
+        crate::live_ledger::authority::store::request_credits::RequestCompletionBudget::measured()
+            .expect("measured request completion budget");
+    vec![
+        generated_activation(1),
+        Input::Reserve {
+            content_complete: true,
+            content_discontinuous: false,
+            content_empty: false,
+            content_fits: true,
+            request_id: GENERATED_REQUEST_ID.into(),
+            source: "source".into(),
+            payload: "payload".into(),
+            evidence: LiveRequestEvidenceKind::ApplicationSnapshot,
+            profile_revision: "profile-revision".into(),
+            parent_scope: "".into(),
+            grant_id: "grant".into(),
+            generation: 1,
+            executor: "binding".into(),
+            now: 2,
+            credit_records: budget.envelope.total().records,
+            credit_bytes: budget.envelope.total().encoded_bytes,
+            snapshot_ceiling: budget.snapshot_ceiling,
+        },
+        Input::Admit {
+            request_id: GENERATED_REQUEST_ID.into(),
+            source_ingress_open: true,
+            source: "source".into(),
+            payload: "payload".into(),
+            input_id: "input".into(),
+            admission_commit: "admission-commit".into(),
+            ingress_generation: 1,
+            credit_records: budget.envelope.total().records,
+            credit_bytes: budget.envelope.total().encoded_bytes,
+            snapshot_ceiling: budget.snapshot_ceiling,
+            profile_revision: "profile-revision".into(),
+            now: 3,
+        },
+        Input::Stage {
+            request_id: GENERATED_REQUEST_ID.into(),
+            input_id: "input".into(),
+            admission_commit: "admission-commit".into(),
+            run_id: "run".into(),
+            scope_id: "scope".into(),
+            scope_record: "scope-digest".into(),
+            executor: "binding".into(),
+            profile_revision: "profile-revision".into(),
+            now: 4,
+        },
+    ]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn generated_effect_claim() -> crate::live_ledger::authority::dsl::LiveRequestInput {
+    let budget =
+        crate::live_ledger::authority::store::effect_credits::EffectCompletionBudget::for_kind(
+            meerkat_core::execution_scope::ScopedEffectKind::ToolDispatch,
+        )
+        .expect("measured completion budget");
+    crate::live_ledger::authority::dsl::LiveRequestInput::ClaimEffect {
+        request_id: GENERATED_REQUEST_ID.into(),
+        input_id: "input".into(),
+        admission_commit: "admission-commit".into(),
+        run_id: "run".into(),
+        scope_id: "scope".into(),
+        scope_record: "scope-digest".into(),
+        parent_scope: "".into(),
+        executor: "binding".into(),
+        claim_id: GENERATED_CLAIM_ID.into(),
+        claim_record: "claim-record".into(),
+        effect_id: "effect".into(),
+        chain_id: "effect".into(),
+        attempt: 0,
+        target: "target-and-arguments".into(),
+        kind: meerkat_core::execution_scope::ScopedEffectKind::ToolDispatch,
+        tool: "allowed_tool".into(),
+        mutation: meerkat_core::ToolMutationClass::ReadOnly,
+        profile_revision: "profile-revision".into(),
+        policy_revision: "synthetic-policy-observation".into(),
+        policy_permits: true,
+        credit_schema: crate::live_ledger::completion_budget::CompletionCreditSchema::V1,
+        credit_records: budget.envelope.total().records,
+        credit_bytes: budget.envelope.total().encoded_bytes,
+        minimum_record_charge: budget.minimum_record_charge,
+        maximum_record_charge: budget.maximum_record_charge,
+        snapshot_ceiling: budget.snapshot_ceiling,
+        available_records: crate::live_resources::LIVE_LEDGER_MAX_CHARGE.records,
+        available_bytes: crate::live_resources::LIVE_LEDGER_MAX_CHARGE.encoded_bytes,
+        now: 5,
+    }
+}
+
+async fn commit_generated_unknown(
+    store: &dyn RuntimeStore,
+    session_id: &SessionId,
+) -> TestResult<crate::live_ledger::authority::dsl::LiveRequestInput> {
+    use crate::live_ledger::authority::dsl::{
+        LiveRequestMachineAuthority, LiveRequestMachineMutator,
+    };
+    let ops = store.live_ledger_ops().ok_or("Live ops")?;
+    let head = ops.load_live_head(session_id).await?.ok_or("head")?;
+    let owner = LiveRequestMachineAuthority::recover_from_state(
+        crate::generated::live_request_state::decode(&head.payload.request_snapshot)?,
+    )?;
+    let completion = credit_tests::record(
+        session_id,
+        meerkat_core::ops::OperationId(uuid::Uuid::parse_str(GENERATED_REQUEST_ID)?),
+        meerkat_core::ops::OperationId(uuid::Uuid::parse_str(GENERATED_CLAIM_ID)?),
+        head.reference.event_count + 1,
+        crate::live_ledger::completion::LivePhysicalEffectOutcome::Unknown,
+    )?;
+    let input = credit_tests::settlement(&completion)?;
+    let mut candidate = owner.prepare_authority();
+    LiveRequestMachineMutator::apply(&mut candidate, input.clone())?;
+    let prepared = PreparedLiveLedgerCommit::from_request_transition_with_completions(
+        session_id,
+        Some(&head),
+        &candidate,
+        vec![completion],
+    )?;
+    assert!(matches!(
+        ops.commit_live_ledger(prepared, current_fence()).await?,
+        LiveLedgerCommitOutcome::Committed { .. }
+    ));
+    Ok(input)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn generated_request_transition_is_returned_only_after_actual_store_commit() -> TestResult {
+    use crate::live_ledger::authority::dsl::LiveRequestInput as Input;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        let owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        for input in generated_request_setup() {
+            let committed = owner.commit(input, current_fence()).await?;
+            assert!(!committed.transition.effects().is_empty());
+            assert_eq!(
+                fixture
+                    .ops()?
+                    .load_live_head(fixture.session.id())
+                    .await?
+                    .ok_or("head")?
+                    .reference,
+                committed.head,
+            );
+        }
+        let before = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        let rejected = owner
+            .commit(
+                generated_effect_claim(),
+                Arc::new(Fence(RuntimeStoreWriteFenceOutcome::Conflict {
+                    reason: "request owner superseded".into(),
+                })),
+            )
+            .await;
+        assert!(matches!(rejected, Err(LiveRequestAuthorityError::Store(_))));
+        assert_eq!(
+            fixture
+                .ops()?
+                .load_live_head(fixture.session.id())
+                .await?
+                .ok_or("head")?,
+            before,
+        );
+        let committed = owner
+            .commit(generated_effect_claim(), current_fence())
+            .await?;
+        let restored_owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        assert!(
+            restored_owner
+                .commit(generated_effect_claim(), current_fence())
+                .await
+                .is_err()
+        );
+        restored_owner
+            .commit(
+                Input::Revoke {
+                    grant_id: "grant".into(),
+                    generation: 1,
+                },
+                current_fence(),
+            )
+            .await?;
+        commit_generated_unknown(fixture.store.as_ref(), fixture.session.id()).await?;
+        assert!(committed.head.revision > before.reference.revision);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn generated_store_claim_reads_revocation_after_an_actual_policy_await() -> TestResult {
+    use crate::live_ledger::authority::dsl::LiveRequestInput as Input;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for (backend, changes) in backends().into_iter().flat_map(|backend| {
+        [
+            vec![Input::Revoke {
+                grant_id: "grant".into(),
+                generation: 1,
+            }],
+            vec![Input::Cancel {
+                request_id: GENERATED_REQUEST_ID.into(),
+            }],
+            vec![Input::FenceExecutor {
+                executor: "replacement-binding".into(),
+            }],
+            vec![
+                Input::FenceExecutor {
+                    executor: "replacement-binding".into(),
+                },
+                Input::FenceExecutor {
+                    executor: "binding".into(),
+                },
+            ],
+        ]
+        .into_iter()
+        .map(move |change| (backend, change))
+    }) {
+        let fixture = Fixture::new(backend).await?;
+        let owner = Arc::new(LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        ));
+        for input in generated_request_setup() {
+            owner.commit(input, current_fence()).await?;
+        }
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let claimant = Arc::clone(&owner);
+        let task = tokio::spawn(async move {
+            entered_tx.send(()).map_err(|()| "lost entry receiver")?;
+            resume_rx.await.map_err(|_| "lost policy result")?;
+            Ok::<_, &'static str>(matches!(
+                claimant
+                    .commit(generated_effect_claim(), current_fence())
+                    .await,
+                Err(LiveRequestAuthorityError::Transition(_))
+            ))
+        });
+        entered_rx.await?;
+        for change in changes {
+            owner.commit(change, current_fence()).await?;
+        }
+        let revoked = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        resume_tx.send(()).map_err(|()| "lost claimant")?;
+        assert!(task.await??);
+        assert_eq!(
+            fixture
+                .ops()?
+                .load_live_head(fixture.session.id())
+                .await?
+                .ok_or("head")?,
+            revoked,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn generated_request_scope_and_spent_claim_survive_closed_store_reopen() -> TestResult {
+    use crate::live_ledger::authority::dsl::LiveRequestInput as Input;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for backend in [Backend::WholeBlob, Backend::HeadCanonical] {
+        let fixture = Fixture::new(backend).await?;
+        let owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        let mut setup = generated_request_setup();
+        let stage = setup.pop().ok_or("missing stage")?;
+        for input in setup {
+            owner.commit(input, current_fence()).await?;
+        }
+        owner
+            .commit(Input::CloseIngress {}, current_fence())
+            .await?;
+        let closed = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        let Fixture {
+            store,
+            session,
+            _directory,
+            path,
+        } = fixture;
+        drop(owner);
+        drop(store);
+        let open = || -> TestResult<Arc<dyn RuntimeStore>> {
+            Ok(Arc::new(match backend {
+                Backend::WholeBlob => crate::store::SqliteRuntimeStore::new_whole_blob(&path)?,
+                Backend::HeadCanonical => {
+                    crate::store::SqliteRuntimeStore::new_head_canonical(&path)?
+                }
+                Backend::Memory => return Err("expected durable backend".into()),
+            }))
+        };
+        let store = open()?;
+        let ops = store.live_ledger_ops().ok_or("missing Live ops")?;
+        assert_eq!(
+            ops.load_live_head(session.id()).await?,
+            Some(closed.clone())
+        );
+        let owner =
+            LiveRequestStoreOwner::with_fixture_clock(Arc::clone(&store), session.id().clone());
+        owner.commit(stage.clone(), current_fence()).await?;
+        assert!(matches!(
+            owner.commit(stage, current_fence()).await,
+            Err(LiveRequestAuthorityError::Transition(_))
+        ));
+        let staged = ops.load_live_head(session.id()).await?.ok_or("head")?;
+        let restore = || Input::RestoreScope {
+            request_id: GENERATED_REQUEST_ID.into(),
+            input_id: "input".into(),
+            admission_commit: "admission-commit".into(),
+            run_id: "run".into(),
+            scope_id: "scope".into(),
+            scope_record: "scope-digest".into(),
+            parent_scope: "".into(),
+            executor: "binding".into(),
+            profile_revision: "profile-revision".into(),
+            now: 5,
+        };
+        for field in 0..8 {
+            let mut changed = restore();
+            let Input::RestoreScope {
+                request_id,
+                input_id,
+                run_id,
+                scope_id,
+                scope_record,
+                parent_scope,
+                executor,
+                admission_commit,
+                ..
+            } = &mut changed
+            else {
+                return Err("wrong restore variant".into());
+            };
+            [
+                request_id,
+                input_id,
+                run_id,
+                scope_id,
+                scope_record,
+                parent_scope,
+                executor,
+                admission_commit,
+            ][field]
+                .push_str("-wrong");
+            assert!(matches!(
+                owner.commit(changed, current_fence()).await,
+                Err(LiveRequestAuthorityError::Transition(_))
+            ));
+            assert_eq!(
+                ops.load_live_head(session.id()).await?,
+                Some(staged.clone())
+            );
+        }
+        owner.commit(restore(), current_fence()).await?;
+        owner
+            .commit(generated_effect_claim(), current_fence())
+            .await?;
+        drop(owner);
+        drop(store);
+        let store = open()?;
+        let owner =
+            LiveRequestStoreOwner::with_fixture_clock(Arc::clone(&store), session.id().clone());
+        assert!(matches!(
+            owner
+                .commit(generated_effect_claim(), current_fence())
+                .await,
+            Err(LiveRequestAuthorityError::Transition(_))
+        ));
+        let feedback = commit_generated_unknown(store.as_ref(), session.id()).await?;
+        assert!(matches!(
+            owner.commit(feedback, current_fence()).await,
+            Err(LiveRequestAuthorityError::Transition(_))
+        ));
+        drop(owner);
+        drop(store);
+        drop(_directory);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn generated_request_close_before_admission_does_not_create_a_run() -> TestResult {
+    use crate::live_ledger::authority::dsl::LiveRequestInput as Input;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        let owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        let mut setup = generated_request_setup().into_iter();
+        for input in setup.by_ref().take(2) {
+            owner.commit(input, current_fence()).await?;
+        }
+        owner
+            .commit(Input::CloseIngress {}, current_fence())
+            .await?;
+        let closed = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        for input in setup {
+            assert!(matches!(
+                owner.commit(input, current_fence()).await,
+                Err(LiveRequestAuthorityError::Transition(_))
+            ));
+            assert_eq!(
+                fixture.ops()?.load_live_head(fixture.session.id()).await?,
+                Some(closed.clone())
+            );
+        }
+        let state = crate::generated::live_request_state::decode(&closed.payload.request_snapshot)?;
+        assert!(state.request_runs.is_empty());
+        assert!(state.admitted_requests.is_empty());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn generated_request_snapshot_codec_rejects_unknown_missing_and_future_fields() -> TestResult {
+    use crate::generated::live_request_state::{decode, encode};
+    use crate::live_ledger::authority::dsl::{
+        LiveRequestMachineAuthority as Authority, LiveRequestMachineMutator as Mutator,
+    };
+    let mut owner = Authority::new();
+    for input in generated_request_setup() {
+        Mutator::apply(&mut owner, input)?;
+    }
+    let bytes = encode(owner.state())?;
+    let recovered = Authority::recover_from_state(decode(&bytes)?)?;
+    assert_eq!(encode(recovered.state())?, bytes);
+    let object: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)?;
+    for field in object.keys() {
+        let mut missing = object.clone();
+        missing.remove(field);
+        assert!(
+            decode(&serde_json::to_vec(&missing)?).is_err(),
+            "accepted missing {field}"
+        );
+    }
+    let current_format = object
+        .get("format")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing encoded format")?;
+    let future_format = current_format.checked_add(1).ok_or("format overflow")?;
+    for invalid_format in (0..current_format).chain([future_format, u64::MAX]) {
+        let mut invalid = object.clone();
+        invalid.insert("format".into(), invalid_format.into());
+        assert!(decode(&serde_json::to_vec(&invalid)?).is_err());
+    }
+    let mut unknown = object;
+    unknown.insert("unrecognized_authority".into(), true.into());
+    assert!(decode(&serde_json::to_vec(&unknown)?).is_err());
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn private_recovery_import_cannot_supply_public_request_scope_authority() -> TestResult {
+    use crate::RuntimeState;
+    use crate::live_execution::LiveBridgeRecoveryImage;
+    use crate::live_ledger::authority::dsl::LiveEffectPhase;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    use crate::store::{
+        MachineLifecycleBindingFacts, MachineLifecycleCommit, SupervisorAuthoritySnapshot,
+        load_machine_lifecycle,
+    };
+    use meerkat_core::live_execution::LiveBridgeSubmissionState;
+
+    let operations = [
+            LiveBridgeSubmissionState::SubmissionAttemptClaimed,
+            LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof,
+            LiveBridgeSubmissionState::SubmissionAmbiguous,
+            LiveBridgeSubmissionState::CallAbandonedByClose,
+        ].into_iter().enumerate().map(|(index, submission)| serde_json::json!({
+            "operation_id": if index == 0 { GENERATED_REQUEST_ID.to_owned() } else { format!("request-{index}") },
+            "channel_id": format!("private-channel-{index}"),
+            "interaction_id": format!("private-interaction-{index}"),
+            "provider_turn_ref": format!("private-turn-{index}"),
+            "provider_delegation_ref": format!("private-delegation-{index}"),
+            "provider_call_ref": format!("private-call-{index}"),
+            "source_agent_identity": "binding",
+            "canonical_context_revision": "scope-digest",
+            "request_digest": "sha256:private-request",
+            "phase": "execution_terminal",
+            "execution_started": true,
+            "outcome_receipt_required": true,
+            "outcome_receipt_recorded": true,
+            "terminal": "completed",
+            "result_digest": "sha256:private-result",
+            "cancellation_reason": "restart",
+            "submission_output_kind": "success",
+            "submission_digest": "sha256:private-submission",
+            "submission_state": submission,
+            "current_for_channel": false,
+            "channel_revoked": true,
+        })).collect::<Vec<_>>();
+    let imported_private: LiveBridgeRecoveryImage = serde_json::from_value(serde_json::json!({
+        "operations": operations
+    }))?;
+    let mut private_state = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new()
+        .state()
+        .clone();
+    imported_private.restore_into(&mut private_state)?;
+    assert_eq!(
+        LiveBridgeRecoveryImage::capture(&private_state)?,
+        imported_private
+    );
+
+    for backend in [Backend::WholeBlob, Backend::HeadCanonical] {
+        let fixture = Fixture::new(backend).await?;
+        let runtime_id = LogicalRuntimeId::for_session(fixture.session.id());
+        fixture
+            .store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                MachineLifecycleCommit::new_with_binding_unregister_progress_and_live_bridge(
+                    RuntimeState::Idle,
+                    MachineLifecycleBindingFacts::default(),
+                    SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    None,
+                    imported_private.clone(),
+                ),
+                &[],
+            )
+            .await?;
+        let private_before = fixture
+            .store
+            .load_machine_lifecycle_record(&runtime_id)
+            .await?
+            .ok_or("private lifecycle")?;
+        let Fixture {
+            store,
+            session,
+            _directory,
+            path,
+        } = fixture;
+        drop(store);
+        let open = || -> TestResult<Arc<dyn RuntimeStore>> {
+            Ok(Arc::new(match backend {
+                Backend::WholeBlob => crate::store::SqliteRuntimeStore::new_whole_blob(&path)?,
+                Backend::HeadCanonical => {
+                    crate::store::SqliteRuntimeStore::new_head_canonical(&path)?
+                }
+                Backend::Memory => return Err("expected durable backend".into()),
+            }))
+        };
+        let store = open()?;
+        assert_eq!(
+            store.load_machine_lifecycle_record(&runtime_id).await?,
+            Some(private_before.clone())
+        );
+        let ops = store.live_ledger_ops().ok_or("Live ops")?;
+        assert!(ops.load_live_head(session.id()).await?.is_none());
+        let owner =
+            LiveRequestStoreOwner::with_fixture_clock(Arc::clone(&store), session.id().clone());
+        for unauthorized in generated_request_setup()
+            .into_iter()
+            .skip(1)
+            .chain([generated_effect_claim()])
+        {
+            let before = ops.load_live_head(session.id()).await?;
+            if matches!(
+                unauthorized,
+                crate::live_ledger::authority::dsl::LiveRequestInput::Reserve { .. }
+            ) {
+                let refused = owner.commit(unauthorized, current_fence()).await?;
+                assert!(matches!(
+                    refused.transition.effects(),
+                    [
+                        crate::live_ledger::authority::dsl::LiveRequestEffect::SourceRefused {
+                            reason: crate::live_source::LiveSourceRefusal::Permission,
+                            ..
+                        }
+                    ]
+                ));
+                let head = ops
+                    .load_live_head(session.id())
+                    .await?
+                    .ok_or("refusal head")?;
+                let state =
+                    crate::generated::live_request_state::decode(&head.payload.request_snapshot)?;
+                assert!(state.request_ids.is_empty());
+                assert!(state.request_inputs.is_empty());
+                assert!(state.run_requests.is_empty());
+                assert!(state.claim_phases.is_empty());
+            } else {
+                assert!(matches!(
+                    owner.commit(unauthorized, current_fence()).await,
+                    Err(LiveRequestAuthorityError::Transition(_))
+                ));
+                assert_eq!(ops.load_live_head(session.id()).await?, before);
+            }
+        }
+        assert_eq!(
+            store.load_machine_lifecycle_record(&runtime_id).await?,
+            Some(private_before.clone())
+        );
+
+        for mut input in generated_request_setup()
+            .into_iter()
+            .chain([generated_effect_claim()])
+        {
+            use crate::live_ledger::authority::dsl::LiveRequestInput;
+            if let LiveRequestInput::Reserve { source, .. }
+            | LiveRequestInput::Admit { source, .. } = &mut input
+            {
+                *source = "fresh-source-after-activation".into();
+            }
+            owner.commit(input, current_fence()).await?;
+        }
+        let public_before = ops
+            .load_live_head(session.id())
+            .await?
+            .ok_or("public head")?;
+        drop(owner);
+        drop(store);
+        let store = open()?;
+        let ops = store.live_ledger_ops().ok_or("Live ops")?;
+        assert_eq!(
+            ops.load_live_head(session.id()).await?,
+            Some(public_before.clone())
+        );
+        let private_after = store
+            .load_machine_lifecycle_record(&runtime_id)
+            .await?
+            .ok_or("private lifecycle after public recovery")?;
+        assert_eq!(private_after, private_before);
+        let private_snapshot = load_machine_lifecycle(store.as_ref(), &runtime_id)
+            .await?
+            .ok_or("decoded private lifecycle")?;
+        assert_eq!(private_snapshot.live_bridge_recovery(), &imported_private);
+        let public =
+            crate::generated::live_request_state::decode(&public_before.payload.request_snapshot)?;
+        assert_eq!(
+            public.claim_phases.get(GENERATED_CLAIM_ID),
+            Some(&LiveEffectPhase::Claimed)
+        );
+        assert!(
+            crate::generated::live_request_state::decode(&serde_json::to_vec(
+                private_snapshot.live_bridge_recovery()
+            )?)
+            .is_err()
+        );
+        assert!(
+            serde_json::from_slice::<LiveBridgeRecoveryImage>(
+                &public_before.payload.request_snapshot
+            )
+            .is_err()
+        );
+        let owner =
+            LiveRequestStoreOwner::with_fixture_clock(Arc::clone(&store), session.id().clone());
+        assert!(matches!(
+            owner
+                .commit(generated_effect_claim(), current_fence())
+                .await,
+            Err(LiveRequestAuthorityError::Transition(_))
+        ));
+        assert_eq!(ops.load_live_head(session.id()).await?, Some(public_before));
+        commit_generated_unknown(store.as_ref(), session.id()).await?;
+        let settled = ops
+            .load_live_head(session.id())
+            .await?
+            .ok_or("settled head")?;
+        let public =
+            crate::generated::live_request_state::decode(&settled.payload.request_snapshot)?;
+        assert_eq!(
+            public.claim_phases.get(GENERATED_CLAIM_ID),
+            Some(&LiveEffectPhase::Unknown)
+        );
+        assert_eq!(
+            store.load_machine_lifecycle_record(&runtime_id).await?,
+            Some(private_before)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn generated_executor_binding_aba_stays_revoked_after_reopen() -> TestResult {
+    use crate::live_ledger::authority::dsl::LiveRequestInput as Input;
+    use crate::live_ledger::authority::store::{LiveRequestAuthorityError, LiveRequestStoreOwner};
+    for backend in [Backend::WholeBlob, Backend::HeadCanonical] {
+        let fixture = Fixture::new(backend).await?;
+        let owner = LiveRequestStoreOwner::with_fixture_clock(
+            Arc::clone(&fixture.store),
+            fixture.session.id().clone(),
+        );
+        for input in generated_request_setup() {
+            owner.commit(input, current_fence()).await?;
+        }
+        for executor in ["replacement-binding", "binding"] {
+            owner
+                .commit(
+                    Input::FenceExecutor {
+                        executor: executor.into(),
+                    },
+                    current_fence(),
+                )
+                .await?;
+        }
+        let Fixture {
+            store,
+            session,
+            _directory,
+            path,
+        } = fixture;
+        drop(owner);
+        drop(store);
+        let store: Arc<dyn RuntimeStore> = Arc::new(match backend {
+            Backend::WholeBlob => crate::store::SqliteRuntimeStore::new_whole_blob(&path)?,
+            Backend::HeadCanonical => crate::store::SqliteRuntimeStore::new_head_canonical(&path)?,
+            Backend::Memory => return Err("expected durable backend".into()),
+        });
+        let owner =
+            LiveRequestStoreOwner::with_fixture_clock(Arc::clone(&store), session.id().clone());
+        let restore = || Input::RestoreScope {
+            request_id: GENERATED_REQUEST_ID.into(),
+            input_id: "input".into(),
+            admission_commit: "admission-commit".into(),
+            run_id: "run".into(),
+            scope_id: "scope".into(),
+            scope_record: "scope-digest".into(),
+            parent_scope: "".into(),
+            executor: "binding".into(),
+            profile_revision: "profile-revision".into(),
+            now: 5,
+        };
+        for generation in [None, Some(2)] {
+            if let Some(generation) = generation {
+                owner
+                    .commit(generated_activation(generation), current_fence())
+                    .await?;
+            }
+            let head = store
+                .live_ledger_ops()
+                .ok_or("Live ops")?
+                .load_live_head(session.id())
+                .await?;
+            for input in [restore(), generated_effect_claim()] {
+                assert!(matches!(
+                    owner.commit(input, current_fence()).await,
+                    Err(LiveRequestAuthorityError::Transition(_))
+                ));
+            }
+            assert_eq!(
+                store
+                    .live_ledger_ops()
+                    .ok_or("Live ops")?
+                    .load_live_head(session.id())
+                    .await?,
+                head
+            );
+        }
+        drop(owner);
+        drop(store);
+        drop(_directory);
+    }
+    Ok(())
+}
+
 fn observation(sequence: u64, text: &str) -> TestResult<LiveLedgerRecord> {
     use meerkat_contracts::wire::live_observation::{
         LiveObservationRecord, LiveObservationWireCodecV1,
@@ -141,6 +1198,134 @@ fn observation(sequence: u64, text: &str) -> TestResult<LiveLedgerRecord> {
     Ok(LiveLedgerRecord::Observation(
         super::super::transcript::StoredLiveObservation::from_fit(&fit),
     ))
+}
+
+#[tokio::test]
+async fn archive_tombstone_compares_missing_lifecycle_in_each_store_transaction() -> TestResult {
+    use crate::live_ledger::authority::dsl as request;
+    use crate::live_ledger::transcript_authority::dsl as transcript;
+    for backend in backends() {
+        for inserted in [false, true] {
+            let fixture = Fixture::new(backend).await?;
+            let actor = fixture.actor().await?;
+            let mut request = request::LiveRequestMachineAuthority::new().prepare_authority();
+            request::LiveRequestMachineMutator::apply(
+                &mut request,
+                request::LiveRequestInput::CloseIngress,
+            )?;
+            let mut transcript =
+                transcript::LiveTranscriptMachineAuthority::new().prepare_authority();
+            transcript::LiveTranscriptMachineMutator::apply(
+                &mut transcript,
+                transcript::LiveTranscriptInput::CloseCurrentIngress,
+            )?;
+            let commit = PreparedLiveLedgerCommit::from_request_transition(
+                fixture.session.id(),
+                None,
+                &request,
+            )?
+            .with_transcript_transition(&transcript)?
+            .with_archive_existence_fence(
+                crate::store::MachineLifecycleExpectedVersion::Missing,
+                Some(actor.clone()),
+            );
+            if inserted {
+                install_grant_executor(&fixture, &meerkat_core::RuntimeEpochId::new(), 0).await?;
+            }
+            let result = fixture
+                .ops()?
+                .commit_live_ledger(commit, current_fence())
+                .await;
+            if inserted {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeStoreError::MachineLifecycleVersionConflict { .. })
+                ));
+                assert!(
+                    fixture
+                        .ops()?
+                        .load_live_head(fixture.session.id())
+                        .await?
+                        .is_none()
+                );
+            } else {
+                assert!(matches!(result?, LiveLedgerCommitOutcome::Committed { .. }));
+                let head = fixture
+                    .ops()?
+                    .load_live_head(fixture.session.id())
+                    .await?
+                    .ok_or("tombstone")?;
+                assert_eq!(head.reference.event_count, 0);
+                assert_eq!(head.payload.reserved, LiveResourceCharge::default());
+            }
+            assert_eq!(fixture.actor().await?, actor);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "live", feature = "sqlite-store"))]
+#[tokio::test]
+async fn cold_existing_session_archive_retains_tombstone_after_full_store_reopen() -> TestResult {
+    for backend in [Backend::WholeBlob, Backend::HeadCanonical] {
+        let fixture = Fixture::new(backend).await?;
+        let runtime_id = LogicalRuntimeId::for_session(fixture.session.id());
+        assert!(matches!(
+            fixture.store.observe_machine_lifecycle(&runtime_id).await?,
+            crate::store::MachineLifecycleObservation::Missing
+        ));
+        let machine = crate::MeerkatMachine::persistent(
+            Arc::clone(&fixture.store),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let lease = machine
+            .prepare_session_archive_lease(fixture.session.id())
+            .await?
+            .ok_or("cold archive lease")?;
+        machine.retire_session_with_archive_lease(lease).await?;
+        let closed = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("closed head")?;
+        assert_eq!(closed.reference.event_count, 0);
+        assert_eq!(closed.payload.reserved, LiveResourceCharge::default());
+        drop(machine);
+        assert_eq!(
+            Arc::strong_count(&fixture.store),
+            1,
+            "archive must release the physical store before reopen"
+        );
+        let Fixture {
+            store,
+            session,
+            _directory,
+            path,
+        } = fixture;
+        drop(store);
+        let reopened: Arc<dyn RuntimeStore> = Arc::new(match backend {
+            Backend::WholeBlob => crate::store::SqliteRuntimeStore::new_whole_blob(&path)?,
+            Backend::HeadCanonical => crate::store::SqliteRuntimeStore::new_head_canonical(&path)?,
+            Backend::Memory => return Err("expected SQLite profile".into()),
+        });
+        let cold = crate::MeerkatMachine::persistent(
+            Arc::clone(&reopened),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let duplicate = cold.prepare_session_archive_lease(session.id()).await?;
+        if let Some(lease) = duplicate {
+            cold.retire_session_with_archive_lease(lease).await?;
+        }
+        assert_eq!(
+            reopened
+                .live_ledger_ops()
+                .ok_or("ledger")?
+                .load_live_head(session.id())
+                .await?,
+            Some(closed)
+        );
+    }
+    Ok(())
 }
 
 // Only this cfg(test) child can construct a synthetic prepared transition.
@@ -185,19 +1370,58 @@ fn prepared(
             .checked_add(LiveResourceCharge::for_event_record(&bytes)?)?;
     }
     Ok(PreparedLiveLedgerCommit {
+        purpose: LiveLedgerWritePurpose::ComponentMutation,
         expected: before.map(|head| head.reference.clone()),
         expected_actor: None,
+        expected_lifecycle: None,
         successor: LiveLedgerStoredHead { reference, payload },
         records,
         sources: Vec::new(),
+        input_admission: None,
+        input_stage: None,
+        input_read_fences: Vec::new(),
         quota: LIVE_LEDGER_MAX_CHARGE,
     })
 }
 
+// Explicit synthetic content for transport tests; uses the real backend CAS.
+pub(crate) async fn append_observation_fixture(
+    store: &dyn RuntimeStore,
+    session_id: &SessionId,
+    texts: &[&str],
+) -> Result<(), RuntimeStoreError> {
+    let ops = store
+        .live_ledger_ops()
+        .ok_or_else(|| RuntimeStoreError::Unsupported("fixture ledger".into()))?;
+    let before = ops.load_live_head(session_id).await?;
+    let start = before.as_ref().map_or(0, |head| head.reference.event_count);
+    let records = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| observation(start + index as u64 + 1, text))
+        .collect::<TestResult<Vec<_>>>()
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+    let change = prepared(session_id, before.as_ref(), records)
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+    let outcome = ops.commit_live_ledger(change, current_fence()).await?;
+    assert!(matches!(outcome, LiveLedgerCommitOutcome::Committed { .. }));
+    Ok(())
+}
+
 fn copy_prepared(value: &PreparedLiveLedgerCommit) -> PreparedLiveLedgerCommit {
     PreparedLiveLedgerCommit {
+        purpose: value.purpose,
         expected: value.expected.clone(),
         expected_actor: value.expected_actor.clone(),
+        expected_lifecycle: value.expected_lifecycle.clone(),
+        input_admission: value.input_admission.clone(),
+        input_read_fences: value.input_read_fences.clone(),
+        input_stage: value.input_stage.as_ref().map(|stage| {
+            Box::new(LiveInputStageMutation {
+                input: stage.input.clone(),
+                lifecycle: stage.lifecycle.clone(),
+            })
+        }),
         successor: value.successor.clone(),
         records: value.records.clone(),
         sources: value
@@ -287,6 +1511,131 @@ fn add_source(
 }
 
 #[tokio::test]
+async fn live_input_materializes_frozen_source_across_admission_and_cancellation() -> TestResult {
+    use crate::live_request::{LiveExecutionRequestRecord, LiveRequestMaterializationError};
+    use crate::live_source::LiveSourceEntryRecord;
+    use meerkat_core::lifecycle::InputId;
+    use meerkat_core::lifecycle::run_primitive::{ConversationAppendRole, CoreRenderable};
+    use meerkat_core::live_execution::evidence::DelegatedRequestProvenance;
+
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        fixture
+            .ops()?
+            .commit_live_ledger(
+                prepared(fixture.session.id(), None, vec![observation(1, "initial")?])?,
+                current_fence(),
+            )
+            .await?;
+        let source = reserved_source(&fixture, "materialize").await?;
+        let LiveSourceEntryRecord::Reservation { record } = source.record()? else {
+            return Err("expected reservation fixture".into());
+        };
+        let evidence = record.frozen_request().ok_or("evidence")?;
+        let provenance = DelegatedRequestProvenance::new(
+            record.request_id().clone(),
+            record.source().clone(),
+            evidence.kind(),
+            evidence.request().digest(),
+        )?;
+        let reference = LiveExecutionRequestRecord::LiveRequest {
+            provenance: provenance.clone(),
+            source_row: record.frozen_digest()?,
+        };
+        let input_id = InputId::new();
+        assert!(matches!(
+            reference
+                .materialize(fixture.store.as_ref(), &input_id)
+                .await,
+            Err(LiveRequestMaterializationError::MissingSource)
+        ));
+        let before = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        let mut reserve = prepared(fixture.session.id(), Some(&before), vec![])?;
+        reserve.expected_actor = Some(fixture.actor().await?);
+        add_source(&mut reserve, None, source.clone())?;
+        fixture
+            .ops()?
+            .commit_live_ledger(reserve, current_fence())
+            .await?;
+        assert!(matches!(
+            reference
+                .materialize(fixture.store.as_ref(), &input_id)
+                .await,
+            Err(LiveRequestMaterializationError::NotAdmitted)
+        ));
+
+        let mut image = serde_json::to_value(source.record()?)?;
+        image["record"]["disposition"] = serde_json::json!({
+            "kind": "admitted",
+            "receipt": {
+                "source": record.source(), "input_id": input_id,
+                "executor": {
+                    "session_id": fixture.session.id(), "realm": "owner",
+                    "runtime_epoch": uuid::Uuid::new_v4(), "binding_generation": 1
+                },
+                "grant": record.grant().ok_or("grant")?,
+                "ingress_generation_at_admission": 1,
+                "commit": {"revision": before.reference.revision + 2, "digest": vec![1;32]}
+            }
+        });
+        let mut previous = source;
+        for cancelled in [false, true] {
+            if cancelled {
+                image["record"]["cancellation"] = serde_json::json!("operator_requested");
+            }
+            let replacement = super::super::source::LiveSourceRow::encode(
+                &serde_json::from_value(image.clone())?,
+            )?;
+            assert_ne!(previous.digest(), replacement.digest());
+            let LiveSourceEntryRecord::Reservation { record: updated } = replacement.record()?
+            else {
+                return Err("expected replacement reservation".into());
+            };
+            assert_eq!(updated.frozen_digest()?, record.frozen_digest()?);
+            let before = fixture
+                .ops()?
+                .load_live_head(fixture.session.id())
+                .await?
+                .ok_or("head")?;
+            let mut mutation = prepared(fixture.session.id(), Some(&before), vec![])?;
+            add_source(&mut mutation, Some(&previous), replacement.clone())?;
+            fixture
+                .ops()?
+                .commit_live_ledger(mutation, current_fence())
+                .await?;
+            let append = reference
+                .materialize(fixture.store.as_ref(), &input_id)
+                .await?
+                .ok_or("original request must materialize a delegated append")?;
+            assert_eq!(
+                append.role,
+                ConversationAppendRole::DelegatedRequest {
+                    provenance: Box::new(provenance.clone())
+                }
+            );
+            assert_eq!(
+                append.content,
+                CoreRenderable::Text {
+                    text: " original request ".into()
+                }
+            );
+            assert!(matches!(
+                reference
+                    .materialize(fixture.store.as_ref(), &InputId::new())
+                    .await,
+                Err(LiveRequestMaterializationError::AdmissionMismatch)
+            ));
+            previous = replacement;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn source_cas_commits_with_head_events_and_preserves_immutable_reservation() -> TestResult {
     for backend in backends() {
         let fixture = Fixture::new(backend).await?;
@@ -365,6 +1714,7 @@ async fn source_cas_commits_with_head_events_and_preserves_immutable_reservation
                 "context" => record[field]["actor"]["revision"] = serde_json::json!(2),
                 _ => unreachable!(),
             }
+
             let replacement =
                 super::super::source::LiveSourceRow::encode(&serde_json::from_value(value)?)?;
             let mut mutation = prepared(fixture.session.id(), Some(&current_head), vec![])?;
@@ -920,6 +2270,92 @@ async fn captured_history_prefix_survives_later_event_and_metadata_commits() -> 
 }
 
 #[tokio::test]
+async fn committed_observation_pages_skip_control_windows_without_losing_progress() -> TestResult {
+    use crate::live_ledger::completion::{
+        LiveChannelControlOutcome, LiveCompletionEvent, LiveCompletionRecord, LiveCompletionText,
+    };
+    use crate::live_ledger::history::{LiveObservationHistoryQuery, read_observation_page};
+    use meerkat_contracts::wire::live_observation::{
+        LiveObservationCoverage, LiveObservationFilter, LiveObservationOwner,
+        LiveObservationWireCodecV1,
+    };
+    use meerkat_core::live_execution::LiveChannelId;
+    use meerkat_core::live_observation::LiveObservationSeq;
+
+    for backend in backends() {
+        let fixture = Fixture::new(backend).await?;
+        let mut records = Vec::new();
+        for sequence in 1..=270 {
+            records.push(if [2, 269].contains(&sequence) {
+                observation(sequence, &format!("exact {sequence}\n\\\0"))?
+            } else {
+                LiveLedgerRecord::Completion(LiveCompletionRecord {
+                    format: LiveLedgerFormatV1::V1,
+                    session_id: fixture.session.id().clone(),
+                    channel_id: LiveChannelId::new("voice"),
+                    sequence: LiveObservationSeq::new(sequence)?,
+                    event: LiveCompletionEvent::ChannelControl {
+                        outcome: LiveChannelControlOutcome::RecoveryFenced,
+                        diagnostic: LiveCompletionText::new("control")?,
+                    },
+                })
+            });
+        }
+        // Individual real CAS batches stay inside the writer's bounded window.
+        for chunk in records.chunks(100) {
+            let before = fixture.ops()?.load_live_head(fixture.session.id()).await?;
+            fixture
+                .ops()?
+                .commit_live_ledger(
+                    prepared(fixture.session.id(), before.as_ref(), chunk.to_vec())?,
+                    current_fence(),
+                )
+                .await?;
+        }
+        let captured = fixture
+            .ops()?
+            .load_live_head(fixture.session.id())
+            .await?
+            .ok_or("head")?;
+        fixture
+            .ops()?
+            .commit_live_ledger(
+                prepared(
+                    fixture.session.id(),
+                    Some(&captured),
+                    vec![observation(271, "later")?],
+                )?,
+                current_fence(),
+            )
+            .await?;
+        let mut cursor = None;
+        for expected in [2, 269] {
+            let page = read_observation_page(
+                fixture.ops()?,
+                LiveObservationHistoryQuery {
+                    owner: LiveObservationOwner::Session {
+                        session_id: fixture.session.id().clone(),
+                    },
+                    filter: LiveObservationFilter::AllChannels {},
+                    head: captured.reference.clone(),
+                    coverage: LiveObservationCoverage::CompleteAcceptedPrefix,
+                    cursor,
+                    limit: 1,
+                },
+            )
+            .await?;
+            assert_eq!(page.records.len(), 1);
+            assert_eq!(page.records[0].sequence.get(), expected);
+            assert_eq!(page.has_more, expected == 2);
+            LiveObservationWireCodecV1::encode_reply(&page)?;
+            cursor = page.next_cursor;
+        }
+        assert!(cursor.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_middle_of_atomic_batch_is_not_a_historical_head_even_with_its_real_prefix_hash()
 -> TestResult {
     use crate::store::live_history::{LiveHistoryReadError, LiveHistoryReadRequest};
@@ -962,7 +2398,7 @@ async fn head_and_events_commit_together_without_changing_actor_authority() -> T
         let ops = fixture.ops()?;
         assert_eq!(
             ops.ledger_write_profile(),
-            LiveLedgerWriteProfile::AtomicHeadEventsSources
+            LiveLedgerWriteProfile::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
         );
         let change = prepared(
             fixture.session.id(),

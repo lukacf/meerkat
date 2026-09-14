@@ -192,6 +192,9 @@ pub struct ResolvedAdmission {
     requires_active_pre_admission: bool,
     authority: MachineAdmissionAuthority,
     execution_capability: Option<RuntimeIngressExecutionCapability>,
+    live_validation: Option<crate::live_ledger::authority::LiveInputAdmissionValidation>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_live: Option<Box<crate::live_ledger::authority::store::PendingLiveAdmission>>,
 }
 
 impl ResolvedAdmission {
@@ -221,7 +224,33 @@ impl ResolvedAdmission {
                     input_id, lane, plan,
                 )
             }),
+            live_validation: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_live: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_pending_live(
+        mut self,
+        pending: Box<crate::live_ledger::authority::store::PendingLiveAdmission>,
+    ) -> Self {
+        self.live_validation = Some(pending.validation());
+        self.pending_live = Some(pending);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_pending_live(
+        &mut self,
+    ) -> Option<Box<crate::live_ledger::authority::store::PendingLiveAdmission>> {
+        self.pending_live.take()
+    }
+
+    pub(crate) fn live_validation(
+        &self,
+    ) -> Option<&crate::live_ledger::authority::LiveInputAdmissionValidation> {
+        self.live_validation.as_ref()
     }
 
     pub(crate) fn coarse_flags(&self) -> CoarseAdmissionFlags {
@@ -341,11 +370,16 @@ pub enum RejectReason {
         /// Description of the violation.
         detail: String,
     },
+    /// Ordinary ingress cannot manufacture the joint Live admission handoff.
+    LiveRequestRequiresGrant,
 }
 
 impl fmt::Display for RejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LiveRequestRequiresGrant => {
+                f.write_str("Live requests require generated, atomic grant-backed admission")
+            }
             Self::NotReady { state } => {
                 write!(f, "runtime not accepting input while in state: {state}")
             }

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NewType, NotRequired, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
+from .generated.types import TranscriptUserRole as TranscriptUserRole
 from .generated.types import (
     AttentionBindingRequest as AttentionBindingRequest,
     AttentionBindingResult as AttentionBindingResult,
@@ -73,6 +74,8 @@ from .generated.types import (
     MobMemberListEntryWire as MobMemberListEntryWire,
     MobMemberHistoryParams as MobMemberHistoryParams,
     MobMemberHistoryResult as MobMemberHistoryResult,
+    MobMemberLiveObservationsParams as MobMemberLiveObservationsParams,
+    MobMemberLiveObservationsResult as MobMemberLiveObservationsResult,
     MobMemberLiveChannelParams as MobMemberLiveChannelParams,
     MobMemberLiveControlParams as MobMemberLiveControlParams,
     MobMemberLiveOpenParams as MobMemberLiveOpenParams,
@@ -386,13 +389,6 @@ sources, pass any string (including ``""``) to set an explicit prompt, or pass
 # and server-owned provenance that an input constructor does not expose.
 SessionContentBlock = WireContentBlock
 SessionContentInput = WireContentInput
-
-TranscriptUserRole = Literal[
-    "conversational",
-    "compaction_summary",
-    "injected_context",
-]
-
 
 @dataclass(frozen=True, slots=True)
 class BlobPayload:

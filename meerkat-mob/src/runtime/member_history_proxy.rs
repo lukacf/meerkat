@@ -25,6 +25,64 @@ use crate::machines::mob_machine as mob_dsl;
 /// DEC-P6E-24: the `ReadMemberHistory` bridge budget per page.
 pub(crate) const HISTORY_BRIDGE_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone)]
+pub struct MemberLiveObservationsDomain {
+    pub page: meerkat_contracts::wire::live_observation::LiveObservationPage,
+    pub placement: Option<mob_dsl::HostId>,
+    pub provenance: WireProjectionProvenance,
+}
+
+pub(crate) async fn read_remote_member_live_observations(
+    bridge: &Arc<MobSupervisorBridge>,
+    peer: &TrustedPeerDescriptor,
+    placement: mob_dsl::HostId,
+    expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+    query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+) -> Result<MemberLiveObservationsDomain, MobError> {
+    let owner = meerkat_contracts::wire::live_observation::LiveObservationOwner::Member {
+        session_id: meerkat_core::SessionId::parse(&expected_member.member_session_id).map_err(
+            |error| MobError::Internal(format!("invalid retained Live member session: {error}")),
+        )?,
+        mob_id: expected_member.mob_id.clone(),
+        agent_identity: expected_member.agent_identity.clone(),
+    };
+    let authority = bridge.authority().await;
+    let supervisor = bridge.supervisor_spec_for_recipient(peer).await?;
+    let command = BridgeCommand::ReadMemberLiveObservations(
+        meerkat_contracts::wire::supervisor_bridge::BridgeMemberLiveObservationPageRequest {
+            supervisor: supervisor.into(),
+            epoch: authority.epoch,
+            protocol_version: BridgeProtocolVersion::V7,
+            expected_member,
+            query: query.clone(),
+        },
+    );
+    let _ = bridge.trust_recipient(peer).await?;
+    let value = bridge
+        .send_bridge_command(peer, &command, HISTORY_BRIDGE_TIMEOUT)
+        .await?;
+    let page = super::bridge_protocol::decode_bridge_payload(
+        &command,
+        value,
+        "read member Live observations",
+    )?;
+    meerkat_contracts::wire::live_observation::LiveObservationWireCodecV1::validate_page_response(
+        &page, &owner, &query,
+    )
+    .map_err(|error| MobError::BridgeCommandRejected {
+        cause: super::bridge_protocol::BridgeRejectionCause::LiveObservationRead {
+            failure:
+                meerkat_contracts::wire::live_observation::LiveObservationReadFailure::Integrity,
+        },
+        reason: format!("invalid remote Live observation page: {error}"),
+    })?;
+    Ok(MemberLiveObservationsDomain {
+        page,
+        placement: Some(placement),
+        provenance: WireProjectionProvenance::HostClaimed,
+    })
+}
+
 /// Domain carrier for one member-history page (local or remote — one
 /// shape). `page` IS the shared wire body: pagination facts live inside it
 /// (one owner); `generation` is the placement-side transcript-domain fact.

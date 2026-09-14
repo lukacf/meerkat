@@ -1027,15 +1027,15 @@ pub(crate) async fn handle_live_open_routed(
         Ok(p) => p,
         Err(resp) => return resp.into(),
     };
+    if let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
+        parsed.profile_id.as_ref(),
+        parsed.execution_identity.as_ref(),
+        parsed.turning_mode,
+        parsed.seed_max_chars,
+    ) {
+        return RpcResponse::error(id, error::INVALID_PARAMS, error.to_string()).into();
+    }
     if let Some(profile) = parsed.profile_id.as_ref() {
-        if let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
-            Some(profile),
-            parsed.execution_identity.as_ref(),
-            parsed.turning_mode,
-            parsed.seed_max_chars,
-        ) {
-            return RpcResponse::error(id, error::INVALID_PARAMS, error.to_string()).into();
-        }
         let session_id = match SessionId::parse(&parsed.session_id) {
             Ok(session_id) => session_id,
             Err(error) => {

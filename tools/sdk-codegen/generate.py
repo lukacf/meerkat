@@ -205,6 +205,8 @@ MOB_RPC_CONTRACT_TYPES = [
     # Phase 7 (DEC-P7A-1/W-A8): the multi-host console verb contracts.
     "MobMemberHistoryParams",
     "MobMemberHistoryResult",
+    "MobMemberLiveObservationsParams",
+    "MobMemberLiveObservationsResult",
     "WireMemberHistoryPageBody",
     "MobHostsResult",
     "MobHostStatus",
@@ -546,6 +548,8 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     # dangling references or opaque maps in generated SDKs.
     "BindingId",
     "ModelFallbackTrigger",
+    "ModelInteractionKind",
+    "ContinuousLiveInputError",
     "MeerkatSchema",
     "PortableMcpDecl",
     "PortableSystemPrompt",
@@ -762,12 +766,16 @@ def _schema_root_with_local_defs(root_schema: dict[str, Any], schema: dict[str, 
 
 
 SESSION_TRANSCRIPT_SCHEMA_ROOTS = {
+    "TranscriptUserRole",
     "TranscriptRewriteReason",
     "TranscriptRewriteSelection",
     "WireTranscriptReplacement",
 }
 
+LIVE_OBSERVATION_SCHEMA_ROOTS = {"MobMemberLiveObservationsResult"}
+
 PUBLIC_TRANSITIVE_SCHEMA_ROOTS = {
+    *LIVE_OBSERVATION_SCHEMA_ROOTS,
     "WireAssistantBlock",
     # Run-result accounting: its usage rows are the whole point of the block,
     # so promoting the block alone would leave `usage` / `usage_total` widened
@@ -1366,6 +1374,7 @@ def _promote_inline_object_defs(
     root: dict[str, Any],
     parent_names: list[str],
     dedupe_candidate_names: list[str],
+    external_parser_names: set[str] | None = None,
 ) -> dict[str, list[Any]]:
     """Promote inline object property schemas in `root` to named `$defs`.
 
@@ -1462,6 +1471,15 @@ def _promote_inline_object_defs(
             continue
         seen.add(parent)
         schema = _lookup_named_schema(root, parent)
+        if parent in (external_parser_names or set()) and _one_of_external_tagged_variants(schema) is not None:
+            for variant in schema["oneOf"]:
+                properties = variant.get("properties", {})
+                for prop in list(properties):
+                    if _is_inline_object_payload(properties[prop]):
+                        properties[prop] = promote_target(
+                            properties[prop], f"{parent}.{prop}",
+                            f"{parent}{_pascal_case(prop)}Payload",
+                        )
         properties = schema.get("properties") if isinstance(schema, dict) else None
         if not isinstance(properties, dict):
             continue
@@ -1517,7 +1535,13 @@ def _build_contract_schema_roots(
     }
     roster = _sdk_contract_type_roster()
     params_report = _promote_inline_object_defs(params_schema, roster, roster)
-    wire_report = _promote_inline_object_defs(wire_schema, roster, roster)
+    external_parsers = {
+        name for name, kind in _wire_parser_closure(wire_schema, WIRE_READ_PARSER_ROOT_TYPES).items()
+        if kind == "external"
+    }
+    wire_report = _promote_inline_object_defs(
+        wire_schema, [*roster, *sorted(external_parsers)], roster, external_parsers
+    )
     overlap = set(params_report["minted"]) & set(wire_report["minted"])
     if overlap:
         raise RuntimeError(
@@ -1583,6 +1607,12 @@ WORKGRAPH_PARSER_ROOT_TYPES = [
     "AttentionListResult",
 ]
 
+WIRE_READ_PARSER_ROOT_TYPES = [
+    *WORKGRAPH_PARSER_ROOT_TYPES,
+    *sorted(LIVE_OBSERVATION_SCHEMA_ROOTS),
+    "TranscriptUserRole",
+]
+
 
 def _flat_string_enum_values(schema: Any) -> list[str] | None:
     if not isinstance(schema, dict):
@@ -1610,6 +1640,8 @@ def _flat_string_enum_values(schema: Any) -> list[str] | None:
 
 
 def _classify_parser_schema(schema_root: dict[str, Any], schema: dict[str, Any]) -> str:
+    if _one_of_external_tagged_variants(schema) is not None:
+        return "external"
     if _one_of_typed_dict_variants(schema_root, schema) is not None:
         return "union"
     if _flat_string_enum_values(schema) is not None:
@@ -1644,6 +1676,7 @@ def _ref_is_named(
         isinstance(resolved.get("properties"), dict)
         or _one_of_typed_dict_variants(root, resolved) is not None
         or _flat_string_enum_values(resolved) is not None
+        or _one_of_external_tagged_variants(resolved) is not None
     )
 
 
@@ -1691,7 +1724,7 @@ def _wire_parser_closure(root: dict[str, Any], root_types: list[str]) -> dict[st
             continue
         schema = _lookup_named_schema(root, name)
         if not isinstance(schema, dict) or not schema:
-            raise KeyError(f"workgraph parser type `{name}` not found in schema root")
+            raise KeyError(f"wire parser type `{name}` not found in schema root")
         local_defs = set(schema.get("$defs", {}).keys())
         schema_root = _schema_root_with_local_defs(root, schema)
         closure[name] = _classify_parser_schema(schema_root, schema)
@@ -1764,7 +1797,7 @@ def _py_wire_expr(
             kind = closure.get(ref_name or "")
             if kind == "struct":
                 return f"{ref_name}.from_wire({value})"
-            if kind in ("union", "enum"):
+            if kind in ("union", "enum", "external"):
                 return f"{_py_parser_fn_name(ref_name or '')}({value})"
             raise KeyError(f"parser closure is missing referenced type `{ref_name}` at {ctx}")
         return _py_wire_expr(root, resolved, value, ctx, local_defs, closure, depth)
@@ -1783,17 +1816,18 @@ def _py_wire_expr(
         case "boolean":
             return f"_expect_wire_bool({value}, {ctx!r})"
         case "integer":
-            return f"_expect_wire_int({value}, {ctx!r})"
+            return f"_expect_wire_int({value}, {ctx!r}, {field_schema.get('minimum')!r}, {field_schema.get('maximum')!r})"
         case "number":
             return f"_expect_wire_number({value}, {ctx!r})"
         case "array":
+            array = f"_expect_wire_list({value}, {ctx!r}, {field_schema.get('minItems')!r}, {field_schema.get('maxItems')!r})"
             var = f"_item{depth or ''}"
             inner = _py_wire_expr(
                 root, field_schema.get("items"), var, f"{ctx}[]", local_defs, closure, depth + 1
             )
             if inner == var:
-                return f"list(_expect_wire_list({value}, {ctx!r}))"
-            return f"[{inner} for {var} in _expect_wire_list({value}, {ctx!r})]"
+                return f"list({array})"
+            return f"[{inner} for {var} in {array}]"
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
@@ -1828,8 +1862,13 @@ def _python_from_wire_method(
         "        (INVALID_RESPONSE) on missing or mistyped fields.",
         '        """',
         f"        data = _expect_wire_object(value, {name!r})",
-        "        return cls(",
     ]
+    if _lookup_named_schema(schema_root, name).get("additionalProperties") is False:
+        lines.extend([
+            f"        if set(data) - set({tuple(properties)!r}):",
+            f"            raise _wire_parse_error({name!r}, 'unknown field')",
+        ])
+    lines.append("        return cls(")
     for field_name, field_schema in properties.items():
         py_name = _python_identifier(field_name)
         ctx = f"{name}.{field_name}"
@@ -1867,6 +1906,28 @@ def _python_alias_parsers(
         local_defs = set(schema.get("$defs", {}).keys())
         schema_root = _schema_root_with_local_defs(root, schema)
         fn = _py_parser_fn_name(name)
+        if kind == "external":
+            variants = _one_of_external_tagged_variants(schema)
+            if variants is None:
+                raise KeyError(f"invalid external enum parser schema `{name}`")
+            units = tuple(tag for variant_kind, tag, _ in variants if variant_kind == "unit")
+            lines = [
+                f'def {fn}(value: Any, context: str = {name!r}) -> "{name}":',
+                "    if isinstance(value, str):",
+                f"        return _expect_wire_enum(value, {units!r}, context)",
+                "    data = _expect_wire_object(value, context)",
+            ]
+            for variant_kind, tag, payload in variants:
+                if variant_kind != "payload":
+                    continue
+                expr = _py_wire_expr(schema_root, payload, f"data[{tag!r}]", f"{name}.{tag}", local_defs, closure)
+                lines.extend([
+                    f"    if set(data) == {{{tag!r}}}:",
+                    f"        return {{{tag!r}: {expr}}}",
+                ])
+            lines.append("    raise _wire_parse_error(context, 'expected exactly one known enum variant')")
+            blocks.append("\n".join(lines) + "\n")
+            continue
         if kind == "enum":
             values = _flat_string_enum_values(schema) or []
             joined = ", ".join(repr(v) for v in values)
@@ -1894,6 +1955,11 @@ def _python_alias_parsers(
             variant_required = set(variant.get("required", []))
             variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
             lines.append(f"    if tag == {discriminator_value!r}:")
+            if variant.get("additionalProperties") is False:
+                lines.extend([
+                    f"        if set(data) - set({tuple(variant_props)!r}):",
+                    f"            raise _wire_parse_error({name!r}, 'unknown variant field')",
+                ])
             lines.append(
                 f"        parsed_{discriminator_value}: dict[str, Any] = {{{discriminator!r}: {discriminator_value!r}}}"
             )
@@ -1962,9 +2028,11 @@ def _expect_wire_bool(value: Any, context: str) -> bool:
     return value
 
 
-def _expect_wire_int(value: Any, context: str) -> int:
+def _expect_wire_int(value: Any, context: str, minimum: int | None = None, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise _wire_parse_error(context, "expected integer")
+    if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+        raise _wire_parse_error(context, "integer outside schema bounds")
     return value
 
 
@@ -1974,9 +2042,11 @@ def _expect_wire_number(value: Any, context: str) -> float:
     return float(value)
 
 
-def _expect_wire_list(value: Any, context: str) -> list[Any]:
+def _expect_wire_list(value: Any, context: str, minimum: int | None = None, maximum: int | None = None) -> list[Any]:
     if not isinstance(value, list):
         raise _wire_parse_error(context, "expected array")
+    if (minimum is not None and len(value) < minimum) or (maximum is not None and len(value) > maximum):
+        raise _wire_parse_error(context, "array length outside schema bounds")
     return value
 
 
@@ -2052,17 +2122,18 @@ def _ts_wire_expr(
         case "boolean":
             return f"expectWireBoolean({value}, {json.dumps(ctx)})"
         case "integer":
-            return f"expectWireInteger({value}, {json.dumps(ctx)})"
+            return f"expectWireInteger({value}, {json.dumps(ctx)}, {json.dumps(field_schema.get('minimum'))}, {json.dumps(field_schema.get('maximum'))})"
         case "number":
             return f"expectWireNumber({value}, {json.dumps(ctx)})"
         case "array":
+            array = f"expectWireArray({value}, {json.dumps(ctx)}, {json.dumps(field_schema.get('minItems'))}, {json.dumps(field_schema.get('maxItems'))})"
             var = f"entry{depth or ''}"
             inner = _ts_wire_expr(
                 root, field_schema.get("items"), var, f"{ctx}[]", local_defs, closure, depth + 1
             )
             if inner == var:
-                return f"expectWireArray({value}, {json.dumps(ctx)})"
-            return f"expectWireArray({value}, {json.dumps(ctx)}).map(({var}) => {inner})"
+                return array
+            return f"{array}.map(({var}) => {inner})"
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
@@ -2095,8 +2166,14 @@ def _typescript_struct_parser(
         f"/** Fail-closed wire parser for {name} (K21): throws MeerkatError(INVALID_RESPONSE). */",
         f"export function {_ts_parser_fn_name(name)}(value: unknown): {name} {{",
         f"  const data = expectWireObject(value, {json.dumps(name)});",
-        "  return {",
     ]
+    if schema.get("additionalProperties") is False:
+        lines.extend([
+            f"  if (Object.keys(data).some((key) => !{json.dumps(list(properties))}.includes(key))) {{",
+            f'    throw wireParseError({json.dumps(name)}, "unknown field");',
+            "  }",
+        ])
+    lines.append("  return {")
     for field_name, field_schema in properties.items():
         ctx = f"{name}.{field_name}"
         expr = _ts_wire_expr(
@@ -2133,6 +2210,32 @@ def _typescript_alias_parser(
     closure: dict[str, str],
 ) -> str:
     fn = _ts_parser_fn_name(name)
+    if kind == "external":
+        variants = _one_of_external_tagged_variants(schema)
+        if variants is None:
+            raise KeyError(f"invalid external enum parser schema `{name}`")
+        units = [tag for variant_kind, tag, _ in variants if variant_kind == "unit"]
+        lines = [
+            f"export function {fn}(value: unknown, context: string = {json.dumps(name)}): {name} {{",
+            '  if (typeof value === "string") {',
+            f"    return expectWireEnum(value, {json.dumps(units)}, context) as {name};",
+            "  }",
+            "  const data = expectWireObject(value, context);",
+        ]
+        for variant_kind, tag, payload in variants:
+            if variant_kind != "payload":
+                continue
+            expr = _ts_wire_expr(schema_root, payload, f"data[{json.dumps(tag)}]", f"{name}.{tag}", set(schema.get("$defs", {})), closure)
+            lines.extend([
+                f"  if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, {json.dumps(tag)})) {{",
+                f"    return {{ {json.dumps(tag)}: {expr} }};",
+                "  }",
+            ])
+        lines.extend([
+            '  throw wireParseError(context, "expected exactly one known enum variant");',
+            "}",
+        ])
+        return "\n".join(lines) + "\n"
     if kind == "enum":
         values = _flat_string_enum_values(schema) or []
         joined = ", ".join(json.dumps(v) for v in values)
@@ -2162,6 +2265,12 @@ def _typescript_alias_parser(
         variant_required = set(variant.get("required", []))
         variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
         lines.append(f"    case {json.dumps(discriminator_value)}:")
+        if variant.get("additionalProperties") is False:
+            lines.extend([
+                f"      if (Object.keys(data).some((key) => !{json.dumps(list(variant_props))}.includes(key))) {{",
+                f'        throw wireParseError({json.dumps(name)}, "unknown variant field");',
+                "      }",
+            ])
         lines.append("      return {")
         lines.append(f"        {discriminator}: {json.dumps(discriminator_value)},")
         for field_name, field_schema in variant_props.items():
@@ -2241,9 +2350,12 @@ function expectWireBoolean(value: unknown, context: string): boolean {
   return value;
 }
 
-function expectWireInteger(value: unknown, context: string): number {
+function expectWireInteger(value: unknown, context: string, minimum: number | null = null, maximum: number | null = null): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     throw wireParseError(context, "expected safe integer");
+  }
+  if ((minimum !== null && value < minimum) || (maximum !== null && value > maximum)) {
+    throw wireParseError(context, "integer outside schema bounds");
   }
   return value;
 }
@@ -2255,9 +2367,12 @@ function expectWireNumber(value: unknown, context: string): number {
   return value;
 }
 
-function expectWireArray(value: unknown, context: string): unknown[] {
+function expectWireArray(value: unknown, context: string, minimum: number | null = null, maximum: number | null = null): unknown[] {
   if (!Array.isArray(value)) {
     throw wireParseError(context, "expected array");
+  }
+  if ((minimum !== null && value.length < minimum) || (maximum !== null && value.length > maximum)) {
+    throw wireParseError(context, "array length outside schema bounds");
   }
   return value;
 }
@@ -3294,7 +3409,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     )
     _log_promotion_report("params", params_promotion)
     _log_promotion_report("wire", wire_promotion)
-    parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
+    parser_closure = _wire_parser_closure(wire_schema, WIRE_READ_PARSER_ROOT_TYPES)
     types_content += _PYTHON_WIRE_PARSE_PRELUDE + "\n"
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_python_dataclasses: set[str] = {"WireToolResult"}
@@ -3477,8 +3592,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
                 return
         external_variants = (
             _one_of_external_tagged_variants(schema)
-            if name
-            in {
+            if parser_closure.get(name) == "external" or name in {
                 "MemberBuildRejection",
                 "BridgeRejectionCause",
                 "BridgeOutboundTaintTarget",
@@ -3951,17 +4065,18 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         params_schema,
         SESSION_TRANSCRIPT_SCHEMA_ROOTS,
     ):
-        schema = _lookup_named_schema(params_schema, name)
+        root_schema = wire_schema if name in parser_closure else params_schema
+        schema = _lookup_named_schema(root_schema, name)
         if _is_plain_object_schema(schema):
             append_python_dataclass(
                 name,
-                params_schema,
+                root_schema,
                 f"Fork transcript replacement helper type for {name}.",
             )
         else:
             append_python_alias(
                 name,
-                params_schema,
+                root_schema,
                 f"Fork transcript replacement helper type for {name}.",
             )
     append_python_alias("WireImageOperationPhase", wire_schema, "Machine-owned image operation phase.")
@@ -4005,6 +4120,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         wire_schema,
         "Exact canonical transcript row used by member history.",
     )
+    for name in _named_schema_dependency_order(wire_schema, {*LIVE_OBSERVATION_SCHEMA_ROOTS, "TranscriptUserRole"}):
+        if _is_plain_object_schema(_lookup_named_schema(wire_schema, name)):
+            append_python_dataclass(name, wire_schema, f"Retained Live history type for {name}.")
+        else:
+            append_python_alias(name, wire_schema, f"Retained Live history type for {name}.")
     # K21: module-level fail-closed parsers for the workgraph union/enum
     # aliases (struct types carry `from_wire` classmethods inline).
     types_content += "\n\n" + _python_alias_parsers(wire_schema, parser_closure)
@@ -4015,7 +4135,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     )
     if missing_struct_parsers:
         raise RuntimeError(
-            "workgraph parser closure includes struct types emitted without a "
+            "wire parser closure includes struct types emitted without a "
             f"`from_wire` parser: {missing_struct_parsers}"
         )
     (output_dir / "types.py").write_text(types_content)
@@ -4140,7 +4260,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     params_schema, wire_schema, params_promotion, wire_promotion = _build_contract_schema_roots(
         schemas
     )
-    parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
+    parser_closure = _wire_parser_closure(wire_schema, WIRE_READ_PARSER_ROOT_TYPES)
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
     emitted_typescript_interfaces: set[str] = {"WireToolResult"}
     emitted_typescript_named_types: set[str] = {"WireToolResult"}
@@ -4251,8 +4371,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
                 return
         external_variants = (
             _one_of_external_tagged_variants(schema)
-            if name
-            in {
+            if parser_closure.get(name) == "external" or name in {
                 "MemberBuildRejection",
                 "BridgeRejectionCause",
                 "WireFlowTurnOutcome",
@@ -4558,6 +4677,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("SystemNoticeBlock", system_notice_root)
     append_typescript_alias("WireSessionMessage", wire_schema)
     append_typescript_alias("WireHistoryRow", wire_schema)
+
+    for name in _named_schema_dependency_order(wire_schema, {*LIVE_OBSERVATION_SCHEMA_ROOTS, "TranscriptUserRole"}):
+        if _is_plain_object_schema(_lookup_named_schema(wire_schema, name)):
+            append_typescript_interface(name, wire_schema)
+        else:
+            append_typescript_alias(name, wire_schema)
 
     # K21: fail-closed wire parsers for the workgraph read types (the
     # `parseInitResult` precedent from the web emission, applied to the

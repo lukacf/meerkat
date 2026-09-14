@@ -648,6 +648,8 @@ pub(crate) enum MeerkatMachineCommand {
     AcceptWithCompletion {
         session_id: SessionId,
         input: Input,
+        #[cfg(not(target_arch = "wasm32"))]
+        pending_live: Option<Box<crate::live_ledger::authority::store::PendingLiveAdmission>>,
         register_completion: bool,
         member_residency: MemberResidencyExpectation,
         expected_attachment: Option<RuntimeExecutorAttachmentWitness>,
@@ -868,6 +870,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveAdmissionIdempotency,
         ResolveAdmissionPlan,
         ResolveAdmissionValidation,
+        ResolveLiveAdmissionValidation,
         ResolveInputPublicLifecycle,
         ResolveInputPublicTerminalOutcome,
         ResolveTranscriptEditAdmission,
@@ -1378,6 +1381,7 @@ pub enum SupervisorBridgeCommandKind {
     HostStatus,
     IssueHostBindingDescriptor,
     MemberOperatorRequest,
+    ReadMemberLiveObservations,
 }
 
 impl SupervisorBridgeCommandKind {
@@ -1414,6 +1418,7 @@ impl SupervisorBridgeCommandKind {
         Self::HostStatus,
         Self::IssueHostBindingDescriptor,
         Self::MemberOperatorRequest,
+        Self::ReadMemberLiveObservations,
     ];
 
     /// Wire enum variant identifier this kind mirrors.
@@ -1435,6 +1440,7 @@ impl SupervisorBridgeCommandKind {
             Self::UnwireMember => "UnwireMember",
             Self::DeclareMemberOutboundTaint => "DeclareMemberOutboundTaint",
             Self::ReadMemberHistory => "ReadMemberHistory",
+            Self::ReadMemberLiveObservations => "ReadMemberLiveObservations",
             Self::PollMemberEvents => "PollMemberEvents",
             Self::OpenMemberLiveChannel => "OpenMemberLiveChannel",
             Self::CloseMemberLiveChannel => "CloseMemberLiveChannel",
@@ -1476,6 +1482,7 @@ impl SupervisorBridgeCommandKind {
             | Self::UnwireMember
             | Self::DeclareMemberOutboundTaint
             | Self::ReadMemberHistory
+            | Self::ReadMemberLiveObservations
             | Self::PollMemberEvents
             | Self::OpenMemberLiveChannel
             | Self::CloseMemberLiveChannel
@@ -1522,6 +1529,7 @@ impl SupervisorBridgeCommandKind {
             | Self::HardCancelMember
             | Self::CancelTrackedMemberInput
             | Self::ReadMemberHistory
+            | Self::ReadMemberLiveObservations
             | Self::PollMemberEvents
             // Phase 6b (§16): the live-channel family gained member-drain
             // arms served through the MemberLiveHost slot (ADJ-P6B-1); an

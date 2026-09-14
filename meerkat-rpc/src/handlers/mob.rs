@@ -3137,6 +3137,33 @@ pub async fn handle_member_history(
     }
 }
 
+pub async fn handle_member_live_observations(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberLiveObservationsParams =
+        match parse_params(params) {
+            Ok(params) => params,
+            Err(response) => return response.with_id(id),
+        };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    match state
+        .mob_member_live_observations(
+            &mob_id,
+            AgentIdentity::from(params.agent_identity.as_str()),
+            params.query,
+        )
+        .await
+    {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(error) => mob_call_error(id, &error),
+    }
+}
+
 pub async fn handle_hosts(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -3272,14 +3299,12 @@ pub async fn handle_member_live_open(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    if let Some(profile) = params.profile_id.as_ref()
-        && let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
-            Some(profile),
-            None,
-            params.turning_mode,
-            None,
-        )
-    {
+    if let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
+        params.profile_id.as_ref(),
+        None,
+        params.turning_mode,
+        None,
+    ) {
         return RpcResponse::error(id, crate::error::INVALID_PARAMS, error.to_string());
     }
     let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
@@ -3398,6 +3423,36 @@ mod tests {
         AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobStorage,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn public_live_member_open_rejects_invalid_intent_before_mob_lookup() {
+        use meerkat::session_runtime::live_orchestration::LiveOpenIntentError;
+
+        let state = MobMcpState::new_in_memory();
+        for (selector, mode) in [
+            (None, "continuous"),
+            (Some("public-voice"), "provider_managed"),
+            (Some("public-voice"), "explicit_commit"),
+        ] {
+            let mut params = serde_json::json!({
+                "mob_id": "absent-open-intent-fixture",
+                "agent_identity": "absent-member",
+                "turning_mode": mode,
+            });
+            if let Some(profile) = selector {
+                params["profile_id"] = serde_json::json!(profile);
+            }
+            let raw = raw_params(params);
+            let response = handle_member_live_open(Some(RpcId::Num(1)), Some(&raw), &state).await;
+            let error = response.error.expect("invalid intent must fail");
+            assert_eq!(error.code, crate::error::INVALID_PARAMS);
+            assert_eq!(
+                error.message,
+                LiveOpenIntentError::UnsupportedTurningMode.to_string(),
+                "invalid intent must not reach mob/member lookup"
+            );
+        }
+    }
 
     fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {
         let mut profiles = BTreeMap::new();

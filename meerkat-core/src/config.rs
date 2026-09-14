@@ -1222,6 +1222,9 @@ pub struct CustomModelConfig {
     /// Typed provider that serves this model. Parsed fail-closed at config
     /// ingress: unknown provider names reject the entry.
     pub provider: crate::Provider,
+    /// Omission preserves text execution; continuous models require a Live profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_kind: Option<crate::model_profile::ModelInteractionKind>,
     /// Human-readable display name. Defaults to the model id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -2721,6 +2724,15 @@ pub struct ConfigDelta(pub serde_json::Value);
 /// Configuration errors
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("config source does not support coherent document observation")]
+    CoherentObservationUnsupported,
+
+    #[error("observed config document is invalid")]
+    InvalidDocumentObservation,
+
+    #[error("observed config document set does not cover the resolved realm chain")]
+    IncompleteDocumentObservation,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

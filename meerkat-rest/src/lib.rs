@@ -1932,6 +1932,16 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .acknowledge_finalized_compaction_projections(&self.session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn checkpoint_committed_session_snapshot(
         &mut self,
         session_snapshot: Arc<Vec<u8>>,
@@ -2413,6 +2423,10 @@ pub fn router(state: AppState) -> Router {
             get(mob_member_history),
         )
         .route("/mob/{id}/hosts", get(mob_hosts))
+        .route(
+            "/mob/{id}/members/{agent_identity}/live-observations",
+            get(mob_member_live_observations),
+        )
         .route("/mob/{id}/route-installs", get(mob_route_installs));
 
     #[cfg(feature = "mcp")]
@@ -3282,6 +3296,24 @@ async fn mob_member_history(
         .mob_member_history(&mob_id, identity, query.from_index, query.limit)
         .await
         .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    Ok(Json(result))
+}
+
+#[cfg(feature = "mob")]
+async fn mob_member_live_observations(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+    Query(query): Query<meerkat_contracts::wire::live_observation::LiveObservationPageQuery>,
+) -> Result<Json<meerkat_contracts::wire::MobMemberLiveObservationsResult>, Response> {
+    let result = state
+        .mob_state
+        .mob_member_live_observations(
+            &meerkat_mob::MobId::from(id.as_str()),
+            meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
+            query,
+        )
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?;
     Ok(Json(result))
 }
 
@@ -4490,6 +4522,7 @@ fn completion_outcome_to_api_result(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => Err(callback_pending_api_error(
             session_id,
             realm,
@@ -4500,6 +4533,7 @@ fn completion_outcome_to_api_result(
         )),
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
             pending_tool_calls,
+            ..
         } => Err(callback_batch_pending_api_error(
             session_id,
             realm,
@@ -9426,6 +9460,7 @@ mod tests {
 
         let primitive =
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: RunApplyBoundary::RunCheckpoint,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
                     role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
@@ -10960,6 +10995,7 @@ mod tests {
         drop(registration_lock);
         let primitive =
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: RunApplyBoundary::Immediate,
                 appends: Vec::new(),
                 contributing_input_ids: vec![input_id],
@@ -11155,6 +11191,7 @@ mod tests {
 
         let primitive =
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: RunApplyBoundary::Immediate,
                 appends: Vec::new(),
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
@@ -12080,6 +12117,102 @@ mod tests {
             .expect("create REST console test mob");
         state.mob_insert_handle(mob_id.clone(), handle).await;
         mob_id
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn public_live_history_rest_dispatch_is_read_only_and_query_validated() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("history-viewer").expect("principal"),
+            ),
+        );
+        let mob_id = insert_console_test_mob(&state.mob_state, "rest-live-history").await;
+        let app = router(state);
+        let path = format!("/mob/{}/members/speaker/live-observations", mob_id.as_str());
+        for query in [
+            "",
+            "?limit=1&channel_id=channel-a",
+            "?limit=256&cursor=opaque",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("{path}{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "valid query: {query}"
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["code"], "SCOPE_DENIED");
+            assert_eq!(payload["details"]["required"], "read_history");
+        }
+        for query in [
+            "limit=0",
+            "limit=257",
+            "limit=1.5",
+            "limit=-1",
+            "cursor=",
+            "channel_id=",
+            "grant=forged",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("{path}?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(&path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        for control in ["open", "close", "control", "send-input", "commit-input"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/mob/{}/members/speaker/live/{control}",
+                            mob_id.as_str()
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     /// Phase 7 (T-A7): the three observation GETs serve typed payloads on
@@ -14818,6 +14951,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
+                callback_identity: None,
             },
             &session_id,
             &realm,

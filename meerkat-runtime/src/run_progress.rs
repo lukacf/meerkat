@@ -822,7 +822,7 @@ pub(crate) async fn apply_with_execution_start_bound(
     staged_at: Instant,
     bound: Duration,
 ) -> Result<CoreApplyOutput, CoreExecutorError> {
-    let apply_future = executor.apply(run_id.clone(), primitive);
+    let apply_future = executor.apply_with_execution_authority(run_id.clone(), primitive);
     let mut apply_future = std::pin::pin!(apply_future);
 
     let deadline = crate::tokio::time::sleep(bound.saturating_sub(staged_at.elapsed()));
@@ -996,6 +996,7 @@ mod tests {
 
     fn staged_primitive() -> RunPrimitive {
         RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+            execution_authority: Default::default(),
             boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
             appends: Vec::new(),
             contributing_input_ids: Vec::new(),

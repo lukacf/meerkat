@@ -101,10 +101,59 @@ pub enum LiveLedgerWriteProfile {
     AtomicHeadEvents,
     /// Source-row CAS is included, but ordinary input admission remains separate.
     AtomicHeadEventsSources,
+    /// Also compares the exact ordinary runtime lifecycle row in the same
+    /// transaction. This still does not declare ordinary input admission.
+    AtomicHeadEventsSourcesLifecycle,
+    /// Also inserts the exact new ordinary input in that transaction. The
+    /// insertion requires absence; it never overwrites a current input row.
+    /// This does not declare joint run staging or physical effect permission.
+    AtomicHeadEventsSourcesLifecycleAdmission,
+    /// Also CAS-updates the admitted input and ordinary lifecycle alongside
+    /// its generated Live run scope. This is not physical effect permission.
+    AtomicHeadEventsSourcesLifecycleAdmissionStage,
+    /// Also compares an unchanged ordinary input and lifecycle during scope
+    /// restoration and effect claims, including replay checks.
+    AtomicHeadEventsSourcesLifecycleAdmissionStageExecution,
 }
 
-/// A physical backend supplies both domains from ONE snapshot/lock. This
-/// capability does not advertise atomic Live admission or mutation support.
+impl LiveLedgerWriteProfile {
+    pub const fn supports_lifecycle_fence(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicHeadEventsSourcesLifecycle
+                | Self::AtomicHeadEventsSourcesLifecycleAdmission
+                | Self::AtomicHeadEventsSourcesLifecycleAdmissionStage
+                | Self::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
+        )
+    }
+
+    pub const fn supports_input_admission(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicHeadEventsSourcesLifecycleAdmission
+                | Self::AtomicHeadEventsSourcesLifecycleAdmissionStage
+                | Self::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
+        )
+    }
+
+    pub const fn supports_input_staging(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicHeadEventsSourcesLifecycleAdmissionStage
+                | Self::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
+        )
+    }
+
+    pub const fn supports_execution_fence(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
+        )
+    }
+}
+
+/// A physical backend supplies both domains from ONE snapshot/lock. The read
+/// capability alone does not advertise Live admission or mutation support.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait RuntimeLiveLedgerOps: Send + Sync {
@@ -145,8 +194,18 @@ pub trait RuntimeLiveLedgerOps: Send + Sync {
         request: &LiveCompositeReadRequest,
     ) -> Result<Option<LiveCompositeCapture>, RuntimeStoreError>;
 
-    /// Prepared component persistence is distinct from ordinary input admission.
     /// Unknown backends fail closed instead of attempting independent writes.
+    /// A present `expected_lifecycle` compares either explicit row absence or
+    /// the raw row version for the same session inside the writing transaction,
+    /// before any publication. `None` means no lifecycle comparison, not absence.
+    /// Profiles declaring `supports_lifecycle_fence` enforce this fence.
+    /// Only a sealed `ArchiveIngressFence` may target an absent actor: it
+    /// closes both generated ingresses with no event, source, or input mutation.
+    /// Ordinary component writes retain their actor-presence requirement.
+    /// `supports_input_admission` additionally requires an absent input row and
+    /// exact atomic insertion of `input_admission`, including on replay.
+    /// `supports_input_staging` additionally requires exact input-row CAS,
+    /// lifecycle replacement and Live scope publication in that transaction.
     async fn commit_live_ledger(
         &self,
         _prepared: crate::live_ledger::write::PreparedLiveLedgerCommit,

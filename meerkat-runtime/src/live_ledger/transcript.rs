@@ -30,6 +30,39 @@ pub struct LiveHeadReference {
 #[serde(transparent)]
 pub struct LiveLedgerPrefixDigest([u8; 32]);
 
+impl std::fmt::Display for LiveLedgerPrefixDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("sha256:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for LiveLedgerPrefixDigest {
+    type Err = LiveObservationEncodingError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let digest = value
+            .strip_prefix("sha256:")
+            .ok_or(LiveObservationEncodingError::InvalidPrefixDigest)?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(LiveObservationEncodingError::InvalidPrefixDigest);
+        }
+        let mut bytes = [0; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                .map_err(|_| LiveObservationEncodingError::InvalidPrefixDigest)?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
 impl LiveLedgerPrefixDigest {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0

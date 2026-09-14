@@ -9903,6 +9903,473 @@ impl MeerkatMachine {
             .await
     }
 
+    /// Commit a reserved Live source through the owned ordinary-ingress path.
+    /// This session entry does not bypass placed-member residency fencing or
+    /// authorize an unscoped primitive. Source replay is a separate read/join.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn commit_live_input_admission<Member: PartialEq + serde::Serialize>(
+        &self,
+        source: meerkat_core::live_execution::request::LiveSourceKey,
+        grant: &crate::live_grant::LiveExecutionGrant<Member>,
+    ) -> Result<
+        (
+            crate::live_request::AdmittedLiveExecutionAuthority,
+            Option<crate::completion::CompletionHandle>,
+        ),
+        RuntimeDriverError,
+    > {
+        let session_id = source.session_id().clone();
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .ok_or_else(|| RuntimeDriverError::NotFound {
+                    runtime_id: LogicalRuntimeId::for_session(&session_id),
+                })?
+                .driver
+                .clone()
+        };
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        let pending = {
+            let driver = driver.lock().await;
+            let DriverEntry::Persistent(driver) = &*driver else {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "Live admission requires joint persistent storage".into(),
+                });
+            };
+            driver
+                .prepare_live_input_admission(&source, grant, receipt_tx)
+                .await?
+        };
+        self.commit_pending_live_input_admission(session_id, pending, receipt_rx)
+            .await
+    }
+
+    /// Persist explicit work cancellation, including sources not yet reserved.
+    /// The returned intent is not a terminal outcome or proof of physical
+    /// cancellation. Voice close/interrupt do not call this operation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn cancel_live_request(
+        &self,
+        intent: meerkat_core::live_execution::request::LiveRequestCancelIntent,
+    ) -> Result<meerkat_core::live_execution::request::LiveRequestCancelIntent, RuntimeDriverError>
+    {
+        let owner = self
+            .live_request_owner_for_session(intent.source.session_id())
+            .await?;
+        let machine = self.clone();
+        let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
+        let completion = cleanup_spawner.spawn(async move {
+            let committed = owner.cancel_source(intent).await.map_err(|error| {
+                Self::live_request_execution_error("Live source cancellation", error)
+            })?;
+            if let Some(target) = &committed.target {
+                if let Some(hold) = owner
+                    .observe_cancelled_callback_hold(&target.request_id)
+                    .await
+                    .map_err(|error| {
+                        Self::live_request_execution_error("Live cancelled callback observation", error)
+                    })?
+                {
+                    crate::live_ledger::authority::store::request_completion::LiveRequestCompletionProgress::CancelledCallbackHeld(hold)
+                        .trace_recovery_hold(committed.intent.source.session_id(), &target.request_id);
+                    return Ok(committed.intent);
+                }
+                machine
+                    .cancel_input_if_present(
+                        committed.intent.source.session_id(),
+                        &target.input_id,
+                        format!("Live request cancellation: {:?}", committed.intent.reason),
+                    )
+                    .await?;
+            }
+            Ok(committed.intent)
+        });
+        completion.await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owned Live source cancellation ended without a result: {error}"
+            ))
+        })?
+    }
+
+    /// Retry retained admitted-source cancellation obligations from durable
+    /// generated state. This is an explicit host recovery pass, not a timer or
+    /// proof that in-flight effects have stopped.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn reconcile_live_request_cancellations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Vec<meerkat_core::live_execution::request::LiveRequestCancelIntent>,
+        RuntimeDriverError,
+    > {
+        let owner = self.live_request_owner_for_session(session_id).await?;
+        let machine = self.clone();
+        let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
+        let completion = cleanup_spawner.spawn(async move {
+            let pending = owner
+                .pending_source_cancellations()
+                .await
+                .map_err(|error| {
+                    Self::live_request_execution_error("Live cancellation recovery", error)
+                })?;
+            let mut delivered = Vec::with_capacity(pending.len());
+            for intent in pending {
+                delivered.push(machine.cancel_live_request(intent).await?);
+            }
+            Ok(delivered)
+        });
+        completion.await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owned Live cancellation recovery ended without a result: {error}"
+            ))
+        })?
+    }
+
+    /// Admit the exact committed callback batch as an exclusive continuation.
+    /// Historical acceptance does not mint callback application permission.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn commit_live_callback_input_admission(
+        &self,
+        source: meerkat_core::live_execution::request::LiveSourceKey,
+        results: crate::store::CommittedCallbackResultsObservation,
+    ) -> Result<
+        (
+            crate::live_request::AdmittedLiveExecutionAuthority,
+            Option<crate::completion::CompletionHandle>,
+        ),
+        RuntimeDriverError,
+    > {
+        let session_id = source.session_id().clone();
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .ok_or_else(|| RuntimeDriverError::NotFound {
+                    runtime_id: LogicalRuntimeId::for_session(&session_id),
+                })?
+                .driver
+                .clone()
+        };
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        let pending = {
+            let driver = driver.lock().await;
+            let DriverEntry::Persistent(driver) = &*driver else {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "Live callback admission requires joint persistent storage".into(),
+                });
+            };
+            driver
+                .prepare_live_callback_input_admission(&source, results, receipt_tx)
+                .await?
+        };
+        self.commit_pending_live_input_admission(session_id, pending, receipt_rx)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn commit_pending_live_input_admission(
+        &self,
+        session_id: SessionId,
+        pending: crate::live_ledger::authority::store::PendingLiveAdmission,
+        receipt_rx: tokio::sync::oneshot::Receiver<
+            crate::live_request::AdmittedLiveExecutionAuthority,
+        >,
+    ) -> Result<
+        (
+            crate::live_request::AdmittedLiveExecutionAuthority,
+            Option<crate::completion::CompletionHandle>,
+        ),
+        RuntimeDriverError,
+    > {
+        let input = pending.input().clone();
+        let result = self
+            .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                session_id,
+                input,
+                pending_live: Some(Box::new(pending)),
+                register_completion: true,
+                member_residency: MemberResidencyExpectation::PeerOnly,
+                expected_attachment: None,
+            })
+            .await?;
+        let (input_id, handle) = match result {
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome: AcceptOutcome::Accepted { input_id, .. },
+                handle,
+                ..
+            } => (input_id, handle),
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome: AcceptOutcome::Deduplicated { existing_id, .. },
+                handle,
+                ..
+            } => (existing_id, handle),
+            _ => {
+                return Err(RuntimeDriverError::Internal(
+                    "Live admission did not return an admitted or joined input".into(),
+                ));
+            }
+        };
+        let receipt = receipt_rx.await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "Live admission committed without returning its sealed receipt: {error}"
+            ))
+        })?;
+        if receipt.record().input_id() != &input_id {
+            return Err(RuntimeDriverError::Internal(
+                "Live admission receipt disagrees with the ordinary ingress result".into(),
+            ));
+        }
+        Ok((receipt, handle))
+    }
+
+    /// Restore a retained scope against the exact current durable input and
+    /// run. This neither starts execution nor grants a physical effect permit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn restore_live_run_scope(
+        &self,
+        scope_id: meerkat_core::execution_scope::RunEffectScopeId,
+        scope: meerkat_core::execution_scope::RunEffectScopeRecord,
+    ) -> Result<meerkat_core::execution_scope::ScopedRunAuthority, RuntimeDriverError> {
+        let owner = self
+            .live_request_owner_for_session(&scope.executor.session_id)
+            .await?;
+        owner
+            .restore_run_scope(scope_id, scope)
+            .await
+            .map_err(|error| Self::live_request_execution_error("Live scope restoration", error))
+    }
+
+    /// Claim one callback application against its admitted continuation scope.
+    /// This is permission custody, not evidence that ordinary results were applied.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn claim_live_callback_application(
+        &self,
+        scope: meerkat_core::execution_scope::ScopedRunAuthority,
+    ) -> Result<meerkat_core::execution_scope::ScopedCallbackApplicationPermit, RuntimeDriverError>
+    {
+        self.live_request_owner_for_session(&scope.record().executor.session_id)
+            .await?
+            .claim_callback_application(scope)
+            .await
+            .map_err(|error| {
+                Self::live_request_execution_error("Live callback application claim", error)
+            })
+    }
+
+    /// Claim one native effect against an existing sealed run scope. The trusted
+    /// host supplies its evaluated ordinary policy and atomic currentness fence.
+    /// This does not install a scope in an actor or enable a public Live profile.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn claim_live_effect(
+        &self,
+        scope: meerkat_core::execution_scope::ScopedRunAuthority,
+        effect_id: meerkat_core::ops::OperationId,
+        target: meerkat_core::execution_scope::ScopedEffectTarget,
+        policy: crate::live_ledger::LiveEffectPolicyObservation,
+    ) -> Result<
+        meerkat_core::execution_scope::ScopedEffectStartPermit<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        RuntimeDriverError,
+    > {
+        let owner = self
+            .live_request_owner_for_session(&scope.record().executor.session_id)
+            .await?;
+        owner
+            .claim_effect(scope, effect_id, target, policy)
+            .await
+            .map_err(|error| Self::live_request_execution_error("Live effect claim", error))
+    }
+
+    /// Claim the exact call evaluated by the ordinary outer dispatcher.
+    /// Neither target content nor policy revision can be supplied separately.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn claim_live_tool_effect(
+        &self,
+        scope: meerkat_core::execution_scope::ScopedRunAuthority,
+        effect_id: meerkat_core::ops::OperationId,
+        evaluation: meerkat_core::EvaluatedToolExecutionPolicy,
+    ) -> Result<
+        meerkat_core::execution_scope::ScopedEffectStartPermit<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        RuntimeDriverError,
+    > {
+        let target = evaluation.target().map_err(|error| {
+            RuntimeDriverError::Internal(format!("Live tool invocation identity: {error}"))
+        })?;
+        let policy = crate::live_ledger::LiveEffectPolicyObservation::from_dispatch_evaluation(
+            evaluation,
+        )
+        .map_err(|error| RuntimeDriverError::Internal(format!("Live tool policy: {error}")))?;
+        self.claim_live_effect(scope, effect_id, target, policy)
+            .await
+    }
+
+    /// Claim the exact physical model request evaluated against its immutable
+    /// selected-model policy. This does not install actor scope or validate an
+    /// adapter's dynamic route on its behalf.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn claim_live_model_effect(
+        &self,
+        scope: meerkat_core::execution_scope::ScopedRunAuthority,
+        effect_id: meerkat_core::ops::OperationId,
+        evaluation: meerkat_core::execution_scope::EvaluatedModelRequestPolicy,
+    ) -> Result<
+        meerkat_core::execution_scope::ScopedEffectStartPermit<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        RuntimeDriverError,
+    > {
+        let target = evaluation.target().clone();
+        let policy =
+            crate::live_ledger::LiveEffectPolicyObservation::from_model_evaluation(evaluation);
+        self.claim_live_effect(scope, effect_id, target, policy)
+            .await
+    }
+
+    /// Publish physical feedback for an exact retained claim, including after
+    /// its run has terminated. Content never reconstitutes start permission.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn settle_live_effect(
+        &self,
+        claim: meerkat_core::execution_scope::ScopedEffectClaimRecord<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        outcome: crate::live_ledger::completion::LivePhysicalEffectOutcome,
+        diagnostic: crate::live_ledger::completion::LiveCompletionText<
+            { crate::live_ledger::completion::LIVE_TERMINAL_DIAGNOSTIC_MAX_BYTES },
+        >,
+    ) -> Result<meerkat_core::live_observation::LiveObservationSeq, RuntimeDriverError> {
+        let token_accounting =
+            meerkat_core::execution_scope::ScopedEffectTokenAccounting::for_unmeasured_target(
+                &claim.target,
+            );
+        self.settle_live_effect_with_token_accounting(claim, outcome, token_accounting, diagnostic)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn settle_live_effect_with_token_accounting(
+        &self,
+        claim: meerkat_core::execution_scope::ScopedEffectClaimRecord<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        outcome: crate::live_ledger::completion::LivePhysicalEffectOutcome,
+        token_accounting: meerkat_core::execution_scope::ScopedEffectTokenAccounting,
+        diagnostic: crate::live_ledger::completion::LiveCompletionText<
+            { crate::live_ledger::completion::LIVE_TERMINAL_DIAGNOSTIC_MAX_BYTES },
+        >,
+    ) -> Result<meerkat_core::live_observation::LiveObservationSeq, RuntimeDriverError> {
+        self.settle_live_effect_feedback(
+            crate::live_ledger::authority::store::settlement::LiveEffectFeedback::Observed {
+                claim,
+                outcome,
+                token_accounting,
+            },
+            diagnostic,
+        )
+        .await
+    }
+
+    /// Record local noninvocation by consuming custody of the unused permit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn settle_live_effect_not_started(
+        &self,
+        proof: meerkat_core::execution_scope::ScopedEffectNotStartedProof<
+            meerkat_core::execution_scope::ScopedEffectTarget,
+        >,
+        diagnostic: crate::live_ledger::completion::LiveCompletionText<
+            { crate::live_ledger::completion::LIVE_TERMINAL_DIAGNOSTIC_MAX_BYTES },
+        >,
+    ) -> Result<meerkat_core::live_observation::LiveObservationSeq, RuntimeDriverError> {
+        self.settle_live_effect_feedback(
+            crate::live_ledger::authority::store::settlement::LiveEffectFeedback::NotStarted(proof),
+            diagnostic,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn settle_live_effect_feedback(
+        &self,
+        feedback: crate::live_ledger::authority::store::settlement::LiveEffectFeedback,
+        diagnostic: crate::live_ledger::completion::LiveCompletionText<
+            { crate::live_ledger::completion::LIVE_TERMINAL_DIAGNOSTIC_MAX_BYTES },
+        >,
+    ) -> Result<meerkat_core::live_observation::LiveObservationSeq, RuntimeDriverError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "Live effect settlement requires persistent storage".into(),
+            })?;
+        // Settlement uses retained claim authority, not current actor residency.
+        let session_id = feedback.session_id().clone();
+        let owner = crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+            Arc::clone(store),
+            session_id.clone(),
+        );
+        let request_id = feedback.request_id().clone();
+        let sequence = owner
+            .settle_effect(feedback, diagnostic)
+            .await
+            .map_err(|error| Self::live_request_execution_error("Live effect settlement", error))?;
+        match owner.reconcile_request_completion(&request_id).await {
+            Ok(progress) => progress.trace_recovery_hold(&session_id, &request_id),
+            Err(error) => tracing::error!(%request_id, %error,
+                "Live request completion remains outstanding after committed effect feedback"),
+        }
+        Ok(sequence)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn live_request_owner_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::live_ledger::authority::store::LiveRequestStoreOwner, RuntimeDriverError>
+    {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or_else(|| RuntimeDriverError::NotFound {
+                    runtime_id: LogicalRuntimeId::for_session(session_id),
+                })?
+                .driver
+                .clone()
+        };
+        {
+            let driver = driver.lock().await;
+            let DriverEntry::Persistent(driver) = &*driver else {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "Live execution requires persistent storage".into(),
+                });
+            };
+            // The returned store owner retains neither driver nor registry guards.
+            driver.live_request_store_owner(session_id)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn live_request_execution_error(
+        operation: &str,
+        error: crate::live_ledger::authority::store::LiveRequestAuthorityError,
+    ) -> RuntimeDriverError {
+        match error {
+            crate::live_ledger::authority::store::LiveRequestAuthorityError::ScopeNotCurrent(_)
+            | crate::live_ledger::authority::store::LiveRequestAuthorityError::InvalidEffectFeedback(_)
+            | crate::live_ledger::authority::store::LiveRequestAuthorityError::SessionMismatch
+            | crate::live_ledger::authority::store::LiveRequestAuthorityError::Transition(_) => {
+                RuntimeDriverError::ValidationFailed {
+                    reason: error.to_string(),
+                }
+            }
+            error => RuntimeDriverError::Internal(format!("{operation}: {error}")),
+        }
+    }
+
     pub(crate) async fn accept_peer_ingress_with_completion(
         &self,
         facts: meerkat_core::interaction::PeerIngressClaimCommitFacts,
@@ -10008,6 +10475,8 @@ impl MeerkatMachine {
         }
         match self
             .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
@@ -10052,6 +10521,8 @@ impl MeerkatMachine {
             });
         match self
             .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
@@ -10091,6 +10562,8 @@ impl MeerkatMachine {
             });
         match self
             .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: session_id.clone(),
                 input,
                 register_completion: true,
@@ -10612,6 +11085,8 @@ impl MeerkatMachine {
             match self
                 .execute_meerkat_machine_ingress_command(
                     MeerkatMachineCommand::AcceptWithCompletion {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        pending_live: None,
                         session_id: session_id.clone(),
                         input,
                         register_completion: true,
@@ -10709,10 +11184,7 @@ impl MeerkatMachine {
                 tracing::error!("prepare_bindings: unexpected command result variant");
                 Err(RuntimeBindingsError::SessionNotFound(session_id))
             }
-            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
-                session_id,
-                err.to_string(),
-            )),
+            Err(err) => Err(RuntimeBindingsError::from_driver_error(session_id, err)),
         }
     }
 
@@ -10739,7 +11211,7 @@ impl MeerkatMachine {
                 RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 } => RuntimeBindingsError::SessionNotFound(session_id.clone()),
-                error => RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string()),
+                error => RuntimeBindingsError::from_driver_error(session_id.clone(), error),
             })?;
         let (driver_handle, epoch_id) = {
             let sessions = self.sessions.read().await;
@@ -10757,7 +11229,7 @@ impl MeerkatMachine {
             generation,
         )
         .await
-        .map_err(|error| RuntimeBindingsError::PrepareFailed(session_id, error.to_string()))
+        .map_err(|error| RuntimeBindingsError::from_driver_error(session_id, error))
     }
 
     /// Prepare factory-consumable session runtime resources without emitting
@@ -10793,10 +11265,7 @@ impl MeerkatMachine {
             // guard) must reach the caller verbatim — the field spent a
             // debugging cycle on "not found in runtime adapter after
             // registration" that was actually a binding guard rejection.
-            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
-                session_id,
-                err.to_string(),
-            )),
+            Err(err) => Err(RuntimeBindingsError::from_driver_error(session_id, err)),
         }
     }
 

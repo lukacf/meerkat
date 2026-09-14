@@ -204,8 +204,8 @@ impl CoreRenderable {
 
 /// Which role to append to in the conversation.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationAppendRole {
     /// Ordinary durable System message at this exact transcript position.
     System,
@@ -224,6 +224,11 @@ pub enum ConversationAppendRole {
     /// slot the content arrived in — not free-form role strings — mints the
     /// transcript role.
     InjectedContext,
+    /// Immutable non-human request slot. Provenance does not authorize staging
+    /// or execution; the generated input/run owners retain those decisions.
+    DelegatedRequest {
+        provenance: Box<crate::live_execution::evidence::DelegatedRequestProvenance>,
+    },
 }
 
 /// A single conversation append operation.
@@ -240,6 +245,22 @@ pub struct ConversationAppend {
     /// producers leave it absent; non-System roles reject it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<crate::types::SystemMessageIdentity>,
+}
+
+impl ConversationAppend {
+    pub(crate) fn validate_delegated_content(
+        &self,
+    ) -> Result<(), crate::live_execution::evidence::LiveEvidenceError> {
+        let ConversationAppendRole::DelegatedRequest { provenance } = &self.role else {
+            return Ok(());
+        };
+        let CoreRenderable::Text { text } = &self.content else {
+            return Err(
+                crate::live_execution::evidence::LiveEvidenceError::InvalidDelegatedContent,
+            );
+        };
+        provenance.validate_request(text)
+    }
 }
 
 /// Typed execution intent classified by the runtime layer.
@@ -850,7 +871,9 @@ impl ProviderParamsOverride {
     /// provider parameter vocabulary. New native tool fields must be added to
     /// this owner before they can cross a restrictive final-request gate.
     pub fn clear_provider_native_tools(&mut self) {
-        self.clear_web_search();
+        if let Some(tag) = &mut self.provider_tag {
+            tag.clear_native_tools();
+        }
     }
 
     /// Inject the structured-output schema for an extraction turn into the
@@ -939,6 +962,15 @@ pub enum ProviderParamsMergeError {
 }
 
 impl ProviderTag {
+    pub fn clear_native_tools(&mut self) {
+        match self {
+            Self::Anthropic(tag) => tag.web_search = None,
+            Self::OpenAi(tag) => tag.web_search = None,
+            Self::Gemini(tag) => tag.google_search = None,
+            Self::Unknown { .. } => {}
+        }
+    }
+
     /// Stable label for the provider family this tag belongs to.
     pub fn provider_label(&self) -> &'static str {
         match self {
@@ -1524,6 +1556,13 @@ mod duration_seconds {
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StagedRunInput {
+    /// Live authority is installed only from a committed generated owner handoff.
+    /// Persisted scoped records require explicit restoration, never a default.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::execution_scope::RunExecutionAuthority::is_session_policy"
+    )]
+    pub execution_authority: crate::execution_scope::RunExecutionAuthority,
     /// When to apply this input.
     pub boundary: RunApplyBoundary,
     /// Conversation mutations to apply.
@@ -1558,6 +1597,98 @@ pub enum RunPrimitive {
 }
 
 impl RunPrimitive {
+    pub fn with_execution_authority(
+        mut self,
+        authority: crate::execution_scope::RunExecutionAuthority,
+    ) -> Result<Self, TurnMetadataMergeConflict> {
+        if let crate::execution_scope::RunExecutionAuthority::Scoped(scope) = &authority
+            && self.contributing_input_ids() != std::slice::from_ref(&scope.record().input_id)
+        {
+            return Err(TurnMetadataMergeConflict {
+                field: "execution_authority",
+                reason: "scoped run requires its exact exclusive contributing input",
+            });
+        }
+        match &mut self {
+            Self::StagedInput(staged) => staged.execution_authority = authority,
+            Self::ImmediateAppend(_) if !authority.is_session_policy() => {
+                return Err(TurnMetadataMergeConflict {
+                    field: "execution_authority",
+                    reason: "immediate append cannot carry scoped run execution",
+                });
+            }
+            Self::ImmediateAppend(_) => {}
+        }
+        Ok(self)
+    }
+
+    pub fn execution_authority(&self) -> &crate::execution_scope::RunExecutionAuthority {
+        match self {
+            Self::StagedInput(staged) => &staged.execution_authority,
+            Self::ImmediateAppend(_) => {
+                &crate::execution_scope::RunExecutionAuthority::SessionPolicy
+            }
+        }
+    }
+
+    pub fn callback_continuation(
+        &self,
+    ) -> Option<&crate::execution_scope::ScopedCallbackContinuationRecord> {
+        match self.execution_authority() {
+            crate::execution_scope::RunExecutionAuthority::Scoped(scope) => {
+                scope.record().callback_continuation.as_ref()
+            }
+            crate::execution_scope::RunExecutionAuthority::SessionPolicy => None,
+        }
+    }
+
+    pub fn validate_execution_authority(&self, run_id: &super::RunId) -> Result<(), &'static str> {
+        match self.execution_authority() {
+            crate::execution_scope::RunExecutionAuthority::Scoped(scope) => {
+                if &scope.record().run_id != run_id
+                    || self.contributing_input_ids()
+                        != std::slice::from_ref(&scope.record().input_id)
+                {
+                    return Err(
+                        "scoped authority does not bind this exact run and exclusive input",
+                    );
+                }
+                scope
+                    .record()
+                    .validate_callback_continuation(scope.scope_id())?;
+                if scope.record().callback_continuation.is_some()
+                    && !matches!(
+                        self,
+                        Self::StagedInput(staged)
+                            if staged.boundary == RunApplyBoundary::RunStart
+                                && staged.appends.is_empty()
+                                && staged.turn_metadata.as_ref()
+                                    .and_then(|metadata| metadata.execution_kind)
+                                    == Some(RuntimeExecutionKind::ResumePending)
+                    )
+                {
+                    return Err(
+                        "scoped callback continuation requires an empty ResumePending run start",
+                    );
+                }
+            }
+            crate::execution_scope::RunExecutionAuthority::SessionPolicy => {
+                let delegated = match self {
+                    Self::StagedInput(staged) => staged.appends.iter().any(|append| {
+                        matches!(append.role, ConversationAppendRole::DelegatedRequest { .. })
+                    }),
+                    Self::ImmediateAppend(append) => {
+                        matches!(append.role, ConversationAppendRole::DelegatedRequest { .. })
+                    }
+                };
+                if delegated {
+                    return Err("delegated request cannot execute under ordinary session policy");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Get all contributing input IDs (if any).
     pub fn contributing_input_ids(&self) -> &[InputId] {
         match self {
@@ -1868,6 +1999,7 @@ mod tests {
 
     fn make_staged(appends: Vec<ConversationAppend>) -> RunPrimitive {
         RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends,
             contributing_input_ids: vec![],
@@ -2030,6 +2162,7 @@ mod tests {
     #[test]
     fn terminal_peer_response_notice_and_run_needs_no_context_sidecar() {
         let p = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends: vec![ConversationAppend {
                 role: ConversationAppendRole::SystemNotice,
@@ -2057,6 +2190,7 @@ mod tests {
     #[test]
     fn terminal_peer_response_notice_can_accompany_conversation_append() {
         let p = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends: vec![
                 ConversationAppend {
@@ -2209,7 +2343,7 @@ mod tests {
             ConversationAppendRole::Tool,
             ConversationAppendRole::InjectedContext,
         ] {
-            let json = serde_json::to_value(role).unwrap();
+            let json = serde_json::to_value(&role).unwrap();
             let parsed: ConversationAppendRole = serde_json::from_value(json).unwrap();
             assert_eq!(role, parsed);
         }
@@ -2237,6 +2371,7 @@ mod tests {
     #[test]
     fn staged_run_input_serde() {
         let staged = StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends: vec![ConversationAppend {
                 role: ConversationAppendRole::User,
@@ -2286,6 +2421,7 @@ mod tests {
     #[test]
     fn run_primitive_staged_input_serde() {
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
             contributing_input_ids: vec![InputId::new(), InputId::new()],
@@ -2314,6 +2450,7 @@ mod tests {
     fn run_primitive_contributing_input_ids() {
         let ids = vec![InputId::new(), InputId::new()];
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
             contributing_input_ids: ids.clone(),

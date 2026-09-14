@@ -29,6 +29,7 @@ import type {
   MobBindHostResult,
   MobHostStatus,
   MobMemberHistoryResult,
+  MobMemberLiveObservationsResult,
   MobRevokeHostResult,
   MobRouteInstallsResult,
   MobSpawnManyResultEntry,
@@ -304,6 +305,14 @@ export class Mob {
     opts?: { fromIndex?: number; limit?: number },
   ): Promise<MobMemberHistoryResult> {
     return this.client.mobMemberHistory(this.mobId, agentIdentity, opts);
+  }
+
+  /** Read retained Live observations; no active channel or Live grant required. */
+  async memberLiveObservations(
+    agentIdentity: string,
+    opts?: { channelId?: string; cursor?: string; limit?: number },
+  ): Promise<MobMemberLiveObservationsResult> {
+    return this.client.mobMemberLiveObservations(this.mobId, agentIdentity, opts);
   }
 
   /** List tracked member hosts with bind phase and capabilities. */

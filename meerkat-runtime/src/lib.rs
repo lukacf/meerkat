@@ -1055,6 +1055,17 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::auth_machine_schema_metadata()
             .attach_to(crate::auth_machine::dsl::AuthMachineState::schema())
     }
+
+    pub fn live_request_machine_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::live_request_machine_schema_metadata()
+            .attach_to(crate::live_ledger::authority::dsl::LiveRequestMachineState::schema())
+    }
+
+    pub fn live_transcript_machine_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::live_transcript_machine_schema_metadata().attach_to(
+            crate::live_ledger::transcript_authority::dsl::LiveTranscriptMachineState::schema(),
+        )
+    }
 }
 pub use interrupt_public_result::{
     UserInterruptObservation, UserInterruptPublicResult, resolve_user_interrupt_public_result,

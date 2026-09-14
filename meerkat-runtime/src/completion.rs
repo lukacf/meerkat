@@ -89,10 +89,14 @@ pub enum CompletionOutcome {
         tool_use_id: String,
         tool_name: String,
         args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_identity: Option<meerkat_core::session::CallbackBatchIdentity>,
     },
     /// One assistant tool-use batch is waiting on multiple external callbacks.
     CallbackBatchPending {
         pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_identity: Option<meerkat_core::session::CallbackBatchIdentity>,
     },
     /// The input reached the canonical cancellation terminal.
     Cancelled,
@@ -195,6 +199,7 @@ pub fn interaction_terminal_event(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => AgentEvent::InteractionCallbackPending {
             interaction_id,
             pending_tool_calls: vec![meerkat_core::error::PendingCallbackToolCall {
@@ -205,7 +210,9 @@ pub fn interaction_terminal_event(
             tool_name,
             args,
         },
-        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+        CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls, ..
+        } => {
             let first = pending_tool_calls.first().cloned().unwrap_or(
                 meerkat_core::error::PendingCallbackToolCall {
                     tool_use_id: String::new(),
@@ -621,6 +628,7 @@ impl CompletionHandle {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity: None,
             },
             crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending,
@@ -667,6 +675,18 @@ impl PendingCompletionForTest {
 }
 
 impl CompletionOutcome {
+    pub fn callback_identity(&self) -> Option<&meerkat_core::session::CallbackBatchIdentity> {
+        match self {
+            Self::CallbackPending {
+                callback_identity, ..
+            }
+            | Self::CallbackBatchPending {
+                callback_identity, ..
+            } => callback_identity.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Mint a [`RuntimeTerminated`](Self::RuntimeTerminated) outcome from a
     /// termination reason, attaching the typed terminal failure metadata every
     /// surface keys off (runtime stop/destroy is a fatal terminal boundary).
@@ -743,16 +763,20 @@ fn authorized_completion_outcome(
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             }) => CompletionOutcome::CallbackPending {
                 tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                callback_identity: callback_identity.clone(),
             },
-            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
-                CompletionOutcome::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                }
-            }
+            Some(CoreApplyTerminal::CallbackBatchPending {
+                pending_tool_calls,
+                callback_identity,
+            }) => CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls: pending_tool_calls.clone(),
+                callback_identity: callback_identity.clone(),
+            },
             _ => {
                 attempt.fail();
                 return Err(CompletionWaitError::AuthorityUnavailable(
@@ -1278,6 +1302,7 @@ impl CompletionRegistry {
                     tool_use_id,
                     tool_name,
                     args,
+                    callback_identity: None,
                 },
                 cleanup_observation,
             );
@@ -1631,6 +1656,7 @@ mod tests {
             interaction_id,
             CompletionOutcome::CallbackBatchPending {
                 pending_tool_calls: calls.clone(),
+                callback_identity: None,
             },
         );
         let meerkat_core::event::AgentEvent::InteractionCallbackPending {
@@ -2186,7 +2212,9 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             } => {
+                assert_eq!(callback_identity, None);
                 assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "browser");
                 assert_eq!(args, serde_json::json!({ "url": "https://example.com" }));

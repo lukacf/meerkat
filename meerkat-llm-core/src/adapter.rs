@@ -274,11 +274,46 @@ impl LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<PreparedLlmRequest, AgentError> {
+        self.build_request_with_native_tool_policy(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            meerkat_core::ProviderNativeToolPolicy::Inherit,
+        )
+    }
+
+    fn build_request_with_native_tool_policy(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+        native_tools: meerkat_core::ProviderNativeToolPolicy,
+    ) -> Result<PreparedLlmRequest, AgentError> {
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
-            .or_else(|| self.provider_params.clone());
+            .or_else(|| {
+                self.provider_params.clone().map(|mut tag| {
+                    if native_tools == meerkat_core::ProviderNativeToolPolicy::DisableAll {
+                        tag.clear_native_tools();
+                    }
+                    tag
+                })
+            });
         let effective_params =
             self.apply_generic_provider_overrides(effective_params, provider_params);
+        LlmRequest::validate_native_tool_params(native_tools, effective_params.as_ref()).map_err(
+            |error| {
+                AgentError::llm(
+                    self.provider.as_str(),
+                    error.failure_reason(),
+                    error.to_string(),
+                )
+            },
+        )?;
         let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
         // The per-call host override intentionally wins. HomeCore uses this
         // escape hatch to raise Fable 5's output allowance while older config
@@ -300,9 +335,10 @@ impl LlmClientAdapter {
                 )
             })?;
 
-        Ok(PreparedLlmRequest::from_projection(
+        let request = PreparedLlmRequest::from_projection(
             LlmRequest {
                 model: self.model.clone(),
+                provider_native_tools: native_tools,
                 messages: Vec::new(),
                 tools: tools.to_vec(),
                 max_tokens: effective_max_tokens,
@@ -311,7 +347,25 @@ impl LlmClientAdapter {
                 provider_params: effective_params,
             },
             projection,
-        ))
+        );
+        if native_tools == meerkat_core::ProviderNativeToolPolicy::DisableAll
+            && self
+                .client
+                .prepared_native_tool_policy_support(&request)
+                .map_err(|error| {
+                    AgentError::llm(
+                        self.provider.as_str(),
+                        error.failure_reason(),
+                        error.to_string(),
+                    )
+                })?
+                != meerkat_core::NativeToolPolicySupport::RequestScoped
+        {
+            return Err(AgentError::ConfigError(
+                "prepared provider route does not enforce request-scoped native-tool policy".into(),
+            ));
+        }
+        Ok(request)
     }
 
     async fn stream_prepared_response(
@@ -524,6 +578,23 @@ struct LlmClientAdapterAttempt {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
+    fn scoped_model_request(
+        &self,
+    ) -> Option<&Arc<meerkat_core::execution_scope::ScopedModelRequest>> {
+        self.request.scoped_model()
+    }
+
+    fn settled_scoped_model_successor(
+        &self,
+    ) -> Result<Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>, AgentError> {
+        self.request
+            .scoped_model()
+            .map(|scope| scope.settled_successor())
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|error| AgentError::InternalError(error.to_string()))
+    }
+
     fn request_pressure(
         &self,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
@@ -549,6 +620,76 @@ impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for LlmClientAdapter {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        self.client.scoped_model_effect_support()
+    }
+
+    fn prepare_scoped_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        scope: Arc<meerkat_core::execution_scope::ScopedModelRequest>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+        let request = self
+            .build_request_with_native_tool_policy(
+                messages.as_slice(),
+                tools.as_ref(),
+                max_tokens,
+                temperature,
+                provider_params.as_ref(),
+                meerkat_core::ProviderNativeToolPolicy::DisableAll,
+            )?
+            .with_scoped_model(scope)
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        let support = self
+            .client
+            .prepared_scoped_model_effect_support(&request)
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        if support != meerkat_core::execution_scope::ScopedModelEffectSupport::PhysicalDispatch {
+            return Err(AgentError::ConfigError(
+                "prepared provider route does not implement scoped physical model dispatch".into(),
+            ));
+        }
+        Ok(Arc::new(LlmClientAdapterAttempt {
+            adapter: self,
+            request,
+            canonical_messages: messages,
+        }))
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        self.client.native_tool_policy_support()
+    }
+
+    fn prepare_request_attempt_with_native_tool_policy(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        native_tools: meerkat_core::ProviderNativeToolPolicy,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+        let request = self.build_request_with_native_tool_policy(
+            messages.as_slice(),
+            tools.as_ref(),
+            max_tokens,
+            temperature,
+            provider_params.as_ref(),
+            native_tools,
+        )?;
+        Ok(Arc::new(LlmClientAdapterAttempt {
+            adapter: self,
+            request,
+            canonical_messages: messages,
+        }))
+    }
+
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<Message>>,
@@ -693,6 +834,206 @@ mod tests {
 
     struct ScriptedClient {
         events: Vec<Result<LlmEvent, LlmError>>,
+    }
+
+    #[derive(Default)]
+    struct NativePolicyProbe {
+        seen: Mutex<Vec<LlmRequest>>,
+    }
+
+    impl NativePolicyProbe {
+        fn record(&self, request: &LlmRequest) -> Result<(), LlmError> {
+            self.seen
+                .lock()
+                .map_err(|error| LlmError::Unknown {
+                    message: format!("request probe lock poisoned: {error}"),
+                })?
+                .push(request.clone());
+            Ok(())
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl LlmClient for NativePolicyProbe {
+        fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+            meerkat_core::NativeToolPolicySupport::RequestScoped
+        }
+
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+            self.record(request)?;
+            let bytes = serde_json::to_vec(request).map_err(|error| LlmError::InvalidRequest {
+                message: error.to_string(),
+            })?;
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(
+                bytes.len() as u64,
+                None,
+            )))
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(stream::iter([self.record(request).map(|()| {
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }
+            })]))
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn native_tool_policy_is_request_local_and_identical_for_pressure_and_dispatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ProviderNativeToolPolicy;
+        use meerkat_core::lifecycle::run_primitive::{OpaqueProviderBody, OpenAiProviderTag};
+
+        let client = Arc::new(NativePolicyProbe::default());
+        let defaults = ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(
+                &serde_json::json!({"type": "web_search"}),
+            )),
+            ..Default::default()
+        });
+        let adapter = Arc::new(
+            LlmClientAdapter::new(client.clone(), "gpt-5.5".into())
+                .with_provider_params(Some(defaults.clone())),
+        );
+        let messages = Arc::new(vec![Message::User(UserMessage::text("read"))]);
+        let attempt = adapter
+            .clone()
+            .prepare_request_attempt_with_native_tool_policy(
+                messages.clone(),
+                Arc::from([]),
+                1024,
+                None,
+                None,
+                ProviderNativeToolPolicy::DisableAll,
+            )?;
+        attempt.request_pressure()?;
+        attempt.stream_response().await?;
+        let ordinary =
+            adapter
+                .clone()
+                .prepare_request_attempt(messages, Arc::from([]), 1024, None, None)?;
+        ordinary.stream_response().await?;
+        let seen = client.seen.lock().map_err(|error| error.to_string())?;
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            serde_json::to_value(&seen[0])?,
+            serde_json::to_value(&seen[1])?
+        );
+        assert_eq!(
+            seen[0].provider_native_tools,
+            ProviderNativeToolPolicy::DisableAll
+        );
+        let Some(ProviderTag::OpenAi(restricted)) = seen[0].provider_params.as_ref() else {
+            return Err("expected retained typed provider parameters".into());
+        };
+        assert!(restricted.web_search.is_none());
+        assert_eq!(
+            seen[2].provider_native_tools,
+            ProviderNativeToolPolicy::Inherit
+        );
+        assert_eq!(seen[2].provider_params.as_ref(), Some(&defaults));
+        assert_eq!(adapter.provider_params.as_ref(), Some(&defaults));
+        Ok(())
+    }
+
+    #[test]
+    fn native_tool_policy_refuses_undeclared_injected_client_without_preparing_dispatch() {
+        let adapter = Arc::new(LlmClientAdapter::new(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "host-model".into(),
+        ));
+        let result = adapter
+            .clone()
+            .prepare_request_attempt_with_native_tool_policy(
+                Arc::new(Vec::new()),
+                Arc::from([]),
+                1024,
+                None,
+                None,
+                meerkat_core::ProviderNativeToolPolicy::DisableAll,
+            );
+        assert!(matches!(result, Err(AgentError::ConfigError(_))));
+        assert!(
+            adapter
+                .prepare_request_attempt(Arc::new(Vec::new()), Arc::from([]), 1024, None, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn native_tool_policy_rejects_enabled_overrides_before_normalization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ProviderNativeToolPolicy;
+        use meerkat_core::lifecycle::run_primitive::{OpaqueProviderBody, OpenAiProviderTag};
+
+        let client = Arc::new(NativePolicyProbe::default());
+        let adapter = Arc::new(LlmClientAdapter::new(client.clone(), "gpt-5.5".into()));
+        for body in [
+            serde_json::json!(true),
+            serde_json::json!({"type": "web_search"}),
+        ] {
+            let params = ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(&body)),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            assert!(
+                adapter
+                    .clone()
+                    .prepare_request_attempt_with_native_tool_policy(
+                        Arc::new(Vec::new()),
+                        Arc::from([]),
+                        1024,
+                        None,
+                        Some(params),
+                        ProviderNativeToolPolicy::DisableAll,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            client
+                .seen
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        let ordinary = LlmRequest::new("gpt-5.5", Vec::new());
+        let ordinary_json = serde_json::to_value(&ordinary)?;
+        assert!(ordinary_json.get("provider_native_tools").is_none());
+        let restored: LlmRequest = serde_json::from_value(ordinary_json)?;
+        assert_eq!(
+            restored.provider_native_tools,
+            ProviderNativeToolPolicy::Inherit
+        );
+        let restricted = ordinary.with_native_tool_policy(ProviderNativeToolPolicy::DisableAll);
+        let restored: LlmRequest = serde_json::from_value(serde_json::to_value(restricted)?)?;
+        assert_eq!(
+            restored.provider_native_tools,
+            ProviderNativeToolPolicy::DisableAll
+        );
+        Ok(())
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

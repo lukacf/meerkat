@@ -21,7 +21,8 @@ use super::{
     },
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_detached_job_machine,
-        dsl_forked_participant_lifecycle_machine, dsl_meerkat_machine, dsl_mob_machine,
+        dsl_forked_participant_lifecycle_machine, dsl_live_request_machine,
+        dsl_live_transcript_machine, dsl_meerkat_machine, dsl_mob_machine,
         dsl_occurrence_lifecycle_machine, dsl_runtime_delivery_machine,
         dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
@@ -219,6 +220,120 @@ pub struct CompositionCoverageManifest {
 
 pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
     vec![
+        machine_manifest_from_schema(
+            &dsl_live_transcript_machine(),
+            &[machine_anchor(
+                "live_transcript_catalog_bridge",
+                "LiveTranscriptMachine",
+                "meerkat-runtime/src/live_ledger/transcript_authority/dsl.rs",
+                "catalog-derived observation rules only; this anchor does not claim native persistence or source reservation realization",
+                CoverageClaims::none(),
+            )],
+            &[
+                scenario(
+                    "generated_transcript_append_requires_contiguous_receive_identity",
+                    "generated observation guards preserve exact channel, receive ordinal, durable sequence, and ingress generation",
+                    CoverageClaims::none().transitions(&["ActivateFreshChannel", "AcceptNextObservation"]),
+                ),
+                scenario(
+                    "generated_prefix_reservation_spends_frontier_and_preserves_gap_facts",
+                    "generated range selection waits for durability and preserves source-frontier and channel-specific gap facts; not a native source commit proof",
+                    CoverageClaims::none().transitions(&[
+                        "AwaitUncommittedObservations", "ReserveDurablePrefix", "SelectDurableExplicitRange", "AcceptKnownReceiveGap",
+                    ]),
+                ),
+                scenario(
+                    "generated_transcript_control_credit_always_preserves_final_fence",
+                    "generated control spending leaves one final fence despite gap records and rejects observation append after ingress closure",
+                    CoverageClaims::none().transitions(&["FenceSessionIngress", "CloseExactChannelIngress"]),
+                ),
+                scenario(
+                    "generated_crash_fence_never_advances_received_ordinal",
+                    "generated unknown-tail transition changes no received count and requires a new channel before range selection",
+                    CoverageClaims::none().transitions(&["FenceUnknownCrashTail"]),
+                ),
+                scenario(
+                    "native_transcript_loss_closes_known_tail_with_last_credit",
+                    "native Memory/WholeBlob/HeadCanonical writer retains exact failed receive bounds and uses the last reserved slot to close the known tail without inventing crash uncertainty",
+                    CoverageClaims::none().transitions(&["FenceKnownUncommittedTail"]),
+                ),
+                scenario(
+                    "native_transcript_cold_recovery_cannot_guess_uncommitted_receive_count",
+                    "full SQLite store close and reopen with equal durable Live states but zero versus seven lost local receives produces the same unknown-extent recovery snapshot",
+                    CoverageClaims::none().transitions(&["FenceUnknownCrashTail"]),
+                ),
+                scenario(
+                    "native_voice_accounting_retains_control_credit_through_observation_closure",
+                    "native Memory/WholeBlob/HeadCanonical tests reconcile cumulative seconds, duplicate receipts and disputes; provider observation closure, not text ingress closure, releases control credit. Native quota tests cover maximum escaped channel and finite duration at zero free capacity. This does not claim full public host or formal qualification.",
+                    CoverageClaims::none()
+                        .transitions(&["ReconcileVoiceUsage", "ObserveRepeatedVoiceUsage"])
+                        .effects(&["VoiceUsageRecorded", "VoiceUsageUnchanged"])
+                        .invariants(&["voice_accounting_remains_channel_scoped"]),
+                ),
+                scenario(
+                    "source_drain_fence_keeps_observation_ingress_without_admitting_new_work",
+                    "native source-drain tests fence source selection and initial admission at one exact Live head while still persisting TEXT and preserving already-admitted scope. This is the native fence, not observation-pump handoff qualification.",
+                    CoverageClaims::none()
+                        .transitions(&["FenceExactChannelSources", "ObserveExactSourceIngress"])
+                        .effects(&["ChannelSourcesFenced", "SourceIngressObserved"]),
+                ),
+                scenario(
+                    "native_provider_controls_replay_exact_facts_without_ordinary_mutation",
+                    "native control tests bind start and diagnostic receipts to exact session/channel/content, preserve duplicate A/B/A across appends and reopen, refuse conflicting start and new closed/capacity-exhausted controls, and measure snapshot growth at zero free quota. Shared-pump native tests route only committed controls without ordinary mutation. Not full readiness, function, or formal qualification.",
+                    CoverageClaims::none()
+                        .transitions(&["ObserveRepeatedProviderControl", "RefuseConflictingProviderStart", "RefuseLateProviderControl", "RecordProviderControl", "RefuseProviderControlCapacity"])
+                        .effects(&["ProviderControlRecorded", "ProviderControlUnchanged", "ProviderControlRefused"])
+                        .invariants(&["provider_controls_retain_exact_receipts"]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_live_request_machine(),
+            &[machine_anchor(
+                "live_request_catalog_bridge",
+                "LiveRequestMachine",
+                "meerkat-runtime/src/live_ledger/authority/dsl.rs",
+                "catalog-derived runtime transition body; committed storage and physical effect realization are not claimed by this anchor",
+                CoverageClaims::none().transitions(&[
+                    "ActivateFreshGrant",
+                    "ReserveNewSource",
+                    "AdmitReservedInput",
+                    "StageAdmittedRun",
+                    "RestoreExactRunningScope",
+                    "ClaimExactCurrentEffect",
+                    "SettleClaimedEffect",
+                    "CancelKnownRequest",
+                    "RevokeCurrentGrant",
+                    "FenceExecutorBinding",
+                    "CloseRequestIngress",
+                    "SuspendRunningRequest",
+                    "CompleteRunningRequest",
+                ]),
+            )],
+            &[
+                scenario(
+                    "generated_scope_restore_preserves_admission_won_close_and_exact_bindings",
+                    "production DSL rejects mismatched request/input/run/scope/digest/lineage/executor after recovery and permits an admitted run despite closed ingress",
+                    CoverageClaims::none().transitions(&[
+                        "ActivateFreshGrant", "ReserveNewSource", "AdmitReservedInput",
+                        "StageAdmittedRun", "CloseRequestIngress", "RestoreExactRunningScope",
+                        "ClaimExactCurrentEffect",
+                    ]),
+                ),
+                scenario(
+                    "generated_claim_rechecks_revocation_after_policy_await",
+                    "an actual awaited candidate policy result cannot restore a revoked generated claim",
+                    CoverageClaims::none().transitions(&["RevokeCurrentGrant"]),
+                ),
+                scenario(
+                    "claimed_effect_survives_revoke_and_recovery_without_resend_permission",
+                    "recovery retains the spent effect and accepts exact unknown feedback once after revoke",
+                    CoverageClaims::none().transitions(&[
+                        "ClaimExactCurrentEffect", "RevokeCurrentGrant", "SettleClaimedEffect",
+                    ]),
+                ),
+            ],
+        ),
         machine_manifest_from_schema(
             &dsl_meerkat_machine(),
             &[
@@ -2644,6 +2759,21 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
 
 pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageManifest> {
     vec![
+        composition_manifest_from_schema(
+            &super::live_source_reservation_composition(),
+            &[route_anchor(
+                "live_source_joint_store_commit",
+                "selected_range_freezes_source",
+                "meerkat-runtime/src/live_ledger/authority/source_reservation.rs",
+                "Native selected-range producer binds exact composite context and both generated candidates to one source/head CAS; public provider installation and formal qualification remain separate.",
+                CoverageClaims::none(),
+            )],
+            &[scenario(
+                "source-selected-range-transaction",
+                "Native source tests cover empty and paged exact content, delayed admission, source-first replay and actual SQLite reopen; this is not public provider qualification.",
+                CoverageClaims::none(),
+            )],
+        ),
         composition_manifest_from_schema(
             &meerkat_mob_seam_composition(),
             &[

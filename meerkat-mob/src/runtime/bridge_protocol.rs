@@ -315,6 +315,11 @@ impl_from_bridge_reply!(
     "member_history_page"
 );
 impl_from_bridge_reply!(
+    meerkat_contracts::wire::live_observation::LiveObservationPage,
+    MemberLiveObservationPage,
+    "member_live_observation_page"
+);
+impl_from_bridge_reply!(
     BridgeMemberEventsPage,
     MemberEventsPage,
     "member_events_page"
@@ -402,6 +407,7 @@ enum ExpectedBridgeReply {
     HostBindingDescriptorIssued,
     MemberOperatorReply,
     MemberHistoryPage,
+    MemberLiveObservationPage,
     MemberEventsPage,
     MemberLiveChannelOpened,
     MemberLiveChannelClosed,
@@ -433,6 +439,7 @@ impl ExpectedBridgeReply {
             Self::HostBindingDescriptorIssued => "host_binding_descriptor_issued",
             Self::MemberOperatorReply => "member_operator_reply",
             Self::MemberHistoryPage => "member_history_page",
+            Self::MemberLiveObservationPage => "member_live_observation_page",
             Self::MemberEventsPage => "member_events_page",
             Self::MemberLiveChannelOpened => "member_live_channel_opened",
             Self::MemberLiveChannelClosed => "member_live_channel_closed",
@@ -480,6 +487,7 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         BridgeCommand::MemberOperatorRequest(_) => ExpectedBridgeReply::MemberOperatorReply,
         // V4 member-addressed observation pair (phase 6).
         BridgeCommand::ReadMemberHistory(_) => ExpectedBridgeReply::MemberHistoryPage,
+        BridgeCommand::ReadMemberLiveObservations(_) => ExpectedBridgeReply::MemberLiveObservationPage,
         BridgeCommand::PollMemberEvents(_) => ExpectedBridgeReply::MemberEventsPage,
         // V4 member-addressed live family (phase 6b): explicit arms — a
         // well-formed live reply must never fail decode as "expected
@@ -519,6 +527,7 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         }
         BridgeReply::MemberOperatorReply(_) => ExpectedBridgeReply::MemberOperatorReply,
         BridgeReply::MemberHistoryPage(_) => ExpectedBridgeReply::MemberHistoryPage,
+        BridgeReply::MemberLiveObservationPage(_) => ExpectedBridgeReply::MemberLiveObservationPage,
         BridgeReply::MemberEventsPage(_) => ExpectedBridgeReply::MemberEventsPage,
         BridgeReply::MemberLiveChannelOpened(_) => ExpectedBridgeReply::MemberLiveChannelOpened,
         BridgeReply::MemberLiveChannelClosed { .. } => ExpectedBridgeReply::MemberLiveChannelClosed,

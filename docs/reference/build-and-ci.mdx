@@ -61,6 +61,10 @@ BuildBuddy is enabled, that switch calls `scripts/buildbuddy-dev`.
 | `make test-unit` | Fast unit coverage. |
 | `make test-mob-dense-topology` | Isolated 300-member/150-peer Mob scalability stress. |
 | `make test-int` | Integration-fast coverage without e2e scenarios. |
+| `make test-public-live-contracts` | Native public Live representation, retained-ledger, scope, and loopback protocol contracts. |
+| `make test-public-live-consumers` | Build/test independent WS and RTC consumer workspaces; inspect their locked Cargo graphs for public-only feature closure and transport separation. |
+| `make check-public-live-feature-isolation` | Independent consumer checks plus separate Cargo feature checks without cross-row feature unification. |
+| `make test-public-live-browser-contract` | Compile and execute the WASM browser contract in headless Chrome through `wasm-pack`. |
 | `make e2e-fast` | Deterministic end-to-end lane. |
 | `make e2e-system` | Local real-resource scenarios. |
 | `make e2e-live` | Targeted live-provider checks when credentials are configured. |
@@ -69,6 +73,14 @@ BuildBuddy is enabled, that switch calls `scripts/buildbuddy-dev`.
 The canonical e2e lane taxonomy lives in
 `tests/integration/src/e2e_lanes.rs`. Scripts and BuildBuddy targets route to
 that taxonomy rather than inventing separate lane names.
+
+The public Live contract targets use Cargo directly; they do not select the
+BuildBuddy backend. These checks require no provider credentials and are not
+real-provider or public-profile activation evidence. The browser target runs
+the actual Rust/WASM browser suite; a Web SDK TypeScript test run alone does
+not replace it. It requires `wasm-pack` and a working Chrome/WebDriver setup.
+Put a `chromedriver` compatible with the installed Chrome version on `PATH`;
+the driver automatically downloaded by `wasm-pack` can target a newer browser.
 
 The dense Mob topology stress has a dedicated GitHub-hosted Linux workflow,
 `.github/workflows/mob-dense-topology.yml`. The active top-level CI calls it

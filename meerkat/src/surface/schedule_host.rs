@@ -1800,7 +1800,9 @@ fn delivery_terminal_from_completion_outcome(
                 runtime_outcome,
             )
         }
-        CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {
+        CompletionOutcome::CallbackBatchPending {
+            pending_tool_calls, ..
+        } => {
             let first = pending_tool_calls.first();
             let tool_name = first
                 .map(|call| call.tool_name.clone())
@@ -3321,6 +3323,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_approval".to_string(),
                 args: serde_json::json!({"ticket": "INC-1"}),
+                callback_identity: None,
             },
             None,
         );

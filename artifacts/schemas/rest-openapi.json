@@ -2119,7 +2119,7 @@
           "current_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
@@ -2823,6 +2823,41 @@
               "epoch",
               "protocol_version",
               "expected_member"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "const": "read_member_live_observations",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "query": {
+                "$ref": "#/components/schemas/LiveObservationPageQuery"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "query"
             ],
             "type": "object"
           },
@@ -4942,6 +4977,26 @@
             },
             "required": [
               "history_row_too_large"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/components/schemas/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
             ],
             "type": "object"
           },
@@ -8443,6 +8498,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -8507,6 +8573,39 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/components/schemas/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "source": {
+            "$ref": "#/components/schemas/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
         "type": "object"
       },
       "DeliveryReceipt": {
@@ -9918,6 +10017,10 @@
         "title": "ListSessionsResult",
         "type": "object"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -10080,6 +10183,104 @@
             "type": "object"
           }
         ]
+      },
+      "LiveObservationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "after_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding_profile": {
+            "$ref": "#/components/schemas/LiveObservationEncodingProfile"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/LiveObservationFilter"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owner": {
+            "$ref": "#/components/schemas/LiveObservationOwner"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/LiveObservationRecord"
+            },
+            "type": "array"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/LiveObservationSnapshot"
+          }
+        },
+        "required": [
+          "encoding_profile",
+          "owner",
+          "filter",
+          "snapshot",
+          "after_sequence",
+          "records",
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "LiveObservationPageQuery": {
+        "additionalProperties": false,
+        "description": "Bounded query content. Owner identity comes from the authorized route,\nnever from this query or its cursor.",
+        "properties": {
+          "channel_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveChannelId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 64,
+            "format": "uint16",
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
+        ],
+        "type": "string"
       },
       "LiveObservationRecord": {
         "additionalProperties": false,
@@ -10369,6 +10570,10 @@
         },
         "type": "object"
       },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
       "LiveRefreshStatus": {
         "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps\nSDK codegen on the simple-struct path.",
         "oneOf": [
@@ -10378,6 +10583,98 @@
             "type": "string"
           }
         ]
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/components/schemas/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/components/schemas/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/components/schemas/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/components/schemas/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/components/schemas/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/components/schemas/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "source": {
+            "$ref": "#/components/schemas/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
       },
       "LiveTranscriptDirection": {
         "description": "Direction of observed speech, not a completed transcript role.",
@@ -11791,6 +12088,33 @@
         "title": "MobMemberHistoryResult",
         "type": "object"
       },
+      "MobMemberLiveObservationsResult": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/LiveObservationPage"
+          },
+          "placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireHostRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/WireProjectionProvenance"
+          }
+        },
+        "required": [
+          "page",
+          "provenance"
+        ],
+        "title": "MobMemberLiveObservationsResult",
+        "type": "object"
+      },
       "MobMemberToolDeclarationResult": {
         "additionalProperties": false,
         "properties": {
@@ -12175,6 +12499,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -18165,7 +18498,7 @@
         ]
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -18181,6 +18514,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/components/schemas/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -20661,7 +21016,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -25081,6 +25436,52 @@
           }
         },
         "summary": "Adopt an existing member into durable identity intent"
+      }
+    },
+    "/mob/{id}/members/{agent_identity}/live-observations": {
+      "get": {
+        "operationId": "get_mob_id_members_agent_identity_live_observations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobMemberLiveObservationsResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Read retained Live observation records by member identity"
       }
     },
     "/mob/{id}/members/{agent_identity}/respawn": {

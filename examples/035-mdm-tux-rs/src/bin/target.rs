@@ -1421,6 +1421,12 @@ impl CoreExecutor for TargetCoreExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn acknowledge_finalized_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_finalized_compaction_projections(&self.session_id).await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.service
             .abort_uncommitted_compaction_projections(&self.session_id)
@@ -2583,6 +2589,7 @@ mod tests {
     fn target_executor_carries_terminal_peer_response_notice_into_turn_request() {
         let primitive = RunPrimitive::StagedInput(
             meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 appends: vec![
                     meerkat_core::lifecycle::run_primitive::ConversationAppend {

@@ -602,6 +602,16 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let right = gen_schema_expr(r);
             quote! { Expr::Sub(Box::new(#left), Box::new(#right)) }
         }
+        ExprDef::Mul(l, r) => {
+            let left = gen_schema_expr(l);
+            let right = gen_schema_expr(r);
+            quote! { Expr::Mul(Box::new(#left), Box::new(#right)) }
+        }
+        ExprDef::Div(l, r) => {
+            let left = gen_schema_expr(l);
+            let right = gen_schema_expr(r);
+            quote! { Expr::Div(Box::new(#left), Box::new(#right)) }
+        }
         ExprDef::Contains { collection, value } => {
             let coll = gen_schema_expr(collection);
             let val = gen_schema_expr(value);
@@ -1237,7 +1247,9 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
         | ExprDef::Lt(l, r)
         | ExprDef::Lte(l, r)
         | ExprDef::Add(l, r)
-        | ExprDef::Sub(l, r) => {
+        | ExprDef::Sub(l, r)
+        | ExprDef::Mul(l, r)
+        | ExprDef::Div(l, r) => {
             references_phase_field(l, phase_field_name)
                 || references_phase_field(r, phase_field_name)
         }
@@ -1528,7 +1540,9 @@ fn collect_field_refs_inner(expr: &ExprDef, out: &mut Vec<String>) {
         | ExprDef::Lt(l, r)
         | ExprDef::Lte(l, r)
         | ExprDef::Add(l, r)
-        | ExprDef::Sub(l, r) => {
+        | ExprDef::Sub(l, r)
+        | ExprDef::Mul(l, r)
+        | ExprDef::Div(l, r) => {
             collect_field_refs_inner(l, out);
             collect_field_refs_inner(r, out);
         }

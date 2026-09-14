@@ -54,6 +54,8 @@ sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meer
 test-support = []
 
 [dev-dependencies]
+meerkat = { workspace = true }
+axum = { workspace = true }
 jsonschema = { workspace = true }
 # Path-only self-dependency (no version, stripped at publish): this crate's
 # own integration tests need the test-support hooks without relying on
@@ -72,6 +74,9 @@ meerkat-store = { workspace = true, features = ["memory", "sqlite"] }
 meerkat-machine-schema = { workspace = true }
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 meerkat-comms = { workspace = true }
+meerkat-openai = { workspace = true }
+meerkat-anthropic = { workspace = true }
+meerkat-gemini = { workspace = true }
 # Integration tests drive the offline schema bridge directly against realms
 # written by published pre-0.8.10 binaries.
 meerkat-sqlite = { workspace = true }

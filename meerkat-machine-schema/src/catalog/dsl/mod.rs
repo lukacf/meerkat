@@ -36,6 +36,8 @@ pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod detached_job;
 pub mod forked_participant_lifecycle;
+pub mod live_request;
+pub mod live_transcript;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
@@ -103,6 +105,10 @@ impl MachineSchemaMetadata {
 }
 
 pub const AUTH_MACHINE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const LIVE_REQUEST_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const LIVE_REQUEST_PRODUCTION_RUST_MODULE: &str = "live_ledger::authority::dsl";
+pub const LIVE_TRANSCRIPT_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const LIVE_TRANSCRIPT_PRODUCTION_RUST_MODULE: &str = "live_ledger::transcript_authority::dsl";
 pub const AUTH_MACHINE_PRODUCTION_RUST_MODULE: &str = "auth_machine::dsl";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-core";
 pub const APPROVAL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "generated::approval_lifecycle";
@@ -574,6 +580,135 @@ pub fn dsl_detached_job_machine_production_schema() -> MachineSchema {
 
 pub fn dsl_runtime_delivery_machine() -> MachineSchema {
     runtime_delivery::RuntimeDeliveryMachineState::schema()
+}
+
+pub fn live_request_machine_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "LiveSourceRefusal",
+                &["Empty", "Gap", "Budget", "Permission", "IngressClosed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveRequestPhase",
+                &["Reserved", "Admitted", "Running", "Suspended", "Terminal"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveEffectPhase",
+                &[
+                    "Claimed",
+                    "Succeeded",
+                    "Failed",
+                    "Cancelled",
+                    "Unknown",
+                    "NotStarted",
+                ],
+            ),
+            NamedTypeBinding::string_enum("LiveCompletionCreditSchema", &["V1"]),
+            NamedTypeBinding::string_enum(
+                "LiveRecoveryInputPhase",
+                &["Queued", "Staged", "Applied", "Terminal"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveRecoveryApplicationEvidence",
+                &["Unobserved", "NotApplicable", "NotApplied", "Applied"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveInputRecoveryPurpose",
+                &["NormalizeColdInput", "ObserveUnfinishedInput"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveInputRecoveryDisposition",
+                &[
+                    "HoldUnresolvedRun",
+                    "NoBoundRun",
+                    "AppliedBoundary",
+                    "HoldOutstandingEffects",
+                    "HoldCallbackApplication",
+                    "RuntimePending",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ScopedTokenAccountingStatus",
+                &[
+                    "Pending",
+                    "NotApplicable",
+                    "Unmeasured",
+                    "Measured",
+                    "Disputed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ScopedEffectKind",
+                &["ModelComputation", "ToolDispatch", "DescendantAdmission"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ToolMutationClass",
+                &["ReadOnly", "Mutating", "Unknown"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveRequestEvidenceKind",
+                &["ApplicationSnapshot", "StructuredFunctionRequest"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveRequestCancellationReason",
+                &[
+                    "OperatorRequested",
+                    "GrantRevoked",
+                    "SessionArchived",
+                    "ExplicitSupersession",
+                ],
+            ),
+        ],
+        Vec::new(),
+    )
+}
+
+pub fn dsl_live_request_machine() -> MachineSchema {
+    live_request_machine_schema_metadata()
+        .attach_to(live_request::LiveRequestMachineState::schema())
+}
+
+pub fn dsl_live_request_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_live_request_machine(),
+        LIVE_REQUEST_PRODUCTION_RUST_CRATE,
+        LIVE_REQUEST_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn dsl_live_transcript_machine() -> MachineSchema {
+    live_transcript_machine_schema_metadata()
+        .attach_to(live_transcript::LiveTranscriptMachineState::schema())
+}
+
+pub fn live_transcript_machine_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum("LiveProviderControlKind", &["Started", "Diagnostic"]),
+            NamedTypeBinding::string_enum(
+                "LiveProviderControlRefusal",
+                &["ObservationClosed", "IdentityConflict", "Capacity"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveVoiceUsageKind",
+                &["Periodic", "Final", "Invalid", "ObservationClosed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveVoiceUsageDispute",
+                &["None", "Regression", "InvalidDuration", "ConflictingFinal"],
+            ),
+        ],
+        vec![],
+    )
+}
+
+pub fn dsl_live_transcript_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_live_transcript_machine(),
+        LIVE_TRANSCRIPT_PRODUCTION_RUST_CRATE,
+        LIVE_TRANSCRIPT_PRODUCTION_RUST_MODULE,
+    )
 }
 
 pub fn dsl_runtime_delivery_machine_production_schema() -> MachineSchema {
@@ -1389,6 +1524,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ExternalEvent",
                     "Continuation",
                     "Operation",
+                    "LiveRequest",
+                    "LiveCallbackContinuation",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -1401,7 +1538,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "AdmissionInputOriginKind",
-                &["Operator", "Peer", "Flow", "System", "External"],
+                &[
+                    "Operator",
+                    "Peer",
+                    "Flow",
+                    "System",
+                    "External",
+                    "LiveRequest",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "AdmissionPolicyApplyMode",
@@ -1467,6 +1611,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "DerivedDurabilityForbiddenForInputKind",
                     "PeerHandlingModeInvalid",
                     "PeerResponseTerminalInvalid",
+                    "LiveRequestRequiresGrant",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -2436,11 +2581,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ExternalEvent",
                     "Continuation",
                     "Operation",
+                    "LiveRequest",
+                    "LiveCallbackContinuation",
                 ],
             ),
             NamedTypeBinding::string_enum(
                 "RecoveredInputRecoveryDisposition",
                 &["Retain", "Discard"],
+            ),
+            NamedTypeBinding::string_enum(
+                "FailedRunRecoveryDisposition",
+                &["HoldScoped", "Ordinary"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ScopedInputNormalizationDisposition",
+                &["Hold", "Authorized"],
             ),
             NamedTypeBinding::string_enum(
                 "RecoveredTerminalCompletionDisposition",
@@ -2891,6 +3046,7 @@ runtime_internal_inputs!(
         ResolveAdmissionIdempotency,
         ResolveAdmissionPlan,
         ResolveAdmissionValidation,
+        ResolveLiveAdmissionValidation,
         ResolveInputPublicLifecycle,
         ResolveInputPublicTerminalOutcome,
         ResolveLiveBoundaryContextReceipt,

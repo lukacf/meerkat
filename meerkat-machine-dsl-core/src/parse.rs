@@ -607,6 +607,43 @@ pub(crate) fn parse_expr(input: ParseStream) -> Result<ExprDef> {
     parse_or_expr(input)
 }
 
+#[cfg(test)]
+mod arithmetic_tests {
+    use super::*;
+    use syn::parse::Parser;
+
+    #[test]
+    fn arithmetic_precedence_associativity_and_parentheses_are_preserved() -> syn::Result<()> {
+        for (source, expected) in [
+            (
+                "1 + 2 * 3 / 4 - 5",
+                "Sub(Add(U64(1), Div(Mul(U64(2), U64(3)), U64(4))), U64(5))",
+            ),
+            ("24 / 3 / 2", "Div(Div(U64(24), U64(3)), U64(2))"),
+            ("24 / (3 / 2)", "Div(U64(24), Div(U64(3), U64(2)))"),
+            (
+                "(1 + 2) * (3 - 1)",
+                "Mul(Add(U64(1), U64(2)), Sub(U64(3), U64(1)))",
+            ),
+            ("7 / 2 == 3", "Eq(Div(U64(7), U64(2)), U64(3))"),
+        ] {
+            assert_eq!(
+                format!("{:?}", parse_expr.parse_str(source)?),
+                expected,
+                "{source}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn arithmetic_rejects_missing_operands_and_unsupported_remainder() {
+        for source in ["1 *", "/ 2", "2 / / 3", "4 % 2"] {
+            assert!(parse_expr.parse_str(source).is_err(), "{source}");
+        }
+    }
+}
+
 fn parse_or_expr(input: ParseStream) -> Result<ExprDef> {
     let mut left = parse_and_expr(input)?;
     while input.peek(Token![||]) {
@@ -672,16 +709,30 @@ fn parse_comparison_expr(input: ParseStream) -> Result<ExprDef> {
 }
 
 fn parse_additive_expr(input: ParseStream) -> Result<ExprDef> {
-    let mut left = parse_unary_expr(input)?;
+    let mut left = parse_multiplicative_expr(input)?;
     while input.peek(Token![+]) || input.peek(Token![-]) {
         if input.peek(Token![+]) {
             let _: Token![+] = input.parse()?;
-            let right = parse_unary_expr(input)?;
+            let right = parse_multiplicative_expr(input)?;
             left = ExprDef::Add(Box::new(left), Box::new(right));
         } else {
             let _: Token![-] = input.parse()?;
-            let right = parse_unary_expr(input)?;
+            let right = parse_multiplicative_expr(input)?;
             left = ExprDef::Sub(Box::new(left), Box::new(right));
+        }
+    }
+    Ok(left)
+}
+
+fn parse_multiplicative_expr(input: ParseStream) -> Result<ExprDef> {
+    let mut left = parse_unary_expr(input)?;
+    while input.peek(Token![*]) || input.peek(Token![/]) {
+        if input.peek(Token![*]) {
+            let _: Token![*] = input.parse()?;
+            left = ExprDef::Mul(Box::new(left), Box::new(parse_unary_expr(input)?));
+        } else {
+            let _: Token![/] = input.parse()?;
+            left = ExprDef::Div(Box::new(left), Box::new(parse_unary_expr(input)?));
         }
     }
     Ok(left)

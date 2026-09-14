@@ -1594,6 +1594,9 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// into service-level request fields.
 #[derive(Debug)]
 pub struct StartTurnRuntimeSemantics {
+    /// In-memory run authority retained alongside the runtime-authored input.
+    /// Scoped authority cannot be restored from request JSON or transcript data.
+    pub execution_context: crate::execution_scope::RunExecutionContext,
     /// Caller-stable identity for durable runtime input admission.
     ///
     /// This is intentionally distinct from transcript identity. Runtime
@@ -1628,6 +1631,7 @@ pub struct StartTurnRuntimeSemantics {
 impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
+            execution_context: Default::default(),
             input_identity: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
@@ -1645,6 +1649,7 @@ impl StartTurnRuntimeSemantics {
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
+            execution_context: Default::default(),
             input_identity: None,
             handling_mode,
             turn_tool_overlay,
@@ -1670,6 +1675,15 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
         self.input_identity = Some(input_identity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_context(
+        mut self,
+        execution_context: crate::execution_scope::RunExecutionContext,
+    ) -> Self {
+        self.execution_context = execution_context;
         self
     }
 }
@@ -1759,6 +1773,9 @@ pub struct AppendSystemContextResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageToolResultsRequest {
     pub results: Vec<crate::ToolResult>,
+    /// Exact callback correlation; required for scoped batches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_target: Option<crate::session::CallbackBatchIdentity>,
 }
 
 /// Result of staging callback tool results for the next turn.
@@ -2486,6 +2503,17 @@ pub trait SessionService: Send + Sync {
                 "reconcile_runtime_compaction_projections".to_string(),
             ))
         }
+    }
+
+    /// Acknowledge the store-committed HeadCanonical compaction metadata
+    /// successor while the runtime caller owns the turn-finalization boundary.
+    async fn acknowledge_finalized_compaction_projections(
+        &self,
+        _id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "acknowledge_finalized_compaction_projections".into(),
+        ))
     }
 
     /// Abort a live compaction transaction after the runtime boundary was

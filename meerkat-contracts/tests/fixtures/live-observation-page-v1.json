@@ -1,0 +1,34 @@
+{
+  "page": {
+    "encoding_profile": "v1",
+    "owner": {
+      "kind": "member",
+      "session_id": "00000000-0000-0000-0000-000000000001",
+      "mob_id": "mob-history",
+      "agent_identity": "speaker"
+    },
+    "filter": {"kind": "channel", "channel_id": "channel-a"},
+    "snapshot": {
+      "generation": 1,
+      "revision": 2,
+      "end_sequence": 1,
+      "prefix_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "coverage": "known_local_gap"
+    },
+    "after_sequence": 0,
+    "records": [
+      {
+        "sequence": 1,
+        "channel_id": "channel-a",
+        "observation": {
+          "direction": "input",
+          "range": {"start_ms": 1.25, "end_ms": 2.5},
+          "text": "heard\n\u0000not a Message"
+        }
+      }
+    ],
+    "has_more": false
+  },
+  "placement": "host-a",
+  "provenance": "host_claimed"
+}

@@ -8,6 +8,89 @@ use serde_json::json;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn delegated_request_slot_preserves_content_source_and_provisional_grade() -> TestResult {
+    use meerkat_core::live_execution::evidence::DelegatedRequestProvenance;
+    use meerkat_core::types::{MemoryIndexableContent, Message, UserMessage};
+    for (source, grade) in [
+        (
+            json!({"kind":"client_delegation","delegation":"d"}),
+            "application_snapshot",
+        ),
+        (
+            json!({"kind":"function_call","delegation":"d","response":"r","call":"c"}),
+            "structured_function_request",
+        ),
+    ] {
+        let request = LiveRequestText::new(" \nrequest \u{1f98a}\t ")?;
+        let provenance: DelegatedRequestProvenance = serde_json::from_value(json!({
+            "request_id":uuid::Uuid::from_u128(1),
+            "source":{"session_id":uuid::Uuid::from_u128(2),"channel_id":"voice","source":source},
+            "evidence_kind":grade,
+            "request_digest":request.digest()
+        }))?;
+        let message = UserMessage::delegated_request(request.clone(), provenance.clone())?;
+        assert!(message.transcript_role.is_delegated_request());
+        assert!(message.transcript_role.is_turn_input());
+        assert!(!message.transcript_role.is_conversational());
+        assert!(!message.transcript_role.is_compaction_summary());
+        assert_eq!(message.text_content(), request.as_str());
+        let encoded = serde_json::to_value(&message)?;
+        let mut changed_content = message.clone();
+        changed_content.content = meerkat_core::types::UserMessage::text("changed").content;
+        assert!(serde_json::to_value(changed_content).is_err());
+        assert_eq!(
+            encoded["transcript_role"]["delegated_request"]["provenance"],
+            serde_json::to_value(&provenance)?
+        );
+        assert_eq!(
+            serde_json::from_value::<UserMessage>(encoded.clone())?,
+            message
+        );
+        assert_eq!(
+            Message::User(message).indexable_content(),
+            MemoryIndexableContent::Indexable(request.as_str().to_owned())
+        );
+        assert!(
+            UserMessage::delegated_request(LiveRequestText::new("changed")?, provenance).is_err()
+        );
+        for content in [json!("changed"), json!([{"type":"text","text":"changed"}])] {
+            let mut altered = encoded.clone();
+            altered["content"] = content;
+            assert!(serde_json::from_value::<UserMessage>(altered).is_err());
+        }
+        for field in ["grant", "permission", "final_user_transcript"] {
+            let mut altered = encoded.clone();
+            altered["transcript_role"]["delegated_request"][field] = json!(true);
+            assert!(serde_json::from_value::<UserMessage>(altered).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_user_slots_keep_their_exact_role_encoding_and_default_import() -> TestResult {
+    use meerkat_core::types::UserMessage;
+    let ordinary: UserMessage = serde_json::from_value(json!({"content":"ordinary"}))?;
+    assert!(ordinary.transcript_role.is_conversational());
+    assert!(
+        serde_json::to_value(ordinary)?
+            .get("transcript_role")
+            .is_none()
+    );
+    for role in ["conversational", "compaction_summary", "injected_context"] {
+        let message: UserMessage =
+            serde_json::from_value(json!({"content":"legacy","transcript_role":role}))?;
+        let encoded = serde_json::to_value(message)?;
+        if role == "conversational" {
+            assert!(encoded.get("transcript_role").is_none());
+        } else {
+            assert_eq!(encoded["transcript_role"], role);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn diagnostics_preserve_known_unscoped_response_without_a_terminal_or_raw_body_field() -> TestResult
 {
     use meerkat_core::live_execution::backend::LiveProviderDiagnostic;

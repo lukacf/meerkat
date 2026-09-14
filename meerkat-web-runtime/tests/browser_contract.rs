@@ -17,6 +17,52 @@ use wasm_bindgen_test::wasm_bindgen_test;
 // browser lane must actually execute these assertions.
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+#[wasm_bindgen_test]
+fn browser_contract_shared_live_types_do_not_supply_native_host_authority() {
+    use meerkat_contracts::LiveOpenParams;
+    use meerkat_core::execution_scope::RunExecutionAuthorityRecord;
+    use meerkat_core::live_adapter::{LiveAdapterCommand, LiveInputChunk};
+    use meerkat_core::live_execution::frontend::{
+        ContinuousLiveFrontendPolicy, ContinuousLiveInputError, LiveAudioIngress,
+    };
+
+    let session = "00000000-0000-0000-0000-000000000001";
+    let selector = json!({"session_id":session,"profile_id":"voice"});
+    let decoded: LiveOpenParams =
+        serde_json::from_value(selector.clone()).expect("shared selector");
+    assert_eq!(serde_json::to_value(decoded).expect("encode"), selector);
+    for value in [
+        json!({"session_id":session,"profile_id":null}),
+        json!({"session_id":session,"profile_id":"voice","grant":"forged"}),
+        json!({"session_id":session,"profile_id":"voice","api_key":"forged"}),
+    ] {
+        assert!(serde_json::from_value::<LiveOpenParams>(value).is_err());
+    }
+    for value in [
+        json!({"kind":"scoped"}),
+        json!({"kind":"scoped","scope_id":session,"record":{}}),
+        json!({"kind":"session_policy","record":{"grant":"must-not-be-dropped"}}),
+    ] {
+        assert!(serde_json::from_value::<RunExecutionAuthorityRecord>(value).is_err());
+    }
+    let rtc = ContinuousLiveFrontendPolicy::new(LiveAudioIngress::WebRtcMediaTracks)
+        .expect("media-track policy");
+    assert_eq!(
+        rtc.validate(&LiveAdapterCommand::SendInput {
+            chunk: LiveInputChunk::Audio {
+                data: vec![0; 2],
+                sample_rate_hz: 24000,
+                channels: 1,
+            },
+        }),
+        Err(ContinuousLiveInputError::AudioUsesAnotherTransport)
+    );
+    assert_eq!(
+        rtc.validate(&LiveAdapterCommand::Interrupt),
+        Err(ContinuousLiveInputError::UnsupportedCapability)
+    );
+}
+
 fn parse_js_error(value: JsValue) -> Value {
     let raw = value.as_string().expect("error string");
     serde_json::from_str(&raw).expect("error json")

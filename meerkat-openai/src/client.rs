@@ -28,6 +28,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::image_generation::{
     OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
@@ -486,7 +487,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
                 )?,
                 render_metadata: user.render_metadata.clone(),
                 identity: user.identity.clone(),
-                transcript_role: user.transcript_role,
+                transcript_role: user.transcript_role.clone(),
                 created_at: user.created_at,
             })),
             Message::BlockAssistant(assistant) => {
@@ -520,6 +521,13 @@ pub(crate) fn project_openai_replay_messages_for_target(
         .validate_projected(messages, &projected, replay_application)
         .map_err(|error| invalid_replay(error.to_string()))?;
     Ok(projected)
+}
+
+struct ScopedResponsesRequest<'a> {
+    scope: Arc<meerkat_core::execution_scope::ScopedModelRequest>,
+    provider: Provider,
+    model: &'a str,
+    native_tools: meerkat_core::ProviderNativeToolPolicy,
 }
 
 impl OpenAiClient {
@@ -720,6 +728,7 @@ impl OpenAiClient {
     /// not a supported host API.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        request.validate_native_tool_policy()?;
         let author_explicit_breakpoints = openai_tag(request).is_some_and(|tag| {
             tag.prompt_cache_enabled != Some(false)
                 && tag.prompt_cache_options.is_some_and(|options| {
@@ -1032,6 +1041,11 @@ impl OpenAiClient {
             }
         }
 
+        crate::tool_schema::enforce_native_tool_policy(
+            request,
+            &mut body,
+            crate::tool_schema::FunctionToolWireShape::Responses,
+        )?;
         Ok(body)
     }
 
@@ -1093,7 +1107,15 @@ impl OpenAiClient {
         endpoint: &str,
         body: &Value,
         has_images: bool,
-    ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
+        scope: Option<&ScopedResponsesRequest<'_>>,
+    ) -> Result<
+        (
+            reqwest::Response,
+            meerkat_core::HttpAuthorizationReceipt,
+            Option<meerkat_core::execution_scope::ScopedModelEffectCustody>,
+        ),
+        LlmError,
+    > {
         let mut request_builder = self
             .http
             .post(endpoint)
@@ -1115,21 +1137,41 @@ impl OpenAiClient {
         let (request_builder, receipt) = self
             .apply_request_headers_with_receipt(request_builder, endpoint, &[])
             .await?;
-        let response = request_builder.json(body).send().await.map_err(|e| {
-            if e.is_timeout() {
-                LlmError::NetworkTimeout { duration_ms: 30000 }
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                if e.is_connect() {
-                    return LlmError::ConnectionReset;
-                }
+        let send = async {
+            request_builder.json(body).send().await.map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::NetworkTimeout { duration_ms: 30000 }
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if e.is_connect() {
+                        return LlmError::ConnectionReset;
+                    }
 
-                LlmError::Unknown {
-                    message: e.to_string(),
+                    LlmError::Unknown {
+                        message: e.to_string(),
+                    }
                 }
+            })
+        };
+        let (response, custody) = match scope {
+            Some(scope) => {
+                meerkat_llm_core::http::send_model_request(
+                    Some(Arc::clone(&scope.scope)),
+                    meerkat_llm_core::http::ModelRequestSendEvidence {
+                        provider: scope.provider,
+                        encoding: meerkat_core::LoweredRequestEncoding::OpenAiResponsesJson,
+                        model: scope.model,
+                        route: endpoint,
+                        body,
+                        native_tools: scope.native_tools,
+                    },
+                    send,
+                )
+                .await?
             }
-        })?;
-        Ok((response, receipt))
+            None => (send.await?, None),
+        };
+        Ok((response, receipt, custody))
     }
 
     async fn responses_response_with_fallback(
@@ -1139,16 +1181,35 @@ impl OpenAiClient {
         fallback_body: Option<Value>,
         has_images: bool,
     ) -> Result<reqwest::Response, LlmError> {
+        self.responses_response_with_scope(endpoint, body, fallback_body, has_images, None)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    async fn responses_response_with_scope(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        fallback_body: Option<Value>,
+        has_images: bool,
+        mut scope: Option<ScopedResponsesRequest<'_>>,
+    ) -> Result<
+        (
+            reqwest::Response,
+            Option<meerkat_core::execution_scope::ScopedModelEffectCustody>,
+        ),
+        LlmError,
+    > {
         let mut current_body = body;
         let mut used_fallback = false;
         let mut refreshed_authorization = false;
         loop {
-            let (response, receipt) = self
-                .send_responses_request(endpoint, current_body, has_images)
+            let (response, receipt, custody) = self
+                .send_responses_request(endpoint, current_body, has_images, scope.as_ref())
                 .await?;
             let status = response.status().as_u16();
             if (200..=299).contains(&status) {
-                return Ok(response);
+                return Ok((response, custody));
             }
             let headers = response.headers().clone();
             let text = response
@@ -1158,6 +1219,23 @@ impl OpenAiClient {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
             let rejection = LlmError::from_http_response(status, text.clone(), &headers);
+            match (&mut scope, custody) {
+                (Some(scope), Some(custody)) => {
+                    scope.scope =
+                        custody
+                            .settle_rejected()
+                            .await
+                            .map_err(|error| LlmError::Unknown {
+                                message: format!("Responses rejection feedback failed: {error}"),
+                            })?;
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "Responses request lost its scoped physical custody".into(),
+                    });
+                }
+            }
             // A policy stop must reach the recovery owner before auth refresh
             // or stateless continuation fallback can issue another request.
             if matches!(rejection, LlmError::PolicyStop { .. }) {
@@ -2220,6 +2298,16 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiClient {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        meerkat_core::execution_scope::ScopedModelEffectSupport::PhysicalDispatch
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        meerkat_core::NativeToolPolicySupport::RequestScoped
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_openai_replay_messages_for_capabilities(
             messages,
@@ -2374,6 +2462,53 @@ impl LlmClient for OpenAiClient {
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_execution_context(request, None)
+    }
+
+    fn stream_with_execution_context<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> LlmStream<'a> {
+        self.stream_with_dispatch_identity(request, scope, Provider::OpenAI, &request.model)
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        // OpenAI `strict` controls constrained decoding behavior for structured
+        // output. `compat` is only used for provider-lowering policies where
+        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
+        if output_schema.strict {
+            ensure_additional_properties_false(&mut schema);
+        }
+
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+impl OpenAiClient {
+    // Compatible clients own alias lowering; policy still binds their selected
+    // identity while request provenance binds the fully lowered physical body.
+    pub(crate) fn stream_with_dispatch_identity<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+        provider: Provider,
+        selected_model: &'a str,
+    ) -> LlmStream<'a> {
+        let feedback = streaming::ScopedModelStreamFeedback::new(scope.as_ref());
+        let response_feedback = feedback.clone();
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
@@ -2386,14 +2521,30 @@ impl LlmClient for OpenAiClient {
             };
 
             let endpoint = self.responses_endpoint();
-            let response = self
-                .responses_response_with_fallback(
+            let (response, custody) = if let Some(scope) = scope {
+                self.responses_response_with_scope(
+                    &endpoint,
+                    &body,
+                    fallback_body,
+                    request.has_images(),
+                    Some(ScopedResponsesRequest {
+                        scope,
+                        provider,
+                        model: selected_model,
+                        native_tools: request.provider_native_tools,
+                    }),
+                ).await?
+            } else {
+                let response = self.responses_response_with_fallback(
                     &endpoint,
                     &body,
                     fallback_body,
                     request.has_images(),
                 )
                 .await?;
+                (response, None)
+            };
+            response_feedback.install(custody)?;
             let mut stream = response.bytes_stream();
             let mut buffer = String::with_capacity(512);
             let mut usage = Usage::default();
@@ -2994,30 +3145,7 @@ impl LlmClient for OpenAiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
-    }
-
-    fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::OpenAI
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        let mut schema = output_schema.schema.as_value().clone();
-        // OpenAI `strict` controls constrained decoding behavior for structured
-        // output. `compat` is only used for provider-lowering policies where
-        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
-        if output_schema.strict {
-            ensure_additional_properties_false(&mut schema);
-        }
-
-        Ok(CompiledSchema {
-            schema,
-            warnings: Vec::new(),
-        })
+        streaming::ensure_terminal_done(feedback.wrap(inner))
     }
 }
 
@@ -8382,6 +8510,69 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_policy_preserves_functions_and_refuses_server_tools_at_pressure() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new("gpt-5.5", Vec::new())
+            .with_tools(vec![Arc::new(meerkat_core::ToolDef::new(
+                "read",
+                "read",
+                serde_json::json!({"type": "object", "properties": {}}),
+            ))])
+            .with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::DisableAll);
+        let body = client
+            .build_request_body(&request)
+            .expect("function-only request");
+        assert_eq!(body["tools"][0]["type"], "function");
+        let pressure = client
+            .request_pressure(&request)
+            .expect("pressure")
+            .expect("exact");
+        assert_eq!(
+            pressure.encoded_bytes,
+            serde_json::to_vec(&body).expect("body").len() as u64
+        );
+        let empty = request.clone().with_tools(Vec::new());
+        assert_eq!(
+            client.build_request_body(&empty).expect("empty")["tools"],
+            serde_json::json!([])
+        );
+        for native in [
+            "web_search",
+            "computer",
+            "image_generation",
+            "mcp",
+            "function",
+        ] {
+            let injected = request.clone().with_openai_tag_merge(|tag| {
+                tag.web_search = Some(
+                    meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": native, "name": "read"}),
+                    ),
+                );
+            });
+            assert!(matches!(
+                client.build_request_body(&injected),
+                Err(LlmError::InvalidRequest { .. })
+            ));
+            assert!(matches!(
+                client.request_pressure(&injected),
+                Err(LlmError::InvalidRequest { .. })
+            ));
+            if native == "web_search" {
+                let ordinary = injected
+                    .with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::Inherit);
+                assert_eq!(
+                    client.build_request_body(&ordinary).expect("ordinary")["tools"]
+                        .as_array()
+                        .expect("tools")
+                        .len(),
+                    2
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_no_web_search_when_absent_openai() {
         use meerkat_core::ToolDef;
         use std::sync::Arc;
@@ -8400,6 +8591,75 @@ mod tests {
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1, "should only have the regular tool");
         assert_eq!(tools[0]["type"], "function");
+    }
+
+    #[tokio::test]
+    async fn native_tool_policy_reaches_actual_wire_and_restores_ordinary_defaults() {
+        use meerkat_core::{AgentLlmClient, ProviderNativeToolPolicy};
+        use meerkat_llm_core::LlmClientAdapter;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+        ).to_string();
+        let (base_url, server) =
+            spawn_openai_stub_server_with_body(payload, Arc::clone(&seen)).await;
+        let native = meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+            &serde_json::json!({"type": "web_search"}),
+        );
+        let adapter = Arc::new(
+            LlmClientAdapter::new(
+                Arc::new(OpenAiClient::new_with_base_url("test-key".into(), base_url)),
+                "gpt-5.5".into(),
+            )
+            .with_provider_params(Some(ProviderTag::OpenAi(
+                meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                    web_search: Some(native),
+                    ..Default::default()
+                },
+            ))),
+        );
+        for policy in [
+            ProviderNativeToolPolicy::DisableAll,
+            ProviderNativeToolPolicy::Inherit,
+        ] {
+            let attempt = adapter
+                .clone()
+                .prepare_request_attempt_with_native_tool_policy(
+                    Arc::new(vec![Message::User(UserMessage::text("read"))]),
+                    Arc::from([]),
+                    1024,
+                    None,
+                    None,
+                    policy,
+                )
+                .expect("attempt");
+            let pressure = attempt
+                .request_pressure()
+                .expect("pressure")
+                .expect("exact pressure");
+            attempt.stream_response().await.expect("actual stream");
+            let bodies = seen.lock().expect("bodies");
+            let body = bodies.last().expect("captured request");
+            assert_eq!(
+                pressure.encoded_bytes,
+                serde_json::to_vec(body).expect("body").len() as u64
+            );
+            if policy == ProviderNativeToolPolicy::DisableAll {
+                assert_eq!(body["tools"], serde_json::json!([]));
+            } else {
+                assert_eq!(body["tools"], serde_json::json!([{"type": "web_search"}]));
+            }
+        }
+        assert_eq!(seen.lock().expect("bodies").len(), 2);
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("server cancellation")
+                .is_cancelled()
+        );
     }
 
     #[tokio::test]

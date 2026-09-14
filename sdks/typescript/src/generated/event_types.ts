@@ -34,6 +34,7 @@ import type {
   SchemaCompat,
   SchemaFormat,
   SenderContentTaint,
+  SessionId,
   SkillKey,
   SkillName,
   SourceUuid,
@@ -876,11 +877,6 @@ export type ServerToolKind = {
   kind: "provider_native";
   name: string;
 };
-
-/**
- * Unique identifier for a session (UUID v7 for time-ordering)
- */
-export type SessionId = string;
 
 /**
  * Slug-validated capability identifier for skill requirements.

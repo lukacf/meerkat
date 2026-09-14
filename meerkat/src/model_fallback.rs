@@ -119,6 +119,60 @@ impl ModelFallbackClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for ModelFallbackClient {
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        self.candidates[self.active_index()]
+            .client
+            .native_tool_policy_support()
+    }
+
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        self.candidates[self.active_index()]
+            .client
+            .scoped_model_effect_support()
+    }
+
+    fn prepare_scoped_request_attempt(
+        self: Arc<Self>,
+        messages: Arc<Vec<meerkat_core::Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        scope: Arc<meerkat_core::execution_scope::ScopedModelRequest>,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
+        let client = Arc::clone(&self.candidates[self.active_index()].client);
+        client.prepare_scoped_request_attempt(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            scope,
+        )
+    }
+
+    fn prepare_request_attempt_with_native_tool_policy(
+        self: Arc<Self>,
+        messages: Arc<Vec<meerkat_core::Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        native_tools: meerkat_core::ProviderNativeToolPolicy,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmRequestAttempt>, AgentError> {
+        let client = Arc::clone(&self.candidates[self.active_index()].client);
+        client.prepare_request_attempt_with_native_tool_policy(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            native_tools,
+        )
+    }
+
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<meerkat_core::Message>>,
@@ -544,6 +598,7 @@ mod tests {
             model.to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider,
+                interaction_kind: None,
                 display_name: None,
                 context_window,
                 max_input_tokens: None,

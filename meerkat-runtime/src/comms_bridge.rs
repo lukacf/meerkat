@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(peer_id, "11111111-1111-4111-8111-111111111111");
         assert_eq!(peer.content.text_content(), "stale helper prose");
 
-        let prompt = crate::input::input_prompt_text(&input);
+        let prompt = crate::input::input_prompt_text(&input).unwrap();
         assert!(prompt.starts_with(
             "Peer request from peer_id 11111111-1111-4111-8111-111111111111 (display_name: test-mob/lead/l-requester)."
         ));

@@ -393,7 +393,7 @@ pub use live_bridge_operation::{
     LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
     LiveBridgeOperationTerminalFuture,
 };
-pub use member_history_proxy::MemberHistoryPageDomain;
+pub use member_history_proxy::{MemberHistoryPageDomain, MemberLiveObservationsDomain};
 pub use member_live_proxy::MemberLiveStatusDomain;
 #[cfg(feature = "runtime-adapter")]
 pub use mobpack_execution::run_mobpack_callable;

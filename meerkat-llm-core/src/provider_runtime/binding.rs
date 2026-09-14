@@ -222,7 +222,10 @@ impl ResolvedTextTarget {
         profile: ModelProfileWitness,
         connection: ResolvedConnection,
     ) -> Option<Self> {
-        if !profile.matches_identity(&identity) || connection.provider != identity.provider {
+        if !profile.matches_identity(&identity)
+            || connection.provider != identity.provider
+            || !profile.profile().interaction_kind.supports_text_execution()
+        {
             return None;
         }
         Some(Self {
@@ -257,7 +260,10 @@ impl ResolvedRealtimeTarget {
         profile: ModelProfileWitness,
         connection: ResolvedConnection,
     ) -> Option<Self> {
-        if !profile.matches_identity(&identity) || connection.provider != identity.provider {
+        if !profile.matches_identity(&identity)
+            || connection.provider != identity.provider
+            || !profile.profile().interaction_kind.supports_text_execution()
+        {
             return None;
         }
         Some(Self {

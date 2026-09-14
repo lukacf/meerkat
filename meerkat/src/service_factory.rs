@@ -234,6 +234,12 @@ impl SessionAgent for FactoryAgent {
         input: SessionAgentTurnInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if !input.execution_context.is_session_policy() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "factory agent requires scope-aware physical dispatch before scoped execution"
+                    .into(),
+            ));
+        }
         // handling_mode and render_metadata are runtime-owned semantics.
         // The runtime routes Queue/Steer BEFORE calling the executor, so by
         // the time this method runs the routing decision is already made.
@@ -273,8 +279,15 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        execution_context: meerkat_core::execution_scope::RunExecutionContext,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if !execution_context.is_session_policy() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "factory agent requires scope-aware physical dispatch before scoped continuation"
+                    .into(),
+            ));
+        }
         self.agent.set_runtime_execution_kind(execution_kind);
         self.agent
             .set_active_transcript_identity(transcript_identity);
@@ -574,10 +587,54 @@ impl SessionAgent for FactoryAgent {
         Ok(self.agent.session().clone())
     }
 
+    fn callback_identity_for_terminal(
+        &self,
+        terminal: &meerkat_core::error::AgentError,
+    ) -> Result<Option<meerkat_core::session::CallbackBatchIdentity>, meerkat_core::error::AgentError>
+    {
+        self.agent
+            .session()
+            .callback_identity_for_terminal(terminal)
+            .map_err(|error| meerkat_core::error::AgentError::InternalError(error.to_string()))
+    }
+
+    fn prepare_callback_result_ingress(
+        &self,
+        request: &meerkat_core::StageToolResultsRequest,
+    ) -> Result<meerkat_core::session::PreparedCallbackResultIngress, meerkat_core::AgentError>
+    {
+        self.agent
+            .session()
+            .prepare_callback_result_ingress(&request.results, request.callback_target.as_ref())
+    }
+
+    fn validate_deferred_callback_targets(
+        &self,
+        messages: &[meerkat_core::session::PendingToolResultsMessage],
+    ) -> Result<(), meerkat_core::AgentError> {
+        self.agent
+            .session()
+            .validate_deferred_callback_targets(messages)
+    }
+
     fn session_transcript_authority(
         &self,
     ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
         SessionTranscriptAuthoritySnapshot::from_session(self.agent.session())
+    }
+
+    fn acknowledge_finalized_compaction_metadata(
+        &mut self,
+        identity: &meerkat_core::SessionHeadMetadataIdentity,
+    ) -> Result<(), meerkat_core::AgentError> {
+        self.agent
+            .session_mut()
+            .acknowledge_head_canonical_compaction_metadata(identity)
+            .map_err(|error| {
+                meerkat_core::AgentError::InternalError(format!(
+                    "failed to acknowledge store-committed compaction metadata: {error}"
+                ))
+            })
     }
 
     async fn prepare_head_canonical_runtime_boundary(
@@ -2397,6 +2454,7 @@ mod tests {
             agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
                 prompt: "initialize policy probe tool visibility".to_string().into(),
+                execution_context: Default::default(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
@@ -2561,6 +2619,7 @@ mod tests {
                 prompt: "initialize durable member tool visibility"
                     .to_string()
                     .into(),
+                execution_context: Default::default(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
@@ -2682,6 +2741,7 @@ mod tests {
                 &mut agent,
                 meerkat_session::ephemeral::SessionAgentTurnInput {
                     prompt: "ordinary turn overlapping live bridge".to_string().into(),
+                    execution_context: Default::default(),
                     injected_context: Vec::new(),
                     handling_mode: meerkat_core::HandlingMode::Queue,
                     render_metadata: None,
@@ -2795,6 +2855,7 @@ mod tests {
             &mut agent,
             meerkat_session::ephemeral::SessionAgentTurnInput {
                 prompt: "ordinary durable turn".to_string().into(),
+                execution_context: Default::default(),
                 injected_context: Vec::new(),
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
@@ -3727,6 +3788,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                execution_context: Default::default(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
@@ -3799,6 +3861,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                execution_context: Default::default(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,

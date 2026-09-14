@@ -10,6 +10,9 @@ use meerkat_machine_schema::{
     CompositionSchema, MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
 };
 
+#[cfg(test)]
+use crate::machine_owner_tests::owner_test_specs_for_machine;
+
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
     /// Operate on every registered machine and composition.
@@ -301,51 +304,6 @@ fn machine_dir(root: &Path, slug: &str) -> PathBuf {
 
 fn composition_dir(root: &Path, slug: &str) -> PathBuf {
     root.join("specs").join("compositions").join(slug)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-struct OwnerTestSpec {
-    package: &'static str,
-    target: &'static str,
-    filter: &'static str,
-}
-
-#[allow(dead_code)]
-fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
-    const MEERKAT: &[OwnerTestSpec] = &[
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_attached_state_reached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_turn_admission_kernel",
-            filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "session_tool_visibility_kernel",
-            filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
-        },
-    ];
-    const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
-        package: "meerkat-mob",
-        target: "lib",
-        filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
-    }];
-
-    match slug {
-        "meerkat_machine" => MEERKAT,
-        "mob_machine" => MOB,
-        _ => &[],
-    }
 }
 
 pub fn machine_slug(machine_name: &str) -> String {

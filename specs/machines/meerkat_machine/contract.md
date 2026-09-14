@@ -148,6 +148,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_runtime_execution_kind`: `Map<String, RecoveredRuntimeExecutionKind>`
 - `input_runtime_peer_response_terminal_apply_intent`: `Map<String, RecoveredPeerResponseTerminalApplyIntent>`
 - `input_is_prompt`: `Map<String, Bool>`
+- `input_exclusive_live_requests`: `Set<String>`
 - `input_lane`: `Map<String, InputLane>`
 - `input_recovery_lanes`: `Map<String, InputLane>`
 - `admission_authorized_lanes`: `Map<String, InputLane>`
@@ -464,6 +465,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
+- `ResolveFailedRunRecovery`(run_id: RunId, input_ids: Set<String>)
+- `AuthorizeScopedInputNormalization`(input_id: String, phase: RecoveredInputObservedPhase, has_run: Bool, applied_boundary_committed: Option<Bool>)
+- `AbortUncommittedLiveStage`(input_id: String, run_id: RunId)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -534,6 +538,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBoundaryUnavailable`(input_id: String)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
+- `ResolveLiveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>)
@@ -1037,6 +1042,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoveredTerminalCompletionDeclaredUnrecoverable`(batch_key: String, reason: RecoveredTerminalCompletionUnrecoverableReasonKind)
 - `TerminalCompletionCorrelationClassified`(owner_input_id: String, run_id: Option<RunId>, correlation: TerminalCompletionCorrelation)
 - `CheckpointCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, recipient_input_ids: Set<String>, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
+- `FailedRunRecoveryResolved`(run_id: RunId, input_ids: Set<String>, disposition: FailedRunRecoveryDisposition)
+- `ScopedInputNormalizationResolved`(input_id: String, disposition: ScopedInputNormalizationDisposition)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1139,11 +1146,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `SteerAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_steer_lane`
   - `SteerAcceptedRetired`: `not_already_tracked`, `live_admission_authorized_steer_lane`
   - `SteerAcceptedStopped`: `not_already_tracked`, `live_admission_authorized_steer_lane`
-  - `RecoverInputLifecycleIdle`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
-  - `RecoverInputLifecycleAttached`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
-  - `RecoverInputLifecycleRunning`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
-  - `RecoverInputLifecycleRetired`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
-  - `RecoverInputLifecycleStopped`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleIdle`: `recovered_lifecycle_has_admission_witness`, `recovered_live_request_is_not_operator_prompt`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleAttached`: `recovered_lifecycle_has_admission_witness`, `recovered_live_request_is_not_operator_prompt`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleRunning`: `recovered_lifecycle_has_admission_witness`, `recovered_live_request_is_not_operator_prompt`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleRetired`: `recovered_lifecycle_has_admission_witness`, `recovered_live_request_is_not_operator_prompt`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleStopped`: `recovered_lifecycle_has_admission_witness`, `recovered_live_request_is_not_operator_prompt`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
 - Command Effects: `IngressAccepted`
 - Emitted By Transitions: `IngressAccepted`, `InputLifecycleNotice`
 
@@ -1152,11 +1159,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `live_request_uses_queue_lane`, `live_request_run_is_exclusive`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `live_request_uses_queue_lane`, `live_request_run_is_exclusive`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `live_request_uses_queue_lane`, `live_request_run_is_exclusive`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `live_request_uses_queue_lane`, `live_request_run_is_exclusive`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `live_request_uses_queue_lane`, `live_request_run_is_exclusive`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedRuntimeLoopRunCommit`
@@ -1316,6 +1323,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_drain_obligations_require_draining`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
+- `live_request_run_associations_are_exclusive`
 - `staged_inputs_are_not_queued`
 - `staged_inputs_have_run_association`
 - `staged_surface_ops_are_known_and_sequenced`
@@ -7439,6 +7447,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
@@ -7447,6 +7456,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
@@ -7455,6 +7465,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_missing`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
@@ -7463,6 +7474,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `external_derived_forbidden`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
@@ -7471,6 +7483,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `external_derived_forbidden`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
@@ -7479,6 +7492,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `external_derived_forbidden`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
@@ -7487,6 +7501,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `derived_forbidden_for_input_kind`
 - Emits: `AdmissionValidationResolved`
 - To: `Idle`
@@ -7495,6 +7510,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `derived_forbidden_for_input_kind`
 - Emits: `AdmissionValidationResolved`
 - To: `Attached`
@@ -7503,6 +7519,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `derived_forbidden_for_input_kind`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
@@ -7511,6 +7528,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -7520,6 +7538,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -7529,6 +7548,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_invalid`
 - Emits: `AdmissionValidationResolved`
@@ -7538,6 +7558,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
@@ -7548,6 +7569,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
@@ -7558,6 +7580,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_invalid`
@@ -7568,6 +7591,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
@@ -7579,6 +7603,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
@@ -7590,12 +7615,133 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
 - Guards:
+  - `ordinary_admission`
   - `durability_authorized`
   - `peer_handling_mode_valid`
   - `peer_response_terminal_structurally_valid`
   - `peer_response_terminal_status_supported`
 - Emits: `AdmissionValidationResolved`
 - To: `Running`
+
+### `ResolveAdmissionValidationUnboundLiveRequestRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationUnboundLiveRequestRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationUnboundLiveRequestRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveLiveAdmissionValidationAcceptedIdle`
+- From: `Idle`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveLiveAdmissionValidationAcceptedAttached`
+- From: `Attached`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveLiveAdmissionValidationAcceptedRunning`
+- From: `Running`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveLiveAdmissionValidationRejectedIdle`
+- From: `Idle`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveLiveAdmissionValidationRejectedAttached`
+- From: `Attached`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveLiveAdmissionValidationRejectedRunning`
+- From: `Running`
+- On: `ResolveLiveAdmissionValidation`(input_id, input_kind, input_origin, durability)
+- Guards:
+  - ``
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `AuthorizeScopedInputNormalizationInitializing`
+- From: `Initializing`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Initializing`
+
+### `AuthorizeScopedInputNormalizationIdle`
+- From: `Idle`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Idle`
+
+### `AuthorizeScopedInputNormalizationAttached`
+- From: `Attached`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Attached`
+
+### `AuthorizeScopedInputNormalizationRunning`
+- From: `Running`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Running`
+
+### `AuthorizeScopedInputNormalizationRetired`
+- From: `Retired`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Retired`
+
+### `AuthorizeScopedInputNormalizationStopped`
+- From: `Stopped`
+- On: `AuthorizeScopedInputNormalization`(input_id, phase, has_run, applied_boundary_committed)
+- Guards:
+  - ``
+- Emits: `ScopedInputNormalizationResolved`
+- To: `Stopped`
 
 ### `NormalizeRecoveredInputAcceptedQueueInitializing`
 - From: `Initializing`
@@ -10797,6 +10943,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_immediate_boundary_uses_steer_lane`
+  - `recovered_live_request_owns_exclusive_run_start`
 - To: `Idle`
 
 ### `RecoverAdmittedInputAttached`
@@ -10806,6 +10953,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_immediate_boundary_uses_steer_lane`
+  - `recovered_live_request_owns_exclusive_run_start`
 - To: `Attached`
 
 ### `RecoverAdmittedInputRunning`
@@ -10815,6 +10963,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_immediate_boundary_uses_steer_lane`
+  - `recovered_live_request_owns_exclusive_run_start`
 - To: `Running`
 
 ### `RecoverAdmittedInputRetired`
@@ -10824,6 +10973,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_immediate_boundary_uses_steer_lane`
+  - `recovered_live_request_owns_exclusive_run_start`
 - To: `Retired`
 
 ### `RecoverAdmittedInputStopped`
@@ -10833,6 +10983,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_execution_kind_matches_input`
   - `recovered_terminal_intent_matches_input`
   - `recovered_immediate_boundary_uses_steer_lane`
+  - `recovered_live_request_owns_exclusive_run_start`
 - To: `Stopped`
 
 ### `RecoverInputLifecycleIdle`
@@ -10840,6 +10991,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
+  - `recovered_live_request_is_not_operator_prompt`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
@@ -10856,6 +11008,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
+  - `recovered_live_request_is_not_operator_prompt`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
@@ -10872,6 +11025,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
+  - `recovered_live_request_is_not_operator_prompt`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
@@ -10888,6 +11042,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
+  - `recovered_live_request_is_not_operator_prompt`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
@@ -10904,6 +11059,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
+  - `recovered_live_request_is_not_operator_prompt`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
@@ -11169,6 +11325,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `live_request_uses_queue_lane`
+  - `live_request_run_is_exclusive`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -11181,6 +11339,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `live_request_uses_queue_lane`
+  - `live_request_run_is_exclusive`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -11193,6 +11353,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `live_request_uses_queue_lane`
+  - `live_request_run_is_exclusive`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -11205,6 +11367,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `live_request_uses_queue_lane`
+  - `live_request_run_is_exclusive`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -11217,6 +11381,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_sequence_bound`
   - `input_recovery_lane_bound`
   - `current_run_matches`
+  - `live_request_uses_queue_lane`
+  - `live_request_run_is_exclusive`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -11255,11 +11421,52 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_tracked`
 - To: `Stopped`
 
+### `ResolveFailedRunRecoveryIdle`
+- From: `Idle`
+- On: `ResolveFailedRunRecovery`(run_id, input_ids)
+- Guards:
+  - `exact_staged_run_contributors`
+- Emits: `FailedRunRecoveryResolved`
+- To: `Idle`
+
+### `ResolveFailedRunRecoveryAttached`
+- From: `Attached`
+- On: `ResolveFailedRunRecovery`(run_id, input_ids)
+- Guards:
+  - `exact_staged_run_contributors`
+- Emits: `FailedRunRecoveryResolved`
+- To: `Attached`
+
+### `ResolveFailedRunRecoveryRunning`
+- From: `Running`
+- On: `ResolveFailedRunRecovery`(run_id, input_ids)
+- Guards:
+  - `exact_staged_run_contributors`
+- Emits: `FailedRunRecoveryResolved`
+- To: `Running`
+
+### `ResolveFailedRunRecoveryRetired`
+- From: `Retired`
+- On: `ResolveFailedRunRecovery`(run_id, input_ids)
+- Guards:
+  - `exact_staged_run_contributors`
+- Emits: `FailedRunRecoveryResolved`
+- To: `Retired`
+
+### `ResolveFailedRunRecoveryStopped`
+- From: `Stopped`
+- On: `ResolveFailedRunRecovery`(run_id, input_ids)
+- Guards:
+  - `exact_staged_run_contributors`
+- Emits: `FailedRunRecoveryResolved`
+- To: `Stopped`
+
 ### `RollbackStagedIdle`
 - From: `Idle`
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
@@ -11268,6 +11475,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
@@ -11276,6 +11484,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
@@ -11284,6 +11493,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
@@ -11292,6 +11502,47 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
+- Emits: `InputLifecycleNotice`
+- To: `Stopped`
+
+### `AbortUncommittedLiveStageIdle`
+- From: `Idle`
+- On: `AbortUncommittedLiveStage`(input_id, run_id)
+- Guards:
+  - `exact_unexecuted_live_stage`
+- Emits: `InputLifecycleNotice`
+- To: `Idle`
+
+### `AbortUncommittedLiveStageAttached`
+- From: `Attached`
+- On: `AbortUncommittedLiveStage`(input_id, run_id)
+- Guards:
+  - `exact_unexecuted_live_stage`
+- Emits: `InputLifecycleNotice`
+- To: `Attached`
+
+### `AbortUncommittedLiveStageRunning`
+- From: `Running`
+- On: `AbortUncommittedLiveStage`(input_id, run_id)
+- Guards:
+  - `exact_unexecuted_live_stage`
+- Emits: `InputLifecycleNotice`
+- To: `Running`
+
+### `AbortUncommittedLiveStageRetired`
+- From: `Retired`
+- On: `AbortUncommittedLiveStage`(input_id, run_id)
+- Guards:
+  - `exact_unexecuted_live_stage`
+- Emits: `InputLifecycleNotice`
+- To: `Retired`
+
+### `AbortUncommittedLiveStageStopped`
+- From: `Stopped`
+- On: `AbortUncommittedLiveStage`(input_id, run_id)
+- Guards:
+  - `exact_unexecuted_live_stage`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
@@ -11300,6 +11551,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11312,6 +11564,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11324,6 +11577,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11336,6 +11590,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11348,6 +11603,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11360,6 +11616,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11372,6 +11629,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11384,6 +11642,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11396,6 +11655,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
@@ -11408,6 +11668,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveStagedRollback`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `ordinary_input_can_be_replayed`
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`

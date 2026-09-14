@@ -1040,7 +1040,9 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         host_inbox_sender: host_comms.inbox_sender.clone(),
         host_keypair: Arc::clone(&host_keypair),
         registry,
-        persistence: Arc::new(RuntimeStoreHostBindingPersistence::new(runtime_store)),
+        persistence: Arc::new(RuntimeStoreHostBindingPersistence::new(
+            runtime_store.clone(),
+        )),
         probe: Arc::clone(&probe) as Arc<dyn ProviderPresenceProbe>,
         capability_facts: HostCapabilityFacts {
             durable_sessions,
@@ -1085,7 +1087,10 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         actor.observation_watch(),
         actor.observation_pending_sender(),
         actor.observation_ack_sender(),
-    );
+    )
+    .with_live_observation_reader(Arc::new(
+        meerkat_runtime::live_ledger::history::RuntimeLiveObservationReader::new(runtime_store),
+    ));
     if let Some(capacity) = composition.live_buffer_events {
         observation = observation.with_event_ring_capacity(capacity);
     }

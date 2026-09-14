@@ -177,6 +177,10 @@ pub mod gpt_live_gate0;
 mod job_delivery;
 #[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
 pub mod live_activation;
+#[cfg(feature = "live")]
+pub mod live_profile_refresh;
+#[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
+pub mod live_profile_source;
 pub use job_delivery::{
     AppliedRuntimeJobDelivery, BlockedRuntimeJobDelivery, JobDeliveryApplication,
     JobDeliveryContent, JobDeliverySink, JobNotificationDeliveryPayload, JobOutboxProjectionError,

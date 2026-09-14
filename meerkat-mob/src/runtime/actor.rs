@@ -25824,6 +25824,13 @@ impl MobActor {
                     self.handle_member_history(agent_identity, from_index, limit, reply_tx)
                         .await;
                 }
+                MobCommand::MemberLiveObservations { agent_identity, query, reply_tx } => {
+                    self.handle_member_live_observations(agent_identity, query, reply_tx).await;
+                }
+                MobCommand::MemberLiveObservationsCompleted { agent_identity, target, result, reply_tx } => {
+                    let current = self.live_observation_read_target_current(&agent_identity, &target).await;
+                    let _ = reply_tx.send(current.and(result));
+                }
                 MobCommand::CreateForkedParticipant {
                     request,
                     reply_tx,
@@ -33979,6 +33986,194 @@ impl MobActor {
         Ok(())
     }
 
+    fn require_host_public_live_protocol(&self, host: &mob_dsl::HostId) -> Result<(), MobError> {
+        let version = Self::bridge_protocol_version_number(
+            super::bridge_protocol::BridgeProtocolVersion::V7,
+        )?;
+        let state = self.dsl_authority.state();
+        if state
+            .host_protocol_min
+            .get(host)
+            .is_some_and(|minimum| *minimum <= version)
+            && state
+                .host_protocol_max
+                .get(host)
+                .is_some_and(|maximum| *maximum >= version)
+        {
+            Ok(())
+        } else {
+            Err(MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                reason: "member owner has not declared bridge V7 public Live support".into(),
+            })
+        }
+    }
+
+    async fn live_observation_read_target_current(
+        &self,
+        identity: &AgentIdentity,
+        target: &super::state::LiveObservationReadTarget,
+    ) -> Result<(), MobError> {
+        let roster = self.roster.read().await;
+        let entry = roster
+            .get(identity)
+            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        let current = match target {
+            super::state::LiveObservationReadTarget::Placed(expected) => {
+                self.placed_member_incarnation(entry)? == *expected
+            }
+            super::state::LiveObservationReadTarget::Local {
+                session_id,
+                generation,
+                agent_runtime_id,
+                fence_token,
+            } => {
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+                !self
+                    .dsl_authority
+                    .state()
+                    .member_placement
+                    .contains_key(&dsl_identity)
+                    && entry.member_ref.bridge_session_id() == Some(session_id)
+                    && entry.generation == *generation
+                    && entry.agent_runtime_id == *agent_runtime_id
+                    && entry.fence_token == *fence_token
+                    && self
+                        .dsl_authority
+                        .state()
+                        .member_runtime_material_for_identity(&dsl_identity)
+                        .map(|material| material.to_domain_for_identity(identity))
+                        == Some((agent_runtime_id.clone(), *fence_token))
+            }
+        };
+        if current {
+            Ok(())
+        } else {
+            Err(MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::StaleFence,
+                reason: "member Live observation residency changed during read".into(),
+            })
+        }
+    }
+
+    async fn handle_member_live_observations(
+        &mut self,
+        agent_identity: AgentIdentity,
+        query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+        reply_tx: oneshot::Sender<
+            Result<super::member_history_proxy::MemberLiveObservationsDomain, MobError>,
+        >,
+    ) {
+        use super::state::LiveObservationReadTarget;
+        use meerkat_contracts::wire::live_observation::{
+            LiveObservationOwner, LiveObservationReadFailure,
+        };
+        let entry = self.roster.read().await.get(&agent_identity).cloned();
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        let placement = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .get(&dsl_identity)
+            .cloned();
+        let command_tx = self.command_tx.clone();
+        if let Some(placement) = placement {
+            if let Err(error) = self.require_host_public_live_protocol(&placement) {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+            let route = self.member_pump_material(&entry).and_then(|material| {
+                self.placed_member_incarnation(&entry)
+                    .map(|expected| (material.peer, expected))
+            });
+            let (peer, expected) = match route {
+                Ok(route) => route,
+                Err(error) => {
+                    let _ = reply_tx.send(Err(error));
+                    return;
+                }
+            };
+            let bridge = Arc::clone(&self.supervisor_bridge);
+            self.actor_io_tasks.spawn(async move {
+                let result = super::member_history_proxy::read_remote_member_live_observations(
+                    &bridge,
+                    &peer,
+                    placement,
+                    expected.clone(),
+                    query,
+                )
+                .await;
+                let _ = command_tx
+                    .send(RoutedMobCommand::internal(
+                        MobCommand::MemberLiveObservationsCompleted {
+                            agent_identity,
+                            target: LiveObservationReadTarget::Placed(expected),
+                            result,
+                            reply_tx,
+                        },
+                    ))
+                    .await;
+            });
+            return;
+        }
+        let Some(session_id) = entry.member_ref.bridge_session_id().cloned() else {
+            let _ = reply_tx.send(Err(MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                reason: "member has no retained Live ledger session".into(),
+            }));
+            return;
+        };
+        #[cfg(feature = "runtime-adapter")]
+        let reader = self
+            .runtime_adapter
+            .as_ref()
+            .and_then(|adapter| adapter.live_observation_reader());
+        #[cfg(not(feature = "runtime-adapter"))]
+        let reader: Option<
+            Arc<dyn meerkat_runtime::live_ledger::history::LiveObservationHistoryReader>,
+        > = None;
+        let Some(reader) = reader else {
+            let _ = reply_tx.send(Err(MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::LiveObservationRead {
+                    failure: LiveObservationReadFailure::Unsupported,
+                },
+                reason: "runtime has no independent retained Live ledger reader".into(),
+            }));
+            return;
+        };
+        let target = LiveObservationReadTarget::Local {
+            session_id: session_id.clone(),
+            generation: entry.generation,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+        };
+        let owner = LiveObservationOwner::Member {
+            session_id,
+            mob_id: self.definition.id.to_string(),
+            agent_identity: agent_identity.to_string(),
+        };
+        self.actor_io_tasks.spawn(async move {
+            let result = reader.read(owner, query).await
+                .map(|page| super::member_history_proxy::MemberLiveObservationsDomain {
+                    page, placement: None,
+                    provenance: meerkat_contracts::wire::WireProjectionProvenance::ControllingHostVerified,
+                })
+                .map_err(|error| MobError::BridgeCommandRejected {
+                    cause: super::bridge_protocol::BridgeRejectionCause::LiveObservationRead {
+                        failure: error.failure(),
+                    },
+                    reason: error.to_string(),
+                });
+            let _ = command_tx.send(RoutedMobCommand::internal(
+                MobCommand::MemberLiveObservationsCompleted { agent_identity, target, result, reply_tx },
+            )).await;
+        });
+    }
+
     /// Phase 6 (DEC-P6E-20/21): the placement-switched member history read.
     /// Local members serve the local session page through THE shared wire
     /// projection; placed members proxy `ReadMemberHistory` on a detached
@@ -35665,6 +35860,17 @@ impl MobActor {
         if let Err(error) = self
             .require_member_live_mutation_admissible(&agent_identity)
             .await
+        {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        if profile_id.is_some()
+            && let Some(host) = self
+                .dsl_authority
+                .state()
+                .member_placement
+                .get(&mob_dsl::AgentIdentity::from_domain(&agent_identity))
+            && let Err(error) = self.require_host_public_live_protocol(host)
         {
             let _ = reply_tx.send(Err(error));
             return;

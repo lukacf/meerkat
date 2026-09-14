@@ -16,6 +16,7 @@ use meerkat_core::live_execution::activation::{
 };
 use meerkat_core::live_execution::profile::LiveProfileId;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 const MAX_ACTIVATION_DOCUMENT_BYTES: u64 = 1024 * 1024;
@@ -54,6 +55,21 @@ pub struct FileLiveExecutionGrantSource {
     documents: BTreeMap<RealmId, LiveActivationDocumentLocator>,
 }
 
+pub struct LiveActivationDocumentObservation<Member> {
+    documents: BTreeMap<RealmId, LiveActivationDocument<Member>>,
+    digest: [u8; 32],
+}
+
+impl<Member> LiveActivationDocumentObservation<Member> {
+    pub fn documents(&self) -> &BTreeMap<RealmId, LiveActivationDocument<Member>> {
+        &self.documents
+    }
+
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
 impl FileLiveExecutionGrantSource {
     pub fn new(documents: BTreeMap<RealmId, LiveActivationDocumentLocator>) -> Self {
         Self { documents }
@@ -63,16 +79,30 @@ impl FileLiveExecutionGrantSource {
         &self,
         chain: &RealmChain,
     ) -> Result<BTreeMap<RealmId, LiveActivationDocument<Member>>, LiveActivationSourceError> {
+        Ok(self.observe(chain).await?.documents)
+    }
+
+    /// Bind every observed document, including absence, without claiming an
+    /// atomic read across files or a lease against subsequent editor writes.
+    pub async fn observe<Member: DeserializeOwned>(
+        &self,
+        chain: &RealmChain,
+    ) -> Result<LiveActivationDocumentObservation<Member>, LiveActivationSourceError> {
         let mut documents = BTreeMap::new();
+        let mut digest = Sha256::new();
+        digest.update(b"meerkat.live-activation-observation.v1\0");
         for realm in chain.realms() {
             let Some(locator) = self.documents.get(realm) else {
                 return Err(LiveActivationSourceError::MissingLocator {
                     realm: realm.clone(),
                 });
             };
+            digest.update((realm.as_str().len() as u64).to_be_bytes());
+            digest.update(realm.as_str().as_bytes());
             let file = match tokio::fs::File::open(locator.path()).await {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    digest.update([0]);
                     documents.insert(realm.clone(), LiveActivationDocument::default());
                     continue;
                 }
@@ -105,9 +135,14 @@ impl FileLiveExecutionGrantSource {
                 toml::from_str(text).map_err(|_| LiveActivationSourceError::InvalidDocument {
                     realm: realm.clone(),
                 })?;
+            digest.update([1]);
+            digest.update(Sha256::digest(&bytes));
             documents.insert(realm.clone(), document);
         }
-        Ok(documents)
+        Ok(LiveActivationDocumentObservation {
+            documents,
+            digest: digest.finalize().into(),
+        })
     }
 }
 

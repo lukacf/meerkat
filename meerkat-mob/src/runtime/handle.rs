@@ -3688,6 +3688,7 @@ fn bounded_runtime_turn_result(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => {
             return Err(BoundedTurnFailure::CallbackPending {
                 session_id,
@@ -3698,6 +3699,7 @@ fn bounded_runtime_turn_result(
         }
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
             pending_tool_calls,
+            ..
         } => {
             return Err(BoundedTurnFailure::CallbackBatchPending {
                 session_id,
@@ -3843,6 +3845,7 @@ pub(crate) fn legacy_exact_turn_result(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => Err(MobError::CallbackPending {
             session_id,
             tool_use_id,
@@ -3851,6 +3854,7 @@ pub(crate) fn legacy_exact_turn_result(
         }),
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
             pending_tool_calls,
+            ..
         } => Err(MobError::CallbackBatchPending {
             session_id,
             pending_tool_calls,
@@ -7003,6 +7007,26 @@ impl MobHandle {
                 limit,
                 reply_tx,
             })
+            .await?
+    }
+
+    /// Retained Live history, authorized independently on every page by
+    /// ReadHistory. Does not open a channel or acquire a Live execution grant.
+    pub async fn member_live_observations(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+    ) -> Result<super::member_history_proxy::MemberLiveObservationsDomain, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::MemberLiveObservations {
+                    agent_identity: identity,
+                    query,
+                    reply_tx,
+                },
+            )
             .await?
     }
 

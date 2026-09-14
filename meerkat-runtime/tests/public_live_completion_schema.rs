@@ -11,6 +11,72 @@ use serde_json::{Value, json};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn aggregate_encoding_bound_requires_actual_maximum_and_all_nested_branches() -> TestResult {
+    let schema = json!({
+        "type": "object", "x-max-encoded-bytes": 29,
+        "properties": {
+            "kind": { "enum": ["a", "b"] },
+            "data": { "type": "string" }
+        },
+        "required": ["kind", "data"], "additionalProperties": false
+    });
+    let full = json!({"kind":"a","data":"1234567"});
+    assert_eq!(encoded_width(&full)?, 29);
+    assert!(
+        verify_schema_coverage(
+            schema.clone(),
+            &[json!({"kind":"a","data":""}), json!({"kind":"b","data":""})]
+        )
+        .is_err()
+    );
+    assert!(verify_schema_coverage(schema.clone(), std::slice::from_ref(&full)).is_err());
+    assert!(
+        verify_schema_coverage(
+            schema.clone(),
+            &[full.clone(), json!({"kind":"b","data":"12345678"})]
+        )
+        .is_err()
+    );
+    verify_schema_coverage(schema, &[full, json!({"kind":"b","data":""})])?;
+    Ok(())
+}
+
+#[test]
+fn provider_diagnostic_aggregate_bound_is_enforced_by_the_real_codec() -> TestResult {
+    use meerkat_core::live_execution::backend::{
+        LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES, LiveProviderDiagnostic,
+    };
+    let diagnostic = maximal_completion_events()?
+        .into_iter()
+        .find_map(|event| match event {
+            LiveCompletionEvent::ChannelProviderDiagnostic { diagnostic }
+                if serde_json::to_vec(&diagnostic).ok()?.len()
+                    == LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES =>
+            {
+                Some(diagnostic)
+            }
+            _ => None,
+        })
+        .ok_or("no actual maximum diagnostic")?;
+    let bytes = serde_json::to_vec(&diagnostic)?;
+    assert_eq!(
+        serde_json::from_slice::<LiveProviderDiagnostic>(&bytes)?,
+        diagnostic
+    );
+    let mut oversized = serde_json::to_value(diagnostic)?;
+    let delegation = oversized
+        .pointer_mut("/attribution/response/delegation")
+        .ok_or("delegation")?;
+    *delegation = json!(format!("{}a", delegation.as_str().ok_or("reference")?));
+    assert_eq!(
+        encoded_width(&oversized)?,
+        LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES + 1
+    );
+    assert!(serde_json::from_value::<LiveProviderDiagnostic>(oversized).is_err());
+    Ok(())
+}
+
+#[test]
 fn multibyte_or_escaped_characters_do_not_prove_minimum_encoded_string_charge() -> TestResult {
     let schema = json!({
         "type": "string", "minLength": 1, "maxLength": 128, "x-max-utf8-bytes": 128
@@ -176,6 +242,7 @@ fn verify_schema_coverage(schema: Value, fixtures: &[Value]) -> TestResult {
         expected: BTreeSet::new(),
         observed: BTreeSet::new(),
         numeric: BTreeMap::new(),
+        aggregate_bound: None,
     };
     coverage.walk(&schema, "#", "#", None, &mut BTreeSet::new())?;
     let validator = jsonschema::validator_for(&schema)?;
@@ -197,6 +264,7 @@ struct Coverage<'a> {
     expected: BTreeSet<String>,
     observed: BTreeSet<String>,
     numeric: BTreeMap<String, NumericExtrema>,
+    aggregate_bound: Option<u64>,
 }
 
 impl Coverage<'_> {
@@ -259,11 +327,31 @@ impl Coverage<'_> {
                 "anyOf",
                 "allOf",
                 "x-max-utf8-bytes",
+                "x-max-encoded-bytes",
             ]
             .contains(&key.as_str())
             {
                 return Err(format!("unsupported schema keyword {key} at {path}").into());
             }
+        }
+        let previous_bound = self.aggregate_bound;
+        if let Some(maximum) = object.get("x-max-encoded-bytes") {
+            let maximum = maximum
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or("invalid aggregate encoded bound")?;
+            if let Some(value) = value
+                && encoded_width(value)? > maximum as usize
+            {
+                return Err("aggregate encoded bound exceeded".into());
+            }
+            self.record(
+                format!("{occurrence}/encoded-maximum"),
+                value
+                    .map(|value| encoded_width(value).map(|bytes| bytes == maximum as usize))
+                    .transpose()?,
+            );
+            self.aggregate_bound = Some(maximum);
         }
         if let Some(reference) = object.get("$ref") {
             let reference = reference.as_str().ok_or("non-string schema reference")?;
@@ -322,7 +410,12 @@ impl Coverage<'_> {
                 }
             }
         }
-        self.observe_extrema(schema, path, occurrence, value)?;
+        // A coupled encoded ceiling bounds the whole subtree, rather than
+        // requiring mutually impossible independent field maxima. Its actual
+        // maximum and every nested discriminant must still be exercised.
+        if self.aggregate_bound.is_none() {
+            self.observe_extrema(schema, path, occurrence, value)?;
+        }
         if let Some(variants) = object.get("enum") {
             for (index, variant) in variants
                 .as_array()
@@ -389,37 +482,61 @@ impl Coverage<'_> {
             );
         }
         if let Some(items) = object.get("items") {
-            let maximum = object
-                .get("maxItems")
-                .and_then(Value::as_u64)
-                .ok_or("array items require a finite maximum for extrema coverage")?;
-            if maximum > 4096 {
-                return Err("array coverage exceeds its explicit test bound".into());
-            }
-            match value {
-                None => {
-                    for index in 0..maximum {
-                        self.walk(
-                            items,
-                            &format!("{path}/items"),
-                            &format!("{occurrence}/items/{index}"),
-                            None,
-                            references,
-                        )?;
+            if self.aggregate_bound.is_some() {
+                match value {
+                    None => self.walk(
+                        items,
+                        &format!("{path}/items"),
+                        &format!("{occurrence}/items"),
+                        None,
+                        references,
+                    )?,
+                    Some(Value::Array(values)) => {
+                        for value in values {
+                            self.walk(
+                                items,
+                                &format!("{path}/items"),
+                                &format!("{occurrence}/items"),
+                                Some(value),
+                                references,
+                            )?;
+                        }
                     }
+                    Some(_) => {}
                 }
-                Some(Value::Array(values)) => {
-                    for (index, value) in values.iter().enumerate() {
-                        self.walk(
-                            items,
-                            &format!("{path}/items"),
-                            &format!("{occurrence}/items/{index}"),
-                            Some(value),
-                            references,
-                        )?;
+            } else {
+                let maximum = object
+                    .get("maxItems")
+                    .and_then(Value::as_u64)
+                    .ok_or("array items require a finite maximum for extrema coverage")?;
+                if maximum > 4096 {
+                    return Err("array coverage exceeds its explicit test bound".into());
+                }
+                match value {
+                    None => {
+                        for index in 0..maximum {
+                            self.walk(
+                                items,
+                                &format!("{path}/items"),
+                                &format!("{occurrence}/items/{index}"),
+                                None,
+                                references,
+                            )?;
+                        }
                     }
+                    Some(Value::Array(values)) => {
+                        for (index, value) in values.iter().enumerate() {
+                            self.walk(
+                                items,
+                                &format!("{path}/items"),
+                                &format!("{occurrence}/items/{index}"),
+                                Some(value),
+                                references,
+                            )?;
+                        }
+                    }
+                    Some(_) => {}
                 }
-                Some(_) => {}
             }
         }
         if let Some(items) = object.get("prefixItems") {
@@ -451,6 +568,7 @@ impl Coverage<'_> {
                 }
             }
         }
+        self.aggregate_bound = previous_bound;
         Ok(())
     }
 

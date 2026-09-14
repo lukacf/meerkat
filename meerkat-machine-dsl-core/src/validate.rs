@@ -440,7 +440,9 @@ fn collect_helper_call_names(expr: &ExprDef, calls: &mut HashSet<String>) {
         | ExprDef::Lt(l, r)
         | ExprDef::Lte(l, r)
         | ExprDef::Add(l, r)
-        | ExprDef::Sub(l, r) => {
+        | ExprDef::Sub(l, r)
+        | ExprDef::Mul(l, r)
+        | ExprDef::Div(l, r) => {
             collect_helper_call_names(l, calls);
             collect_helper_call_names(r, calls);
         }
@@ -646,7 +648,9 @@ fn validate_expr(
         | ExprDef::Lt(l, r)
         | ExprDef::Lte(l, r)
         | ExprDef::Add(l, r)
-        | ExprDef::Sub(l, r) => {
+        | ExprDef::Sub(l, r)
+        | ExprDef::Mul(l, r)
+        | ExprDef::Div(l, r) => {
             validate_expr(l, fields, bindings, helpers, errors);
             validate_expr(r, fields, bindings, helpers, errors);
         }

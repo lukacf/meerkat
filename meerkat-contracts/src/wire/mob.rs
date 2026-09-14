@@ -3488,6 +3488,61 @@ pub struct MobMemberHistoryResult {
     pub provenance: WireProjectionProvenance,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "MobMemberLiveObservationsParamsWire")]
+pub struct MobMemberLiveObservationsParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    #[serde(flatten)]
+    pub query: super::live_observation::LiveObservationPageQuery,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct MobMemberLiveObservationsParamsWire {
+    mob_id: String,
+    agent_identity: String,
+    #[serde(default)]
+    channel_id: Option<meerkat_core::live_execution::LiveChannelId>,
+    #[serde(default)]
+    cursor: Option<super::live_observation::LiveObservationCursor>,
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 256)))]
+    limit: Option<u16>,
+}
+
+impl TryFrom<MobMemberLiveObservationsParamsWire> for MobMemberLiveObservationsParams {
+    type Error = super::live_observation::LiveObservationEncodingError;
+
+    fn try_from(value: MobMemberLiveObservationsParamsWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mob_id: value.mob_id,
+            agent_identity: value.agent_identity,
+            query: super::live_observation::LiveObservationPageQuery::new(
+                value.channel_id,
+                value.cursor,
+                usize::from(
+                    value
+                        .limit
+                        .unwrap_or(super::live_observation::LIVE_OBSERVATION_PAGE_DEFAULT_LIMIT),
+                ),
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberLiveObservationsResult {
+    pub page: super::live_observation::LiveObservationPage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WireHostRef>,
+    pub provenance: WireProjectionProvenance,
+}
+
 /// Request payload for `mob/bind_host`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -116,7 +116,12 @@ impl SessionGeneration {
     }
 }
 
+mod callback_identity;
 mod digest_accumulator;
+pub use callback_identity::{
+    CallbackBatchIdentity, CallbackBatchObservation, CallbackBatchObservationError,
+    CompleteCallbackResults, StagedCallbackResultsObservation,
+};
 mod head_metadata;
 mod import_0810;
 mod instruction_activation;
@@ -2728,6 +2733,8 @@ pub struct PendingDeferredPrompt {
 pub struct PendingToolResultsMessage {
     pub results: Vec<ToolResult>,
     pub accepted_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_identity: Option<CallbackBatchIdentity>,
 }
 
 /// Typed refusal at the deferred callback-result ingress seam.
@@ -2739,6 +2746,37 @@ pub enum DeferredToolResultsIngressError {
     ConflictingRedelivery(String),
     #[error("callback result tool id '{0}' is outside the staged pending set")]
     WrongToolUseId(String),
+    #[error("staged callback results belong to a different callback batch")]
+    CallbackTargetMismatch,
+}
+
+/// Owner-validated callback data for deferred staging, not continuation permission.
+#[derive(Debug, Clone)]
+pub struct PreparedCallbackResultIngress {
+    classification: CallbackResultIngress,
+    identity: Option<CallbackBatchIdentity>,
+    results: Vec<ToolResult>,
+}
+
+impl PreparedCallbackResultIngress {
+    pub fn already_applied(&self) -> bool {
+        matches!(self.classification, CallbackResultIngress::AlreadyApplied)
+    }
+
+    pub fn callback_identity(&self) -> Option<&CallbackBatchIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub fn stage_into(
+        &self,
+        state: &mut SessionDeferredTurnState,
+        accepted_at: SystemTime,
+    ) -> Result<usize, DeferredToolResultsIngressError> {
+        if self.already_applied() {
+            return Ok(0);
+        }
+        state.try_stage_tool_results_inner(self.results.clone(), accepted_at, Some(self))
+    }
 }
 
 /// Durable staging record for one assistant tool-use batch that contains one
@@ -2751,6 +2789,10 @@ pub enum DeferredToolResultsIngressError {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct PendingCallbackToolBatch {
     pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_scope: Option<crate::execution_scope::RunEffectScopeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_boundary: Option<crate::ops::OperationId>,
     pub tool_use_order: Vec<String>,
     pub pending_tool_use_ids: Vec<String>,
     pub completed_results: Vec<ToolResult>,
@@ -2763,8 +2805,14 @@ pub(crate) struct PendingCallbackToolBatch {
 enum CallbackToolBatchState {
     Pending {
         batch: PendingCallbackToolBatch,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<CallbackBatchIdentity>,
     },
     Applied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<CallbackBatchIdentity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        complete_results_digest: Option<[u8; 32]>,
         tool_use_order: Vec<String>,
         results: Vec<ToolResult>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2795,7 +2843,8 @@ pub enum CallbackResultIngress {
     /// The session has no durable callback batch; legacy callers may use their
     /// ordinary deferred-input policy.
     NoPendingBatch,
-    /// The exact result set belongs to the pending batch.
+    /// The nonempty result subset belongs to the pending batch. Application
+    /// still requires all pending results.
     Pending { pending_tool_use_ids: Vec<String> },
     /// The identical callback payload was already committed.
     AlreadyApplied,
@@ -2821,6 +2870,12 @@ pub(crate) enum PendingCallbackBatchError {
     },
     #[error("callback result redelivery conflicts with the already applied payload")]
     ConflictingRedelivery,
+    #[error("scoped callback application requires generated continuation authority")]
+    ScopedContinuationRequired,
+    #[error(
+        "scoped callback sibling effects and async operations require effect-aware continuation support"
+    )]
+    ScopedCallbackEffectsUnsupported,
 }
 
 fn unique_tool_results(
@@ -2834,6 +2889,34 @@ fn unique_tool_results(
         }
     }
     Ok(by_id)
+}
+
+enum CallbackResultCoverage {
+    Complete,
+    NonemptySubset,
+}
+
+fn require_callback_result_ids(
+    incoming: &BTreeMap<String, ToolResult>,
+    expected_ids: &[String],
+    coverage: CallbackResultCoverage,
+) -> Result<(), PendingCallbackBatchError> {
+    let expected = expected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if expected.len() != expected_ids.len() {
+        return Err(PendingCallbackBatchError::Malformed(
+            "callback receipt contains duplicate expected ids".into(),
+        ));
+    }
+    let actual = incoming.keys().cloned().collect::<BTreeSet<_>>();
+    let matches = match coverage {
+        CallbackResultCoverage::Complete => actual == expected,
+        CallbackResultCoverage::NonemptySubset => !actual.is_empty() && actual.is_subset(&expected),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(PendingCallbackBatchError::ResultSetMismatch { expected, actual })
+    }
 }
 
 fn validate_pending_callback_batch(
@@ -2898,6 +2981,7 @@ fn validate_pending_callback_batch(
 impl PartialEq for PendingToolResultsMessage {
     fn eq(&self, other: &Self) -> bool {
         self.accepted_at == other.accepted_at
+            && self.callback_identity == other.callback_identity
             && serde_json::to_value(&self.results).ok() == serde_json::to_value(&other.results).ok()
     }
 }
@@ -3164,6 +3248,22 @@ impl SessionDeferredTurnState {
         results: Vec<ToolResult>,
         accepted_at: SystemTime,
     ) -> Result<usize, DeferredToolResultsIngressError> {
+        self.try_stage_tool_results_inner(results, accepted_at, None)
+    }
+
+    fn try_stage_tool_results_inner(
+        &mut self,
+        mut results: Vec<ToolResult>,
+        accepted_at: SystemTime,
+        prepared: Option<&PreparedCallbackResultIngress>,
+    ) -> Result<usize, DeferredToolResultsIngressError> {
+        let identity = prepared.and_then(PreparedCallbackResultIngress::callback_identity);
+        let pending_ids = prepared.and_then(|prepared| match &prepared.classification {
+            CallbackResultIngress::Pending {
+                pending_tool_use_ids,
+            } => Some(pending_tool_use_ids.as_slice()),
+            _ => None,
+        });
         let mut incoming_by_id = BTreeMap::new();
         for result in &results {
             if incoming_by_id
@@ -3178,7 +3278,15 @@ impl SessionDeferredTurnState {
 
         let mut staged_by_id = BTreeMap::new();
         for pending in &self.pending_tool_results {
+            if pending.callback_identity.as_ref() != identity {
+                return Err(DeferredToolResultsIngressError::CallbackTargetMismatch);
+            }
             for result in &pending.results {
+                if pending_ids.is_some_and(|ids| !ids.contains(&result.tool_use_id)) {
+                    return Err(DeferredToolResultsIngressError::WrongToolUseId(
+                        result.tool_use_id.clone(),
+                    ));
+                }
                 match staged_by_id.insert(result.tool_use_id.clone(), result) {
                     Some(previous) if previous != result => {
                         return Err(DeferredToolResultsIngressError::ConflictingRedelivery(
@@ -3198,12 +3306,16 @@ impl SessionDeferredTurnState {
                             id.clone(),
                         ));
                     }
-                    None => {
+                    None if !pending_ids.is_some_and(|ids| ids.contains(id)) => {
                         return Err(DeferredToolResultsIngressError::WrongToolUseId(id.clone()));
                     }
+                    None => {}
                 }
             }
-            return Ok(0);
+            results.retain(|result| !staged_by_id.contains_key(&result.tool_use_id));
+            if results.is_empty() {
+                return Ok(0);
+            }
         }
 
         let (mut authority, key) = self.document_authority();
@@ -3236,6 +3348,7 @@ impl SessionDeferredTurnState {
         self.pending_tool_results.push(PendingToolResultsMessage {
             results,
             accepted_at,
+            callback_identity: identity.cloned(),
         });
         Ok(accepted)
     }
@@ -3380,6 +3493,56 @@ fn assert_host_append_does_not_mint_system_semantics(message: &Message) {
 }
 
 impl Session {
+    /// Bind validated result data to its current callback owner before staging.
+    /// Scoped callbacks require the caller's exact target; ordinary callers may
+    /// retain the legacy untargeted ingress contract.
+    #[doc(hidden)]
+    pub fn prepare_callback_result_ingress(
+        &self,
+        incoming: &[ToolResult],
+        target: Option<&CallbackBatchIdentity>,
+    ) -> Result<PreparedCallbackResultIngress, crate::error::AgentError> {
+        let classification = self.classify_callback_result_ingress(incoming)?;
+        let identity = self
+            .callback_tool_batch_state()
+            .map_err(|error| crate::error::AgentError::ConfigError(error.to_string()))?
+            .and_then(|state| match state {
+                CallbackToolBatchState::Pending { identity, .. }
+                | CallbackToolBatchState::Applied { identity, .. } => identity,
+            });
+        if target.is_some_and(|target| Some(target) != identity.as_ref())
+            || (target.is_none()
+                && identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.execution_scope().is_some()))
+        {
+            return Err(crate::error::AgentError::ConfigError(
+                "callback result ingress requires its exact callback target".into(),
+            ));
+        }
+        Ok(PreparedCallbackResultIngress {
+            classification,
+            identity,
+            results: incoming.to_vec(),
+        })
+    }
+
+    /// Revalidate retained targets against the actor-owned session immediately
+    /// before applying consumed deferred results.
+    #[doc(hidden)]
+    pub fn validate_deferred_callback_targets(
+        &self,
+        messages: &[PendingToolResultsMessage],
+    ) -> Result<(), crate::error::AgentError> {
+        for message in messages {
+            self.prepare_callback_result_ingress(
+                &message.results,
+                message.callback_identity.as_ref(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Validate callback-result ingress against the exact durable callback
     /// batch without mutating transcript or deferred-turn state.
     #[doc(hidden)]
@@ -3387,23 +3550,75 @@ impl Session {
         &self,
         incoming: &[ToolResult],
     ) -> Result<CallbackResultIngress, crate::error::AgentError> {
-        match self
-            .resolve_pending_callback_tool_results(incoming.to_vec())
-            .map_err(|error| {
-                crate::error::AgentError::ConfigError(format!(
-                    "callback result ingress was rejected: {error}"
-                ))
-            })? {
-            ResolvedPendingCallbackToolResults::NoState => {
-                Ok(CallbackResultIngress::NoPendingBatch)
-            }
-            ResolvedPendingCallbackToolResults::AlreadyApplied { .. } => {
-                Ok(CallbackResultIngress::AlreadyApplied)
-            }
-            ResolvedPendingCallbackToolResults::Pending { batch, .. } => {
+        self.classify_callback_ingress(incoming).map_err(|error| {
+            crate::error::AgentError::ConfigError(format!(
+                "callback result ingress was rejected: {error}"
+            ))
+        })
+    }
+
+    fn classify_callback_ingress(
+        &self,
+        incoming: &[ToolResult],
+    ) -> Result<CallbackResultIngress, PendingCallbackBatchError> {
+        let Some(state) = self.callback_tool_batch_state()? else {
+            return Ok(CallbackResultIngress::NoPendingBatch);
+        };
+        let incoming = unique_tool_results(incoming.to_vec())?;
+        match state {
+            CallbackToolBatchState::Pending { batch, identity } => {
+                self.validate_pending_callback_identity(&batch, identity.as_ref())?;
+                require_callback_result_ids(
+                    &incoming,
+                    &batch.pending_tool_use_ids,
+                    CallbackResultCoverage::NonemptySubset,
+                )?;
                 Ok(CallbackResultIngress::Pending {
                     pending_tool_use_ids: batch.pending_tool_use_ids,
                 })
+            }
+            CallbackToolBatchState::Applied {
+                identity,
+                tool_use_order,
+                results,
+                ..
+            } => {
+                if identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.session_id() != self.id())
+                {
+                    return Err(PendingCallbackBatchError::Malformed(
+                        "applied callback receipt belongs to another session".into(),
+                    ));
+                }
+                require_callback_result_ids(
+                    &incoming,
+                    &tool_use_order,
+                    CallbackResultCoverage::NonemptySubset,
+                )?;
+                if !results
+                    .iter()
+                    .map(|result| &result.tool_use_id)
+                    .eq(tool_use_order.iter())
+                {
+                    return Err(PendingCallbackBatchError::Malformed(
+                        "applied callback results differ from the retained tool-use order".into(),
+                    ));
+                }
+                let retained = unique_tool_results(results)?;
+                require_callback_result_ids(
+                    &retained,
+                    &tool_use_order,
+                    CallbackResultCoverage::Complete,
+                )?;
+                if incoming
+                    .iter()
+                    .all(|(id, result)| retained.get(id) == Some(result))
+                {
+                    Ok(CallbackResultIngress::AlreadyApplied)
+                } else {
+                    Err(PendingCallbackBatchError::ConflictingRedelivery)
+                }
             }
         }
     }
@@ -4968,6 +5183,22 @@ impl Session {
             )
     }
 
+    /// Adopt only the store-committed compaction-intent metadata transition.
+    /// Other actor-local mutation intent is retained and the resulting root
+    /// must equal the exact committed identity.
+    pub fn acknowledge_head_canonical_compaction_metadata(
+        &mut self,
+        committed: &SessionHeadMetadataIdentity,
+    ) -> Result<(), String> {
+        self.history_caches
+            .head_canonical_metadata
+            .rebase_control_commit_baseline(
+                &[crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY],
+                &self.metadata,
+                committed,
+            )
+    }
+
     pub(crate) fn validate_head_canonical_metadata_acknowledgement(
         &self,
         projection: &Arc<SessionHeadMetadataProjection>,
@@ -5231,9 +5462,12 @@ impl Session {
         ) {
             return Err(PendingCallbackBatchError::AlreadyStaged);
         }
-        validate_pending_callback_batch(self.messages(), &batch)?;
-        let value = serde_json::to_value(CallbackToolBatchState::Pending { batch })
-            .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        let identity = self.pending_callback_identity(&batch)?;
+        let value = serde_json::to_value(CallbackToolBatchState::Pending {
+            batch,
+            identity: Some(identity),
+        })
+        .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
         self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
         Ok(())
     }
@@ -5256,8 +5490,8 @@ impl Session {
         &self,
     ) -> Result<Option<PendingCallbackToolBatch>, PendingCallbackBatchError> {
         match self.callback_tool_batch_state()? {
-            Some(CallbackToolBatchState::Pending { batch }) => {
-                validate_pending_callback_batch(self.messages(), &batch)?;
+            Some(CallbackToolBatchState::Pending { batch, identity }) => {
+                self.validate_pending_callback_identity(&batch, identity.as_ref())?;
                 Ok(Some(batch))
             }
             Some(CallbackToolBatchState::Applied { .. }) | None => Ok(None),
@@ -5274,7 +5508,10 @@ impl Session {
             return Ok(ResolvedPendingCallbackToolResults::NoState);
         };
         let batch = match state {
-            CallbackToolBatchState::Pending { batch } => batch,
+            CallbackToolBatchState::Pending { batch, identity } => {
+                self.validate_pending_callback_identity(&batch, identity.as_ref())?;
+                batch
+            }
             CallbackToolBatchState::Applied {
                 tool_use_order,
                 results,
@@ -5282,11 +5519,11 @@ impl Session {
                 ..
             } => {
                 let incoming_by_id = unique_tool_results(incoming)?;
-                let expected = tool_use_order.iter().cloned().collect::<BTreeSet<_>>();
-                let actual = incoming_by_id.keys().cloned().collect::<BTreeSet<_>>();
-                if actual != expected {
-                    return Err(PendingCallbackBatchError::ResultSetMismatch { expected, actual });
-                }
+                require_callback_result_ids(
+                    &incoming_by_id,
+                    &tool_use_order,
+                    CallbackResultCoverage::Complete,
+                )?;
                 let delivered = tool_use_order
                     .iter()
                     .map(|id| incoming_by_id.get(id).cloned())
@@ -5303,17 +5540,12 @@ impl Session {
                 };
             }
         };
-        validate_pending_callback_batch(self.messages(), &batch)?;
         let incoming_by_id = unique_tool_results(incoming)?;
-        let expected = batch
-            .pending_tool_use_ids
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let actual = incoming_by_id.keys().cloned().collect::<BTreeSet<_>>();
-        if actual != expected {
-            return Err(PendingCallbackBatchError::ResultSetMismatch { expected, actual });
-        }
+        require_callback_result_ids(
+            &incoming_by_id,
+            &batch.pending_tool_use_ids,
+            CallbackResultCoverage::Complete,
+        )?;
         let mut all_by_id = unique_tool_results(batch.completed_results.clone())?;
         all_by_id.extend(incoming_by_id);
         let ordered = batch
@@ -5348,6 +5580,16 @@ impl Session {
         ordered_results: Vec<ToolResult>,
         post_tool_messages: Vec<Message>,
     ) -> Result<(), PendingCallbackBatchError> {
+        self.require_session_policy_callback_application()?;
+        self.commit_callback_tool_results(batch, ordered_results, post_tool_messages)
+    }
+
+    fn commit_callback_tool_results(
+        &mut self,
+        batch: &PendingCallbackToolBatch,
+        ordered_results: Vec<ToolResult>,
+        post_tool_messages: Vec<Message>,
+    ) -> Result<(), PendingCallbackBatchError> {
         let current = self
             .pending_callback_tool_batch()?
             .ok_or(PendingCallbackBatchError::Missing)?;
@@ -5366,17 +5608,22 @@ impl Session {
                 batch.tool_use_order
             )));
         }
-        self.push(Message::tool_results(ordered_results.clone()));
+        let identity = self.pending_callback_identity(batch)?;
         let pending_ids = batch
             .pending_tool_use_ids
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
         let applied_callback_results = ordered_results
-            .into_iter()
+            .iter()
             .filter(|result| pending_ids.contains(&result.tool_use_id))
+            .cloned()
             .collect();
+        let complete_results_digest = Self::callback_results_digest(&identity, &ordered_results)
+            .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
         let value = serde_json::to_value(CallbackToolBatchState::Applied {
+            identity: Some(identity),
+            complete_results_digest: Some(complete_results_digest),
             tool_use_order: batch.pending_tool_use_ids.clone(),
             results: applied_callback_results,
             async_ops: batch.async_ops.clone(),
@@ -5384,6 +5631,7 @@ impl Session {
             post_tool_messages_applied: false,
         })
         .map_err(|error| PendingCallbackBatchError::Malformed(error.to_string()))?;
+        self.push(Message::tool_results(ordered_results));
         self.set_metadata_unchecked(SESSION_PENDING_CALLBACK_BATCH_KEY, value);
         Ok(())
     }
@@ -5395,7 +5643,16 @@ impl Session {
     pub(crate) fn apply_pending_callback_resume_effects(
         &mut self,
     ) -> Result<Vec<crate::event::AssistantImageEvent>, PendingCallbackBatchError> {
+        self.require_session_policy_callback_continuation()?;
+        self.apply_callback_resume_effects()
+    }
+
+    fn apply_callback_resume_effects(
+        &mut self,
+    ) -> Result<Vec<crate::event::AssistantImageEvent>, PendingCallbackBatchError> {
         let Some(CallbackToolBatchState::Applied {
+            identity,
+            complete_results_digest,
             tool_use_order,
             results,
             async_ops,
@@ -5418,6 +5675,8 @@ impl Session {
             .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
             .collect::<Vec<_>>();
         let applied_state = CallbackToolBatchState::Applied {
+            identity,
+            complete_results_digest,
             tool_use_order,
             results,
             async_ops,
@@ -7185,7 +7444,19 @@ pub enum ProviderNativeToolPolicy {
     DisableAll,
 }
 
+/// A client declaration about its exact request lowering, not run permission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NativeToolPolicySupport {
+    #[default]
+    Unsupported,
+    RequestScoped,
+}
+
 impl ProviderNativeToolPolicy {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+
     #[must_use]
     pub fn narrow(self, other: Self) -> Self {
         if matches!(self, Self::DisableAll) || matches!(other, Self::DisableAll) {

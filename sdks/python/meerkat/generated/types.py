@@ -133,9 +133,11 @@ def _expect_wire_bool(value: Any, context: str) -> bool:
     return value
 
 
-def _expect_wire_int(value: Any, context: str) -> int:
+def _expect_wire_int(value: Any, context: str, minimum: int | None = None, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise _wire_parse_error(context, "expected integer")
+    if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+        raise _wire_parse_error(context, "integer outside schema bounds")
     return value
 
 
@@ -145,9 +147,11 @@ def _expect_wire_number(value: Any, context: str) -> float:
     return float(value)
 
 
-def _expect_wire_list(value: Any, context: str) -> list[Any]:
+def _expect_wire_list(value: Any, context: str, minimum: int | None = None, maximum: int | None = None) -> list[Any]:
     if not isinstance(value, list):
         raise _wire_parse_error(context, "expected array")
+    if (minimum is not None and len(value) < minimum) or (maximum is not None and len(value) > maximum):
+        raise _wire_parse_error(context, "array length outside schema bounds")
     return value
 
 
@@ -471,7 +475,7 @@ class WorkEventsResult:
         """
         data = _expect_wire_object(value, 'WorkEventsResult')
         return cls(
-            events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events')),
+            events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events', None, None)),
         )
 
 
@@ -487,7 +491,7 @@ class WorkItemsResult:
         """
         data = _expect_wire_object(value, 'WorkItemsResult')
         return cls(
-            items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items')),
+            items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items', None, None)),
         )
 
 
@@ -887,7 +891,7 @@ class HelpRequest:
 @dataclass
 class HelpResponse:
     """Canonical run result for wire protocol."""
-    session_id: str
+    session_id: SessionId
     text: str
     tool_calls: int
     turns: int
@@ -929,7 +933,7 @@ class InjectSystemContextResult:
 class InstructionActivationIdentity:
     """Typed identity sealed onto one durable chronological activation row."""
     activation_id: str
-    origin_session_id: str
+    origin_session_id: SessionId
     render_version: int
     revision: dict[str, Any]
     supersedes: Optional[str] = None
@@ -939,7 +943,7 @@ class InstructionActivationIdentity:
 class InstructionActivationReadPage:
     """One page of durable activation records in transcript order."""
     records: list[dict[str, Any]]
-    session_id: str
+    session_id: SessionId
     key_state: Optional[dict[str, Any]] = None
     next_offset: Optional[int] = None
 
@@ -950,7 +954,7 @@ class InstructionActivationRecord:
     activation_ordinal: int
     identity: InstructionActivationIdentity
     projection_witness: dict[str, Any]
-    session_id: str
+    session_id: SessionId
 
 
 @dataclass
@@ -1245,7 +1249,7 @@ class SystemPromptUpdateResult:
     """Durable result of a keyed prompt update."""
     key: SystemPromptKey
     message_index: int
-    session_id: str
+    session_id: SessionId
     status: Literal['applied', 'duplicate']
     transcript_revision: str
     version: SystemPromptVersion
@@ -2699,6 +2703,38 @@ only the controlling host knows."""
 
 
 @dataclass
+class MobMemberLiveObservationsParams:
+    """Request payload for MobMemberLiveObservationsParams."""
+    agent_identity: str
+    mob_id: str
+    channel_id: Optional[LiveChannelId] = None
+    cursor: Optional[str] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class MobMemberLiveObservationsResult:
+    """Wire payload for MobMemberLiveObservationsResult."""
+    page: LiveObservationPage
+    provenance: WireProjectionProvenance
+    placement: Optional[WireHostRef] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "MobMemberLiveObservationsResult":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'MobMemberLiveObservationsResult')
+        if set(data) - set(('page', 'placement', 'provenance')):
+            raise _wire_parse_error('MobMemberLiveObservationsResult', 'unknown field')
+        return cls(
+            page=LiveObservationPage.from_wire(_require_wire_field(data, 'page', 'MobMemberLiveObservationsResult')),
+            placement=(_expect_wire_str(data['placement'], 'MobMemberLiveObservationsResult.placement') if data.get('placement') is not None else None),
+            provenance=parse_wire_projection_provenance(_require_wire_field(data, 'provenance', 'MobMemberLiveObservationsResult')),
+        )
+
+
+@dataclass
 class WireMemberHistoryPageBody:
     """Shared transcript page body used by both the bridge
 `MemberHistoryPage` reply and the console `mob/member_history` result —
@@ -3117,6 +3153,7 @@ treated as absent rather than guessed from the model name."""
     call_timeout_secs: Optional[int] = None
     context_window: Optional[int] = None
     display_name: Optional[str] = None
+    interaction_kind: Optional[ModelInteractionKind] = None
     max_input_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
     vision: Optional[bool] = None
@@ -3463,7 +3500,7 @@ class AttentionListResult:
         """
         data = _expect_wire_object(value, 'AttentionListResult')
         return cls(
-            attention=[WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'attention', 'AttentionListResult'), 'AttentionListResult.attention')],
+            attention=[WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'attention', 'AttentionListResult'), 'AttentionListResult.attention', None, None)],
         )
 
 
@@ -3481,7 +3518,7 @@ class AttentionProjectionPolicy:
         data = _expect_wire_object(value, 'AttentionProjectionPolicy')
         return cls(
             include_parent_context=(_expect_wire_bool(data['include_parent_context'], 'AttentionProjectionPolicy.include_parent_context') if data.get('include_parent_context') is not None else None),
-            max_text_chars=(_expect_wire_int(data['max_text_chars'], 'AttentionProjectionPolicy.max_text_chars') if data.get('max_text_chars') is not None else None),
+            max_text_chars=(_expect_wire_int(data['max_text_chars'], 'AttentionProjectionPolicy.max_text_chars', 0, None) if data.get('max_text_chars') is not None else None),
         )
 
 
@@ -3576,7 +3613,7 @@ class WorkGraphEventsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphEventsResponse')
         return cls(
-            events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events')],
+            events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events', None, None)],
         )
 
 
@@ -3601,7 +3638,7 @@ class WorkGraphItemsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphItemsResponse')
         return cls(
-            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items')],
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items', None, None)],
         )
 
 
@@ -3626,13 +3663,13 @@ class WorkGraphSnapshot:
         data = _expect_wire_object(value, 'WorkGraphSnapshot')
         return cls(
             all_namespaces=_expect_wire_bool(_require_wire_field(data, 'all_namespaces', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.all_namespaces'),
-            attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention')] if data.get('attention') is not None else None),
+            attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention', None, None)] if data.get('attention') is not None else None),
             captured_at=_expect_wire_str(_require_wire_field(data, 'captured_at', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.captured_at'),
-            edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges')],
-            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
-            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items')],
+            edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges', None, None)],
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark', None, None) if data.get('event_high_water_mark') is not None else None),
+            items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items', None, None)],
             namespace=(_expect_wire_str(data['namespace'], 'WorkGraphSnapshot.namespace') if data.get('namespace') is not None else None),
-            ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids')],
+            ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids', None, None)],
             realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.realm_id'),
         )
 
@@ -3689,18 +3726,18 @@ class WorkItem:
             created_at=_expect_wire_str(_require_wire_field(data, 'created_at', 'WorkItem'), 'WorkItem.created_at'),
             description=(_expect_wire_str(data['description'], 'WorkItem.description') if data.get('description') is not None else None),
             due_at=(_expect_wire_str(data['due_at'], 'WorkItem.due_at') if data.get('due_at') is not None else None),
-            evidence_refs=([WorkEvidenceRef.from_wire(_item) for _item in _expect_wire_list(data['evidence_refs'], 'WorkItem.evidence_refs')] if data.get('evidence_refs') is not None else None),
-            external_refs=([WorkItemExternalRef.from_wire(_item) for _item in _expect_wire_list(data['external_refs'], 'WorkItem.external_refs')] if data.get('external_refs') is not None else None),
+            evidence_refs=([WorkEvidenceRef.from_wire(_item) for _item in _expect_wire_list(data['evidence_refs'], 'WorkItem.evidence_refs', None, None)] if data.get('evidence_refs') is not None else None),
+            external_refs=([WorkItemExternalRef.from_wire(_item) for _item in _expect_wire_list(data['external_refs'], 'WorkItem.external_refs', None, None)] if data.get('external_refs') is not None else None),
             failed_child_join_policy=_expect_wire_enum(_require_wire_field(data, 'failed_child_join_policy', 'WorkItem'), ('require_success', 'propagate', 'accept',), 'WorkItem.failed_child_join_policy'),
             id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItem'), 'WorkItem.id'),
-            labels=([_expect_wire_str(_item, 'WorkItem.labels[]') for _item in _expect_wire_list(data['labels'], 'WorkItem.labels')] if data.get('labels') is not None else None),
+            labels=([_expect_wire_str(_item, 'WorkItem.labels[]') for _item in _expect_wire_list(data['labels'], 'WorkItem.labels', None, None)] if data.get('labels') is not None else None),
             machine_state=_expect_wire_object(_require_wire_field(data, 'machine_state', 'WorkItem'), 'WorkItem.machine_state'),
             namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkItem'), 'WorkItem.namespace'),
             not_before=(_expect_wire_str(data['not_before'], 'WorkItem.not_before') if data.get('not_before') is not None else None),
             owner=(WorkItemOwner.from_wire(data['owner']) if data.get('owner') is not None else None),
             priority=_expect_wire_enum(_require_wire_field(data, 'priority', 'WorkItem'), ('low', 'medium', 'high',), 'WorkItem.priority'),
             realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkItem'), 'WorkItem.realm_id'),
-            revision=_expect_wire_int(_require_wire_field(data, 'revision', 'WorkItem'), 'WorkItem.revision'),
+            revision=_expect_wire_int(_require_wire_field(data, 'revision', 'WorkItem'), 'WorkItem.revision', 0, None),
             snoozed_until=(_expect_wire_str(data['snoozed_until'], 'WorkItem.snoozed_until') if data.get('snoozed_until') is not None else None),
             status=_expect_wire_enum(_require_wire_field(data, 'status', 'WorkItem'), ('open', 'in_progress', 'blocked', 'completed', 'cancelled', 'failed',), 'WorkItem.status'),
             terminal_at=(_expect_wire_str(data['terminal_at'], 'WorkItem.terminal_at') if data.get('terminal_at') is not None else None),
@@ -3815,13 +3852,13 @@ class WorkGraphEvent:
         data = _expect_wire_object(value, 'WorkGraphEvent')
         return cls(
             at=_expect_wire_str(_require_wire_field(data, 'at', 'WorkGraphEvent'), 'WorkGraphEvent.at'),
-            facts=(list(_expect_wire_list(data['facts'], 'WorkGraphEvent.facts')) if data.get('facts') is not None else None),
+            facts=(list(_expect_wire_list(data['facts'], 'WorkGraphEvent.facts', None, None)) if data.get('facts') is not None else None),
             item_id=(_expect_wire_str(data['item_id'], 'WorkGraphEvent.item_id') if data.get('item_id') is not None else None),
             kind=parse_work_graph_event_kind(_require_wire_field(data, 'kind', 'WorkGraphEvent')),
             namespace=_expect_wire_str(_require_wire_field(data, 'namespace', 'WorkGraphEvent'), 'WorkGraphEvent.namespace'),
             payload=data.get('payload'),
             realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphEvent'), 'WorkGraphEvent.realm_id'),
-            seq=(_expect_wire_int(data['seq'], 'WorkGraphEvent.seq') if data.get('seq') is not None else None),
+            seq=(_expect_wire_int(data['seq'], 'WorkGraphEvent.seq', None, None) if data.get('seq') is not None else None),
         )
 
 
@@ -3900,6 +3937,24 @@ class WorkItemOwner:
         return cls(
             display_name=(_expect_wire_str(data['display_name'], 'WorkItemOwner.display_name') if data.get('display_name') is not None else None),
             key=WorkOwnerKey.from_wire(_require_wire_field(data, 'key', 'WorkItemOwner')),
+        )
+
+
+@dataclass
+class TranscriptUserRoleDelegatedRequestPayload:
+    """Promoted inline object type TranscriptUserRoleDelegatedRequestPayload."""
+    provenance: DelegatedRequestProvenance
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "TranscriptUserRoleDelegatedRequestPayload":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'TranscriptUserRoleDelegatedRequestPayload')
+        if set(data) - set(('provenance',)):
+            raise _wire_parse_error('TranscriptUserRoleDelegatedRequestPayload', 'unknown field')
+        return cls(
+            provenance=DelegatedRequestProvenance.from_wire(_require_wire_field(data, 'provenance', 'TranscriptUserRoleDelegatedRequestPayload')),
         )
 
 
@@ -5208,6 +5263,10 @@ WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap
 # [`WireLiveConfigRejectionReason`] mirror so SDK consumers route on the
 # variant rather than parsing English from the previous free-form
 # `String`.
+class WireLiveAdapterErrorCodeContinuousInputRejected(TypedDict, total=False):
+    code: Required[Literal['continuous_input_rejected']]
+    reason: Required[ContinuousLiveInputError]
+
 class WireLiveAdapterErrorCodeConnectionFailed(TypedDict, total=False):
     code: Required[Literal['connection_failed']]
 
@@ -5235,7 +5294,7 @@ class WireLiveAdapterErrorCodeUnknown(TypedDict, total=False):
     code: Required[Literal['unknown']]
     debug: Required[str]
 
-WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown
+WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeContinuousInputRejected | WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown
 
 # Wire mirror of [`meerkat_core::live_adapter::LiveAdapterObservation`].
 #
@@ -5262,6 +5321,10 @@ WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAd
 # [`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire
 # mirror carries `data` as a `String` so the schema emits `String` instead
 # of an opaque `Vec<u8>` JSON-array shape.
+class WireLiveAdapterObservationLiveObservationCommitted(TypedDict, total=False):
+    observation: Required[Literal['live_observation_committed']]
+    record: Required[LiveObservationRecord]
+
 class WireLiveAdapterObservationReady(TypedDict, total=False):
     observation: Required[Literal['ready']]
 
@@ -5364,7 +5427,7 @@ class WireLiveAdapterObservationUnknown(TypedDict, total=False):
     debug: Required[str]
     observation: Required[Literal['unknown']]
 
-WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown
+WireLiveAdapterObservation = WireLiveAdapterObservationLiveObservationCommitted | WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown
 
 @dataclass
 class RuntimeAcceptResult:
@@ -6397,6 +6460,12 @@ BindingId = str
 # Mob RPC helper wire type for ModelFallbackTrigger.
 ModelFallbackTrigger = Literal['capacity', 'provider_unavailable', 'transport', 'empty_output']
 
+# Catalog-owned interaction contract, independent of a provider's model name.
+ModelInteractionKind = Literal['text', 'turn_based_realtime', 'continuous_live']
+
+# Mob RPC helper wire type for ContinuousLiveInputError.
+ContinuousLiveInputError = Literal['unsupported_input_kind', 'unsupported_frontend_modality', 'unsupported_capability', 'requires_owner_control', 'audio_uses_another_transport', 'invalid_audio_format', 'invalid_audio_frame']
+
 # A Meerkat-native JSON schema.
 MeerkatSchema = Any
 
@@ -6623,7 +6692,7 @@ AttentionDelegatedAuthority = Literal['add_evidence', 'close_own_review_item', '
 # WorkGraph RPC helper wire type for GoalAttentionTarget.
 class GoalAttentionTargetSession(TypedDict, total=False):
     kind: Required[Literal['session']]
-    session_id: Required[str]
+    session_id: Required[SessionId]
 
 class GoalAttentionTargetOwner(TypedDict, total=False):
     kind: Required[Literal['owner']]
@@ -6653,7 +6722,7 @@ WorkAttentionStatus = WorkAttentionStatusActive | WorkAttentionStatusPaused | Wo
 # WorkGraph RPC helper wire type for WorkAttentionTarget.
 class WorkAttentionTargetSession(TypedDict, total=False):
     kind: Required[Literal['session']]
-    session_id: Required[str]
+    session_id: Required[SessionId]
 
 class WorkAttentionTargetLoweredOwner(TypedDict, total=False):
     kind: Required[Literal['lowered_owner']]
@@ -6991,6 +7060,104 @@ class TranscriptRewriteSelectionCompactionMessageRange(TypedDict, total=False):
 
 TranscriptRewriteSelection = TranscriptRewriteSelectionMessageRange | TranscriptRewriteSelectionEditMessageRange | TranscriptRewriteSelectionCompactionMessageRange
 
+# Which content evidence a trusted grant may admit. Neither variant is
+# provider-final user speech or an effect permission by itself.
+LiveRequestEvidenceKind = Literal['application_snapshot', 'structured_function_request']
+
+# Opaque identity of one live channel binding.
+#
+# A replacement channel receives a new value. Semantic observations retain
+# this identity so a delayed callback from the old binding fails its fence.
+LiveChannelId = str
+
+# Application-selected identity for an explicit snapshot resubmission.
+#
+# A new UUID is a new source, not proof that its content may execute.
+LiveApplicationRequestId = str
+
+# Opaque provider equality material. It is not a Meerkat control handle.
+LiveProviderReference = str
+
+# Fork transcript replacement helper type for LiveSourceIdentity.
+class LiveSourceIdentityClientDelegation(TypedDict, total=False):
+    delegation: Required[LiveProviderReference]
+    kind: Required[Literal['client_delegation']]
+
+class LiveSourceIdentityFunctionCall(TypedDict, total=False):
+    call: Required[LiveProviderReference]
+    delegation: Required[LiveProviderReference]
+    kind: Required[Literal['function_call']]
+    response: Required[LiveProviderReference]
+
+class LiveSourceIdentityApplicationRequest(TypedDict, total=False):
+    kind: Required[Literal['application_request']]
+    request_id: Required[LiveApplicationRequestId]
+
+LiveSourceIdentity = LiveSourceIdentityClientDelegation | LiveSourceIdentityFunctionCall | LiveSourceIdentityApplicationRequest
+
+# Unique identifier for a session (UUID v7 for time-ordering)
+SessionId = str
+
+@dataclass
+class LiveSourceKey:
+    """Exact durable lookup key, independent of when admission is observed."""
+    channel_id: LiveChannelId
+    session_id: SessionId
+    source: LiveSourceIdentity
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveSourceKey":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveSourceKey')
+        if set(data) - set(('channel_id', 'session_id', 'source')):
+            raise _wire_parse_error('LiveSourceKey', 'unknown field')
+        return cls(
+            channel_id=_expect_wire_str(_require_wire_field(data, 'channel_id', 'LiveSourceKey'), 'LiveSourceKey.channel_id'),
+            session_id=_expect_wire_str(_require_wire_field(data, 'session_id', 'LiveSourceKey'), 'LiveSourceKey.session_id'),
+            source=parse_live_source_identity(_require_wire_field(data, 'source', 'LiveSourceKey')),
+        )
+
+
+@dataclass
+class DelegatedRequestProvenance:
+    """Non-human transcript provenance. No grant, tool policy or final-speech
+assertion can be serialized into this content descriptor."""
+    evidence_kind: LiveRequestEvidenceKind
+    request_digest: list[int]
+    request_id: OperationId
+    source: LiveSourceKey
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "DelegatedRequestProvenance":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'DelegatedRequestProvenance')
+        if set(data) - set(('evidence_kind', 'request_digest', 'request_id', 'source')):
+            raise _wire_parse_error('DelegatedRequestProvenance', 'unknown field')
+        return cls(
+            evidence_kind=parse_live_request_evidence_kind(_require_wire_field(data, 'evidence_kind', 'DelegatedRequestProvenance')),
+            request_digest=[_expect_wire_int(_item, 'DelegatedRequestProvenance.request_digest[]', 0, 255) for _item in _expect_wire_list(_require_wire_field(data, 'request_digest', 'DelegatedRequestProvenance'), 'DelegatedRequestProvenance.request_digest', 32, 32)],
+            request_id=_expect_wire_str(_require_wire_field(data, 'request_id', 'DelegatedRequestProvenance'), 'DelegatedRequestProvenance.request_id'),
+            source=LiveSourceKey.from_wire(_require_wire_field(data, 'source', 'DelegatedRequestProvenance')),
+        )
+
+
+# Typed transcript role for a user-channel message.
+#
+# This is the canonical replacement for `[Context compacted]` string-prefix
+# folklore in the transcript-continuity save-guard. A user message produced as
+# a runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];
+# ordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of
+# the compaction summary sets this typed marker; the save-guard reads the typed
+# field instead of classifying the rendered message body by content.
+class TranscriptUserRoleDelegatedRequest(TypedDict, total=False):
+    delegated_request: Required[TranscriptUserRoleDelegatedRequestPayload]
+
+TranscriptUserRole = Literal['conversational'] | Literal['compaction_summary'] | Literal['injected_context'] | TranscriptUserRoleDelegatedRequest
+
 # Fork transcript replacement helper type for BackgroundJobTerminalStatus.
 BackgroundJobTerminalStatus = Literal['completed', 'failed', 'aborted', 'cancelled', 'retired', 'terminated']
 
@@ -7162,16 +7329,6 @@ class SystemPromptVersionIdentity:
     key: SystemPromptKey
     version: SystemPromptVersion
 
-
-# Typed transcript role for a user-channel message.
-#
-# This is the canonical replacement for `[Context compacted]` string-prefix
-# folklore in the transcript-continuity save-guard. A user message produced as
-# a runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];
-# everything else stays [`TranscriptUserRole::Conversational`]. The producer of
-# the compaction summary sets this typed marker; the save-guard reads the typed
-# field instead of classifying the rendered message body by content.
-TranscriptUserRole = Literal['conversational', 'compaction_summary', 'injected_context']
 
 # Fork transcript replacement helper type for AssistantImageId.
 AssistantImageId = str
@@ -7575,6 +7732,14 @@ class BridgeCommandReadMemberHistory(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandReadMemberLiveObservations(TypedDict, total=False):
+    command: Required[Literal['read_member_live_observations']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    query: Required[dict[str, Any]]
+    supervisor: Required[BridgePeerSpec]
+
 class BridgeCommandPollMemberEvents(TypedDict, total=False):
     command: Required[Literal['poll_member_events']]
     cursor: Required[BridgeEventCursor]
@@ -7755,7 +7920,7 @@ class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
     source_member: Required[BridgeMemberIncarnation]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandReadMemberLiveObservations | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -7861,6 +8026,12 @@ class BridgeRejectionCauseHistoryRowTooLargePayload(TypedDict, total=False):
 class BridgeRejectionCauseHistoryRowTooLarge(TypedDict, total=False):
     history_row_too_large: Required[BridgeRejectionCauseHistoryRowTooLargePayload]
 
+class BridgeRejectionCauseLiveObservationReadPayload(TypedDict, total=False):
+    failure: Required[Literal['unsupported', 'unavailable', 'invalid_query', 'cursor_mismatch', 'cursor_expired', 'integrity']]
+
+class BridgeRejectionCauseLiveObservationRead(TypedDict, total=False):
+    live_observation_read: Required[BridgeRejectionCauseLiveObservationReadPayload]
+
 class BridgeRejectionCauseRuntimeRetirementInProgressPayload(TypedDict, total=False):
     stage: Required[str]
 
@@ -7943,7 +8114,7 @@ class BridgeRejectionCauseSessionOwnershipConflictPayload(TypedDict, total=False
 class BridgeRejectionCauseSessionOwnershipConflict(TypedDict, total=False):
     session_ownership_conflict: Required[BridgeRejectionCauseSessionOwnershipConflictPayload]
 
-BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
+BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | BridgeRejectionCauseLiveObservationRead | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
 
 # A typed reply from a member runtime (or mob host daemon) back to the
 # supervisor, and — for `MemberOperatorReply` — from the controlling host
@@ -8038,14 +8209,14 @@ class BridgeReplyMemberHistoryPage(TypedDict, total=False):
 
 class BridgeReplyMemberLiveObservationPage(TypedDict, total=False):
     after_sequence: Required[int]
-    encoding_profile: Required[Literal['v1']]
-    filter: Required[dict[str, Literal['all_channels']] | dict[str, Any]]
+    encoding_profile: Required[LiveObservationEncodingProfile]
+    filter: Required[LiveObservationFilter]
     has_more: Required[bool]
-    next_cursor: NotRequired[Optional[str]]
-    owner: Required[dict[str, Any]]
-    records: Required[list[dict[str, Any]]]
+    next_cursor: NotRequired[Optional[LiveObservationCursor]]
+    owner: Required[LiveObservationOwner]
+    records: Required[list[LiveObservationRecord]]
     result: Required[Literal['member_live_observation_page']]
-    snapshot: Required[dict[str, Any]]
+    snapshot: Required[LiveObservationSnapshot]
 
 class BridgeReplyMemberEventsPage(TypedDict, total=False):
     events: Required[list[dict[str, Any]]]
@@ -8326,6 +8497,185 @@ WireSessionMessage = WireSessionMessageSystem | WireSessionMessageSystemNotice |
 # shape stays the raw row object.
 WireHistoryRow = WireSessionMessage
 
+# Retained Live history type for LiveObservationCoverage.
+LiveObservationCoverage = Literal['complete_accepted_prefix', 'known_local_gap', 'unknown_extent_crash_discontinuity']
+
+# Opaque query token, never a read authorization or bearer credential.
+LiveObservationCursor = str
+
+# Retained Live history type for LiveObservationEncodingProfile.
+LiveObservationEncodingProfile = Literal['v1']
+
+# Retained Live history type for LiveObservationFilter.
+class LiveObservationFilterAllChannels(TypedDict, total=False):
+    kind: Required[Literal['all_channels']]
+
+class LiveObservationFilterChannel(TypedDict, total=False):
+    channel_id: Required[LiveChannelId]
+    kind: Required[Literal['channel']]
+
+LiveObservationFilter = LiveObservationFilterAllChannels | LiveObservationFilterChannel
+
+# Retained Live history type for LiveObservationOwner.
+class LiveObservationOwnerSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+    session_id: Required[SessionId]
+
+class LiveObservationOwnerMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    kind: Required[Literal['member']]
+    mob_id: Required[str]
+    session_id: Required[SessionId]
+
+LiveObservationOwner = LiveObservationOwnerSession | LiveObservationOwnerMember
+
+# A Meerkat-assigned ordinal within one session's committed Live ledger.
+#
+# This is never a provider event, response, item, or turn identifier.
+LiveObservationSeq = int
+
+# Direction of observed speech, not a completed transcript role.
+LiveTranscriptDirection = Literal['input', 'output']
+
+@dataclass
+class LiveTranscriptRange:
+    """Finite session-relative half-open interval in milliseconds.
+
+Fractional values, overlaps with other observations, and zero-width
+intervals are retained. An interval proves neither a turn boundary nor
+playback completion."""
+    end_ms: float
+    start_ms: float
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveTranscriptRange":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveTranscriptRange')
+        if set(data) - set(('end_ms', 'start_ms')):
+            raise _wire_parse_error('LiveTranscriptRange', 'unknown field')
+        return cls(
+            end_ms=_expect_wire_number(_require_wire_field(data, 'end_ms', 'LiveTranscriptRange'), 'LiveTranscriptRange.end_ms'),
+            start_ms=_expect_wire_number(_require_wire_field(data, 'start_ms', 'LiveTranscriptRange'), 'LiveTranscriptRange.start_ms'),
+        )
+
+
+@dataclass
+class LiveTranscriptObservation:
+    """Exact observed transcript text before canonical sequence assignment.
+
+Whitespace and empty deltas are content facts. Request construction and
+permission are separate owners and must not turn this value into a final
+user transcript or an executable task by itself."""
+    direction: LiveTranscriptDirection
+    range: LiveTranscriptRange
+    text: str
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveTranscriptObservation":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveTranscriptObservation')
+        if set(data) - set(('direction', 'range', 'text')):
+            raise _wire_parse_error('LiveTranscriptObservation', 'unknown field')
+        return cls(
+            direction=parse_live_transcript_direction(_require_wire_field(data, 'direction', 'LiveTranscriptObservation')),
+            range=LiveTranscriptRange.from_wire(_require_wire_field(data, 'range', 'LiveTranscriptObservation')),
+            text=_expect_wire_str(_require_wire_field(data, 'text', 'LiveTranscriptObservation'), 'LiveTranscriptObservation.text'),
+        )
+
+
+@dataclass
+class LiveObservationRecord:
+    """Retained Live history type for LiveObservationRecord."""
+    channel_id: LiveChannelId
+    observation: LiveTranscriptObservation
+    sequence: LiveObservationSeq
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveObservationRecord":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveObservationRecord')
+        if set(data) - set(('channel_id', 'observation', 'sequence')):
+            raise _wire_parse_error('LiveObservationRecord', 'unknown field')
+        return cls(
+            channel_id=_expect_wire_str(_require_wire_field(data, 'channel_id', 'LiveObservationRecord'), 'LiveObservationRecord.channel_id'),
+            observation=LiveTranscriptObservation.from_wire(_require_wire_field(data, 'observation', 'LiveObservationRecord')),
+            sequence=_expect_wire_int(_require_wire_field(data, 'sequence', 'LiveObservationRecord'), 'LiveObservationRecord.sequence', 1, None),
+        )
+
+
+@dataclass
+class LiveObservationSnapshot:
+    """Retained Live history type for LiveObservationSnapshot."""
+    coverage: LiveObservationCoverage
+    end_sequence: int
+    generation: int
+    prefix_digest: str
+    revision: int
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveObservationSnapshot":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveObservationSnapshot')
+        if set(data) - set(('coverage', 'end_sequence', 'generation', 'prefix_digest', 'revision')):
+            raise _wire_parse_error('LiveObservationSnapshot', 'unknown field')
+        return cls(
+            coverage=parse_live_observation_coverage(_require_wire_field(data, 'coverage', 'LiveObservationSnapshot')),
+            end_sequence=_expect_wire_int(_require_wire_field(data, 'end_sequence', 'LiveObservationSnapshot'), 'LiveObservationSnapshot.end_sequence', 0, None),
+            generation=_expect_wire_int(_require_wire_field(data, 'generation', 'LiveObservationSnapshot'), 'LiveObservationSnapshot.generation', 0, None),
+            prefix_digest=_expect_wire_str(_require_wire_field(data, 'prefix_digest', 'LiveObservationSnapshot'), 'LiveObservationSnapshot.prefix_digest'),
+            revision=_expect_wire_int(_require_wire_field(data, 'revision', 'LiveObservationSnapshot'), 'LiveObservationSnapshot.revision', 0, None),
+        )
+
+
+@dataclass
+class LiveObservationPage:
+    """Retained Live history type for LiveObservationPage."""
+    after_sequence: int
+    encoding_profile: LiveObservationEncodingProfile
+    filter: LiveObservationFilter
+    has_more: bool
+    owner: LiveObservationOwner
+    records: list[LiveObservationRecord]
+    snapshot: LiveObservationSnapshot
+    next_cursor: Optional[LiveObservationCursor] = None
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "LiveObservationPage":
+        """Fail-closed wire parser (K21): raises MeerkatError
+        (INVALID_RESPONSE) on missing or mistyped fields.
+        """
+        data = _expect_wire_object(value, 'LiveObservationPage')
+        if set(data) - set(('after_sequence', 'encoding_profile', 'filter', 'has_more', 'next_cursor', 'owner', 'records', 'snapshot')):
+            raise _wire_parse_error('LiveObservationPage', 'unknown field')
+        return cls(
+            after_sequence=_expect_wire_int(_require_wire_field(data, 'after_sequence', 'LiveObservationPage'), 'LiveObservationPage.after_sequence', 0, None),
+            encoding_profile=parse_live_observation_encoding_profile(_require_wire_field(data, 'encoding_profile', 'LiveObservationPage')),
+            filter=parse_live_observation_filter(_require_wire_field(data, 'filter', 'LiveObservationPage')),
+            has_more=_expect_wire_bool(_require_wire_field(data, 'has_more', 'LiveObservationPage'), 'LiveObservationPage.has_more'),
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'LiveObservationPage.next_cursor') if data.get('next_cursor') is not None else None),
+            owner=parse_live_observation_owner(_require_wire_field(data, 'owner', 'LiveObservationPage')),
+            records=[LiveObservationRecord.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'records', 'LiveObservationPage'), 'LiveObservationPage.records', None, None)],
+            snapshot=LiveObservationSnapshot.from_wire(_require_wire_field(data, 'snapshot', 'LiveObservationPage')),
+        )
+
+
+
+def parse_transcript_user_role(value: Any, context: str = 'TranscriptUserRole') -> "TranscriptUserRole":
+    if isinstance(value, str):
+        return _expect_wire_enum(value, ('conversational', 'compaction_summary', 'injected_context'), context)
+    data = _expect_wire_object(value, context)
+    if set(data) == {'delegated_request'}:
+        return {'delegated_request': TranscriptUserRoleDelegatedRequestPayload.from_wire(data['delegated_request'])}
+    raise _wire_parse_error(context, 'expected exactly one known enum variant')
+
 
 def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":
     """Fail-closed wire parser for WorkCompletionPolicy (K21)."""
@@ -8346,7 +8696,7 @@ def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":
         return parsed_supervisor
     if tag == 'reviewer_quorum':
         parsed_reviewer_quorum: dict[str, Any] = {'kind': 'reviewer_quorum'}
-        parsed_reviewer_quorum['threshold'] = _expect_wire_int(_require_wire_field(data, 'threshold', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.reviewer_quorum.threshold')
+        parsed_reviewer_quorum['threshold'] = _expect_wire_int(_require_wire_field(data, 'threshold', 'WorkCompletionPolicy'), 'WorkCompletionPolicy.reviewer_quorum.threshold', 1, 64)
         return parsed_reviewer_quorum
     raise _wire_parse_error('WorkCompletionPolicy', f"unknown `kind` value `{tag}`")
 
@@ -8359,6 +8709,11 @@ def parse_work_edge_kind(value: Any) -> "WorkEdgeKind":
 def parse_work_graph_event_kind(value: Any) -> "WorkGraphEventKind":
     """Fail-closed wire parser for WorkGraphEventKind (K21)."""
     return _expect_wire_enum(value, ('created', 'updated', 'readiness_observed', 'claimed', 'released', 'blocked', 'closed', 'linked', 'evidence_added', 'attention_created', 'attention_updated', 'execution_bound', 'execution_transitioned',), 'WorkGraphEventKind')
+
+
+def parse_wire_projection_provenance(value: Any) -> "WireProjectionProvenance":
+    """Fail-closed wire parser for WireProjectionProvenance (K21)."""
+    return _expect_wire_enum(value, ('host_claimed', 'controlling_host_verified',), 'WireProjectionProvenance')
 
 
 def parse_work_evidence_kind(value: Any) -> "WorkEvidenceKind":
@@ -8412,6 +8767,92 @@ def parse_work_attention_target(value: Any) -> "WorkAttentionTarget":
     raise _wire_parse_error('WorkAttentionTarget', f"unknown `kind` value `{tag}`")
 
 
+def parse_live_observation_encoding_profile(value: Any) -> "LiveObservationEncodingProfile":
+    """Fail-closed wire parser for LiveObservationEncodingProfile (K21)."""
+    return _expect_wire_enum(value, ('v1',), 'LiveObservationEncodingProfile')
+
+
+def parse_live_observation_filter(value: Any) -> "LiveObservationFilter":
+    """Fail-closed wire parser for LiveObservationFilter (K21)."""
+    data = _expect_wire_object(value, 'LiveObservationFilter')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'LiveObservationFilter'), 'LiveObservationFilter.kind')
+    if tag == 'all_channels':
+        if set(data) - set(('kind',)):
+            raise _wire_parse_error('LiveObservationFilter', 'unknown variant field')
+        parsed_all_channels: dict[str, Any] = {'kind': 'all_channels'}
+        return parsed_all_channels
+    if tag == 'channel':
+        if set(data) - set(('channel_id', 'kind')):
+            raise _wire_parse_error('LiveObservationFilter', 'unknown variant field')
+        parsed_channel: dict[str, Any] = {'kind': 'channel'}
+        parsed_channel['channel_id'] = _expect_wire_str(_require_wire_field(data, 'channel_id', 'LiveObservationFilter'), 'LiveObservationFilter.channel.channel_id')
+        return parsed_channel
+    raise _wire_parse_error('LiveObservationFilter', f"unknown `kind` value `{tag}`")
+
+
+def parse_live_observation_owner(value: Any) -> "LiveObservationOwner":
+    """Fail-closed wire parser for LiveObservationOwner (K21)."""
+    data = _expect_wire_object(value, 'LiveObservationOwner')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'LiveObservationOwner'), 'LiveObservationOwner.kind')
+    if tag == 'session':
+        if set(data) - set(('kind', 'session_id')):
+            raise _wire_parse_error('LiveObservationOwner', 'unknown variant field')
+        parsed_session: dict[str, Any] = {'kind': 'session'}
+        parsed_session['session_id'] = _expect_wire_str(_require_wire_field(data, 'session_id', 'LiveObservationOwner'), 'LiveObservationOwner.session.session_id')
+        return parsed_session
+    if tag == 'member':
+        if set(data) - set(('agent_identity', 'kind', 'mob_id', 'session_id')):
+            raise _wire_parse_error('LiveObservationOwner', 'unknown variant field')
+        parsed_member: dict[str, Any] = {'kind': 'member'}
+        parsed_member['agent_identity'] = _expect_wire_str(_require_wire_field(data, 'agent_identity', 'LiveObservationOwner'), 'LiveObservationOwner.member.agent_identity')
+        parsed_member['mob_id'] = _expect_wire_str(_require_wire_field(data, 'mob_id', 'LiveObservationOwner'), 'LiveObservationOwner.member.mob_id')
+        parsed_member['session_id'] = _expect_wire_str(_require_wire_field(data, 'session_id', 'LiveObservationOwner'), 'LiveObservationOwner.member.session_id')
+        return parsed_member
+    raise _wire_parse_error('LiveObservationOwner', f"unknown `kind` value `{tag}`")
+
+
 def parse_work_owner_kind(value: Any) -> "WorkOwnerKind":
     """Fail-closed wire parser for WorkOwnerKind (K21)."""
     return _expect_wire_enum(value, ('principal', 'agent', 'session', 'mob', 'label',), 'WorkOwnerKind')
+
+
+def parse_live_observation_coverage(value: Any) -> "LiveObservationCoverage":
+    """Fail-closed wire parser for LiveObservationCoverage (K21)."""
+    return _expect_wire_enum(value, ('complete_accepted_prefix', 'known_local_gap', 'unknown_extent_crash_discontinuity',), 'LiveObservationCoverage')
+
+
+def parse_live_request_evidence_kind(value: Any) -> "LiveRequestEvidenceKind":
+    """Fail-closed wire parser for LiveRequestEvidenceKind (K21)."""
+    return _expect_wire_enum(value, ('application_snapshot', 'structured_function_request',), 'LiveRequestEvidenceKind')
+
+
+def parse_live_transcript_direction(value: Any) -> "LiveTranscriptDirection":
+    """Fail-closed wire parser for LiveTranscriptDirection (K21)."""
+    return _expect_wire_enum(value, ('input', 'output',), 'LiveTranscriptDirection')
+
+
+def parse_live_source_identity(value: Any) -> "LiveSourceIdentity":
+    """Fail-closed wire parser for LiveSourceIdentity (K21)."""
+    data = _expect_wire_object(value, 'LiveSourceIdentity')
+    tag = _expect_wire_str(_require_wire_field(data, 'kind', 'LiveSourceIdentity'), 'LiveSourceIdentity.kind')
+    if tag == 'client_delegation':
+        if set(data) - set(('delegation', 'kind')):
+            raise _wire_parse_error('LiveSourceIdentity', 'unknown variant field')
+        parsed_client_delegation: dict[str, Any] = {'kind': 'client_delegation'}
+        parsed_client_delegation['delegation'] = _expect_wire_str(_require_wire_field(data, 'delegation', 'LiveSourceIdentity'), 'LiveSourceIdentity.client_delegation.delegation')
+        return parsed_client_delegation
+    if tag == 'function_call':
+        if set(data) - set(('call', 'delegation', 'kind', 'response')):
+            raise _wire_parse_error('LiveSourceIdentity', 'unknown variant field')
+        parsed_function_call: dict[str, Any] = {'kind': 'function_call'}
+        parsed_function_call['call'] = _expect_wire_str(_require_wire_field(data, 'call', 'LiveSourceIdentity'), 'LiveSourceIdentity.function_call.call')
+        parsed_function_call['delegation'] = _expect_wire_str(_require_wire_field(data, 'delegation', 'LiveSourceIdentity'), 'LiveSourceIdentity.function_call.delegation')
+        parsed_function_call['response'] = _expect_wire_str(_require_wire_field(data, 'response', 'LiveSourceIdentity'), 'LiveSourceIdentity.function_call.response')
+        return parsed_function_call
+    if tag == 'application_request':
+        if set(data) - set(('kind', 'request_id')):
+            raise _wire_parse_error('LiveSourceIdentity', 'unknown variant field')
+        parsed_application_request: dict[str, Any] = {'kind': 'application_request'}
+        parsed_application_request['request_id'] = _expect_wire_str(_require_wire_field(data, 'request_id', 'LiveSourceIdentity'), 'LiveSourceIdentity.application_request.request_id')
+        return parsed_application_request
+    raise _wire_parse_error('LiveSourceIdentity', f"unknown `kind` value `{tag}`")

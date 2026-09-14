@@ -44,7 +44,83 @@ fn public_live_tagged_carriers_cannot_silently_discard_permission_fields() -> an
         checked >= 9,
         "public Live tagged inventory was not traversed"
     );
+    let bridge = root.join("meerkat-contracts/src/wire/supervisor_bridge.rs");
+    check_selected_tagged_carrier(
+        &bridge,
+        &std::fs::read_to_string(&bridge)?,
+        "BridgeLiveProfileSelection",
+    )?;
     Ok(())
+}
+
+fn check_selected_tagged_carrier(path: &Path, source: &str, name: &str) -> anyhow::Result<()> {
+    let file = syn::parse_file(source)?;
+    let mut selected = file.items.iter().filter_map(|item| match item {
+        syn::Item::Enum(item) if item.ident == name => Some(item),
+        _ => None,
+    });
+    let item = selected
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{}: missing selected carrier {name}", path.display()))?;
+    anyhow::ensure!(
+        selected.next().is_none(),
+        "{}: duplicate selected carrier {name}",
+        path.display()
+    );
+    let mut visitor = TaggedVisitor {
+        path,
+        violations: Vec::new(),
+        checked: 0,
+    };
+    visitor.visit_item_enum(item);
+    anyhow::ensure!(
+        visitor.checked == 1,
+        "{}: selected carrier {name} lost its tagged representation",
+        path.display()
+    );
+    anyhow::ensure!(
+        visitor.violations.is_empty(),
+        "{}",
+        visitor.violations.join("\n")
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_legacy_files_still_check_the_exact_selected_public_carrier() {
+    let legacy = r#"#[serde(tag = "kind")] enum Legacy { Absent }"#;
+    for (selected, valid) in [
+        (
+            r#"#[serde(tag = "version", deny_unknown_fields)] enum Selected { V1 {} }"#,
+            true,
+        ),
+        (
+            r#"#[serde(tag = "version", deny_unknown_fields)] enum Selected { V1 }"#,
+            false,
+        ),
+        ("enum Selected { V1 {} }", false),
+        ("enum Renamed { V1 {} }", false),
+        (
+            r#"#[cfg_attr(all(), serde(tag = "version", deny_unknown_fields))] enum Selected { V1 {} }"#,
+            false,
+        ),
+        (
+            r#"#[serde(tag = "version", deny_unknown_fields)] enum Selected { V1 {} }
+               #[serde(tag = "version", deny_unknown_fields)] enum Selected { V1 {} }"#,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            check_selected_tagged_carrier(
+                Path::new("mixed.rs"),
+                &format!("{legacy}\n{selected}"),
+                "Selected",
+            )
+            .is_ok(),
+            valid,
+            "{selected}",
+        );
+    }
 }
 
 fn collect_rust_files(path: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {

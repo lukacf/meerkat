@@ -2788,6 +2788,33 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn abort_uncommitted_live_stage(
+        &mut self,
+        input_id: &InputId,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::AbortUncommittedLiveStage {
+                input_id: Self::dsl_key(input_id),
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "AbortUncommittedLiveStage",
+        )?;
+        let state = self.ledger.get_mut(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal("uncommitted Live input projection missing".into())
+        })?;
+        let now = Utc::now();
+        state.history.push(InputStateHistoryEntry {
+            timestamp: now,
+            from: InputLifecycleState::Staged,
+            to: InputLifecycleState::Queued,
+            reason: Some("AbortUncommittedLiveStage".into()),
+        });
+        state.updated_at = now;
+        Ok(())
+    }
+
     pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             // Skip inputs that are no longer in Staged (terminal or never-staged).
@@ -3271,6 +3298,66 @@ impl EphemeralRuntimeDriver {
         Self::admission_validation_from_machine_effects(input_id, effects)
     }
 
+    fn resolve_bound_admission_validation(
+        &self,
+        input: &Input,
+        resolved: &crate::accept::ResolvedAdmission,
+        facts: AdmissionValidationFacts<'_>,
+    ) -> Result<Option<mm_dsl::AdmissionRejectReasonKind>, RuntimeDriverError> {
+        let Some(validation) = resolved.live_validation() else {
+            return self.resolve_admission_validation(input.id(), facts);
+        };
+        validation.validate(input)?;
+        let effects = self.dsl_preview(
+            mm_dsl::MeerkatMachineInput::ResolveLiveAdmissionValidation {
+                input_id: Self::dsl_key(input.id()),
+                input_kind: mm_dsl::AdmissionInputKind::from(facts.input_kind),
+                input_origin: mm_dsl::AdmissionInputOriginKind::from(facts.input_origin),
+                durability: mm_dsl::InputDurabilityKind::from(facts.durability),
+            },
+            "ResolveLiveAdmissionValidation",
+        )?;
+        Self::admission_validation_from_machine_effects(input.id(), effects)
+    }
+
+    pub(crate) fn live_grant_rejection_before_durable_deduplication(
+        &self,
+        input: &Input,
+        resolved: &crate::accept::ResolvedAdmission,
+    ) -> Result<Option<RejectReason>, RuntimeDriverError> {
+        let reason =
+            self.resolve_bound_admission_validation(
+                input,
+                resolved,
+                AdmissionValidationFacts {
+                    input_kind: input.kind(),
+                    input_origin: &input.header().source,
+                    durability: input.header().durability,
+                    peer_handling_mode_valid:
+                        crate::peer_handling_mode::validate_peer_handling_mode(input).is_ok(),
+                    peer_response_terminal_structurally_valid:
+                        crate::input::validate_peer_response_terminal_fact(input).is_ok(),
+                    peer_response_terminal_observed_status:
+                        Self::peer_response_terminal_observed_status(input),
+                },
+            )?;
+        // A durable key is not a Live grant. Other validation retains the
+        // ordinary durable path's idempotency-first ordering.
+        match reason {
+            Some(mm_dsl::AdmissionRejectReasonKind::LiveRequestRequiresGrant) => {
+                Ok(Some(RejectReason::LiveRequestRequiresGrant))
+            }
+            Some(
+                mm_dsl::AdmissionRejectReasonKind::DurabilityMissing
+                | mm_dsl::AdmissionRejectReasonKind::ExternalDerivedDurabilityForbidden
+                | mm_dsl::AdmissionRejectReasonKind::DerivedDurabilityForbiddenForInputKind
+                | mm_dsl::AdmissionRejectReasonKind::PeerHandlingModeInvalid
+                | mm_dsl::AdmissionRejectReasonKind::PeerResponseTerminalInvalid,
+            )
+            | None => Ok(None),
+        }
+    }
+
     fn peer_response_terminal_observed_status(
         input: &Input,
     ) -> mm_dsl::PeerResponseTerminalObservedStatus {
@@ -3326,6 +3413,9 @@ impl EphemeralRuntimeDriver {
             ))
         };
         match reason {
+            mm_dsl::AdmissionRejectReasonKind::LiveRequestRequiresGrant => {
+                Ok(RejectReason::LiveRequestRequiresGrant)
+            }
             mm_dsl::AdmissionRejectReasonKind::DurabilityMissing => {
                 Ok(RejectReason::DurabilityViolation {
                     detail: "input durability observation missing".to_owned(),
@@ -3687,8 +3777,9 @@ impl EphemeralRuntimeDriver {
         let peer_response_terminal_detail = peer_response_terminal_structural_error
             .clone()
             .or_else(|| Self::peer_response_terminal_generated_rejection_detail(&input));
-        if let Some(reason) = self.resolve_admission_validation(
-            &input_id,
+        if let Some(reason) = self.resolve_bound_admission_validation(
+            &input,
+            &resolved,
             AdmissionValidationFacts {
                 input_kind: input.kind(),
                 input_origin: &input.header().source,
@@ -3931,8 +4022,9 @@ impl EphemeralRuntimeDriver {
         let peer_response_terminal_detail = peer_response_terminal_structural_error
             .clone()
             .or_else(|| Self::peer_response_terminal_generated_rejection_detail(input));
-        if let Some(reason) = self.resolve_admission_validation(
-            &input_id,
+        if let Some(reason) = self.resolve_bound_admission_validation(
+            input,
+            resolved,
             AdmissionValidationFacts {
                 input_kind: input.kind(),
                 input_origin: &input.header().source,
@@ -4195,9 +4287,67 @@ impl EphemeralRuntimeDriver {
         contributing_input_ids: &[InputId],
         replay_plan: &ReplayQueuedContributorsPlan,
         contributor_disposition: crate::meerkat_machine::driver::FailedRunContributorDisposition,
-    ) -> Result<(), RuntimeDriverError> {
+    ) -> Result<crate::meerkat_machine::driver::FailedRunContributorDisposition, RuntimeDriverError>
+    {
         use crate::meerkat_machine::driver::FailedRunContributorDisposition;
+        let contributor_disposition =
+            if contributor_disposition != FailedRunContributorDisposition::Consumed
+                && !contributing_input_ids.is_empty()
+            {
+                let input_ids: std::collections::BTreeSet<_> = contributing_input_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                let run = mm_dsl::RunId::from_domain(run_id);
+                let effects = self.dsl_apply_effects(
+                    mm_dsl::MeerkatMachineInput::ResolveFailedRunRecovery {
+                        run_id: run.clone(),
+                        input_ids: input_ids.clone(),
+                    },
+                    "ResolveFailedRunRecovery",
+                )?;
+                match effects.as_slice() {
+                    [
+                        mm_dsl::MeerkatMachineEffect::FailedRunRecoveryResolved {
+                            run_id: observed_run,
+                            input_ids: observed_inputs,
+                            disposition,
+                        },
+                    ] if observed_run == &run && observed_inputs == &input_ids => match disposition
+                    {
+                        mm_dsl::FailedRunRecoveryDisposition::HoldScoped => {
+                            FailedRunContributorDisposition::HeldForScopedRecovery
+                        }
+                        mm_dsl::FailedRunRecoveryDisposition::Ordinary
+                            if contributor_disposition
+                                != FailedRunContributorDisposition::HeldForScopedRecovery =>
+                        {
+                            contributor_disposition
+                        }
+                        mm_dsl::FailedRunRecoveryDisposition::Ordinary => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: "ordinary failed run cannot claim scoped recovery custody"
+                                    .into(),
+                            });
+                        }
+                    },
+                    _ => return Err(RuntimeDriverError::Internal(
+                        "failed-run recovery classification did not retain its exact contributors"
+                            .into(),
+                    )),
+                }
+            } else {
+                contributor_disposition
+            };
         match contributor_disposition {
+            FailedRunContributorDisposition::HeldForScopedRecovery => {
+                tracing::warn!(
+                    ?run_id,
+                    contributors = contributing_input_ids.len(),
+                    "scoped failed-run contributors held intact without replay or terminal result"
+                );
+                Ok(())
+            }
             FailedRunContributorDisposition::Consumed => {
                 tracing::debug!(
                     run_id = ?run_id,
@@ -4264,7 +4414,8 @@ impl EphemeralRuntimeDriver {
                 // lane - no separate lane seeding is needed here.
                 self.rollback_staged(contributing_input_ids)
             }
-        }
+        }?;
+        Ok(contributor_disposition)
     }
 
     /// Machine-owned realization for a validated cancelled run.

@@ -12,6 +12,7 @@ pub const LIVE_REQUEST_TEXT_MAX_BYTES: usize = 16 * 1024;
 
 /// Non-human transcript provenance. No grant, tool policy or final-speech
 /// assertion can be serialized into this content descriptor.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "DelegatedRequestProvenanceParts")]
 pub struct DelegatedRequestProvenance {
@@ -54,11 +55,24 @@ impl DelegatedRequestProvenance {
     pub fn request_id(&self) -> &crate::ops::OperationId {
         &self.request_id
     }
+    pub const fn evidence_kind(&self) -> LiveRequestEvidenceKind {
+        self.evidence_kind
+    }
     pub const fn request_digest(&self) -> LiveContentDigest {
         self.request_digest
     }
+
+    /// Check immutable content identity, not admission or execution permission.
+    pub fn validate_request(&self, request: &str) -> Result<(), LiveEvidenceError> {
+        LiveRequestText::validate(request)?;
+        if LiveContentDigest::of_request_bytes(request.as_bytes()) != self.request_digest {
+            return Err(LiveEvidenceError::RequestDigestMismatch);
+        }
+        Ok(())
+    }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DelegatedRequestProvenanceParts {
@@ -86,6 +100,10 @@ impl TryFrom<DelegatedRequestProvenanceParts> for DelegatedRequestProvenance {
 pub struct LiveContentDigest([u8; 32]);
 
 impl LiveContentDigest {
+    pub const fn from_sha256(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
     pub fn of_request_bytes(bytes: &[u8]) -> Self {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.live-request-content.v1\0");
@@ -150,13 +168,18 @@ pub struct LiveRequestText(Box<str>);
 impl LiveRequestText {
     pub fn new(value: impl Into<Box<str>>) -> Result<Self, LiveEvidenceError> {
         let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    fn validate(value: &str) -> Result<(), LiveEvidenceError> {
         if value.len() > LIVE_REQUEST_TEXT_MAX_BYTES {
             return Err(LiveEvidenceError::RequestTooLarge);
         }
         if value.trim().is_empty() {
             return Err(LiveEvidenceError::EmptyRequest);
         }
-        Ok(Self(value))
+        Ok(())
     }
 
     pub fn as_str(&self) -> &str {
@@ -219,6 +242,10 @@ impl LiveRequestEvidence {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LiveEvidenceError {
+    #[error("delegated request content does not match its immutable request digest")]
+    RequestDigestMismatch,
+    #[error("delegated request content must be exactly one text block")]
+    InvalidDelegatedContent,
     #[error("live request provenance does not match its source kind")]
     SourceKindMismatch,
     #[error("live observation interval is reversed")]

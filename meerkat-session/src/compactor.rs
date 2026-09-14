@@ -375,7 +375,7 @@ impl Compactor for DefaultCompactor {
         // message never loses the ambient context the model responded with.
         let mut turn_starts: Vec<usize> = Vec::new();
         for (i, msg) in messages.iter().enumerate() {
-            if matches!(msg, Message::User(u) if u.transcript_role.is_conversational()) {
+            if matches!(msg, Message::User(u) if u.transcript_role.is_turn_input()) {
                 let mut start = i;
                 while start > 0
                     && matches!(
@@ -821,6 +821,7 @@ mod tests {
             MODEL.to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider: meerkat_core::Provider::OpenAI,
+                interaction_kind: None,
                 display_name: None,
                 context_window: Some(window_tokens),
                 max_input_tokens: None,
@@ -1251,6 +1252,34 @@ mod tests {
             &retention.message,
             Message::User(user) if user.transcript_role.is_compaction_summary()
         )));
+    }
+
+    #[test]
+    fn public_live_delegated_turn_retains_provenance_and_its_injected_context() {
+        use meerkat_core::live_execution::evidence::{DelegatedRequestProvenance, LiveRequestText};
+        let request = LiveRequestText::new("provisional task").unwrap();
+        let provenance: DelegatedRequestProvenance = serde_json::from_value(serde_json::json!({
+            "request_id":"00000000-0000-0000-0000-000000000001",
+            "source":{"session_id":"00000000-0000-0000-0000-000000000002","channel_id":"voice",
+                "source":{"kind":"client_delegation","delegation":"d"}},
+            "evidence_kind":"application_snapshot","request_digest":request.digest()
+        }))
+        .unwrap();
+        let delegated = Message::User(UserMessage::delegated_request(request, provenance).unwrap());
+        let messages = vec![
+            Message::User(UserMessage::text("old turn")),
+            Message::User(UserMessage::injected_context("ambient")),
+            delegated.clone(),
+        ];
+        let result = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        })
+        .rebuild_history(&messages, "summary");
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.messages[1], messages[1]);
+        assert_eq!(result.messages[2], delegated);
+        assert_eq!(result.discarded.len(), 1);
     }
 
     #[test]

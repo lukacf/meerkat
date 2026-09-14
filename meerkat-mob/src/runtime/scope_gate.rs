@@ -105,7 +105,8 @@ impl MobCommand {
 
             // ── ReadHistory: member transcript reads (phase 6 — the
             //    ADJ-P5-13 marker's real verb) ──
-            Self::MemberHistory { .. } => Some(ControlScope::ReadHistory),
+            Self::MemberHistory { .. }
+            | Self::MemberLiveObservations { .. } => Some(ControlScope::ReadHistory),
 
             // ── Live: the duplex media-plane bearer family (phase 6b,
             //    DL8/DEC-P6B-C2). A WS bootstrap does not decompose into
@@ -210,6 +211,7 @@ impl MobCommand {
             | Self::HostRuntimeIncarnationObserved { .. }
             | Self::HostOrphanReleaseCompleted { .. }
             | Self::PlacedBehaviorCompleted { .. }
+            | Self::MemberLiveObservationsCompleted { .. }
             | Self::ProjectMemberStatusObserved { .. }
             | Self::CommitFlowRunCommand { .. }
             | Self::CommitFlowTerminalization { .. }
@@ -410,6 +412,10 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::MemberLiveObservations { reply_tx, .. }
+            | Self::MemberLiveObservationsCompleted { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CreateForkedParticipant { reply_tx, .. } => {

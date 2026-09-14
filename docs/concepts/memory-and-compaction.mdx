@@ -40,6 +40,13 @@ does not dilute the recent-turn retention budget, and stays attached to the
 conversational user message it preceded. Neither injected context nor a prior
 compaction summary is indexed as ordinary semantic memory.
 
+Delegated application/model requests use the typed `delegated_request` role.
+Their exact source references, request digest, and provisional evidence grade
+remain attached to the message; indexing or completing a request never turns it
+into finalized human speech. They count as turn inputs for retention and are
+indexable application content. Transcript rewrite cannot author this role, and
+the role itself grants no execution or tool permission.
+
 ## Capacity and cadence
 
 The default compactor can react to four different pressure signals:

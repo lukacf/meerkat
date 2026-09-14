@@ -828,6 +828,16 @@ impl CoreExecutor for SessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .core_session_service()
+            .acknowledge_finalized_compaction_projections(&self.session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.runtime
             .core_session_service()
@@ -1147,6 +1157,15 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .acknowledge_finalized_compaction_projections(&self.session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {

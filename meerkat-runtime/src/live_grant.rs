@@ -11,6 +11,11 @@ use meerkat_core::live_execution::activation::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod issuer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use issuer::{LiveExecutionGrantIssuer, LiveGrantActivationError, LiveGrantActivationRequest};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveExecutionGrantFormat {
@@ -133,8 +138,8 @@ impl<Member: PartialEq> TryFrom<LiveExecutionGrantWire<Member>>
     }
 }
 
-/// Sealed host-issuer handoff to generated grant activation, not an effect
-/// permit or a record-decoding convenience.
+/// Sealed receipt of trusted-host activation through the generated owner and
+/// its exact durable commit, not an effect permit or a decoded record.
 ///
 /// ```compile_fail
 /// use meerkat_runtime::live_grant::LiveExecutionGrant;
@@ -143,11 +148,15 @@ impl<Member: PartialEq> TryFrom<LiveExecutionGrantWire<Member>>
 #[derive(Debug, Clone)]
 pub struct LiveExecutionGrant<Member> {
     record: Arc<LiveExecutionGrantRecord<Member>>,
+    activation_commit: crate::live_ledger::transcript::LiveHeadReference,
 }
 
 impl<Member> LiveExecutionGrant<Member> {
     pub fn record(&self) -> &LiveExecutionGrantRecord<Member> {
         &self.record
+    }
+    pub fn activation_commit(&self) -> &crate::live_ledger::transcript::LiveHeadReference {
+        &self.activation_commit
     }
 }
 

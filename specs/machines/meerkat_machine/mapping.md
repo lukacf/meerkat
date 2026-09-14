@@ -1928,6 +1928,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveAdmissionValidationAcceptedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveAdmissionValidationUnboundLiveRequestRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAdmissionValidationUnboundLiveRequestRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAdmissionValidationUnboundLiveRequestRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationAcceptedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationAcceptedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationAcceptedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveAdmissionValidationRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeScopedInputNormalizationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAcceptedQueueInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3158,6 +3203,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `IncrementAttemptCountStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `ResolveFailedRunRecoveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFailedRunRecoveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFailedRunRecoveryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFailedRunRecoveryRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFailedRunRecoveryStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RollbackStagedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3172,6 +3232,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `RollbackStagedStopped`
   - anchors: `meerkat_machine`
+  - scenarios: (unclaimed)
+- `AbortUncommittedLiveStageIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUncommittedLiveStageAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUncommittedLiveStageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUncommittedLiveStageRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUncommittedLiveStageStopped`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedIdle`
   - anchors: (unclaimed)
@@ -7792,6 +7867,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CheckpointCompletionResultResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `FailedRunRecoveryResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ScopedInputNormalizationResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `fence_requires_bound_runtime`
@@ -7897,6 +7978,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `current_run_has_pre_run_phase`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_request_run_associations_are_exclusive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `staged_inputs_are_not_queued`

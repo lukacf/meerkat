@@ -20,6 +20,7 @@ import type {
   MobTurnStartParams,
   MobWiringRulesInput,
   OutputSchema,
+  TranscriptUserRole,
   WireAuthBindingRef,
   WireContentInput,
   WireHostRef,
@@ -276,6 +277,7 @@ export interface SessionMessage {
   readonly kind?: string;
   readonly body?: string;
   readonly content?: SessionContentInput;
+  readonly transcriptRole?: TranscriptUserRole;
   readonly stopReason?: string;
   readonly interactionId?: string;
   readonly runId?: string;

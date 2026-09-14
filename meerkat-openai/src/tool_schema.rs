@@ -41,6 +41,42 @@ use serde_json::{Map, Value};
 /// (quoted from the validator message in the module documentation).
 const ROOT_REJECTED_KEYWORDS: &[&str] = &["not", "oneOf", "anyOf", "allOf", "enum"];
 
+pub(crate) enum FunctionToolWireShape {
+    Responses,
+    ChatCompletions,
+}
+
+pub(crate) fn enforce_native_tool_policy(
+    request: &meerkat_llm_core::LlmRequest,
+    body: &mut Value,
+    shape: FunctionToolWireShape,
+) -> Result<(), LlmError> {
+    if request.provider_native_tools.is_inherit() {
+        return Ok(());
+    }
+    if body.get("tools").is_none() {
+        body["tools"] = Value::Array(Vec::new());
+    }
+    let valid = body["tools"].as_array().is_some_and(|tools| {
+        tools.len() == request.tools.len()
+            && tools.iter().zip(&request.tools).all(|(wire, expected)| {
+                let function = match shape {
+                    FunctionToolWireShape::Responses => wire,
+                    FunctionToolWireShape::ChatCompletions => &wire["function"],
+                };
+                wire["type"].as_str() == Some("function")
+                    && function["name"].as_str() == Some(expected.name.as_str())
+            })
+    });
+    if !valid {
+        return Err(LlmError::InvalidRequest {
+            message: "request-scoped native-tool restriction rejects non-catalog OpenAI tools"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 /// Normalize a tool's `input_schema` for OpenAI function-parameter emission.
 ///
 /// - Local `$ref`s (`#/$defs/...`, `#/definitions/...`) are inlined; the

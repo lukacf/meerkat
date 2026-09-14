@@ -19,6 +19,7 @@ pub mod block_assembler;
 pub mod error;
 pub mod factory;
 pub mod http;
+pub mod live_adapter_factory;
 pub mod provider_runtime;
 pub mod realtime_session;
 pub mod streaming;

@@ -3692,6 +3692,12 @@ impl DriverEntry {
                 if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
                     driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let DriverEntry::Persistent(driver) = self {
+                    driver
+                        .reconcile_live_request_completions(Some(&input_ids))
+                        .await;
+                }
                 return Ok(());
             }
             return Err(RuntimeDriverError::RecoveryCorruption {
@@ -3741,6 +3747,12 @@ impl DriverEntry {
         .await?;
         if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
             driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let DriverEntry::Persistent(driver) = self {
+            driver
+                .reconcile_live_request_completions(Some(&input_ids))
+                .await;
         }
         Ok(())
     }
@@ -4318,13 +4330,38 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn materialize_live_request(
+        &self,
+        input_id: &InputId,
+        request: &crate::live_request::LiveExecutionRequestRecord,
+    ) -> Result<
+        Option<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+        crate::live_request::LiveRequestMaterializationError,
+    > {
+        match self {
+            DriverEntry::Persistent(driver) => {
+                driver.materialize_live_request(input_id, request).await
+            }
+            DriverEntry::Ephemeral(_) => {
+                Err(crate::live_request::LiveRequestMaterializationError::Unsupported)
+            }
+        }
+    }
+
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,
         resolved: ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         match self {
-            DriverEntry::Ephemeral(d) => d.accept_resolved_input(input, resolved).await,
+            DriverEntry::Ephemeral(d) => {
+                if resolved.live_validation().is_some() {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: "Live admission requires joint persistent storage".into(),
+                    });
+                }
+                d.accept_resolved_input(input, resolved).await
+            }
             DriverEntry::Persistent(d) => d.accept_resolved_input(input, resolved).await,
         }
     }
@@ -4633,6 +4670,15 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn persist_prepared_runtime_binding(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(()),
+            DriverEntry::Persistent(driver) => driver.persist_prepared_runtime_binding().await,
+        }
+    }
+
     pub(crate) async fn persist_current_machine_lifecycle(
         &mut self,
         context: &str,
@@ -4877,14 +4923,21 @@ impl DriverEntry {
         } = realization;
         let checkpoint = self.begin_terminal_transition("failed_run_terminal_realization")?;
 
-        if let Err(error) = self.shell_driver_mut().machine_realize_run_failed(
+        let contributor_disposition = match self.shell_driver_mut().machine_realize_run_failed(
             &run_id,
             &contributing_input_ids,
             &replay_plan,
             contributor_disposition,
         ) {
-            return Err(self.fail_terminal_transition(checkpoint, "failed_run_realization", error));
-        }
+            Ok(disposition) => disposition,
+            Err(error) => {
+                return Err(self.fail_terminal_transition(
+                    checkpoint,
+                    "failed_run_realization",
+                    error,
+                ));
+            }
+        };
         let terminal_input_ids = contributing_input_ids
             .iter()
             .filter(|input_id| {
@@ -5742,6 +5795,9 @@ pub(crate) enum FailedRunContributorDisposition {
     /// machine terminalizes the contributors instead: refuse the release
     /// rather than risk it.
     Terminalized,
+    /// The scoped run ended without an applied terminal witness. Keep its
+    /// non-runnable input and run attribution for exact effect reconciliation.
+    HeldForScopedRecovery,
 }
 
 impl FailedRunContributorDisposition {
@@ -5757,6 +5813,7 @@ impl FailedRunContributorDisposition {
             Self::Consumed => "Consumed",
             Self::Replayed => "Replayed",
             Self::Terminalized => "Terminalized",
+            Self::HeldForScopedRecovery => "HeldForScopedRecovery",
         }
     }
 }
@@ -6848,6 +6905,15 @@ pub(crate) async fn machine_normalize_recovered_input_state(
         None
     };
 
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::live_ledger::authority::store::recovery::authorize_input_normalization(
+        store,
+        runtime_id,
+        &bundle,
+        applied_boundary_committed,
+    )
+    .await?;
+
     let delta =
         machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed)?;
 
@@ -6993,8 +7059,59 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         return Ok(delta);
     }
 
+    if state.persisted_input.is_none() {
+        return Err(RuntimeDriverError::RecoveryCorruption {
+            reason: missing_recovered_ingress_entry_reason(state, seed),
+        });
+    }
+
     let input_id = state.input_id.to_string();
     let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    if matches!(
+        state.persisted_input,
+        Some(crate::input::Input::LiveRequest(_))
+    ) {
+        use crate::meerkat_machine::dsl::{
+            MeerkatMachineEffect, MeerkatMachineInput, MeerkatMachineMutator,
+            ScopedInputNormalizationDisposition,
+        };
+        let scoped = MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::AuthorizeScopedInputNormalization {
+                input_id: input_id.clone(),
+                phase: recovered_observed_phase(seed.phase),
+                has_run: seed.last_run_id.is_some(),
+                applied_boundary_committed,
+            },
+        )
+        .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+            reason: format!("scoped input normalization was rejected: {error:?}"),
+        })?;
+        match scoped.effects() {
+            [
+                MeerkatMachineEffect::ScopedInputNormalizationResolved {
+                    input_id: observed_input,
+                    disposition,
+                },
+            ] if observed_input == &input_id => match disposition {
+                ScopedInputNormalizationDisposition::Authorized => {}
+                ScopedInputNormalizationDisposition::Hold => {
+                    return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: format!(
+                            "scoped input {input_id} retains unresolved run {:?}; normalization cannot replay it",
+                            seed.last_run_id
+                        ),
+                    });
+                }
+            },
+            _ => {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "scoped normalization lost its exact input disposition".into(),
+                });
+            }
+        }
+    }
     let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
         &mut authority,
         crate::meerkat_machine::dsl::MeerkatMachineInput::NormalizeRecoveredInputLifecycle {
@@ -7263,7 +7380,10 @@ pub(crate) fn machine_build_recovered_ingress_entry(
     Some(RecoveredIngressEntry { runtime_semantics })
 }
 
-fn missing_recovered_ingress_entry_reason(state: &InputState, seed: &InputStateSeed) -> String {
+pub(crate) fn missing_recovered_ingress_entry_reason(
+    state: &InputState,
+    seed: &InputStateSeed,
+) -> String {
     if state.persisted_input.is_none() {
         return format!(
             "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
@@ -8619,7 +8739,12 @@ pub(crate) async fn machine_recycle_preserving_work(
 #[must_use]
 #[derive(Debug)]
 pub(crate) enum RuntimeLoopBatchStart {
-    Started,
+    Started(meerkat_core::execution_scope::RunExecutionAuthority),
+    #[cfg(not(target_arch = "wasm32"))]
+    LiveStageRefused {
+        source: meerkat_core::live_execution::request::LiveSourceKey,
+        reason: RuntimeDriverError,
+    },
     StageRefused {
         reason: String,
         abandoned_input_ids: Vec<InputId>,
@@ -8627,6 +8752,23 @@ pub(crate) enum RuntimeLoopBatchStart {
 }
 
 pub(crate) async fn prepare_runtime_loop_batch_start(
+    driver: &SharedDriver,
+    run_id: RunId,
+    batch: AuthorizedRuntimeLoopBatch,
+) -> Result<RuntimeLoopBatchStart, RuntimeDriverError> {
+    let driver = Arc::clone(driver);
+    crate::tokio::spawn(async move {
+        prepare_runtime_loop_batch_start_owned(&driver, run_id, batch).await
+    })
+    .await
+    .map_err(|error| {
+        RuntimeDriverError::Internal(format!(
+            "owned runtime run-start transaction ended without a result: {error}",
+        ))
+    })?
+}
+
+async fn prepare_runtime_loop_batch_start_owned(
     driver: &SharedDriver,
     run_id: RunId,
     batch: AuthorizedRuntimeLoopBatch,
@@ -8706,26 +8848,56 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     // mid-run must leave identity evidence a later recovery can terminalize
     // against instead of holding the tail. Fail-closed — a persist failure
     // rolls the staged batch and the run back and the turn never starts.
-    if let DriverEntry::Persistent(persistent) = &*driver
-        && let Err(err) = persistent.persist_staged_input_bindings(&staged_ids).await
-    {
-        {
-            let _ = driver.rollback_staged(&staged_ids);
-            if let Err(rollback_err) = machine_apply_run_return_projection(
-                &mut driver,
-                &run_id,
-                RunReturnDisposition::Rollback,
-            ) {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "failed to roll back runtime run after staged-binding persist failure: \
+    let authority = match &*driver {
+        DriverEntry::Persistent(persistent) => {
+            match persistent.persist_staged_input_bindings(&staged_ids).await {
+                Ok(crate::driver::persistent::StagedInputBindingOutcome::Bound(authority)) => {
+                    authority
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                Ok(crate::driver::persistent::StagedInputBindingOutcome::UncommittedLiveStage(
+                    refusal,
+                )) => {
+                    let DriverEntry::Persistent(persistent) = &mut *driver else {
+                        return Err(RuntimeDriverError::Internal(
+                            "persistent stage owner changed".into(),
+                        ));
+                    };
+                    let (source, reason) = persistent.abort_uncommitted_live_stage(refusal)?;
+                    machine_apply_run_return_projection(
+                        &mut driver,
+                        &run_id,
+                        RunReturnDisposition::Rollback,
+                    ).map_err(|error| RuntimeDriverError::Internal(format!(
+                        "failed to return uncommitted Live run: {error}; stage refusal: {reason}"
+                    )))?;
+                    return Ok(RuntimeLoopBatchStart::LiveStageRefused { source, reason });
+                }
+                Err(err) => {
+                    if persistent.require_durability_ready().is_err() {
+                        return Err(err);
+                    }
+                    let _ = driver.rollback_staged(&staged_ids);
+                    if let Err(rollback_err) = machine_apply_run_return_projection(
+                        &mut driver,
+                        &run_id,
+                        RunReturnDisposition::Rollback,
+                    ) {
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "failed to roll back runtime run after staged-binding persist failure: \
                      {rollback_err}; persist failure: {err}"
-                )));
+                        )));
+                    }
+                    return Err(err);
+                }
             }
-            return Err(err);
         }
-    }
+        DriverEntry::Ephemeral(_) => {
+            meerkat_core::execution_scope::RunExecutionAuthority::SessionPolicy
+        }
+    };
 
-    Ok(RuntimeLoopBatchStart::Started)
+    Ok(RuntimeLoopBatchStart::Started(authority))
 }
 
 /// Validate the committed boundary witness.
@@ -8855,6 +9027,17 @@ pub(crate) async fn commit_runtime_loop_run(
         committed.as_ref(),
     )
     .map_err(RuntimeLoopRunCommitError::Rejected)?;
+    if let Some(identity) = terminal
+        .and_then(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::callback_identity)
+        && (identity.session_id() != commit_authority.owner_session_id()
+            || identity.run_id() != &completed_run_id)
+    {
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(
+                "callback identity does not match the committed session and run".into(),
+            ),
+        ));
+    }
     let completion_candidate =
         crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(terminal);
 
@@ -10765,16 +10948,20 @@ mod recovery_tests {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             } => CompletionOutcome::CallbackPending {
                 tool_use_id: tool_use_id.clone().unwrap_or_default(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                callback_identity: callback_identity.clone(),
             },
-            InteractionTerminalCandidate::CallbackBatchPending { pending_tool_calls } => {
-                CompletionOutcome::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                }
-            }
+            InteractionTerminalCandidate::CallbackBatchPending {
+                pending_tool_calls,
+                callback_identity,
+            } => CompletionOutcome::CallbackBatchPending {
+                pending_tool_calls: pending_tool_calls.clone(),
+                callback_identity: callback_identity.clone(),
+            },
             InteractionTerminalCandidate::MachineTerminalFailure { error } => {
                 CompletionOutcome::AbandonedWithError {
                     reason: error.detail.clone().unwrap_or_default(),

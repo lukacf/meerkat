@@ -28,6 +28,41 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Public Live observation conversion:** `WireLiveAdapterObservation`
+  replaces `From<LiveAdapterObservation>` with
+  `TryFrom<LiveAdapterObservation, Error = LiveObservationNotPublic>`.
+  Internal continuous facts and unmapped variants cannot become public debug
+  payloads; `WireLiveAdapterObservation::encode` performs the checked conversion.
+  `WireLiveAdapterObservation` also gains `LiveObservationCommitted`, carrying
+  the independent, store-assigned observation record rather than a final turn.
+- **Explicit custom interaction contracts:** `CustomModelConfig` gains the
+  optional Rust field `interaction_kind`; existing struct literals use `None`
+  to preserve text behavior. `FactoryError` gains
+  `ContinuousModelRequiresLiveProfile`, `LiveConnection`, and `LiveTarget`.
+  `WireLiveAdapterErrorCode` gains `ContinuousInputRejected` with the closed
+  `ContinuousLiveInputError` vocabulary. Behavior-only: ordinary agent creation,
+  identity preflight/client rebuilding, `ResolvedTextTarget::new`, and
+  `ResolvedRealtimeTarget::new` reject continuous-Live profiles, including
+  operator-defined aliases, rather than routing them through text or Realtime.
+- **Typed Live storage refusal:** `RuntimeStoreError` gains
+  `LiveLedgerCapacityExceeded` and `LiveRequestPublicationRejected`; the latter
+  identifies an owner refusal before the publication callback, not an
+  uncertain physical write.
+- **Machine expression vocabulary:** `meerkat_machine_schema::Expr` gains
+  `Mul` and `Div` variants. Exhaustive matches must handle multiplication and
+  integer division. Guards must establish nonzero divisors and bounded products
+  before evaluating generated native arithmetic; the interpreted kernel reports
+  arithmetic overflow and division by zero as typed evaluation refusals.
+- **Scoped run handoff:** `StagedRunInput` gains the mandatory Rust field
+  `execution_authority: RunExecutionAuthority`. Ordinary constructors use
+  `SessionPolicy`; scoped handles come only from committed generated runtime
+  authority. Ordinary JSON keeps the prior omitted-field shape. Behavior-only:
+  serialized scoped primitives cannot be deserialized into runnable permission,
+  and legacy `CoreExecutor` implementations refuse scoped execution rather than
+  silently forwarding it to ordinary `apply`.
+
 ## [0.8.37] - 2026-09-11
 
 ### Breaking

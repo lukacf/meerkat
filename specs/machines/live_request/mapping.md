@@ -1,0 +1,280 @@
+# LiveRequestMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `LiveRequestMachine`
+
+### Code Anchors
+- `live_request_catalog_bridge` (machine `LiveRequestMachine`): `meerkat-runtime/src/live_ledger/authority/dsl.rs` — catalog-derived runtime transition body; committed storage and physical effect realization are not claimed by this anchor
+
+### Scenarios
+- `generated_scope_restore_preserves_admission_won_close_and_exact_bindings` — production DSL rejects mismatched request/input/run/scope/digest/lineage/executor after recovery and permits an admitted run despite closed ingress
+- `generated_claim_rechecks_revocation_after_policy_await` — an actual awaited candidate policy result cannot restore a revoked generated claim
+- `claimed_effect_survives_revoke_and_recovery_without_resend_permission` — recovery retains the spent effect and accepts exact unknown feedback once after revoke
+
+### Transitions
+- `ResolveUnboundInputRecovery`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveBoundInputRecovery`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ActivateFreshGrant`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `ReserveNewSource`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `RefuseNewSource`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitReservedInput`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `ObserveCommittedAdmission`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StageAdmittedRun`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `AdmitExactCallbackContinuation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveExactCallbackContinuation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StageExactCallbackContinuation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClaimExactCallbackApplication`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreExactRunningScope`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `ClaimExactCurrentEffect`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`, `claimed_effect_survives_revoke_and_recovery_without_resend_permission`
+- `SettleClaimedEffect`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `claimed_effect_survives_revoke_and_recovery_without_resend_permission`
+- `ResolveFreshModelAttempt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveConclusiveModelSuccessor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveExhaustedModelTokenBudget`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveExactEffectSettlement`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelKnownRequest`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: (unclaimed)
+- `CancelUnadmittedRequest`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelUnreservedSource`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelReservedSource`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelUnadmittedSource`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelCompletedSource`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSourceCancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObservePendingSourceCancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeCurrentGrant`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_claim_rechecks_revocation_after_policy_await`, `claimed_effect_survives_revoke_and_recovery_without_resend_permission`
+- `FenceExecutorBinding`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: (unclaimed)
+- `CloseRequestIngress`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: `generated_scope_restore_preserves_admission_won_close_and_exact_bindings`
+- `ObserveClosedRequestIngress`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SuspendRunningRequest`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: (unclaimed)
+- `ObserveExactCallbackSuspension`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveExactCancelledCallbackHold`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteRunningRequest`
+  - anchors: `live_request_catalog_bridge`
+  - scenarios: (unclaimed)
+- `ObserveCompletedRequest`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteRunlessRequest`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveCompletedRunlessRequest`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteUnstagedCallbackContinuation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveCompletedUnstagedCallbackContinuation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+
+### Effects
+- `ActivationChanged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SourceReserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SourceRefused`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InputAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmissionObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CallbackContinuationAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CallbackContinuationObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CallbackApplicationClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunScopeBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ScopeRestored`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ModelAttemptResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ModelTokenBudgetExhausted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompletionObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EffectStartClaimed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EffectSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCancellationRequired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GrantRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExecutorFenced`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `IngressClosed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestSuspended`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EffectSettlementObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InputRecoveryResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunlessRequestCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SourceCancellationRetained`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelledCallbackHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+
+### Invariants
+- `refused_sources_never_mint_requests`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `request_completion_obligations_have_exact_lifetimes`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `request_completion_credits_are_complete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `request_record_fields_have_one_owner`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `activated_grant_is_complete_and_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `active_grant_requests_have_exact_admission`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `current_requests_retain_the_activated_ceiling`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `admission_and_run_scope_fields_are_complete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `request_identity_joins_are_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `callback_continuations_form_one_exact_acyclic_run_chain`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `callback_continuation_admission_is_complete_and_one_shot`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `callback_application_claims_require_continuation_lineage`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `claims_retain_exact_identity_and_spent_effects`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `observed_token_accounting_is_complete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `effect_attempt_chains_are_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `completion_credits_are_bounded_and_settlement_is_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `claim_identity_joins_are_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `callback_suspensions_retain_exact_run_membership`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `open_ingress_requires_a_live_grant`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+
+
+<!-- GENERATED_COVERAGE_END -->

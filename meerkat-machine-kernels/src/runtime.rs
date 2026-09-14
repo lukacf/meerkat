@@ -1024,6 +1024,24 @@ impl GeneratedMachineKernel {
                 })?;
                 Ok(KernelValue::U64(value))
             }
+            Expr::Mul(left, right) | Expr::Div(left, right) => {
+                let left = self
+                    .eval_expr(state, bindings, left, transition_name)?
+                    .as_u64()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let right = self
+                    .eval_expr(state, bindings, right, transition_name)?
+                    .as_u64()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let (value, reason) = if matches!(expr, Expr::Mul(_, _)) {
+                    (left.checked_mul(right), "multiplication overflow")
+                } else {
+                    (left.checked_div(right), "division by zero")
+                };
+                let value =
+                    value.ok_or_else(|| self.eval_error(transition_name, reason.to_owned()))?;
+                Ok(KernelValue::U64(value))
+            }
             Expr::Gt(left, right) => self.compare_values(
                 state,
                 bindings,
@@ -2493,6 +2511,47 @@ mod tests {
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
         default_value_for_type, option_some, value_matches_type,
     };
+
+    #[test]
+    fn multiplicative_kernel_evaluation_is_checked_integer_arithmetic() {
+        use meerkat_machine_schema::Expr;
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let transition = TransitionId::parse("ArithmeticContract").expect("transition id");
+        let evaluate =
+            |expression: &Expr| kernel.eval_expr(&state, &BTreeMap::new(), expression, &transition);
+        for (expression, expected) in [
+            (
+                Expr::Mul(Box::new(Expr::U64(7)), Box::new(Expr::U64(3))),
+                21,
+            ),
+            (Expr::Div(Box::new(Expr::U64(7)), Box::new(Expr::U64(2))), 3),
+            (
+                Expr::Div(Box::new(Expr::U64(u64::MAX)), Box::new(Expr::U64(1))),
+                u64::MAX,
+            ),
+            (
+                Expr::Mul(Box::new(Expr::U64(u64::MAX)), Box::new(Expr::U64(0))),
+                0,
+            ),
+        ] {
+            assert_eq!(evaluate(&expression), Ok(KernelValue::U64(expected)));
+        }
+        for expression in [
+            Expr::Div(Box::new(Expr::U64(1)), Box::new(Expr::U64(0))),
+            Expr::Mul(Box::new(Expr::U64(u64::MAX)), Box::new(Expr::U64(2))),
+            Expr::Div(Box::new(Expr::Bool(true)), Box::new(Expr::U64(1))),
+        ] {
+            assert!(matches!(
+                evaluate(&expression),
+                Err(TransitionRefusal::EvaluationError { .. })
+            ));
+            assert_eq!(
+                evaluate(&Expr::And(vec![Expr::Bool(false), expression])),
+                Ok(KernelValue::Bool(false))
+            );
+        }
+    }
 
     fn input_id(slug: &str) -> InputVariantId {
         #[allow(clippy::expect_used)]

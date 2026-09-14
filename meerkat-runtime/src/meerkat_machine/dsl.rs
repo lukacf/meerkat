@@ -3,6 +3,9 @@
 
 use meerkat_machine_dsl::machine;
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
+pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+    FailedRunRecoveryDisposition, ScopedInputNormalizationDisposition,
+};
 
 // ---------------------------------------------------------------------------
 // Bridging types
@@ -3490,6 +3493,8 @@ pub enum AdmissionInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+    LiveRequest,
+    LiveCallbackContinuation,
 }
 
 /// Typed continuation discriminant carried by `ResolveAdmissionPlan`. The DSL
@@ -3546,6 +3551,7 @@ pub enum AdmissionInputOriginKind {
     Flow,
     System,
     External,
+    LiveRequest,
 }
 
 impl From<&crate::input::InputOrigin> for AdmissionInputOriginKind {
@@ -3556,6 +3562,7 @@ impl From<&crate::input::InputOrigin> for AdmissionInputOriginKind {
             crate::input::InputOrigin::Flow { .. } => Self::Flow,
             crate::input::InputOrigin::System => Self::System,
             crate::input::InputOrigin::External { .. } => Self::External,
+            crate::input::InputOrigin::LiveRequest => Self::LiveRequest,
         }
     }
 }
@@ -3572,6 +3579,10 @@ impl From<crate::identifiers::InputKind> for AdmissionInputKind {
             crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
             crate::identifiers::InputKind::Continuation => Self::Continuation,
             crate::identifiers::InputKind::Operation => Self::Operation,
+            crate::identifiers::InputKind::LiveRequest => Self::LiveRequest,
+            crate::identifiers::InputKind::LiveCallbackContinuation => {
+                Self::LiveCallbackContinuation
+            }
         }
     }
 }
@@ -3803,6 +3814,7 @@ pub enum AdmissionRejectReasonKind {
     DerivedDurabilityForbiddenForInputKind,
     PeerHandlingModeInvalid,
     PeerResponseTerminalInvalid,
+    LiveRequestRequiresGrant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -3858,6 +3870,8 @@ pub enum RecoveredInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+    LiveRequest,
+    LiveCallbackContinuation,
 }
 
 /// Generated recovery disposition for a persisted input row.
@@ -3916,6 +3930,10 @@ impl From<crate::identifiers::InputKind> for RecoveredInputKind {
             crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
             crate::identifiers::InputKind::Continuation => Self::Continuation,
             crate::identifiers::InputKind::Operation => Self::Operation,
+            crate::identifiers::InputKind::LiveRequest => Self::LiveRequest,
+            crate::identifiers::InputKind::LiveCallbackContinuation => {
+                Self::LiveCallbackContinuation
+            }
         }
     }
 }

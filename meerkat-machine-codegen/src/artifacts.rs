@@ -374,6 +374,8 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)
@@ -442,6 +444,8 @@ fn expr_uses_u64_max(expr: &Expr) -> bool {
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)
@@ -3725,6 +3729,8 @@ fn collect_named_literals_from_expr(
         }
         Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)
@@ -3970,7 +3976,12 @@ fn infer_expr_type(
         | Expr::MapContainsKey { .. }
         | Expr::SeqStartsWith { .. }
         | Expr::Quantified { .. } => Some(TypeRef::Bool),
-        Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) | Expr::Count { .. } => Some(TypeRef::U64),
+        Expr::Add(_, _)
+        | Expr::Sub(_, _)
+        | Expr::Mul(_, _)
+        | Expr::Div(_, _)
+        | Expr::Len(_)
+        | Expr::Count { .. } => Some(TypeRef::U64),
         Expr::SeqElements(inner) => {
             match infer_expr_type(inner, field_types, helper_returns, binding_types) {
                 Some(TypeRef::Seq(inner_ty)) => Some(TypeRef::Set(inner_ty)),
@@ -11171,6 +11182,16 @@ impl<'a> MachineTlaCompiler<'a> {
                 self.render_expr_with_types(left, env, binding_env, binding_types),
                 self.render_expr_with_types(right, env, binding_env, binding_types)
             ),
+            Expr::Mul(left, right) => format!(
+                "({} * {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
+            Expr::Div(left, right) => format!(
+                "({} \\div {})",
+                self.render_expr_with_types(left, env, binding_env, binding_types),
+                self.render_expr_with_types(right, env, binding_env, binding_types)
+            ),
             Expr::Gt(left, right) => format!(
                 "({} > {})",
                 self.render_expr_with_types(left, env, binding_env, binding_types),
@@ -11726,6 +11747,8 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)
@@ -11815,6 +11838,8 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
         | Expr::Neq(left, right)
         | Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
         | Expr::Gt(left, right)
         | Expr::Gte(left, right)
         | Expr::Lt(left, right)

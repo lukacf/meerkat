@@ -25,6 +25,7 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time as async_time;
@@ -33,6 +34,9 @@ use crate::image_generation::{
     GeminiImageGenerationProfile, GeminiImageOutputOptions, GeminiImageTurnPlan,
 };
 use meerkat_core::image_generation::ImageGenerationProviderProfile;
+
+#[derive(Debug)]
+struct GeminiRequestNonce(String);
 
 /// Extract the typed Gemini provider tag from a request.
 fn gemini_tag(request: &LlmRequest) -> Option<&GeminiProviderTag> {
@@ -262,7 +266,7 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
                 )?,
                 render_metadata: user.render_metadata.clone(),
                 identity: user.identity.clone(),
-                transcript_role: user.transcript_role,
+                transcript_role: user.transcript_role.clone(),
                 created_at: user.created_at,
             })),
             Message::BlockAssistant(assistant) => {
@@ -432,6 +436,7 @@ impl GeminiClient {
     /// Schema proto. It is not a supported host API.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        request.validate_native_tool_policy()?;
         let mut contents = Vec::new();
         let mut system_instruction_parts = Vec::new();
         let mut leading_system_prefix = true;
@@ -715,10 +720,53 @@ impl GeminiClient {
             body["toolConfig"]["includeServerSideToolInvocations"] = Value::Bool(true);
         }
 
+        if !request.provider_native_tools.is_inherit() {
+            if body.get("cachedContent").is_some() {
+                return Err(LlmError::InvalidRequest {
+                    message: "request-scoped native-tool restriction cannot attest externally cached Gemini tools".into(),
+                });
+            }
+            if body.get("tools").is_none() {
+                body["tools"] = Value::Array(Vec::new());
+            }
+            let valid = body["tools"].as_array().is_some_and(|tools| {
+                if request.tools.is_empty() {
+                    return tools.is_empty();
+                }
+                tools.len() == 1
+                    && tools[0].as_object().is_some_and(|tool| tool.len() == 1)
+                    && tools[0]["functionDeclarations"]
+                        .as_array()
+                        .is_some_and(|functions| {
+                            functions.len() == request.tools.len()
+                                && functions
+                                    .iter()
+                                    .zip(&request.tools)
+                                    .all(|(wire, expected)| {
+                                        wire["name"].as_str() == Some(expected.name.as_str())
+                                    })
+                        })
+            });
+            if !valid {
+                return Err(LlmError::InvalidRequest {
+                    message:
+                        "request-scoped native-tool restriction rejects non-catalog Gemini tools"
+                            .into(),
+                });
+            }
+        }
         Ok(body)
     }
 
     fn build_stream_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        self.build_stream_request_body_with_nonce(request, None)
+    }
+
+    fn build_stream_request_body_with_nonce(
+        &self,
+        request: &LlmRequest,
+        nonce: Option<&str>,
+    ) -> Result<Value, LlmError> {
         let body = self.build_request_body(request)?;
         match self.wire_mode {
             GeminiWireMode::PublicGenerateContent => Ok(body),
@@ -730,9 +778,9 @@ impl GeminiClient {
                 );
                 outer.insert(
                     "user_prompt_id".to_string(),
-                    Value::String(format!(
-                        "meerkat-{}",
-                        meerkat_core::time_compat::new_uuid_v7()
+                    Value::String(nonce.map_or_else(
+                        || format!("meerkat-{}", meerkat_core::time_compat::new_uuid_v7()),
+                        str::to_owned,
                     )),
                 );
                 if let Some(project_id) = &self.code_assist_project_id {
@@ -2076,6 +2124,45 @@ fn join_index(prefix: &str, index: usize) -> String {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for GeminiClient {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        meerkat_core::execution_scope::ScopedModelEffectSupport::PhysicalDispatch
+    }
+
+    fn prepared_scoped_model_effect_support(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<meerkat_core::execution_scope::ScopedModelEffectSupport, LlmError> {
+        let messages = self.project_replay_messages(&request.request().messages)?;
+        Ok(if self.requires_referenced_video_preparation(&messages) {
+            meerkat_core::execution_scope::ScopedModelEffectSupport::Unsupported
+        } else {
+            self.scoped_model_effect_support()
+        })
+    }
+
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
+        let projection =
+            meerkat_llm_core::LlmReplayProjection::new(self.project_replay_messages(messages)?);
+        Ok(match self.wire_mode {
+            GeminiWireMode::PublicGenerateContent => projection,
+            GeminiWireMode::CodeAssist => projection.with_route_witness(
+                meerkat_llm_core::LlmRequestRouteWitness::new(GeminiRequestNonce(format!(
+                    "meerkat-{}",
+                    meerkat_core::time_compat::new_uuid_v7()
+                ))),
+            ),
+        })
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        meerkat_core::NativeToolPolicySupport::RequestScoped
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_gemini_replay_messages(messages)
     }
@@ -2084,16 +2171,96 @@ impl LlmClient for GeminiClient {
         &self,
         request: &LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut pressure = self.request_pressure_with_nonce(request, None)?;
+        if matches!(self.wire_mode, GeminiWireMode::CodeAssist)
+            && let Some(pressure) = pressure.as_mut()
+        {
+            // UUID width is fixed, but only prepared requests retain the nonce
+            // needed to attest the eventual body digest.
+            pressure.lowered_request_provenance = None;
+        }
+        Ok(pressure)
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_with_nonce(request.request(), self.prepared_nonce(request)?)
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_execution_context(request, None)
+    }
+
+    fn stream_with_execution_context<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> LlmStream<'a> {
+        self.stream_with_nonce(request, scope, None)
+    }
+
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> LlmStream<'a> {
+        match self.prepared_nonce(request) {
+            Ok(nonce) => {
+                self.stream_with_nonce(request.request(), request.scoped_model().cloned(), nonce)
+            }
+            Err(error) => Box::pin(futures::stream::once(async { Err(error) })),
+        }
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Gemini
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        GeminiClient::compile_schema_for_gemini(output_schema)
+    }
+}
+
+impl GeminiClient {
+    fn prepared_nonce<'a>(
+        &self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<Option<&'a str>, LlmError> {
+        match (
+            self.wire_mode,
+            request.route_witness::<GeminiRequestNonce>(),
+        ) {
+            (GeminiWireMode::PublicGenerateContent, None) => Ok(None),
+            (GeminiWireMode::CodeAssist, Some(nonce)) => Ok(Some(&nonce.0)),
+            _ => Err(LlmError::InvalidRequest {
+                message: "Gemini prepared request is missing its matching wire nonce".into(),
+            }),
+        }
+    }
+
+    fn request_pressure_with_nonce(
+        &self,
+        request: &LlmRequest,
+        nonce: Option<&str>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
         let mut projected_request = request.clone();
         projected_request.messages = self.project_replay_messages(&request.messages)?;
-        // Google GenAI rewrites gs:// references through an async Files API
-        // registration step. A synchronous observer cannot prove the resulting
-        // URI bytes, so fail truthfully unavailable instead of reporting a
-        // stale pre-registration body as exact.
+        // Files API preparation changes URI bytes asynchronously, so this
+        // observer cannot attest an exact post-registration body.
         if self.requires_referenced_video_preparation(&projected_request.messages) {
             return Ok(None);
         }
-        let body = self.build_stream_request_body(&projected_request)?;
+        let body = match nonce {
+            Some(nonce) => {
+                self.build_stream_request_body_with_nonce(&projected_request, Some(nonce))?
+            }
+            None => self.build_stream_request_body(&projected_request)?,
+        };
         let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
             message: format!("failed to serialize Gemini request body: {error}"),
         })?;
@@ -2112,13 +2279,27 @@ impl LlmClient for GeminiClient {
         ))
     }
 
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+    fn stream_with_nonce<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+        nonce: Option<&'a str>,
+    ) -> LlmStream<'a> {
+        let feedback = streaming::ScopedModelStreamFeedback::new(scope.as_ref());
+        let response_feedback = feedback.clone();
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
+            if scope.is_some()
+                && self.requires_referenced_video_preparation(&projected_request.messages)
+            {
+                Err::<(), _>(LlmError::InvalidRequest {
+                    message: "Gemini referenced-video preparation does not yet retain scoped effect custody".into(),
+                })?;
+            }
             self.prepare_referenced_videos(&mut projected_request.messages).await?;
             let request = &projected_request;
-            let body = self.build_stream_request_body(request)?;
+            let body = self.build_stream_request_body_with_nonce(request, nonce)?;
             let url = self.stream_generate_content_url(&request.model);
 
             // Auth path: if an authorizer is attached (Code Assist /
@@ -2146,20 +2327,37 @@ impl LlmClient for GeminiClient {
             } else {
                 req = req.header("x-goog-api-key", &self.api_key);
             }
-            let response = req
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+            let (response, custody) = http::send_model_request(
+                scope,
+                http::ModelRequestSendEvidence {
+                    provider: Provider::Gemini,
+                    encoding: meerkat_core::LoweredRequestEncoding::GeminiGenerateContentJson,
+                    model: &request.model,
+                    route: &url,
+                    body: &body,
+                    native_tools: request.provider_native_tools,
+                },
+                async {
+                    req.json(&body).send().await.map_err(|_| LlmError::NetworkTimeout {
+                        duration_ms: 30000,
+                    })
+                },
+            ).await?;
 
             let status_code = response.status().as_u16();
             let stream_result = if (200..=299).contains(&status_code) {
+                response_feedback.install(custody)?;
                 Ok(response.bytes_stream())
             } else {
+                if let Some(claimed) = custody {
+                    drop(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                        message: format!("Gemini rejection feedback failed: {error}"),
+                    })?);
+                }
                 let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
+                let text = response.text().await.map_err(|error| LlmError::StreamParseError {
+                    message: format!("cannot read Gemini rejection body: {error}"),
+                })?;
                 Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
@@ -2281,19 +2479,7 @@ impl LlmClient for GeminiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
-    }
-
-    fn provider(&self) -> Provider {
-        Provider::Gemini
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        GeminiClient::compile_schema_for_gemini(output_schema)
+        streaming::ensure_terminal_done(feedback.wrap(inner))
     }
 }
 
@@ -3033,6 +3219,37 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn code_assist_prepared_pressure_retains_nonce_but_raw_pressure_does_not_attest_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new(String::new()).with_code_assist_wire();
+        let raw = LlmRequest::new(
+            "fixture-model",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        let direct = client.request_pressure(&raw)?.ok_or("raw pressure")?;
+        assert!(direct.lowered_request_provenance.is_none());
+        let prepared = meerkat_llm_core::PreparedLlmRequest::from_projection(
+            raw.clone(),
+            client.project_replay_request(&raw.messages)?,
+        );
+        let first = client
+            .prepared_request_pressure(&prepared)?
+            .ok_or("prepared pressure")?;
+        assert_eq!(first.encoded_bytes, direct.encoded_bytes);
+        assert!(first.lowered_request_provenance.is_some());
+        assert_eq!(
+            client.prepared_request_pressure(&prepared)?.as_ref(),
+            Some(&first)
+        );
+        let missing_nonce = meerkat_llm_core::PreparedLlmRequest::from_projection(
+            raw.clone(),
+            meerkat_llm_core::LlmReplayProjection::new(raw.messages),
+        );
+        assert!(client.prepared_request_pressure(&missing_nonce).is_err());
+        Ok(())
     }
 
     #[tokio::test]
@@ -6039,6 +6256,67 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_policy_preserves_functions_and_refuses_server_tools_at_pressure() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new("gemini-3.5-flash", Vec::new())
+            .with_tools(vec![Arc::new(meerkat_core::ToolDef::new(
+                "read",
+                "read",
+                serde_json::json!({"type": "object", "properties": {}}),
+            ))])
+            .with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::DisableAll);
+        let body = client
+            .build_request_body(&request)
+            .expect("function-only request");
+        assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "read");
+        let pressure = client
+            .request_pressure(&request)
+            .expect("pressure")
+            .expect("exact");
+        assert_eq!(
+            pressure.encoded_bytes,
+            serde_json::to_vec(&body).expect("body").len() as u64
+        );
+        let empty = request.clone().with_tools(Vec::new());
+        assert_eq!(
+            client.build_request_body(&empty).expect("empty")["tools"],
+            serde_json::json!([])
+        );
+        let injected = request.clone().with_gemini_tag_merge(|tag| {
+            tag.google_search = Some(
+                meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                    &serde_json::json!({}),
+                ),
+            );
+        });
+        assert!(matches!(
+            client.build_request_body(&injected),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        assert!(matches!(
+            client.request_pressure(&injected),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        let cached = request.clone().with_gemini_tag_merge(|tag| {
+            tag.cached_content_name = Some("cachedContents/external-tools".into());
+        });
+        assert!(matches!(
+            client.build_request_body(&cached),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        assert!(matches!(
+            client.request_pressure(&cached),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        let ordinary =
+            request.with_native_tool_policy(meerkat_core::ProviderNativeToolPolicy::Inherit);
+        assert_eq!(
+            client.build_request_body(&ordinary).expect("ordinary"),
+            body
+        );
+    }
+
+    #[test]
     fn test_google_search_alone() -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
@@ -6087,6 +6365,76 @@ mod tests {
             "functionDeclarations alone should not force toolConfig"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_tool_policy_reaches_actual_wire_and_restores_ordinary_defaults() {
+        use meerkat_core::{AgentLlmClient, ProviderNativeToolPolicy};
+        use meerkat_llm_core::LlmClientAdapter;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#,
+            "",
+        ].join("\n");
+        let (base_url, server) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, Arc::clone(&seen)).await;
+        let adapter = Arc::new(
+            LlmClientAdapter::new(
+                Arc::new(GeminiClient::new_with_base_url("test-key".into(), base_url)),
+                "gemini-3.5-flash".into(),
+            )
+            .with_provider_params(Some(ProviderTag::Gemini(
+                meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
+                    google_search: Some(
+                        meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                            &serde_json::json!({}),
+                        ),
+                    ),
+                    ..Default::default()
+                },
+            ))),
+        );
+        for policy in [
+            ProviderNativeToolPolicy::DisableAll,
+            ProviderNativeToolPolicy::Inherit,
+        ] {
+            let attempt = adapter
+                .clone()
+                .prepare_request_attempt_with_native_tool_policy(
+                    Arc::new(vec![Message::User(UserMessage::text("read"))]),
+                    Arc::from([]),
+                    1024,
+                    None,
+                    None,
+                    policy,
+                )
+                .expect("attempt");
+            let pressure = attempt
+                .request_pressure()
+                .expect("pressure")
+                .expect("exact pressure");
+            attempt.stream_response().await.expect("actual stream");
+            let bodies = seen.lock().expect("bodies");
+            let body = bodies.last().expect("captured request");
+            assert_eq!(
+                pressure.encoded_bytes,
+                serde_json::to_vec(body).expect("body").len() as u64
+            );
+            if policy == ProviderNativeToolPolicy::DisableAll {
+                assert_eq!(body["tools"], serde_json::json!([]));
+            } else {
+                assert_eq!(body["tools"], serde_json::json!([{"google_search": {}}]));
+            }
+        }
+        assert_eq!(seen.lock().expect("bodies").len(), 2);
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("server cancellation")
+                .is_cancelled()
+        );
     }
 
     #[tokio::test]

@@ -275,6 +275,8 @@ pub enum ExprDef {
     // Arithmetic
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
+    Mul(Box<ExprDef>, Box<ExprDef>),
+    Div(Box<ExprDef>, Box<ExprDef>),
 
     // Collection operations
     Contains {

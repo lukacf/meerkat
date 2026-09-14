@@ -1064,6 +1064,7 @@ impl ToolExecutionContract {
             output_policy,
             progress_policy,
             owner_witnesses: Vec::new(),
+            scoped_policy_owners: Vec::new(),
             resolved_call: None,
             root_dispatcher: None,
         })
@@ -1167,6 +1168,7 @@ pub struct ResolvedToolExecutionPlan {
     output_policy: ToolExecutionApplicability<ToolOutputPolicy>,
     progress_policy: ToolExecutionApplicability<ToolProgressPolicy>,
     owner_witnesses: Vec<ToolExecutionOwnerWitness>,
+    scoped_policy_owners: Vec<ScopedPolicyPlanLease>,
     resolved_call: Option<ResolvedToolCallIdentity>,
     root_dispatcher: Option<RootDispatcherLease>,
 }
@@ -1178,17 +1180,48 @@ struct ResolvedToolCallIdentity {
     canonical_arguments_sha256: [u8; 32],
 }
 
-trait ErasedRootDispatcherLease: Send + Sync {
-    fn data_ptr(&self) -> *const ();
+#[derive(Debug)]
+pub(crate) struct ScopedPolicyPlanOwner;
+
+#[derive(Debug, Clone)]
+struct ScopedPolicyPlanLease {
+    owner: Arc<ScopedPolicyPlanOwner>,
+    binding: EphemeralToolBindingFingerprint,
+    context: crate::execution_scope::ScopedExecutionContext,
 }
 
-struct TypedRootDispatcherLease<T: ?Sized + Send + Sync + 'static> {
+impl PartialEq for ScopedPolicyPlanLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            && self.binding == other.binding
+            && self.context == other.context
+    }
+}
+
+trait ErasedRootDispatcherLease: Send + Sync {
+    fn data_ptr(&self) -> *const ();
+    fn current_binding(
+        &self,
+        tool_name: &str,
+    ) -> Result<EphemeralToolBindingFingerprint, ToolExecutionResolutionError>;
+}
+
+struct TypedRootDispatcherLease<T: crate::AgentToolDispatcher + ?Sized + 'static> {
     dispatcher: Arc<T>,
 }
 
-impl<T: ?Sized + Send + Sync + 'static> ErasedRootDispatcherLease for TypedRootDispatcherLease<T> {
+impl<T: crate::AgentToolDispatcher + ?Sized + 'static> ErasedRootDispatcherLease
+    for TypedRootDispatcherLease<T>
+{
     fn data_ptr(&self) -> *const () {
         Arc::as_ptr(&self.dispatcher).cast::<()>()
+    }
+
+    fn current_binding(
+        &self,
+        tool_name: &str,
+    ) -> Result<EphemeralToolBindingFingerprint, ToolExecutionResolutionError> {
+        self.dispatcher.execution_binding_fingerprint(tool_name)
     }
 }
 
@@ -1196,7 +1229,7 @@ impl<T: ?Sized + Send + Sync + 'static> ErasedRootDispatcherLease for TypedRootD
 struct RootDispatcherLease(Arc<dyn ErasedRootDispatcherLease>);
 
 impl RootDispatcherLease {
-    fn new<T: ?Sized + Send + Sync + 'static>(dispatcher: Arc<T>) -> Self {
+    fn new<T: crate::AgentToolDispatcher + ?Sized + 'static>(dispatcher: Arc<T>) -> Self {
         Self(Arc::new(TypedRootDispatcherLease { dispatcher }))
     }
 
@@ -1218,6 +1251,7 @@ impl std::fmt::Debug for ResolvedToolExecutionPlan {
             .field("output_policy", &self.output_policy)
             .field("progress_policy", &self.progress_policy)
             .field("owner_witnesses", &self.owner_witnesses)
+            .field("scoped_policy_owners", &self.scoped_policy_owners)
             .field("resolved_call", &self.resolved_call)
             .field("has_root_dispatcher_lease", &self.root_dispatcher.is_some())
             .finish()
@@ -1235,6 +1269,7 @@ impl PartialEq for ResolvedToolExecutionPlan {
             && self.output_policy == other.output_policy
             && self.progress_policy == other.progress_policy
             && self.owner_witnesses == other.owner_witnesses
+            && self.scoped_policy_owners == other.scoped_policy_owners
             && self.resolved_call == other.resolved_call
             && match (&self.root_dispatcher, &other.root_dispatcher) {
                 (Some(left), Some(right)) => left.0.data_ptr() == right.0.data_ptr(),
@@ -1332,7 +1367,7 @@ impl ResolvedToolExecutionPlan {
         Ok(self)
     }
 
-    pub(crate) fn bind_root_dispatch<T: ?Sized + Send + Sync + 'static>(
+    pub(crate) fn bind_root_dispatch<T: crate::AgentToolDispatcher + ?Sized + 'static>(
         mut self,
         dispatcher: Arc<T>,
         call: crate::ToolCallView<'_>,
@@ -1340,6 +1375,75 @@ impl ResolvedToolExecutionPlan {
         self.resolved_call = Some(ResolvedToolCallIdentity::from_call(call)?);
         self.root_dispatcher = Some(RootDispatcherLease::new(dispatcher));
         Ok(self)
+    }
+
+    pub(crate) fn bind_scoped_policy_owner(
+        mut self,
+        owner: Arc<ScopedPolicyPlanOwner>,
+        binding: EphemeralToolBindingFingerprint,
+        context: crate::execution_scope::ScopedExecutionContext,
+    ) -> Self {
+        self.scoped_policy_owners.push(ScopedPolicyPlanLease {
+            owner,
+            binding,
+            context,
+        });
+        self
+    }
+
+    pub(crate) fn validate_scoped_policy_call(
+        &self,
+        owner: &Arc<ScopedPolicyPlanOwner>,
+        call: crate::ToolCallView<'_>,
+        current_binding: &EphemeralToolBindingFingerprint,
+        context: &crate::execution_scope::ScopedExecutionContext,
+    ) -> Result<(), ToolExecutionResolutionError> {
+        let actual = ResolvedToolCallIdentity::from_call(call)?;
+        if self.resolved_call.as_ref() != Some(&actual) {
+            return Err(ToolExecutionResolutionError::ResolvedCallMismatch {
+                tool_name: call.name.into(),
+            });
+        }
+        if self
+            .scoped_policy_owners
+            .iter()
+            .find(|lease| Arc::ptr_eq(&lease.owner, owner))
+            .map(|lease| &lease.context)
+            != Some(context)
+        {
+            return Err(ToolExecutionResolutionError::Unavailable {
+                tool_name: call.name.into(),
+                reason: crate::ToolUnavailableReason::ExecutionOwnerChanged,
+            });
+        }
+        self.validate_current_scoped_policy_binding(owner, call.name, current_binding)
+    }
+
+    pub(crate) fn validate_current_scoped_policy_binding(
+        &self,
+        owner: &Arc<ScopedPolicyPlanOwner>,
+        tool_name: &str,
+        current_binding: &EphemeralToolBindingFingerprint,
+    ) -> Result<(), ToolExecutionResolutionError> {
+        let unavailable = || ToolExecutionResolutionError::Unavailable {
+            tool_name: tool_name.into(),
+            reason: crate::ToolUnavailableReason::ExecutionOwnerChanged,
+        };
+        let root = self.root_dispatcher.as_ref().ok_or_else(unavailable)?;
+        let root_witness = self
+            .owner_witness("root-dispatcher")
+            .ok_or_else(unavailable)?;
+        let policy = self
+            .scoped_policy_owners
+            .iter()
+            .find(|lease| Arc::ptr_eq(&lease.owner, owner))
+            .ok_or_else(unavailable)?;
+        if &policy.binding != current_binding
+            || root_witness.binding_fingerprint() != &root.0.current_binding(tool_name)?
+        {
+            return Err(unavailable());
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_root_dispatch<T: ?Sized + Send + Sync + 'static>(

@@ -1064,6 +1064,10 @@ pub(crate) struct SessionTurnExecutionOutcome {
     pub(crate) result: Result<RunResult, meerkat_core::error::AgentError>,
     pub(crate) machine_terminal_failure:
         Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError>,
+    callback_identity: Result<
+        Option<meerkat_core::session::CallbackBatchIdentity>,
+        meerkat_core::error::AgentError,
+    >,
 }
 
 impl SessionTurnExecutionOutcome {
@@ -1073,6 +1077,7 @@ impl SessionTurnExecutionOutcome {
         Self {
             result,
             machine_terminal_failure: Ok(None),
+            callback_identity: Ok(None),
         }
     }
 
@@ -1082,20 +1087,37 @@ impl SessionTurnExecutionOutcome {
         (
             Result<RunResult, meerkat_core::error::AgentError>,
             Option<meerkat_core::TurnErrorMetadata>,
+            Option<meerkat_core::session::CallbackBatchIdentity>,
         ),
         meerkat_core::error::AgentError,
     > {
         let machine_terminal_failure = self.machine_terminal_failure?;
+        let callback_identity = self.callback_identity?;
+        if callback_identity.is_some() && machine_terminal_failure.is_some() {
+            return Err(AgentError::InternalError(
+                "callback identity contradicts machine-terminal failure witness".into(),
+            ));
+        }
         if self.result.is_ok() && machine_terminal_failure.is_some() {
             return Err(meerkat_core::error::AgentError::InternalError(
                 "runtime turn returned success with a machine-terminal failure witness".to_string(),
             ));
         }
-        Ok((self.result, machine_terminal_failure))
+        if callback_identity.is_some()
+            && !matches!(
+                &self.result,
+                Err(AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. })
+            )
+        {
+            return Err(AgentError::InternalError(
+                "non-callback terminal carried callback identity".into(),
+            ));
+        }
+        Ok((self.result, machine_terminal_failure, callback_identity))
     }
 
     fn into_public_result(self) -> Result<RunResult, meerkat_core::error::AgentError> {
-        let (result, _machine_terminal_failure) = self.into_runtime_parts()?;
+        let (result, _machine_terminal_failure, _callback_identity) = self.into_runtime_parts()?;
         result
     }
 }
@@ -1174,18 +1196,22 @@ enum SessionCommand {
         expected: SessionTranscriptAuthoritySnapshot,
         reply_tx: oneshot::Sender<Result<Option<meerkat_core::Session>, AgentError>>,
     },
-    /// Classify a callback-result batch against actor-owned canonical
+    /// Prepare callback-result data against actor-owned canonical
     /// transcript state without exporting that state across the command seam.
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    ClassifyCallbackResultIngress {
-        results: Vec<ToolResult>,
+    PrepareCallbackResultIngress {
+        request: StageToolResultsRequest,
         reply_tx: oneshot::Sender<
-            Result<meerkat_core::session::CallbackResultIngress, AgentError>,
+            Result<meerkat_core::session::PreparedCallbackResultIngress, AgentError>,
         >,
     },
     ReconcileRuntimeCompactionProjections {
         intents: Vec<meerkat_core::CompactionProjectionIntent>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    AcknowledgeFinalizedCompactionMetadata {
+        identity: meerkat_core::session::SessionHeadMetadataIdentity,
+        reply_tx: oneshot::Sender<Result<(), AgentError>>,
     },
     AbortUncommittedCompactionProjections {
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -1411,7 +1437,7 @@ struct SessionHandle {
     /// Exact incarnation identity for this registry entry.  Logical-session
     /// recovery creates a new witness even when it reuses the same SessionId.
     actor_witness: LiveSessionActorWitness,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     task_handle: tokio::task::JoinHandle<()>,
     command_tx: mpsc::Sender<SessionCommand>,
     state_tx: watch::Sender<SessionState>,
@@ -1809,6 +1835,7 @@ pub trait SessionAgentBuilder: Send + Sync {
 /// Trait abstracting over the agent's run/cancel interface.
 pub struct SessionAgentTurnInput {
     pub prompt: meerkat_core::types::ContentInput,
+    pub execution_context: meerkat_core::execution_scope::RunExecutionContext,
     /// Host-attached injected context for this turn. Each entry materializes
     /// as a separate typed injected-context user message immediately before
     /// the turn's user message. Must be empty when `typed_turn_appends` is
@@ -1964,6 +1991,11 @@ pub trait SessionAgent: Send {
         input: SessionAgentTurnInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if !input.execution_context.is_session_policy() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "session agent does not support scoped run execution".into(),
+            ));
+        }
         if input.handling_mode != meerkat_core::types::HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
                 "handling_mode {:?} requires a runtime-backed surface",
@@ -2003,8 +2035,14 @@ pub trait SessionAgent: Send {
         &mut self,
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        execution_context: meerkat_core::execution_scope::RunExecutionContext,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if !execution_context.is_session_policy() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "session agent does not support scoped pending execution".into(),
+            ));
+        }
         if transcript_identity.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "transcript identity requires a runtime-backed surface".to_string(),
@@ -2172,12 +2210,41 @@ pub trait SessionAgent: Send {
     /// Classify callback-result ingress against the actor-owned canonical
     /// Session. Implementations with direct session access should override
     /// this; the default remains exact for lightweight/test agents.
-    fn classify_callback_result_ingress(
+    fn prepare_callback_result_ingress(
         &self,
-        incoming: &[ToolResult],
-    ) -> Result<meerkat_core::session::CallbackResultIngress, AgentError> {
+        request: &StageToolResultsRequest,
+    ) -> Result<meerkat_core::session::PreparedCallbackResultIngress, AgentError> {
         self.session_clone()?
-            .classify_callback_result_ingress(incoming)
+            .prepare_callback_result_ingress(&request.results, request.callback_target.as_ref())
+    }
+
+    fn validate_deferred_callback_targets(
+        &self,
+        messages: &[meerkat_core::session::PendingToolResultsMessage],
+    ) -> Result<(), AgentError> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        self.session_clone()?
+            .validate_deferred_callback_targets(messages)
+    }
+
+    fn acknowledge_finalized_compaction_metadata(
+        &mut self,
+        _identity: &meerkat_core::session::SessionHeadMetadataIdentity,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::InternalError(
+            "agent cannot acknowledge HeadCanonical compaction metadata".into(),
+        ))
+    }
+
+    fn callback_identity_for_terminal(
+        &self,
+        terminal: &AgentError,
+    ) -> Result<Option<meerkat_core::session::CallbackBatchIdentity>, AgentError> {
+        self.session_clone()?
+            .callback_identity_for_terminal(terminal)
+            .map_err(|error| AgentError::InternalError(error.to_string()))
     }
 
     /// Return the durable LLM identity authored by the concrete agent builder.
@@ -2612,26 +2679,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             conversation_digest: Some(digest),
             message_count: session.messages().len(),
         })
-    }
-
-    fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
-        match error {
-            SessionError::Agent(AgentError::CallbackPending {
-                tool_use_id,
-                tool_name,
-                args,
-            }) => Some(CoreApplyTerminal::CallbackPending {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                args: args.clone(),
-            }),
-            SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
-                Some(CoreApplyTerminal::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                })
-            }
-            _ => None,
-        }
     }
 
     async fn build_runtime_output(
@@ -3164,12 +3211,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(Some(session))
     }
 
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    pub(crate) async fn classify_callback_result_ingress(
+    pub(crate) async fn prepare_callback_result_ingress(
         &self,
         id: &SessionId,
-        results: Vec<ToolResult>,
-    ) -> Result<meerkat_core::session::CallbackResultIngress, SessionError> {
+        request: StageToolResultsRequest,
+    ) -> Result<meerkat_core::session::PreparedCallbackResultIngress, SessionError> {
         let command_tx = self
             .sessions
             .read()
@@ -3180,7 +3226,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .clone();
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
-            .send(SessionCommand::ClassifyCallbackResultIngress { results, reply_tx })
+            .send(SessionCommand::PrepareCallbackResultIngress { request, reply_tx })
             .await
             .map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(
@@ -4320,6 +4366,39 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })
     }
 
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn acknowledge_finalized_compaction_metadata(
+        &self,
+        id: &SessionId,
+        identity: meerkat_core::session::SessionHeadMetadataIdentity,
+    ) -> Result<(), SessionError> {
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            .command_tx
+            .clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::AcknowledgeFinalizedCompactionMetadata { identity, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "session task exited before compaction metadata acknowledgement".into(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "session task dropped compaction metadata acknowledgement".into(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     pub async fn prepare_head_canonical_runtime_boundary(
         &self,
         id: &SessionId,
@@ -4471,7 +4550,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ) -> Result<CoreApplyOutput, SessionError> {
         Self::require_runtime_execution_kind_stamp(&req)?;
         let execution = self.start_runtime_turn_execution(id, req).await?;
-        let (result, machine_terminal_failure) =
+        let (result, machine_terminal_failure, callback_identity) =
             execution.into_runtime_parts().map_err(|error| {
                 SessionError::runtime_executor_stopped(format!(
                     "runtime terminal-witness projection failed after live mutation: {error}"
@@ -4509,7 +4588,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         Some(CoreApplyTerminal::MachineTerminalFailure { error }),
                     )
                     .await
-                } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
+                } else if let SessionError::Agent(error) = &error
+                    && let Some(terminal) =
+                        CoreApplyTerminal::from_callback_error(error, callback_identity)
+                {
                     self.build_runtime_output(
                         id,
                         run_id,
@@ -5308,6 +5390,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 archive_snapshot_gate: Arc::clone(&archive_snapshot_gate),
             },
         ));
+        #[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
+        drop(task_handle);
         #[cfg(target_arch = "wasm32")]
         tokio_with_wasm::alias::task::spawn(session_task(
             agent,
@@ -5336,7 +5420,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         // Store the handle
         let handle = SessionHandle {
             actor_witness: actor_witness.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             task_handle,
             command_tx: command_tx.clone(),
             state_tx: state_tx_handle,
@@ -5917,11 +6001,8 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
         req: StageToolResultsRequest,
     ) -> Result<StageToolResultsResult, SessionError> {
         Self::validate_tool_result_video(&req.results)?;
-        let session = self.export_session(id).await?;
-        if matches!(
-            session.classify_callback_result_ingress(&req.results)?,
-            meerkat_core::session::CallbackResultIngress::AlreadyApplied
-        ) {
+        let prepared = self.prepare_callback_result_ingress(id, req).await?;
+        if prepared.already_applied() {
             return Ok(StageToolResultsResult {
                 accepted_result_count: 0,
                 disposition: StageToolResultsDisposition::AlreadyApplied,
@@ -5933,8 +6014,8 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let accepted = {
             let mut guard = lock_deferred_turn_state(&state);
-            guard
-                .try_stage_tool_results(req.results, SystemTime::now())
+            prepared
+                .stage_into(&mut guard, SystemTime::now())
                 .map_err(|error| {
                     SessionError::Agent(meerkat_core::error::AgentError::ConfigError(
                         error.to_string(),
@@ -6431,12 +6512,17 @@ async fn drain_session_task_commands<A: SessionAgent>(
                     });
                 let _ = reply_tx.send(result);
             }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
-                let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
+            SessionCommand::PrepareCallbackResultIngress { request, reply_tx } => {
+                let _ = reply_tx.send(agent.prepare_callback_result_ingress(&request));
             }
             SessionCommand::ReconcileRuntimeCompactionProjections { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::AcknowledgeFinalizedCompactionMetadata { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::InternalError(
+                    "cannot acknowledge compaction metadata after session termination".into(),
+                )));
             }
             SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
                 // Cleanup is still mandatory while shutting down: dropping
@@ -6783,6 +6869,7 @@ async fn session_task<A: SessionAgent>(
                         None => RuntimeKeepAliveRequest::Preserve,
                     };
                 let typed_turn_appends = runtime.typed_turn_appends;
+                let execution_context = runtime.execution_context;
                 let prompt = if typed_turn_appends.is_empty() {
                     prompt
                 } else {
@@ -7025,10 +7112,13 @@ async fn session_task<A: SessionAgent>(
                             }
                         })
                 };
-                let apply_result = match apply_authorization {
-                    Ok(()) => agent.apply_pending_tool_results(flattened_tool_results),
-                    Err(error) => Err(error),
-                };
+                let apply_result = apply_authorization
+                    .and_then(|()| {
+                        agent.validate_deferred_callback_targets(
+                            consumed_deferred_inputs.pending_tool_results(),
+                        )
+                    })
+                    .and_then(|()| agent.apply_pending_tool_results(flattened_tool_results));
                 if let Err(error) = apply_result {
                     let _ = agent.set_turn_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
@@ -7171,6 +7261,7 @@ async fn session_task<A: SessionAgent>(
                             Box::pin(agent.run_turn_with_events(
                                 SessionAgentTurnInput {
                                     prompt,
+                                    execution_context,
                                     injected_context,
                                     handling_mode,
                                     render_metadata,
@@ -7185,6 +7276,7 @@ async fn session_task<A: SessionAgent>(
                             Box::pin(agent.run_pending_with_events(
                                 transcript_identity,
                                 execution_kind,
+                                execution_context,
                                 agent_event_tx.clone(),
                             ))
                         }
@@ -7358,8 +7450,16 @@ async fn session_task<A: SessionAgent>(
                     }
                 };
                 drop(active_admission);
+                let callback_identity = match &result {
+                    Err(
+                        error @ (AgentError::CallbackPending { .. }
+                        | AgentError::CallbackBatchPending { .. }),
+                    ) => agent.callback_identity_for_terminal(error),
+                    _ => Ok(None),
+                };
                 let _ = result_tx.send(SessionTurnExecutionOutcome {
                     result,
+                    callback_identity,
                     machine_terminal_failure: if cleanup_failed {
                         Ok(None)
                     } else {
@@ -7402,15 +7502,18 @@ async fn session_task<A: SessionAgent>(
                     });
                 let _ = reply_tx.send(result);
             }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
-                let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
+            SessionCommand::PrepareCallbackResultIngress { request, reply_tx } => {
+                let _ = reply_tx.send(agent.prepare_callback_result_ingress(&request));
             }
             SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx } => {
                 let result = agent
                     .reconcile_runtime_compaction_projections(&intents)
                     .await;
                 let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::AcknowledgeFinalizedCompactionMetadata { identity, reply_tx } => {
+                let _ = reply_tx.send(agent.acknowledge_finalized_compaction_metadata(&identity));
             }
             SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
                 let result = agent.abort_uncommitted_compaction_projections().await;
@@ -7870,6 +7973,7 @@ mod runtime_turn_metadata_tests {
                 meerkat_core::TurnTerminalOutcome::Failed,
                 "forged witness",
             ))),
+            callback_identity: Ok(None),
         };
 
         let error = outcome
@@ -7880,6 +7984,52 @@ mod runtime_turn_metadata_tests {
                 .to_string()
                 .contains("success with a machine-terminal failure witness")
         );
+    }
+
+    #[test]
+    fn callback_identity_rejects_contradictory_actor_terminal_witnesses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity: meerkat_core::session::CallbackBatchIdentity =
+            serde_json::from_value(serde_json::json!({
+                "session_id": SessionId::new(),
+                "run_id": meerkat_core::lifecycle::RunId::new(),
+                "execution_scope": null,
+                "batch_digest": vec![7; 32],
+            }))?;
+        let callback_error = || AgentError::CallbackPending {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({}),
+        };
+        let outcome = |result, witness| SessionTurnExecutionOutcome {
+            result,
+            machine_terminal_failure: Ok(witness),
+            callback_identity: Ok(Some(identity.clone())),
+        };
+        assert!(
+            outcome(
+                Err(callback_error()),
+                Some(meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "failed"
+                )),
+            )
+            .into_runtime_parts()
+            .is_err()
+        );
+        assert!(
+            outcome(
+                Err(AgentError::InternalError("not a callback".into())),
+                None,
+            )
+            .into_runtime_parts()
+            .is_err()
+        );
+        let (result, witness, captured) =
+            outcome(Err(callback_error()), None).into_runtime_parts()?;
+        assert!(matches!(result, Err(AgentError::CallbackPending { .. })));
+        assert_eq!(witness, None);
+        assert_eq!(captured.as_ref(), Some(&identity));
+        Ok(())
     }
 
     fn test_llm_identity(model: &str) -> SessionLlmIdentity {
@@ -9106,6 +9256,7 @@ mod injected_context_turn_tests {
             .run_turn_with_events(
                 SessionAgentTurnInput {
                     prompt: ContentInput::Text("prompt".to_string()),
+                    execution_context: Default::default(),
                     injected_context: vec![ContentInput::Text("ambient".to_string())],
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,

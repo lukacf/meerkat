@@ -1504,7 +1504,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            landed.contains(&("session-store", 1, 4)),
+            landed.contains(&(
+                "session-store",
+                1,
+                meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version(),
+            )),
             "session-store committed before the refusal and must be reported: {landed:?}"
         );
         assert!(
@@ -1691,8 +1695,16 @@ mod tests {
             // The three sessions-file co-tenants are pinned exactly: their
             // source version is the fact this fix turns on.
             for expected in [
-                ("session-store", 1, 4),
-                ("runtime-store", 1, 3),
+                (
+                    "session-store",
+                    1,
+                    meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.supported_version(),
+                ),
+                (
+                    "runtime-store",
+                    1,
+                    meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN.supported_version(),
+                ),
                 ("schedule-store", 1, 3),
             ] {
                 assert!(
@@ -2237,6 +2249,7 @@ mod tests {
         )?;
         let rerun = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)?;
         drop(fence);
+        assert!(rerun.is_complete(), "repeat bridge refused: {rerun:?}");
         assert_eq!(rerun.domains.len(), report.domains.len());
         assert!(
             rerun.domains.iter().all(|entry| {
@@ -2396,8 +2409,9 @@ mod tests {
             PersistenceError::Store(StoreError::SchemaFromTheFuture {
                 ref domain,
                 found: 99,
-                supported: 3,
+                supported,
             }) if domain == "runtime-store"
+                && supported == meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN.supported_version()
         ));
 
         let conn = meerkat_sqlite::open(

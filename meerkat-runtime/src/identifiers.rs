@@ -207,6 +207,10 @@ pub enum InputKind {
     Continuation,
     /// Explicit operation/lifecycle input.
     Operation,
+    /// Isolated, non-human request backed by an immutable Live source.
+    LiveRequest,
+    /// Exclusive resume of an exact suspended Live callback batch.
+    LiveCallbackContinuation,
 }
 
 impl InputKind {
@@ -223,6 +227,8 @@ impl InputKind {
             InputKind::ExternalEvent => "external_event",
             InputKind::Continuation => "continuation",
             InputKind::Operation => "operation",
+            InputKind::LiveRequest => "live_request",
+            InputKind::LiveCallbackContinuation => "live_callback_continuation",
         }
     }
 }

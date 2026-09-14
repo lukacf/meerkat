@@ -15,6 +15,115 @@ use serde_json::{Value, json};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn delegated_message_wire_preserves_provenance_but_rewrite_cannot_author_it() -> TestResult {
+    use meerkat_contracts::{TranscriptRewriteMessage, WireSessionMessage};
+    use meerkat_core::live_execution::evidence::{DelegatedRequestProvenance, LiveRequestText};
+    use meerkat_core::types::{Message, UserMessage};
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/delegated-request-message-v1.json"))?;
+    let canonical: Message = serde_json::from_value(fixture.clone())?;
+    assert_eq!(
+        serde_json::to_value(WireSessionMessage::from(canonical))?,
+        fixture
+    );
+    let request = LiveRequestText::new(" exact application request ")?;
+    let provenance: DelegatedRequestProvenance = serde_json::from_value(json!({
+        "request_id":uuid::Uuid::from_u128(1),
+        "source":{"session_id":uuid::Uuid::from_u128(2),"channel_id":"voice",
+            "source":{"kind":"client_delegation","delegation":"d"}},
+        "evidence_kind":"application_snapshot",
+        "request_digest":request.digest()
+    }))?;
+    let message = UserMessage::delegated_request(request, provenance)?;
+    let wire: WireSessionMessage = Message::User(message).into();
+    let encoded = serde_json::to_value(&wire)?;
+    assert_eq!(
+        serde_json::to_value(serde_json::from_value::<WireSessionMessage>(
+            encoded.clone()
+        )?)?,
+        encoded
+    );
+    let rewrite: TranscriptRewriteMessage = serde_json::from_value(json!({
+        "role":"user", "content":encoded["content"], "transcript_role":encoded["transcript_role"]
+    }))?;
+    assert!(matches!(rewrite.into_core(),
+        Err(meerkat_contracts::wire::WireConversionError::TranscriptRole { debug })
+            if debug == "delegated_request"));
+    Ok(())
+}
+
+#[test]
+fn bounded_history_query_is_flat_strict_and_defaults_to_64() -> TestResult {
+    use meerkat_contracts::wire::MobMemberLiveObservationsParams;
+    use meerkat_contracts::wire::live_observation::LiveObservationPageQuery;
+    let query: LiveObservationPageQuery = serde_json::from_value(json!({}))?;
+    assert_eq!(query.into_parts().2, 64);
+    let base = json!({"mob_id":"mob-history","agent_identity":"speaker"});
+    let params: MobMemberLiveObservationsParams = serde_json::from_value(base.clone())?;
+    assert_eq!(
+        serde_json::to_value(params)?,
+        json!({"mob_id":"mob-history","agent_identity":"speaker","limit":64})
+    );
+    for limit in [json!(0), json!(-1), json!(257), json!(1.5), json!(true)] {
+        let mut invalid = base.clone();
+        invalid["limit"] = limit;
+        assert!(serde_json::from_value::<MobMemberLiveObservationsParams>(invalid).is_err());
+    }
+    for (field, value) in [
+        ("channel_id", json!("")),
+        ("channel_id", json!("x".repeat(129))),
+        ("cursor", json!("")),
+        ("cursor", json!("x".repeat(4097))),
+        ("grant", json!("forged")),
+    ] {
+        let mut invalid = base.clone();
+        invalid[field] = value;
+        assert!(serde_json::from_value::<MobMemberLiveObservationsParams>(invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn actual_remote_page_validator_rejects_wrong_owner_window_and_cursor() -> TestResult {
+    use meerkat_contracts::wire::live_observation::LiveObservationPageQuery;
+    let rows = [
+        Codec::check_record_fit(record(1, "first")?)?,
+        Codec::check_record_fit(record(2, "second")?)?,
+    ];
+    let page = Codec::page(owner(), filter(), snapshot(2), 0, &rows, 1, false)?;
+    let query = LiveObservationPageQuery::new(Some(LiveChannelId::new("\0".repeat(128))), None, 1)?;
+    Codec::validate_page_response(&page, &owner(), &query)?;
+    for mutate in [
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| {
+            p.after_sequence = 1;
+        },
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| p.records.clear(),
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| {
+            p.next_cursor = None;
+        },
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| p.has_more = false,
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| {
+            p.filter = LiveObservationFilter::AllChannels {}
+        },
+        |p: &mut meerkat_contracts::wire::live_observation::LiveObservationPage| {
+            p.owner = LiveObservationOwner::Session {
+                session_id: SessionId::new(),
+            }
+        },
+    ] {
+        let mut altered = page.clone();
+        mutate(&mut altered);
+        assert!(Codec::validate_page_response(&altered, &owner(), &query).is_err());
+    }
+    let fixture: meerkat_contracts::wire::MobMemberLiveObservationsResult =
+        serde_json::from_str(include_str!("fixtures/live-observation-page-v1.json"))?;
+    let fixture_query =
+        LiveObservationPageQuery::new(Some(LiveChannelId::new("channel-a")), None, 64)?;
+    Codec::validate_page_response(&fixture.page, &fixture.page.owner, &fixture_query)?;
+    Ok(())
+}
+
+#[test]
 fn versioned_member_profile_selection_carries_only_an_owner_resolved_name() -> TestResult {
     use meerkat_contracts::wire::supervisor_bridge::BridgeLiveProfileSelection;
     let value = json!({"version":"v1","profile_id":"voice"});

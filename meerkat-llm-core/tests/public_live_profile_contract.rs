@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use meerkat_core::live_execution::profile::{
     LiveClientRequestPolicy, LiveManagedBackendModel, LiveProfileId,
 };
-use meerkat_core::model_profile::ModelInteractionKind;
-use meerkat_core::model_profile::capabilities::ModelCapabilities;
 use meerkat_core::provider_matrix::openai::OpenAiBackendKind;
 use meerkat_core::{
     AuthBindingRef, AuthCredentialIdentity, AuthProfile, BackendProfile, Config,
@@ -21,7 +19,7 @@ use meerkat_llm_core::provider_runtime::{
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-const VOICE: &str = "gpt-live-1-codex";
+const VOICE: &str = "gpt-live-1";
 
 #[test]
 fn open_intent_matrix_keeps_public_profile_separate_from_legacy_defaults() -> TestResult {
@@ -100,18 +98,7 @@ fn open_intent_matrix_keeps_public_profile_separate_from_legacy_defaults() -> Te
 }
 
 fn registry() -> Result<ModelRegistry, meerkat_core::ConfigError> {
-    static CAPABILITIES: LazyLock<Vec<ModelCapabilities>> = LazyLock::new(|| {
-        let mut rows = meerkat_models::canonical().capabilities.to_vec();
-        for row in &mut rows {
-            if row.id == VOICE {
-                row.interaction_kind = ModelInteractionKind::ContinuousLive;
-            }
-        }
-        rows
-    });
-    let mut catalog = meerkat_models::canonical();
-    catalog.capabilities = &CAPABILITIES;
-    ModelRegistry::from_config(&Config::default(), catalog)
+    ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
 }
 
 fn profile(
@@ -247,6 +234,7 @@ fn live_target_requires_exact_continuous_registry_identity() -> TestResult {
     for (model, expected) in [
         ("gpt-5.5", LiveTargetError::VoiceNotContinuous),
         ("gpt-realtime-2", LiveTargetError::VoiceNotContinuous),
+        ("gpt-live-1-codex", LiveTargetError::VoiceNotContinuous),
     ] {
         let result = ResolvedLiveTarget::new(
             LiveProfileId::parse("voice")?,
@@ -265,6 +253,29 @@ fn live_target_requires_exact_continuous_registry_identity() -> TestResult {
         client_mode(),
     );
     assert_eq!(result.err(), Some(LiveTargetError::VoiceIdentityMismatch));
+    Ok(())
+}
+
+#[test]
+fn public_live_voice_cannot_be_relabelled_as_text_or_realtime() -> TestResult {
+    use meerkat_llm_core::provider_runtime::{ResolvedRealtimeTarget, ResolvedTextTarget};
+    let connection = connection()?;
+    assert!(
+        ResolvedTextTarget::new(
+            identity(VOICE)?,
+            profile(VOICE, Provider::OpenAI)?,
+            connection.connection().clone()
+        )
+        .is_none()
+    );
+    assert!(
+        ResolvedRealtimeTarget::new(
+            identity(VOICE)?,
+            profile(VOICE, Provider::OpenAI)?,
+            connection.connection().clone()
+        )
+        .is_none()
+    );
     Ok(())
 }
 

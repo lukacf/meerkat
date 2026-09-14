@@ -483,12 +483,55 @@ pub enum CoreApplyTerminal {
         tool_use_id: String,
         tool_name: String,
         args: Value,
+        callback_identity: Option<crate::session::CallbackBatchIdentity>,
     },
     /// The run committed one assistant batch containing multiple external
     /// callback calls. All results must be supplied as one exact set.
     CallbackBatchPending {
         pending_tool_calls: Vec<crate::error::PendingCallbackToolCall>,
+        callback_identity: Option<crate::session::CallbackBatchIdentity>,
     },
+}
+
+impl CoreApplyTerminal {
+    pub fn from_callback_error(
+        error: &AgentError,
+        callback_identity: Option<crate::session::CallbackBatchIdentity>,
+    ) -> Option<Self> {
+        match error {
+            AgentError::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            } => Some(Self::CallbackPending {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+                callback_identity,
+            }),
+            AgentError::CallbackBatchPending { pending_tool_calls } => {
+                Some(Self::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
+                    callback_identity,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn callback_identity(&self) -> Option<&crate::session::CallbackBatchIdentity> {
+        match self {
+            Self::CallbackPending {
+                callback_identity, ..
+            }
+            | Self::CallbackBatchPending {
+                callback_identity, ..
+            } => callback_identity.as_ref(),
+            Self::RunResult(_) | Self::NoPendingBoundary | Self::MachineTerminalFailure { .. } => {
+                None
+            }
+        }
+    }
 }
 
 /// Failure to materialize the whole-blob representation of a prepared session
@@ -1395,6 +1438,7 @@ impl CoreApplyOutput {
                 tool_use_id: tool_use_id.into(),
                 tool_name: tool_name.into(),
                 args,
+                callback_identity: None,
             }),
         )
     }
@@ -1407,7 +1451,10 @@ impl CoreApplyOutput {
         Self::with_untyped_snapshot(
             receipt,
             untyped_snapshot,
-            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }),
+            Some(CoreApplyTerminal::CallbackBatchPending {
+                pending_tool_calls,
+                callback_identity: None,
+            }),
         )
     }
 
@@ -1784,6 +1831,36 @@ pub trait CoreExecutor: Send + Sync {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError>;
 
+    /// Dispatch the exact run authority without letting legacy executors discard it.
+    async fn apply_with_execution_authority(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        primitive
+            .validate_execution_authority(&run_id)
+            .map_err(|reason| {
+                CoreExecutorError::apply_failed_primitive_rejected(reason.to_string())
+            })?;
+        if primitive.execution_authority().is_session_policy() {
+            self.apply(run_id, primitive).await
+        } else {
+            self.apply_scoped(run_id, primitive).await
+        }
+    }
+
+    /// Executors opt in only when their actor and physical dispatch paths preserve
+    /// the scoped authority. Legacy executors must not forward to ordinary apply.
+    async fn apply_scoped(
+        &mut self,
+        _run_id: RunId,
+        _primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        Err(CoreExecutorError::apply_failed_primitive_rejected(
+            "executor does not support scoped run execution",
+        ))
+    }
+
     /// Persist or project the committed session snapshot after the runtime
     /// control plane has durably committed the machine boundary.
     ///
@@ -1837,6 +1914,16 @@ pub trait CoreExecutor: Send + Sync {
                 "executor cannot reconcile committed compaction projections".to_string(),
             ))
         }
+    }
+
+    /// Refresh the actor's metadata baseline after HeadCanonical store-owned
+    /// compaction finalization. Called only after the outbox commits.
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "executor cannot acknowledge HeadCanonical compaction finalization".to_string(),
+        ))
     }
 
     /// Roll back and abort any invisible compaction stage after the runtime

@@ -565,14 +565,19 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     //   the grant family): MCP servers are routinely wired into agent tool
     //   contexts, and an LLM-reachable `AdminHost`/`AdminGrants` mutation is
     //   a plane-(b) escalation vector (SD-4). Unknown names fail closed.
-    // - NO `meerkat_mob_member_live_*` tools: live channels are
-    //   console/operator-only (§16.9).
+    // - Live mutation/control tools remain console/operator-only (§16.9);
+    //   retained observations are independently ReadHistory-scoped.
     // - NO drive verb for route installs — the drain is actor-owned on
     //   EVERY surface (DEC-P7B-16); this is the read projection only.
     PublicTool {
         name: "meerkat_mob_member_history",
         description: "Read a mob member transcript page by identity (local or placed).",
         schema: typed_schema::<meerkat_contracts::wire::MobMemberHistoryParams>,
+    },
+    PublicTool {
+        name: "meerkat_mob_member_live_observations",
+        description: "Read retained Live observation records by member identity without opening a channel.",
+        schema: typed_schema::<meerkat_contracts::wire::MobMemberLiveObservationsParams>,
     },
     PublicTool {
         name: "meerkat_mob_hosts",
@@ -662,6 +667,7 @@ const DISPATCH_TOOL_NAMES: &[&str] = &[
     "meerkat_mob_profile_update",
     "meerkat_mob_profile_delete",
     "meerkat_mob_member_history",
+    "meerkat_mob_member_live_observations",
     "meerkat_mob_hosts",
     "meerkat_mob_route_installs",
 ];
@@ -1307,6 +1313,22 @@ pub async fn handle_public_tools_call(
             serde_json::to_value(result)
                 .map_err(|err| McpToolError::internal(format!("member history serialize: {err}")))
         }
+        "meerkat_mob_member_live_observations" => {
+            let input: meerkat_contracts::wire::MobMemberLiveObservationsParams =
+                parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let result = state
+                .mob_member_live_observations(
+                    &mob_id,
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
+                    input.query,
+                )
+                .await
+                .map_err(|error| McpToolError::from_mob(&error))?;
+            serde_json::to_value(result).map_err(|error| {
+                McpToolError::internal(format!("member Live observations serialize: {error}"))
+            })
+        }
         "meerkat_mob_hosts" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
@@ -1640,6 +1662,7 @@ mod tests {
         // Phase 7 (SD-4): the three multi-host OBSERVATION tools.
         for name in [
             "meerkat_mob_member_history",
+            "meerkat_mob_member_live_observations",
             "meerkat_mob_hosts",
             "meerkat_mob_route_installs",
         ] {
@@ -1650,8 +1673,8 @@ mod tests {
         }
         assert_eq!(
             table_names.len(),
-            36,
-            "expected exactly 36 public tools across all surfaces"
+            37,
+            "expected exactly 37 public tools across all surfaces"
         );
     }
 
@@ -1771,6 +1794,36 @@ mod tests {
             json!({ "required": "subscribe_events", "presented": [] }),
             "data is the bare typed {{required, presented}} pair"
         );
+        let history_args = json!({
+            "mob_id": "typed-error-dispatch",
+            "agent_identity": "speaker",
+            "limit": 1,
+            "cursor": "opaque"
+        });
+        let history_denied = handle_public_tools_call(
+            &viewer,
+            "meerkat_mob_member_live_observations",
+            &history_args,
+        )
+        .await
+        .expect_err("history uses ReadHistory, not Live");
+        assert_eq!(
+            history_denied.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+        );
+        assert_eq!(
+            history_denied.data,
+            Some(json!({"required": "read_history", "presented": []}))
+        );
+        for limit in [json!(0), json!(257), json!(-1), json!(1.5)] {
+            let mut invalid = history_args.clone();
+            invalid["limit"] = limit;
+            let error =
+                handle_public_tools_call(&viewer, "meerkat_mob_member_live_observations", &invalid)
+                    .await
+                    .expect_err("invalid query must not reach the actor");
+            assert_eq!(error.code, -32602);
+        }
     }
 
     #[tokio::test]

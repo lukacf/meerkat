@@ -89,13 +89,17 @@ impl BridgeProtocolVersion {
     pub const V5: Self = Self(5);
     /// Source-owner forked-participant capability protocol.
     pub const V6: Self = Self(6);
+    /// Public Live profile selection and retained observation pages.
+    pub const V7: Self = Self(7);
     /// Current protocol version implemented by this bridge contract.
-    pub const CURRENT: Self = Self::V6;
+    pub const CURRENT: Self = Self::V7;
     /// Default protocol version for newly minted supervisor authority.
     ///
     /// V6 adds source-owner forked-participant capabilities on top of V5's
     /// exact peer-only bind/retire incarnation fencing. V2-V5 remain
     /// decodable for persisted or negotiated historical command families.
+    /// Public Live commands explicitly select V7; ordinary authority defaults
+    /// stay at V6 so unrelated legacy operations do not require a newer peer.
     pub const DEFAULT: Self = Self::V6;
     /// Protocol versions accepted by this bridge contract.
     ///
@@ -106,10 +110,11 @@ impl BridgeProtocolVersion {
     /// under-versioned command is rejected with a typed
     /// `UnsupportedProtocolVersion` cause rather than a raw
     /// deserialization error.
-    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3, Self::V4, Self::V5, Self::V6];
+    pub const SUPPORTED: &'static [Self] =
+        &[Self::V2, Self::V3, Self::V4, Self::V5, Self::V6, Self::V7];
 
     pub const fn is_supported(self) -> bool {
-        matches!(self.0, 2..=6)
+        matches!(self.0, 2..=7)
     }
 
     pub const fn same_protocol_as(self, other: Self) -> bool {
@@ -140,6 +145,10 @@ impl BridgeProtocolVersion {
         self.0 >= 6
     }
 
+    pub const fn supports_public_live(self) -> bool {
+        self.0 >= 7
+    }
+
     pub fn supported() -> &'static [Self] {
         Self::SUPPORTED
     }
@@ -151,6 +160,7 @@ impl BridgeProtocolVersion {
             4 => Ok(Self::V4),
             5 => Ok(Self::V5),
             6 => Ok(Self::V6),
+            7 => Ok(Self::V7),
             _ => Err(UnsupportedBridgeProtocolVersion {
                 raw,
                 command: None,
@@ -309,6 +319,8 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   `MaterializeMember` may carry a capability attachment only for `Resume`
 ///   of that reference's exact fork session. V2-V5 peers reject these fields
 ///   and commands with a typed minimum-version failure.
+/// - `7`: public Live profile selectors and retained observation-page requests
+///   require explicit support. Legacy opens without a profile still use V4.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -344,7 +356,15 @@ pub fn supervisor_bridge_protocol_version_supported(
 }
 
 fn default_supported_protocol_versions() -> Vec<BridgeProtocolVersion> {
-    supervisor_bridge_supported_protocol_versions().to_vec()
+    supervisor_bridge_supported_protocol_versions()
+        .iter()
+        .copied()
+        .take_while(|version| !version.supports_public_live())
+        .collect()
+}
+
+fn legacy_unreported_protocol_version() -> BridgeProtocolVersion {
+    BridgeProtocolVersion::V6
 }
 
 fn bool_is_false(value: &bool) -> bool {
@@ -432,6 +452,7 @@ pub enum BridgeCommand {
     DeclareMemberOutboundTaint(BridgeOutboundTaintPayload),
     // --- V4 member-addressed observation family ---
     ReadMemberHistory(BridgeReadHistoryPayload),
+    ReadMemberLiveObservations(BridgeMemberLiveObservationPageRequest),
     PollMemberEvents(BridgePollEventsPayload),
     // --- V4 member-addressed live-channel family ---
     OpenMemberLiveChannel(BridgeLiveOpenPayload),
@@ -479,6 +500,7 @@ impl BridgeCommand {
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
             Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
             Self::ReadMemberHistory(payload) => payload.protocol_version,
+            Self::ReadMemberLiveObservations(payload) => payload.protocol_version,
             Self::PollMemberEvents(payload) => payload.protocol_version,
             Self::OpenMemberLiveChannel(payload) => payload.protocol_version,
             Self::CloseMemberLiveChannel(payload) => payload.protocol_version,
@@ -625,6 +647,8 @@ fn bridge_command_minimum_protocol(
 ) -> Option<(&'static str, BridgeProtocolVersion)> {
     let command = value.get("command")?.as_str()?;
     let minimum = match command {
+        "read_member_live_observations" => BridgeProtocolVersion::V7,
+        "open_member_live_channel" if value.get("profile").is_some() => BridgeProtocolVersion::V7,
         "bind_member" | "retire_member" => BridgeProtocolVersion::V5,
         "create_forked_participant"
         | "revoke_forked_participant"
@@ -696,6 +720,7 @@ fn bridge_command_minimum_protocol(
         "hard_cancel_member" => "HardCancelMember",
         "cancel_tracked_member_input" => "CancelTrackedMemberInput",
         "read_member_history" => "ReadMemberHistory",
+        "read_member_live_observations" => "ReadMemberLiveObservations",
         "poll_member_events" => "PollMemberEvents",
         "open_member_live_channel" => "OpenMemberLiveChannel",
         "close_member_live_channel" => "CloseMemberLiveChannel",
@@ -744,6 +769,17 @@ pub struct BridgeReadHistoryPayload {
     pub from_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeMemberLiveObservationPageRequest {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub expected_member: BridgeMemberIncarnation,
+    pub query: super::live_observation::LiveObservationPageQuery,
 }
 
 /// Long-poll a remote member's durable event stream (V4).
@@ -2416,6 +2452,9 @@ pub enum BridgeRejectionCause {
         encoded_bytes: u64,
         max_bytes: u64,
     },
+    LiveObservationRead {
+        failure: super::live_observation::LiveObservationReadFailure,
+    },
     /// The addressed member/host is transiently unable to serve the
     /// command (observation degrades typed, never quiet).
     Unavailable,
@@ -3185,7 +3224,8 @@ pub struct BridgeBindPayload {
 #[serde(deny_unknown_fields)]
 pub struct BridgeCapabilities {
     /// Protocol version implemented by the responding member runtime.
-    #[serde(default = "supervisor_bridge_current_protocol_version")]
+    /// Legacy omission never declares support for public Live.
+    #[serde(default = "legacy_unreported_protocol_version")]
     pub current_protocol_version: BridgeProtocolVersion,
     /// Protocol version new supervisors should use for fresh authority records.
     #[serde(default = "supervisor_bridge_default_protocol_version")]
@@ -4767,13 +4807,13 @@ mod tests {
                 BridgeProtocolVersion::V4,
                 BridgeProtocolVersion::V5,
                 BridgeProtocolVersion::V6,
+                BridgeProtocolVersion::V7,
             ]
         );
-        // V6 is current/default. V2-V5 remain explicitly decodable only for
-        // their negotiated historical command families.
+        // Public Live opts into V7 without changing ordinary authority defaults.
         assert_eq!(
             supervisor_bridge_current_protocol_version(),
-            BridgeProtocolVersion::V6
+            BridgeProtocolVersion::V7
         );
         assert_eq!(
             supervisor_bridge_default_protocol_version(),
@@ -4823,6 +4863,7 @@ mod tests {
                 BridgeProtocolVersion::V4,
                 BridgeProtocolVersion::V5,
                 BridgeProtocolVersion::V6,
+                BridgeProtocolVersion::V7,
             ]
         );
         // V4 host-capability facts default to the incapable/unreported
@@ -4851,7 +4892,7 @@ mod tests {
 
         assert_eq!(
             capabilities.current_protocol_version,
-            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+            BridgeProtocolVersion::V6
         );
         assert_eq!(
             capabilities.default_protocol_version,
@@ -5427,6 +5468,7 @@ mod tests {
                         BridgeProtocolVersion::V4,
                         BridgeProtocolVersion::V5,
                         BridgeProtocolVersion::V6,
+                        BridgeProtocolVersion::V7,
                     ],
                     "deliver_member_input": false,
                     "observe_member": false,
@@ -5941,10 +5983,10 @@ mod tests {
     fn v4_command_with_future_protocol_version_rejects_before_serde() {
         for cmd in all_v4_commands() {
             let mut value = serde_json::to_value(&cmd).expect("serialize command");
-            value
-                .as_object_mut()
-                .expect("command object")
-                .insert("protocol_version".to_string(), json!(7));
+            value.as_object_mut().expect("command object").insert(
+                "protocol_version".to_string(),
+                json!(BridgeProtocolVersion::CURRENT.0 + 1),
+            );
             let err = decode_bridge_command(value)
                 .expect_err("future protocol version must reject pre-serde");
             assert!(

@@ -2022,6 +2022,94 @@ async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
 }
 
 #[tokio::test]
+async fn prepare_bindings_persists_exact_binding_without_erasing_durable_run_fixture() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = MeerkatMachine::persistent(store.clone(), memory_blob_store());
+    let session_id = SessionId::new();
+    let bindings = machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare actual session binding");
+    let runtime_id = runtime_id_for_session(&session_id);
+    let initial = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.binding().runtime_generation(), Some(0));
+    assert_eq!(
+        initial.binding().runtime_epoch_id(),
+        Some(bindings.epoch_id().to_string().as_str())
+    );
+    let (_, _, run_id) =
+        prepare_live_run_for_authority_test(&machine, &session_id, "binding during run").await;
+    // Install a durable recovery image for that actual run. Ordinary batch
+    // staging alone does not write lifecycle run facts; this oracle tests
+    // binding-only publication, not the run checkpoint producer.
+    store
+        .commit_machine_lifecycle(
+            &runtime_id,
+            crate::store::MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
+                RuntimeState::Running,
+                initial.binding().clone(),
+                crate::store::MachineLifecycleRunFacts::new(
+                    Some(run_id.clone()),
+                    Some(crate::store::MachineLifecyclePreRunPhase::Attached),
+                ),
+                initial.supervisor_authority().clone(),
+                initial.unregister_progress().cloned(),
+                initial.live_bridge_recovery().clone(),
+            ),
+            &[],
+        )
+        .await
+        .expect("install the explicit active-run recovery fixture");
+    let before = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.run().current_run_id(), Some(&run_id));
+    machine
+        .prepare_runtime_placement_binding(session_id, runtime_id.clone(), 0, 0)
+        .await
+        .expect("revalidate exact binding during the real staged run");
+    let after = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "binding publication must preserve the run image"
+    );
+}
+
+#[tokio::test]
+async fn prepare_bindings_persistence_failure_emits_no_runtime_bound_signal() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(inner.clone()));
+    let machine = MeerkatMachine::persistent(store.clone(), memory_blob_store());
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await.unwrap();
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+    store
+        .fail_machine_lifecycle_cas
+        .store(true, Ordering::SeqCst);
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect_err("binding publication failure cannot return usable bindings");
+    assert!(signal_surface.log.lock().await.is_empty());
+    let durable =
+        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id_for_session(&session_id))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        durable.binding(),
+        &crate::store::MachineLifecycleBindingFacts::default()
+    );
+}
+
+#[tokio::test]
 async fn rejected_provisional_dsl_transition_emits_no_routed_signal_or_state() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
@@ -11429,6 +11517,8 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: session_id.clone(),
                 input: first,
                 register_completion: true,
@@ -11460,6 +11550,8 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: session_id.clone(),
                 input: duplicate,
                 register_completion: true,
@@ -28928,6 +29020,19 @@ fn display_only_run_failure(error: &str) -> MeerkatMachineRunFailure {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl MeerkatMachine {
+    pub(crate) async fn prepare_next_batch_for_live_scope_test(
+        &self,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<RunId, RuntimeDriverError> {
+        self.prepare_next_batch_for_live_scope_authority_test(session_id, input_id)
+            .await
+            .map(|(run_id, _)| run_id)
+    }
+}
+
 async fn prepare_live_run_for_authority_test(
     adapter: &MeerkatMachine,
     session_id: &SessionId,
@@ -28965,7 +29070,7 @@ async fn prepare_live_run_for_authority_test(
     assert!(
         matches!(
             outcome,
-            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started(_)
         ),
         "run prepare should stage the accepted input, got {outcome:?}"
     );
@@ -29359,7 +29464,7 @@ async fn staged_batch_commit_driver(
     assert!(
         matches!(
             outcome,
-            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started(_)
         ),
         "batch prepare should stage both inputs, got {outcome:?}"
     );
@@ -29822,6 +29927,7 @@ fn machine_terminal_receipt(
 struct RuntimeCommitAtomicityStore {
     inner: Arc<crate::store::InMemoryRuntimeStore>,
     fail_atomic_apply: AtomicBool,
+    fail_machine_lifecycle_cas: AtomicBool,
     unsupported_atomic_machine_lifecycle: AtomicBool,
     fail_commit_machine_lifecycle: AtomicBool,
     fail_commit_machine_lifecycle_on_call: AtomicUsize,
@@ -29854,6 +29960,7 @@ impl RuntimeCommitAtomicityStore {
         Self {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
+            fail_machine_lifecycle_cas: AtomicBool::new(false),
             unsupported_atomic_machine_lifecycle: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
             fail_commit_machine_lifecycle_on_call: AtomicUsize::new(usize::MAX),
@@ -30450,6 +30557,14 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     ) -> Result<crate::store::MachineLifecycleCasOutcome, crate::store::RuntimeStoreError> {
         self.machine_lifecycle_cas_calls
             .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_machine_lifecycle_cas
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "injected lifecycle CAS failure".into(),
+            ));
+        }
         self.inner
             .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
             .await
@@ -31305,6 +31420,61 @@ async fn completed_run_rejects_foreign_session_witness_before_mutation() {
         store.load_session_snapshot(&runtime_id).await.unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn completed_run_rejects_foreign_callback_identity_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (driver, runtime_id, run_id, input_id) =
+        persistent_staged_run_driver(store.clone() as Arc<dyn RuntimeStore>).await;
+    let owner_session_id = SessionId::parse(&runtime_id.to_string())?;
+    let session = meerkat_core::Session::with_id(owner_session_id.clone());
+    for (callback_session, callback_run) in [
+        (SessionId::new(), run_id.clone()),
+        (owner_session_id, RunId::new()),
+    ] {
+        let callback_identity = serde_json::from_value(serde_json::json!({
+            "session_id": callback_session,
+            "run_id": callback_run,
+            "execution_scope": null,
+            "batch_digest": vec![7; 32],
+        }))?;
+        let terminal = meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackPending {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({}),
+            callback_identity: Some(callback_identity),
+        };
+        let error = commit_runtime_loop_run(
+            &driver,
+            run_id.clone(),
+            vec![input_id.clone()],
+            machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
+            Some(BoundSessionCommit::sealed(Arc::new(session.clone()))?),
+            Vec::new(),
+            Some(&terminal),
+        )
+        .await
+        .err()
+        .ok_or("foreign callback identity must refuse the actual commit")?;
+        assert!(
+            error
+                .to_string()
+                .contains("callback identity does not match")
+        );
+        let entry = driver.lock().await;
+        assert_live_run_remains_staged(&entry, &run_id, &input_id, "foreign callback identity");
+        drop(entry);
+        assert!(
+            store
+                .load_boundary_receipt(&runtime_id, &run_id, 1)
+                .await?
+                .is_none()
+        );
+        assert_eq!(store.load_session_snapshot(&runtime_id).await?, None);
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -32334,6 +32504,7 @@ fn spine_snapshot_and_sticky_fallback_share_canonical_visibility_lock_order() {
             target.model.clone(),
             meerkat_core::config::CustomModelConfig {
                 provider: target.provider,
+                interaction_kind: None,
                 display_name: Some("Lock-order fallback target".to_string()),
                 context_window: Some(128_000),
                 max_input_tokens: None,
@@ -41594,6 +41765,8 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled attached steer"),
                 register_completion: true,
@@ -41690,6 +41863,8 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: session_id.clone(),
                 input: runtime_parity_prompt("modeled idle queued admission"),
                 register_completion: true,
@@ -41982,6 +42157,8 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
                 register_completion: true,
@@ -42584,6 +42761,8 @@ async fn modeled_meerkat_accept_with_completion_running_peer_interrupt_signal_ma
         .execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_peer_message("modeled running peer wake admission"),
                 register_completion: true,
@@ -43039,6 +43218,8 @@ fn runtime_parity_probe_command(
         }
         RuntimeParityProbeInput::AcceptWithCompletion => {
             MeerkatMachineCommand::AcceptWithCompletion {
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live: None,
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_prompt("runtime parity accept with completion"),
                 register_completion: true,

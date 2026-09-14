@@ -43,6 +43,8 @@ The canonical registry is `canonical_machine_schemas()` in
 | `ApprovalLifecycleMachine` | `meerkat-core::generated::approval_lifecycle` | Approval request and decision lifecycle legality. `ApprovalService` and its configured store own records and optional persistence; this machine does not imply an automatic in-loop tool gate. |
 | `DetachedJobMachine` | `meerkat-jobs::machines::detached_job` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
 | `RuntimeDeliveryMachine` | `meerkat-runtime::delivery_inbox::dsl` | Stable durable-inbox identity, monotonic delivery/feed sequence assignment, exact replay, and ordered application cursor. |
+| `LiveRequestMachine` | `meerkat-runtime::live_ledger::authority::dsl` | Public Live request identity, scoped-run bindings, current grant/executor fences, one-use effect claims, and funded settlement. Native committed producers exist; public profile execution and scoped executor installation remain unfinished. |
+| `LiveTranscriptMachine` | `meerkat-runtime::live_ledger::transcript_authority::dsl` | Independent observation coverage, exact local receive ordinals, durable watermarks, gap records, channel fences, and range-reservation frontiers. Native observation/control persistence and the joint `live_source_reservation` transaction exist; provider ingress installation and archive composition remain unfinished. |
 | `SessionDocumentMachine` | `meerkat-core::generated::session_document` | Session document, transcript, pending-continuation lifecycle, the session lifecycle terminal fact for all profiles, cold-read source disposition, and durable-tail recovery classification. |
 | `SessionTurnAdmissionMachine` | `meerkat-session::generated::session_turn_admission` | Per-turn input admission and classification lifecycle. |
 | `WorkGraphLifecycleMachine` | `meerkat-workgraph::machines::workgraph_lifecycle` | Work item lifecycle, readiness, dependency eligibility, claim leases, terminal state, and evidence revision handling. |
@@ -312,6 +314,394 @@ make rmat-audit
 `make agent-gate` and CI run the relevant gates for normal development. Use the
 direct targets when you are touching the catalog, generated kernels, composition
 routes, or runtime bridge code.
+
+Every TLC subprocess started by `machine-verify` (including witness configs)
+or `machine-hopcroft` has a fixed **20-minute wall-clock maximum**. There is
+no CLI or environment override to extend it. Expiry force-kills the owned
+process group on Unix (process tree on Windows), reaps the direct child, and
+returns a nonzero, typed timeout before coverage evaluation or Cargo
+follow-through. The runner does not retry. File-backed `tlc.stdout.log` and
+`tlc.stderr.log` remain in the reported verification metadir or Hopcroft
+artifact directory; timeout also leaves the metadir intact.
+
+Use the default `ci` profile for routine bounded verification. A timeout or a
+user-stopped run is **incomplete verification, never PASS**. Bounded-profile
+success proves only that profile's explored model, not a larger/deep state
+space. Do not automatically restart, deepen, or expand a timed-out campaign.
+
+The Cargo-backed `machine-verify` follow-through runs generated kernel tests
+and the machine's registered exact owner tests. LiveRequest owner tests include
+native grant activation, transactional lifecycle fencing, durable request
+recovery, and scoped permission guards, with `live` and `sqlite-store` enabled.
+Owner qualification requires every registered test to execute and pass:
+zero-selection, partially selected, ignored, and failed runs are errors, even
+when the test process exits successfully. This bounded owner selection does
+not replace full product, provider, or target-specific qualification.
+
+### Public Live ordinary-input boundary
+
+`Input::LiveRequest` is distinct from operator prompts. Its persisted content
+reference binds the frozen source digest, not the mutable source-row CAS digest;
+admission or cancellation metadata cannot silently replace its delegated text.
+Content materialization does not authorize execution. Ordinary, unsealed ingress
+rejects Live kinds and origins.
+
+MeerkatMachine owns exclusive Live queue membership. Queue selection stops before
+an exclusive request, and independent stage planning and transitions refuse mixed
+or sequentially mixed inputs in the same run. Recovery preserves that isolation
+and rejects mixed run associations; rollback cannot move a Live request into the
+steer lane. These constraints do not replace the required joint Live/input
+admission and staging transactions or sealed physical execution permits. Public
+profile activation remains unavailable until those production handoffs are wired.
+Built-in Live storage can atomically insert a prepared ordinary input with the
+source/head/event delta and lifecycle fence. Its admission capability requires an
+absent input row and exact replay, not an independent input upsert. The stronger
+staging capability also CAS-updates an existing input and its ordinary lifecycle
+alongside the generated Live scope; neither capability is a physical run permit.
+
+The native `MeerkatMachine::commit_live_input_admission` path now prepares a
+generated Admit transition from an existing immutable source reservation and
+carries its sealed handoff through the ordinary process-owned
+AcceptWithCompletion transaction. The persistent driver publishes the ordinary
+input, source receipt, and Live head together at its existing atomic persistence
+boundary. Completion registration, hooks, and cancellation-safe wake delivery
+remain shared with ordinary ingress. Repeated and concurrent calls reconcile the
+immutable source, original input index, and generated admission witness, then
+join the original completion without another input, quota debit, head commit, or
+wake. This read-only observation remains legal after grant revocation and after
+ordinary terminal payload retirement; it does not renew permission. Unsealed
+Live kinds and origins are rejected before durable idempotency lookup, so an
+existing key cannot substitute for a grant. Placed-member admission is still
+unfinished; this entry does not grant run or physical-effect permission.
+
+The handoff binds the exact accepting driver's generated authority instance.
+Inside the physical write fence, the existing generated Ingest transition checks
+the current session/runtime/fence/generation/epoch tuple under that authority's
+lock. Conditional registrations additionally retain their external write fence;
+ordinary session registrations do not fabricate an external fence. PrepareBindings
+publishes its generated binding with a lifecycle-version CAS before RuntimeBound
+notification, preserving durable run and recovery fields. Session-owned binding
+generation zero is valid and compared exactly; grant generations remain nonzero.
+
+The native ordinary run-start path now publishes its generated Live Stage,
+exact input-row replacement, source comparison, and generated ordinary lifecycle
+in one transaction. The lifecycle retains the actual current run and pre-run
+phase. Registration refusal or a late SQLite lifecycle-write failure leaves all
+durable predecessors unchanged. A run-start task owns staging independently of
+its awaiting caller and stays in the owning runtime's clock domain. Production
+persistence failure requires reload instead of restoring an in-memory checkpoint.
+An admission-won-close request can stage after committed ingress close. Only the
+exact successful joint commit seals a Core scope through the distinct native
+LiveRequest owner bridge. The ordinary run-start result carries this handle into
+the staged primitive; there is no driver-side authority cache. The executor
+handoff checks the exact run and exclusive input, and legacy executors refuse
+scoped runs instead of forwarding them to ordinary apply. Ordinary primitives
+retain their existing JSON shape. Serialized scoped primitives expose record
+content, but deserialization refuses until explicit generated restoration;
+records cannot mint handles or silently become SessionPolicy.
+
+Native `MeerkatMachine::restore_live_run_scope` now compares the retained generated
+scope, immutable source receipt, exact staged input, and current durable run and
+executor. Only a newly committed generated `RestoreScope` seals another Core
+handle. Memory and both SQLite profiles compare the input's exact row digest and
+the lifecycle version in that same Live transaction, including replay checks.
+These are compare-only fences: restoration does not rewrite the ordinary input,
+advance its set revision, or replace the lifecycle. The version-5 commit digest
+binds the input comparison's identity and version. The new
+`AtomicHeadEventsSourcesLifecycleAdmissionStageExecution` capability explicitly
+declares this stronger contract; the older staging profile is insufficient.
+No ordinary driver or registry lock crosses the restoration commit. The
+generated clock recheck still runs at publication.
+
+The native restoration producer also works after reopening either SQLite
+profile, but cold actor/run recovery integration, descendant restoration, and actor
+installation remain unfinished. The sealed run
+handle is not a physical-effect permit, and no production executor currently
+opts into scoped execution.
+
+LiveRequest snapshot format 6 retains a nonempty, request-unique admission commit
+witness and each admitted request's original ingress generation. Stage, scope
+restoration, and effect claims must present that exact witness; recovery rejects
+missing, empty, or duplicated admission bindings. Read-only `ObserveAdmission`
+checks the complete retained binding without applying Admit again.
+Formats 1 through 5 are refused rather than inventing missing admission,
+completion-credit, exact retained claim authority, or typed policy identity.
+The joint-admission producer derives this witness from its stable admission image,
+not recursively from an operation containing its own receipt.
+
+Format 6 also retains generated per-claim completion budgets, actual spend, and
+the exact terminal sequence/content digest. Native storage accounting validates
+the codec-measured budget and projects its remaining reservation into the Live
+head; it does not maintain another mutable spend counter. Reserved bytes include
+the measured maximum growth of the claim's mutable snapshot values, so a full
+ledger can append feedback and update the snapshot atomically. Known outcomes
+release unused credit; Unknown retains capacity for a later actual outcome.
+NotStarted requires local noninvocation evidence and cannot refine a recovered
+Unknown. Exact settlement observation does not spend another record. The
+completion-record constructor checks actual encoded charge and the generated
+identity/sequence/digest before including records in the same head CAS. A changed
+settlement cannot use the record-free commit constructor. Reserved record slots
+also reserve future head-revision/sequence capacity; unrelated metadata commits
+cannot consume the last numeric positions needed by outstanding feedback.
+
+Native `MeerkatMachine::claim_live_effect` intersects the trusted host's resolved
+ordinary tool policy with the retained scope, then commits generated ClaimEffect
+under exact input/lifecycle comparisons, the host's policy publication fence,
+and the final generated clock recheck. Only a newly committed claim seals a
+move-only Core start permit. Conflicts and replays never mint another permit.
+The complete immutable claim record is retained by generated authority. Its
+digest binds the typed claim image and claim revision, excluding its own digest;
+it is not a recursively embedded full-operation receipt.
+
+`settle_live_effect` checks that exact retained record and commits the real
+completion row with generated spend. It does not demand a still-running actor
+or unrevoked grant: feedback remains recordable after stop and reopen.
+`settle_live_effect_not_started` consumes `ScopedEffectNotStartedProof`, produced
+only by relinquishing an unused start permit. Serialized claim content cannot
+establish noninvocation. Exact retained feedback can be observed idempotently
+without another append, including after later head advancement.
+
+Managed consequence evaluation can retain its actual request, provider,
+generation, revision, and digest in `AllowedToolConsequenceEvaluation`.
+`LiveEffectPolicyObservation::from_evaluated` binds that witness to the host's
+resolved call, physical target, and run. Its native claim publishes through the
+policy provider's opt-in `publish_if_current` callback, which must hold the
+snapshot replacement lock through publication. Unsupported providers refuse;
+an unlocked reread or a copied revision counter is not an implementation.
+Ordinary consequence evaluation retains its existing behavior.
+
+The outer dispatcher can now produce `EvaluatedToolExecutionPolicy` without
+invoking a tool. It retains the exact call, run, mutation declaration, normalized
+ordinary policy, and optional managed evaluation. Its typed policy identity
+distinguishes immutable content (no fabricated revision), managed provider
+generation/revision/digest, and explicit trusted-host revision. The native
+`from_dispatch_evaluation` adapter derives the invocation target from that
+retained call instead of accepting a separately paired target digest. That digest
+is content identity, not a live dispatcher binding lease. Mutation permissions
+are checked again after awaited consequence evaluation.
+`evaluate_for_scoped_run` uses the sealed scope's run identity, and native
+`claim_live_tool_effect` consumes that evaluated witness through the same
+generated claim transaction. Neither call invokes a tool.
+
+The runtime primitive lowering validates `RunExecutionAuthority` against the
+actual run and resolves a `RunExecutionContext` containing the same sealed scope
+and its native effect host from the executor's existing machine adapter.
+`StartTurnRuntimeSemantics` and the existing session task pass that context through both
+content-turn and pending-continuation calls instead of dropping it while
+unpacking metadata. The default `SessionAgent` and `FactoryAgent` explicitly
+refuse scoped execution; the latter must acquire scope-aware physical dispatch
+before that refusal can be removed. Ordinary turns retain session-policy
+authority. This in-memory handoff does not deserialize scope records into
+handles or opt `CoreExecutor` into scoped execution.
+Both existing Core run entries retain a future-owned dispatch-context guard.
+Dropping a content or pending run releases that local context, including its
+run identity; it does not synthesize canonical terminal state or settle
+already-admitted physical effects.
+The explicit Core scoped entries now install that context before preparation,
+retain it through the ordinary context rebuilds, and require the registered
+actor's exact runtime cursor, session, and generated primitive start. A scoped
+run cannot synthesize an ordinary run identity. Configured memory, skills,
+comms, hooks, and unfinished compaction cleanup refuse until their owners retain
+scope. An actual compaction trigger also refuses before summary or projection
+I/O; merely installing an idle compactor does not perform such work.
+
+The existing resolved outer dispatcher consumes a native claim through
+`ScopedExecutionContext`. It checks exact session/run identity, refuses
+private bridge mixing, and rechecks the invocation's binding and mutation
+declaration after the awaited claim. Scoped resolution retains a private lease
+to the particular policy-dispatch owner as well as the existing fenced root
+lease, exact scoped invocation context, and canonical call identity. Unbound, foreign-owner, re-paired-call, and
+stale-root plans refuse before claiming; both leases are checked again after
+awaited policy evaluation and after the durable claim. These leases are
+in-memory dispatch custody, never serialized grant authority.
+A changed binding relinquishes the unused
+permit and records NotStarted. Effect identity is stable per scope/run/generated
+turn boundary/tool-call id. A provider may legitimately reuse a call id at a
+later boundary, but neither replaying the earlier call nor reusing its resolved
+plan can mint another physical attempt. Undeclared physical dispatchers and
+nested claim owners refuse rather than starting unowned or double-claimed work. Unplanned
+scoped dispatch refuses rather than falling back to an ordinary call.
+
+Feedback custody transfers synchronously to the existing process-owned cleanup
+runtime. Dropping an invocation records Unknown; abandoning an unused permit
+records NotStarted. Successful synchronous tool feedback records the actual
+result, while asynchronous operation starts remain Unknown pending their owner's
+later evidence. Feedback persistence errors remain surfaced and logged when the
+caller has gone away. This does not yet connect asynchronous operation owners
+or callback chains to their final scoped feedback.
+
+Prepared provider requests now carry an explicit native-tool restriction. The
+adapter checks the exact prepared route's enforcement declaration; undeclared
+injected clients refuse. Provider-owned final request builders admit only the
+same catalog function tools under that restriction, including explicit empty
+tool arrays. Gemini externally named caches refuse without evidence of their
+native tool contents. Ordinary requests retain their existing defaults.
+
+`ScopedModelRequest` retains immutable selected-model policy and one logical
+request identity. Each physical send claims an exact model/route/body digest
+through the same native claim owner, without a fabricated tool policy or
+managed-policy revision. An explicit rejection or observed terminal success
+publishes an unused physical successor only after its feedback commits.
+Unknown, abandonment, or failed feedback persistence publishes no successor;
+replay of the entered physical identity refuses. The generated Core retry
+policy still decides whether another request is needed, including a
+successful-but-empty response.
+Core's initial, retry, and route-repreparation sites retain the exact prepared
+scope. Logical model identity comes from the generated turn boundary, not a
+fresh UUID on retry. The conclusive-completion mailbox hands off an unused
+physical attempt without retaining a request reference cycle. Repreparation
+and fallback identity changes share that physical slot; an entered slot without
+conclusive committed feedback cannot be replaced. This mailbox remains process-local
+receipt transport. Durable retry lineage belongs to `LiveRequestMachine`: each claim
+retains its logical chain, physical ordinal, and conclusive-retry eligibility.
+Only the exact next ordinal after conclusive feedback can claim. Claimed,
+Unknown (including later corrected Unknown), cancelled, and not-started attempts
+cannot produce a retry quotation. Native restoration validates the committed
+scope and asks the generated owner for the ordinal; it neither scans projection
+rows nor treats a quotation as permission. Claiming rechecks the exact current
+chain, so a stale quotation or competing reconstructed handle cannot send again.
+Core uses this restoration seam when preparing a logical request without a
+process-local predecessor. Native tests close every old store reference, reopen
+both SQLite storage modes, restore the sealed scope, and exercise successor,
+skip/reset, Unknown, and competing-quotation behavior. This does not yet qualify
+the complete serialized service/executor restart path.
+Observed token limits reuse ordinary normalized `TurnUsage`, including disputed
+reported counters without repairing attribution. The physical stream observer
+retains the latest usage update and commits its bounded accounting reference
+with terminal feedback. `LiveRequestMachine` advances each claim's known count
+monotonically and charges only its positive delta; exact feedback replay and
+cold reopen cannot reset or double-charge it. Missing usage remains explicitly
+unmeasured and leaves the known total unchanged. If that total is below
+`max_tokens_per_request`, missing or disputed accounting alone does not refuse
+another model boundary or retry correct work. Reaching the observed limit
+refuses subsequent model claims while preserving the completed answer that
+crossed it. This is not a hard actual/billed-token ceiling under incomplete
+reporting, and it introduces no guessed token reservation or refund account.
+Revocation, expiry, run binding, and the other grant fences still apply.
+
+Request admission separately reserves the measured request-completion envelope
+and mutable snapshot growth. Conclusive effect settlement releases only its
+own reservation, not the outstanding request obligation. Native request closure
+reads the exact finalized ordinary `InputTerminalCompletion` owner and consumes
+the generated request reservation with its completion record in one Live commit.
+The ordinary input-row digest is compared inside that transaction, including
+prepared-commit replay. This retained-result comparison does not require a current executor;
+active-execution comparisons still require the exact lifecycle fence.
+`OrdinaryTerminal` references the complete ordinary outcome by input, run, and
+receipt digest. It does not truncate large results, discard typed stop or
+extraction metadata, duplicate the ordinary result owner, or certify a public
+artifact. Candidate and ingress retirement do not remove that finalized outcome.
+Reconciliation runs after ordinary finalization, late effect feedback, and cold
+input recovery; cold discovery uses outstanding generated Live requests rather
+than the ordinary nonterminal-input index. Follow-up failures are reported without
+relabeling an already-finalized ordinary outcome, and the generated obligation
+remains outstanding. Callback, unclassified, and failed-finalization outcomes do
+not close the Live request. Complete callback chains, surfaced reconciliation
+health, public result delivery, and actual actor-finalization qualification
+remain unfinished.
+
+The ordinary session callback owner mints and retains exact session/run/batch
+correlation when staging the pending batch, and preserves it when results replace
+that batch with an applied receipt. Its digest includes
+the actual assistant tool-use arguments and staged sibling effects; it is not a
+continuation grant. The scoped producer also retains the originating run-scope
+reference. Session-policy execution cannot consume those scoped results, apply
+their staged effects, or restore their async operations. The existing result
+staging owner can still validate incoming results without executing them.
+Ingress accepts nonempty, duplicate-free subsets of the exact pending IDs;
+full result application still requires the complete batch. Identical applied
+subsets are idempotent, while changed payloads, foreign IDs and malformed
+receipt ordering are refused without mutation.
+Historical applied receipts without correlation report identity-unavailable
+rather than borrowing a later run. The serialized actor captures the correlation
+with its callback terminal; ordinary terminal candidates and finalized outcomes
+carry that same identity through recovery and candidate retirement. Commit checks
+bind it to the actual session and run, independently of WholeBlob, HeadCanonical,
+or provisional-tail representation. Optional absent identity retains the exact
+legacy candidate/outcome bytes and does not manufacture historical provenance.
+Callback display payloads remain tool-owned and need not equal model arguments;
+the captured terminal must identify the exact pending callback IDs.
+Scoped batches also retain their actual actor invocation boundary. Their candidate
+effect IDs use the same derivation as physical dispatch, so a reused tool-call ID
+at another model boundary cannot substitute an earlier claim. Missing historical
+invocation identity is explicit unavailability, not a fabricated boundary.
+Native request reconciliation distinguishes unattributed callback receipts from
+callbacks whose exact scope, run, input, and observed physical tool claims can
+be verified. It uses the same retained-claim validation as effect feedback.
+Physical tool targets retain the exact evaluated call ID in addition to their
+argument digest; a matching derived effect ID cannot substitute different call
+content. The managed-policy binding checks that same ID before publication.
+Grant revocation does not erase those already-observed facts or grant continuation.
+An attributed ordinary callback terminal now drives generated request suspension.
+The exact run identity, ordinary completion receipt, callback claim membership,
+per-claim completion records and credit spend publish in one Live transaction,
+fenced against the exact finalized ordinary input row. Tool claims reserve the
+measured callback snapshot growth before physical dispatch; observed feedback
+does not release that obligation before ordinary classification. Reconciliation
+replays the retained suspension sequence without another append, including after
+late physical feedback or closed-store recovery. Missing historical correlation
+remains explicitly unattributed. Suspension is not continuation permission.
+Retained scope records and their reciprocal scope identity are keyed by the
+actual run, not by a replaceable request-current scope. Effect feedback reads
+that originating run's record and its immutable input/admission-commit links.
+Staging cannot replace them; the current one-run
+admission guard remains until generated continuation admission is implemented.
+Generated scoped continuation admission and
+run-chain restoration are still required before enabling this execution path.
+
+The shared sender consumes the permit before polling physical I/O, and the
+stream observer commits feedback before exposing successful terminal output.
+Dropping that observer transfers Unknown feedback even if a producer retains
+the shared handoff. Scope stays in the nonserializable prepared-request carrier,
+not a skipped field on the wire request.
+
+OpenAI Responses, OpenAI-compatible Chat Completions/Responses, Anthropic
+Messages, and Gemini public/Code Assist model requests use this sender after awaited authorization, including
+authorization-refresh retries and OpenAI stateless continuation retries.
+Compatible clients retain their selected provider/model alias for policy
+checks while binding the actual lowered remote-model body into the claim.
+Code Assist retains its request nonce in the existing prepared-request witness,
+so pressure and physical dispatch attest the same bytes. Direct unprepared
+Code Assist pressure reports the fixed-width byte count without pretending its
+fresh nonce proves the eventual body digest.
+Native conformance drives the actual client adapters
+against local HTTP servers, matching captured bytes to pressure and claim
+digests and checking durable feedback before exposing completion. This is
+local transport evidence, not a live-provider quadrant result. Other adapters must
+declare and implement physical scoped dispatch separately from native-tool
+restriction. Undeclared adapters and the not-yet-wired Copilot prepared route
+refuse instead of dropping the scope. Gemini Files API registration/polling for
+`gs://` video references remains unowned under scoped execution: exact prepared
+support refuses, and direct scoped streaming rejects before authorization or
+auxiliary I/O. Ordinary video preparation is unchanged; this refusal is a
+remaining implementation gap, not complete auxiliary-path qualification.
+The explicit Core actor path installs these mechanisms. Every factory build,
+including an unrestricted build, retains the outer execution-policy owner for
+later scoped runs. Core restricts owned request-parameter copies at each model
+preparation, including retries; the stored ordinary configuration is unchanged.
+Direct adapter requests that contradict their native-tool restriction still fail.
+Native integration tests construct the agent through the real factory and linked
+runtime authority, then observe committed model feedback, explicit-rejection
+retry, and dropped-future Unknown feedback. A multi-boundary actor test executes
+two physical tools with the same provider call ID under distinct claims and
+restores configured native tools on the following ordinary run without another
+Live claim. Their test-support hook seeds only a generated source reservation;
+ordinary admission, staging, claims, and feedback are production paths. This
+does not qualify the complete service/executor path, all providers, auxiliary
+requests, or scoped token accounting.
+
+Complete service/executor activation, model/provider and physical-adapter
+qualification, and scoped descendant execution remain unfinished. These native
+producer APIs do not activate public profiles or opt an executor into scoped
+execution.
+
+Native Live request commits refresh clock observations both before preparation
+and inside the store/registration publication fence. The latter reapplies the
+same generated command against the CAS-protected predecessor and requires the
+exact prepared successor. Expiry while awaiting storage cannot publish an
+activation, reservation, admission, stage, restoration, or effect claim. Clock
+failure refuses timed publication; untimed cancellation/revocation remains
+available. This recheck does not itself issue a physical execution permit.
 
 ## See Also
 

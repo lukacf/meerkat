@@ -1918,6 +1918,7 @@ impl MeerkatMachine {
         {
             let mut driver = driver_handle.lock().await;
             machine_prepare_bindings_projection(&mut driver);
+            driver.persist_prepared_runtime_binding().await?;
         }
         if let Err(reason) = self
             .commit_session_dsl_transition(session_id, staged, "PrepareBindings")
@@ -2680,7 +2681,7 @@ impl MeerkatMachine {
                 RuntimeDriverError::MaterializationRegistrationOwned { session_id } => {
                     RuntimeBindingsError::RegistrationOwned(session_id)
                 }
-                error => RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string()),
+                error => RuntimeBindingsError::from_driver_error(session_id.clone(), error),
             })?;
         let MeerkatMachineCommandResult::Bindings(bindings) = result else {
             return Err(RuntimeBindingsError::SessionNotFound(session_id));

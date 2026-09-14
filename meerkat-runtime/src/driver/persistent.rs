@@ -16,7 +16,7 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::input::{Input, externalize_input_images};
 use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStatePersistenceRecord,
-    InputStateSeed, StoredInputState,
+    StoredInputState,
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
@@ -63,6 +63,20 @@ pub struct PersistentRuntimeDriver {
 enum PreparedProvisionalPromotion {
     WholeBlob(PreparedWholeBlobProvisionalPromotion),
     HeadCanonical(PreparedHeadCanonicalProvisionalPromotion),
+}
+
+pub(crate) enum StagedInputBindingOutcome {
+    Bound(meerkat_core::execution_scope::RunExecutionAuthority),
+    #[cfg(not(target_arch = "wasm32"))]
+    UncommittedLiveStage(UncommittedLiveStage),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct UncommittedLiveStage {
+    input_id: InputId,
+    run_id: RunId,
+    source: meerkat_core::live_execution::request::LiveSourceKey,
+    reason: RuntimeDriverError,
 }
 
 #[must_use = "prepared unstageable-input resolution must be committed or explicitly aborted"]
@@ -380,7 +394,11 @@ impl PersistentRuntimeDriver {
             .map_err(|err| RuntimeDriverError::RecoveryBackoff {
                 reason: format!("recovered input exact-batch CAS failed: {err}"),
             })? {
-            InputStateBatchCasOutcome::Swapped => Ok(report),
+            InputStateBatchCasOutcome::Swapped => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.reconcile_live_request_completions(None).await;
+                Ok(report)
+            }
             InputStateBatchCasOutcome::Stale => Err(RuntimeDriverError::RecoveryBackoff {
                 reason: "durable input state changed while cold recovery was preparing".to_string(),
             }),
@@ -412,7 +430,11 @@ impl PersistentRuntimeDriver {
                     .map_err(|error| RuntimeDriverError::RecoveryBackoff {
                         reason: format!("recovered input exact-batch CAS failed: {error}"),
                     })? {
-                    InputStateBatchCasOutcome::Swapped => Ok(report),
+                    InputStateBatchCasOutcome::Swapped => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.reconcile_live_request_completions(None).await;
+                        Ok(report)
+                    }
                     InputStateBatchCasOutcome::Stale => Err(RuntimeDriverError::RecoveryBackoff {
                         reason: "durable input state changed while cold recovery was preparing"
                             .to_string(),
@@ -442,7 +464,11 @@ impl PersistentRuntimeDriver {
                             reason: format!("fenced recovered input persistence failed: {other}"),
                         },
                     })? {
-                    FencedInputStateBatchCasOutcome::Swapped => Ok(report),
+                    FencedInputStateBatchCasOutcome::Swapped => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.reconcile_live_request_completions(None).await;
+                        Ok(report)
+                    }
                     FencedInputStateBatchCasOutcome::Stale => {
                         Err(RuntimeDriverError::StaleAuthority {
                             reason: "durable input state changed while cold recovery was preparing"
@@ -625,7 +651,7 @@ impl PersistentRuntimeDriver {
     async fn durable_idempotency_duplicate(
         &self,
         input: &Input,
-    ) -> Result<Option<(InputId, InputStateSeed)>, RuntimeDriverError> {
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
         let Some(key) = input.header().idempotency_key.as_ref() else {
             return Ok(None);
         };
@@ -668,7 +694,7 @@ impl PersistentRuntimeDriver {
                 ),
             });
         }
-        Ok(Some((stored.state.input_id, stored.seed)))
+        Ok(Some(stored))
     }
 
     /// Get immutable reference to the inner ephemeral driver.
@@ -1462,6 +1488,88 @@ impl PersistentRuntimeDriver {
         self.inner.sync_control_projection_from_dsl_authority();
     }
 
+    pub(crate) async fn persist_prepared_runtime_binding(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let result = async {
+            let observed = self
+                .store
+                .observe_machine_lifecycle(&self.runtime_id)
+                .await?;
+            let crate::store::MachineLifecycleObservation::Decoded { record, version } = observed
+            else {
+                return Err(crate::store::RuntimeStoreError::ReadFailed(
+                    "prepared runtime binding requires a decoded lifecycle predecessor".into(),
+                ));
+            };
+            let state = record.runtime_state().ok_or_else(|| {
+                crate::store::RuntimeStoreError::ReadFailed(
+                    "prepared runtime binding cannot replace a null lifecycle state".into(),
+                )
+            })?;
+            // PrepareBindings can run during an active turn. Publish only its
+            // generated binding, retaining the durable run and recovery image.
+            let replacement =
+                MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
+                    state,
+                    self.inner.machine_lifecycle_binding_facts(),
+                    record.run().clone(),
+                    record.supervisor_authority().clone(),
+                    record.unregister_progress().cloned(),
+                    record.live_bridge_recovery().clone(),
+                );
+            let expected = crate::store::MachineLifecycleExpectedVersion::Version(version);
+            if let Some(fence) = &self.input_state_write_fence {
+                match self
+                    .store
+                    .compare_and_swap_machine_lifecycle_with_fence(
+                        &self.runtime_id,
+                        expected,
+                        replacement,
+                        Arc::clone(fence),
+                    )
+                    .await?
+                {
+                    crate::store::FencedMachineLifecycleCasOutcome::Applied { .. }
+                    | crate::store::FencedMachineLifecycleCasOutcome::AlreadyExact { .. } => Ok(()),
+                    crate::store::FencedMachineLifecycleCasOutcome::Conflict { .. } => {
+                        Err(crate::store::RuntimeStoreError::WriteFailed(
+                            "prepared runtime binding lifecycle predecessor changed".into(),
+                        ))
+                    }
+                    crate::store::FencedMachineLifecycleCasOutcome::FenceConflict { reason }
+                    | crate::store::FencedMachineLifecycleCasOutcome::FenceBackoff { reason } => {
+                        Err(crate::store::RuntimeStoreError::WriteFailed(format!(
+                            "prepared runtime binding registration fence refused: {reason}"
+                        )))
+                    }
+                }
+            } else {
+                match self
+                    .store
+                    .compare_and_swap_machine_lifecycle(&self.runtime_id, expected, replacement)
+                    .await?
+                {
+                    crate::store::MachineLifecycleCasOutcome::Applied { .. } => Ok(()),
+                    crate::store::MachineLifecycleCasOutcome::Conflict { .. } => {
+                        Err(crate::store::RuntimeStoreError::WriteFailed(
+                            "prepared runtime binding lifecycle predecessor changed".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        .await;
+        result.map_err(|error| {
+            self.post_transition_failure(
+                None,
+                "prepare_binding_lifecycle",
+                format!("prepared runtime binding publication failed: {error}"),
+            )
+        })
+    }
+
     pub(crate) async fn persist_current_machine_lifecycle(
         &mut self,
         context: &str,
@@ -1700,6 +1808,142 @@ impl PersistentRuntimeDriver {
             )
     }
 
+    pub(crate) async fn materialize_live_request(
+        &self,
+        input_id: &InputId,
+        request: &crate::live_request::LiveExecutionRequestRecord,
+    ) -> Result<
+        Option<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+        crate::live_request::LiveRequestMaterializationError,
+    > {
+        request.materialize(self.store.as_ref(), input_id).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn reconcile_live_request_completions(&self, input_ids: Option<&[InputId]>) {
+        let Some(session_id) = self.runtime_id.session_id() else {
+            return;
+        };
+        if self.store.live_ledger_ops().is_none() {
+            return;
+        }
+        let owner = crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+            Arc::clone(&self.store),
+            session_id.clone(),
+        );
+        match owner.reconcile_input_completions(input_ids).await {
+            Ok(reconciliations) => {
+                for reconciliation in reconciliations {
+                    match reconciliation.result {
+                        Ok(progress) => {
+                            progress.trace_recovery_hold(&session_id, &reconciliation.request_id);
+                        }
+                        Err(error) => tracing::error!(
+                            %session_id, request_id = %reconciliation.request_id, %error,
+                            "Live request completion remains outstanding after ordinary finalization"
+                        ),
+                    }
+                }
+            }
+            Err(error) => tracing::error!(
+                %session_id, %error,
+                "Live request completion discovery failed; retained obligations require reconciliation"
+            ),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn live_cancellation_recovery_owner(
+        &self,
+    ) -> Result<
+        Option<crate::live_ledger::authority::store::LiveRequestStoreOwner>,
+        RuntimeDriverError,
+    > {
+        let Some(session_id) = self.runtime_id.session_id() else {
+            return Ok(None);
+        };
+        if self.store.live_ledger_ops().is_none() {
+            return Ok(None);
+        }
+        self.live_request_store_owner(&session_id).map(Some)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn live_request_store_owner(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<crate::live_ledger::authority::store::LiveRequestStoreOwner, RuntimeDriverError>
+    {
+        self.require_durability_ready()?;
+        if self.runtime_id != LogicalRuntimeId::for_session(session_id) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "Live scope belongs to another runtime".into(),
+            });
+        }
+        Ok(
+            crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+                Arc::clone(&self.store),
+                session_id.clone(),
+            ),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn prepare_live_input_admission<Member: PartialEq + serde::Serialize>(
+        &self,
+        source: &meerkat_core::live_execution::request::LiveSourceKey,
+        grant: &crate::live_grant::LiveExecutionGrant<Member>,
+        receipt_tx: tokio::sync::oneshot::Sender<
+            crate::live_request::AdmittedLiveExecutionAuthority,
+        >,
+    ) -> Result<crate::live_ledger::authority::store::PendingLiveAdmission, RuntimeDriverError>
+    {
+        self.require_durability_ready()?;
+        if self.runtime_id != LogicalRuntimeId::for_session(source.session_id()) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "Live source belongs to another runtime".into(),
+            });
+        }
+        let binding = crate::live_ledger::authority::store::LiveAdmissionRuntimeBinding::new(
+            self.inner.shared_dsl_authority(),
+            self.input_state_write_fence(),
+        );
+        crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+            Arc::clone(&self.store),
+            source.session_id().clone(),
+        )
+        .prepare_input_admission(source, grant, binding, receipt_tx)
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn prepare_live_callback_input_admission(
+        &self,
+        source: &meerkat_core::live_execution::request::LiveSourceKey,
+        results: crate::store::CommittedCallbackResultsObservation,
+        receipt_tx: tokio::sync::oneshot::Sender<
+            crate::live_request::AdmittedLiveExecutionAuthority,
+        >,
+    ) -> Result<crate::live_ledger::authority::store::PendingLiveAdmission, RuntimeDriverError>
+    {
+        self.require_durability_ready()?;
+        if self.runtime_id != LogicalRuntimeId::for_session(source.session_id()) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "Live callback source belongs to another runtime".into(),
+            });
+        }
+        let binding = crate::live_ledger::authority::store::LiveAdmissionRuntimeBinding::new(
+            self.inner.shared_dsl_authority(),
+            self.input_state_write_fence(),
+        );
+        crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+            Arc::clone(&self.store),
+            source.session_id().clone(),
+        )
+        .prepare_callback_input_admission(source, results, binding, receipt_tx)
+        .await
+    }
+
     pub(crate) async fn accept_resolved_input(
         &mut self,
         input: Input,
@@ -1707,9 +1951,35 @@ impl PersistentRuntimeDriver {
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         self.inner.ensure_contract_session_authority()?;
-        if let Some((existing_id, existing_seed)) =
-            self.durable_idempotency_duplicate(&input).await?
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut resolved = resolved;
+        #[cfg(not(target_arch = "wasm32"))]
+        let pending_live = resolved.take_pending_live();
+        #[cfg(not(target_arch = "wasm32"))]
+        if pending_live.is_some() != resolved.live_validation().is_some() {
+            return Err(RuntimeDriverError::Internal(
+                "Live validation and joint persistence handoff must travel together".into(),
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pending) = &pending_live {
+            pending.validate_store(&self.store)?;
+            pending.validate_runtime_authority(&self.inner.shared_dsl_authority())?;
+            pending.validation().validate(&input)?;
+        }
+        if let Some(reason) = self
+            .inner
+            .live_grant_rejection_before_durable_deduplication(&input, &resolved)?
         {
+            return Ok(AcceptOutcome::Rejected { reason });
+        }
+        if let Some(existing) = self.durable_idempotency_duplicate(&input).await? {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(pending) = pending_live {
+                pending.reconcile_existing(&existing).await?;
+            }
+            let existing_id = existing.state.input_id;
+            let existing_seed = existing.seed;
             let input_id = input.id().clone();
             self.inner
                 .record_durable_idempotency_deduplication(input_id.clone(), existing_id.clone());
@@ -1718,6 +1988,10 @@ impl PersistentRuntimeDriver {
                 existing_id,
                 existing_seed,
             });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pending) = &pending_live {
+            pending.require_new_admission()?;
         }
         let preview = self
             .inner
@@ -1829,11 +2103,25 @@ impl PersistentRuntimeDriver {
                 ));
             }
         };
-        if let Err(error) = self
+        #[cfg(not(target_arch = "wasm32"))]
+        let persisted = match pending_live {
+            Some(pending) => pending
+                .commit(&records)
+                .await
+                .map_err(|error| error.to_string()),
+            None => self
+                .store
+                .persist_input_states_atomically(&self.runtime_id, &records)
+                .await
+                .map_err(|error| error.to_string()),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let persisted = self
             .store
             .persist_input_states_atomically(&self.runtime_id, &records)
             .await
-        {
+            .map_err(|error| error.to_string());
+        if let Err(error) = persisted {
             return Err(self.post_transition_failure(
                 checkpoint,
                 "admission_commit",
@@ -1873,13 +2161,17 @@ impl PersistentRuntimeDriver {
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
-        if let Some((existing_id, existing_seed)) =
-            self.durable_idempotency_duplicate(&input).await?
+        if let Some(reason) = self
+            .inner
+            .live_grant_rejection_before_durable_deduplication(&input, resolved)?
         {
+            return Ok(AcceptOutcome::Rejected { reason });
+        }
+        if let Some(existing) = self.durable_idempotency_duplicate(&input).await? {
             return Ok(AcceptOutcome::Deduplicated {
                 input_id: input.id().clone(),
-                existing_id,
-                existing_seed,
+                existing_id: existing.state.input_id,
+                existing_seed: existing.seed,
             });
         }
         self.inner
@@ -1960,6 +2252,22 @@ impl PersistentRuntimeDriver {
         input_ids: &[InputId],
     ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.rollback_staged(input_ids)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn abort_uncommitted_live_stage(
+        &mut self,
+        refusal: UncommittedLiveStage,
+    ) -> Result<
+        (
+            meerkat_core::live_execution::request::LiveSourceKey,
+            RuntimeDriverError,
+        ),
+        RuntimeDriverError,
+    > {
+        self.inner
+            .abort_uncommitted_live_stage(&refusal.input_id, &refusal.run_id)?;
+        Ok((refusal.source, refusal.reason))
     }
 
     /// Resolve queued inputs the generated staging authority refused, making
@@ -2100,25 +2408,140 @@ impl PersistentRuntimeDriver {
     pub(crate) async fn persist_staged_input_bindings(
         &self,
         input_ids: &[InputId],
-    ) -> Result<(), RuntimeDriverError> {
+    ) -> Result<StagedInputBindingOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         let records = self
             .inner
             .authorized_stored_input_states_for_ids(input_ids)?;
         if records.is_empty() {
-            return Ok(());
+            return Ok(StagedInputBindingOutcome::Bound(
+                meerkat_core::execution_scope::RunExecutionAuthority::SessionPolicy,
+            ));
+        }
+        if records.iter().any(|record| {
+            matches!(
+                record.as_stored().state.persisted_input,
+                Some(Input::LiveRequest(_))
+            )
+        }) {
+            #[cfg(target_arch = "wasm32")]
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "native Live scope staging is unavailable on this target".into(),
+            });
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let [record] = records.as_slice() else {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: "Live scope staging requires one exclusive input".into(),
+                    });
+                };
+                let Some(Input::LiveRequest(request)) = &record.as_stored().state.persisted_input
+                else {
+                    return Err(RuntimeDriverError::Internal(
+                        "exclusive Live input disappeared".into(),
+                    ));
+                };
+                let source = request.request.source_reference().0.source().clone();
+                let run_id = record.as_stored().seed.last_run_id.clone().ok_or_else(|| {
+                    RuntimeDriverError::Internal("Live staged input has no run binding".into())
+                })?;
+                return match self.persist_live_staged_input_binding(record.clone()).await {
+                    Ok(authority) => Ok(StagedInputBindingOutcome::Bound(
+                        meerkat_core::execution_scope::RunExecutionAuthority::Scoped(authority),
+                    )),
+                    Err(
+                        crate::live_ledger::authority::store::LiveInputStageError::Uncommitted(
+                            reason,
+                        ),
+                    ) => Ok(StagedInputBindingOutcome::UncommittedLiveStage(
+                        UncommittedLiveStage {
+                            input_id: record.as_stored().state.input_id.clone(),
+                            run_id,
+                            source,
+                            reason,
+                        },
+                    )),
+                    Err(
+                        crate::live_ledger::authority::store::LiveInputStageError::CommitUncertain(
+                            error,
+                        ),
+                    ) => Err(self.mark_durability_reload_required(
+                        "joint_live_stage_commit",
+                        error.to_string(),
+                    )),
+                };
+            }
         }
         match self
             .store
             .persist_input_states_atomically(&self.runtime_id, &records)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(StagedInputBindingOutcome::Bound(
+                meerkat_core::execution_scope::RunExecutionAuthority::SessionPolicy,
+            )),
             Err(error) => Err(self.mark_durability_reload_required(
                 "staged_input_binding_commit",
                 format!("atomic staged input binding persist failed: {error}"),
             )),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn persist_live_staged_input_binding(
+        &self,
+        input: crate::input_state::InputStatePersistenceRecord,
+    ) -> Result<
+        meerkat_core::execution_scope::ScopedRunAuthority,
+        crate::live_ledger::authority::store::LiveInputStageError,
+    > {
+        let pre_run_phase = match self.inner.pre_run_phase() {
+            Some(RuntimeState::Idle) => crate::store::MachineLifecyclePreRunPhase::Idle,
+            Some(RuntimeState::Attached) => crate::store::MachineLifecyclePreRunPhase::Attached,
+            Some(RuntimeState::Retired) => crate::store::MachineLifecyclePreRunPhase::Retired,
+            phase => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "generated Live run has invalid pre-run phase: {phase:?}"
+                ))
+                .into());
+            }
+        };
+        let lifecycle =
+            MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
+                self.inner.runtime_state(),
+                self.inner.machine_lifecycle_binding_facts(),
+                crate::store::MachineLifecycleRunFacts::new(
+                    self.inner.current_run_id(),
+                    Some(pre_run_phase),
+                ),
+                self.inner.supervisor_authority_snapshot(),
+                Self::unregister_progress_for_persistence_from_inner(&self.inner),
+                Self::live_bridge_recovery_for_persistence_from_inner(&self.inner)?,
+            );
+        let Some(Input::LiveRequest(request)) = &input.as_stored().state.persisted_input else {
+            return Err(RuntimeDriverError::Internal("Live stage lost its input".into()).into());
+        };
+        let (provenance, _) = request.request.source_reference();
+        let session_id = provenance.source().session_id().clone();
+        if self.runtime_id != LogicalRuntimeId::for_session(&session_id) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "Live stage source belongs to another runtime".into(),
+            }
+            .into());
+        }
+        crate::live_ledger::authority::store::LiveRequestStoreOwner::new(
+            Arc::clone(&self.store),
+            session_id,
+        )
+        .commit_input_stage(
+            input,
+            lifecycle,
+            crate::live_ledger::authority::store::LiveAdmissionRuntimeBinding::new(
+                self.inner.shared_dsl_authority(),
+                self.input_state_write_fence(),
+            ),
+        )
+        .await
     }
 
     pub(crate) async fn abandon_pending_inputs(
@@ -2759,6 +3182,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::input_state::InputStateSeed;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
     use meerkat_core::types::SessionId;

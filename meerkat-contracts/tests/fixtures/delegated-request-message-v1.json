@@ -1,0 +1,19 @@
+{
+  "role": "user",
+  "content": " exact provisional request ",
+  "created_at": "2026-09-11T00:00:00+00:00",
+  "transcript_role": {
+    "delegated_request": {
+      "provenance": {
+        "request_id": "00000000-0000-0000-0000-000000000001",
+        "source": {
+          "session_id": "00000000-0000-0000-0000-000000000002",
+          "channel_id": "voice",
+          "source": {"kind": "client_delegation", "delegation": "d"}
+        },
+        "evidence_kind": "application_snapshot",
+        "request_digest": [148, 209, 247, 125, 122, 253, 136, 175, 124, 89, 31, 18, 55, 1, 142, 89, 24, 49, 42, 196, 217, 68, 70, 107, 102, 52, 167, 9, 4, 249, 171, 182]
+      }
+    }
+  }
+}

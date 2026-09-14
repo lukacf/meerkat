@@ -39,6 +39,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
 from .events import Usage
 from .generated.rpc_contracts import RpcRequest
+from .generated.types import parse_transcript_user_role
 from .generated.types import (
     CONTRACT_VERSION,
     ApprovalDecideParams,
@@ -121,6 +122,8 @@ from .generated.types import (
     MobkitJobProgressParams,
     MobMemberHistoryParams,
     MobMemberHistoryResult,
+    MobMemberLiveObservationsParams,
+    MobMemberLiveObservationsResult,
     MobMemberToolDeclarationParams,
     MobApplyMemberToolDeclarationParams,
     MobAdoptMemberIdentityDeclarationParams,
@@ -306,7 +309,6 @@ from .types import (
     TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
-    TranscriptUserRole,
     WorkGraphEvent,
     WorkGraphEventFilter,
     WorkGraphIdParams,
@@ -3088,6 +3090,28 @@ class MeerkatClient:
         )
         result = await self._request("mob/member_history", _wire_params(params))
         return self._parse_mob_member_history_result(result)
+
+    async def mob_member_live_observations(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> MobMemberLiveObservationsResult:
+        """Read retained Live records without acquiring an active channel."""
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 256):
+            raise ValueError("Live observation page limit must be between 1 and 256")
+        params = MobMemberLiveObservationsParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            channel_id=channel_id,
+            cursor=cursor,
+            limit=limit,
+        )
+        result = await self._request("mob/member_live_observations", _wire_params(params))
+        return MobMemberLiveObservationsResult.from_wire(result)
 
     async def mob_hosts(self, mob_id: str) -> list[MobHostStatus]:
         """List tracked member hosts with committed authority facts."""
@@ -6114,15 +6138,8 @@ class MeerkatClient:
                     f"{context}: content must be a string or block list",
                 )
             transcript_role = row.get("transcript_role")
-            if transcript_role is not None and transcript_role not in {
-                "conversational",
-                "compaction_summary",
-                "injected_context",
-            }:
-                raise MeerkatError(
-                    "INVALID_RESPONSE",
-                    f"{context}: unsupported transcript_role {transcript_role!r}",
-                )
+            if transcript_role is not None:
+                parse_transcript_user_role(transcript_role, f"{context}: transcript_role")
         elif role == "block_assistant":
             blocks = MeerkatClient._require_present_list_field(
                 row,
@@ -8048,10 +8065,8 @@ class MeerkatClient:
             content=MeerkatClient._parse_content_input(content_value)
             if content_value is not None
             else None,
-            transcript_role=cast(
-                TranscriptUserRole | None,
-                transcript_role,
-            ),
+            transcript_role=parse_transcript_user_role(transcript_role)
+            if transcript_role is not None else None,
             stop_reason=data.get("stop_reason"),
             interaction_id=data.get("interaction_id"),
             run_id=data.get("run_id"),
@@ -8102,6 +8117,11 @@ class MeerkatClient:
             if message.kind is not None:
                 payload["kind"] = message.kind
             if message.role == "user" and message.transcript_role is not None:
+                if not isinstance(message.transcript_role, str):
+                    raise MeerkatError(
+                        "INVALID_ARGUMENT",
+                        "delegated request provenance cannot be authored by transcript rewrite",
+                    )
                 payload["transcript_role"] = message.transcript_role
             if message.role == "system_notice":
                 payload.pop("body", None)

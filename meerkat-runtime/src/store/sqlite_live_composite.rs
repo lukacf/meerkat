@@ -258,7 +258,7 @@ impl RuntimeLiveLedgerOps for SqliteRuntimeStore {
     }
 
     fn ledger_write_profile(&self) -> crate::store::live_read::LiveLedgerWriteProfile {
-        crate::store::live_read::LiveLedgerWriteProfile::AtomicHeadEventsSources
+        crate::store::live_read::LiveLedgerWriteProfile::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
     }
 
     async fn read_live_history(

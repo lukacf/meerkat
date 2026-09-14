@@ -2463,6 +2463,10 @@ impl MethodRouter {
                 handlers::mob::handle_member_history(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/member_live_observations" => {
+                handlers::mob::handle_member_live_observations(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/hosts" => handlers::mob::handle_hosts(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/route_installs" => {
@@ -12330,6 +12334,245 @@ mod tests {
             token_authority,
         ));
         router.with_live_ws(Arc::clone(&live_ws), "ws://127.0.0.1:0".to_string())
+    }
+
+    struct OpenIntentRecordingFactory {
+        opens: Arc<tokio::sync::Mutex<Vec<meerkat_contracts::RealtimeTurningMode>>>,
+    }
+
+    #[async_trait]
+    impl meerkat_client::realtime_session::RealtimeSessionFactory for OpenIntentRecordingFactory {
+        fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
+            meerkat_contracts::RealtimeCapabilities {
+                audio_input_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                audio_output_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                turning_modes: vec![
+                    meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                    meerkat_contracts::RealtimeTurningMode::ExplicitCommit,
+                ],
+                ..Default::default()
+            }
+        }
+
+        fn supports_provider(&self, provider: meerkat_core::Provider) -> bool {
+            provider == meerkat_core::Provider::OpenAI
+        }
+
+        async fn open_session(
+            &self,
+            config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            self.opens.lock().await.push(config.turning_mode);
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "open-intent fixture reached provider".into(),
+            })
+        }
+
+        async fn attach_external_session(
+            &self,
+            _target: &meerkat_client::realtime_session::RealtimeExternalSessionTarget,
+            config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            self.open_session(config).await
+        }
+
+        async fn open_live_adapter(
+            &self,
+            config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<Arc<dyn meerkat_core::live_adapter::LiveAdapter>, meerkat_client::LlmError>
+        {
+            self.opens.lock().await.push(config.turning_mode);
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "open-intent fixture reached provider".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn public_live_open_dispatch_rejects_invalid_selectors_before_provider_io() {
+        use meerkat::session_runtime::live_orchestration::LiveOpenIntentError;
+
+        let (router, _notifications) = test_openai_live_router().await;
+        let opens = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = attach_test_live_ws(router).with_live_session_factory(Arc::new(
+            OpenIntentRecordingFactory {
+                opens: opens.clone(),
+            },
+        ));
+        let session_id = SessionId::new();
+        let mut cases: Vec<_> = [
+            serde_json::json!({"profile_id": null}),
+            serde_json::json!({"profile_id": ""}),
+            serde_json::json!({"profile_id": " "}),
+            serde_json::json!({"profile_id": 1}),
+            serde_json::json!({"profile_id": {}}),
+            serde_json::json!({"profile_id": "x".repeat(129)}),
+        ]
+        .into_iter()
+        .map(|params| (params, None))
+        .collect();
+        cases.push((
+            serde_json::json!({"turning_mode": "continuous"}),
+            Some(LiveOpenIntentError::UnsupportedTurningMode),
+        ));
+        for mode in [
+            None,
+            Some("continuous"),
+            Some("explicit_commit"),
+            Some("provider_managed"),
+        ] {
+            for seed in [None, Some(0), Some(1), Some(usize::MAX)] {
+                let mut public = serde_json::json!({"profile_id": "public-voice"});
+                if let Some(mode) = mode {
+                    public["turning_mode"] = serde_json::json!(mode);
+                }
+                if let Some(seed) = seed {
+                    public["seed_max_chars"] = serde_json::json!(seed);
+                }
+                let mut both = public.clone();
+                both["execution_identity"] = serde_json::json!({
+                    "version": "v1", "profile_id": "private-voice"
+                });
+                cases.push((both, Some(LiveOpenIntentError::MutuallyExclusiveSelection)));
+                if seed.is_some() || matches!(mode, Some("explicit_commit" | "provider_managed")) {
+                    let expected = if matches!(mode, Some("explicit_commit" | "provider_managed")) {
+                        LiveOpenIntentError::UnsupportedTurningMode
+                    } else {
+                        LiveOpenIntentError::UnsupportedSeedWindowForContinuous
+                    };
+                    cases.push((public, Some(expected)));
+                }
+            }
+        }
+        for (mut params, expected_intent_error) in cases {
+            params["session_id"] = serde_json::json!(session_id.to_string());
+            let response = router
+                .dispatch(make_request("live/open", params.clone()))
+                .await
+                .expect("live/open responds");
+            assert_eq!(
+                error_code(&response),
+                error::INVALID_PARAMS,
+                "{params}: {response:?}"
+            );
+            if let Some(expected) = expected_intent_error {
+                assert_eq!(
+                    response
+                        .error
+                        .as_ref()
+                        .expect("invalid intent error")
+                        .message,
+                    expected.to_string(),
+                    "{params}: must reject the intent, not fail a later session lookup"
+                );
+            }
+            assert!(
+                opens.lock().await.is_empty(),
+                "{params}: invalid intent reached provider"
+            );
+            assert!(router.live_adapter_host.active_channels().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn public_live_open_dispatch_valid_profile_never_falls_back_to_legacy_factory() {
+        let (router, _notifications) = test_openai_live_router().await;
+        let opens = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = attach_test_live_ws(router).with_live_session_factory(Arc::new(
+            OpenIntentRecordingFactory {
+                opens: opens.clone(),
+            },
+        ));
+        for explicit_mode in [false, true] {
+            let mut params = serde_json::json!({
+                "session_id": SessionId::new().to_string(), "profile_id": "public-voice"
+            });
+            if explicit_mode {
+                params["turning_mode"] = serde_json::json!("continuous");
+            }
+            let response = router
+                .dispatch(make_request("live/open", params))
+                .await
+                .expect("live/open responds");
+            assert_eq!(
+                error_code(&response),
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+            );
+            assert!(
+                opens.lock().await.is_empty(),
+                "public target fell back to legacy provider"
+            );
+            assert!(router.live_adapter_host.active_channels().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn public_live_open_dispatch_omitted_profile_preserves_legacy_modes() {
+        use meerkat_contracts::RealtimeTurningMode;
+
+        let (router, _notifications) = test_openai_live_router().await;
+        let opens = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = attach_test_live_ws(router).with_live_session_factory(Arc::new(
+            OpenIntentRecordingFactory {
+                opens: opens.clone(),
+            },
+        ));
+        for (mut params, expected) in [
+            (serde_json::json!({}), RealtimeTurningMode::ProviderManaged),
+            (
+                serde_json::json!({"turning_mode": null}),
+                RealtimeTurningMode::ProviderManaged,
+            ),
+            (
+                serde_json::json!({"turning_mode": "provider_managed", "seed_max_chars": 100000}),
+                RealtimeTurningMode::ProviderManaged,
+            ),
+            (
+                serde_json::json!({"turning_mode": "explicit_commit"}),
+                RealtimeTurningMode::ExplicitCommit,
+            ),
+        ] {
+            let created = router
+                .dispatch(make_request(
+                    "session/create",
+                    serde_json::json!({
+                        "prompt": "open intent fixture", "initial_turn": "deferred",
+                        "model": "gpt-realtime-2", "provider": "openai", "keep_alive": false
+                    }),
+                ))
+                .await
+                .expect("session/create responds");
+            assert!(created.error.is_none(), "{created:?}");
+            params["session_id"] = result_value(&created)["session_id"].clone();
+            let before = opens.lock().await.len();
+            let response = router
+                .dispatch(make_request("live/open", params.clone()))
+                .await
+                .expect("live/open responds");
+            let message = &response
+                .error
+                .as_ref()
+                .expect("fixture fails at provider")
+                .message;
+            assert!(
+                message.contains("open-intent fixture reached provider"),
+                "{params}: {response:?}"
+            );
+            let actual = opens.lock().await;
+            assert_eq!(
+                &actual[before..],
+                &[expected],
+                "{params}: wrong legacy mode"
+            );
+            drop(actual);
+            assert!(router.live_adapter_host.active_channels().await.is_empty());
+        }
     }
 
     fn assert_no_live_methods(methods: &[serde_json::Value]) {

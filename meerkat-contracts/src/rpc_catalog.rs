@@ -1065,6 +1065,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobMemberHistoryResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/member_live_observations",
+                "Read retained Live observation records by member identity without an active channel",
+                "MobMemberLiveObservationsParams",
+                "MobMemberLiveObservationsResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/hosts",
                 "List tracked member hosts with bind phase and declared capabilities",
                 "MobIdParams",

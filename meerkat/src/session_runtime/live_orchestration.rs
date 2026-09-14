@@ -400,9 +400,11 @@ pub enum LiveSeedProjectionError {
 /// Provider-neutral open projection: the mechanical provider config plus the
 /// canonical seed-completeness fact used by public continuity reporting.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RealtimeSessionOpenProjection {
     pub open_config: RealtimeSessionOpenConfig,
     pub seed_status: LiveSeedProjectionStatus,
+    #[cfg(feature = "live")]
     owner_session_id: SessionId,
 }
 
@@ -1205,6 +1207,7 @@ mod orchestrator {
             Ok(RealtimeSessionOpenProjection {
                 open_config,
                 seed_status: seed_projection.status,
+                #[cfg(feature = "live")]
                 owner_session_id: session_id.clone(),
             })
         }

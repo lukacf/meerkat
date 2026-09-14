@@ -23,6 +23,10 @@ pub enum FactoryError {
     /// resolution kind rather than re-parsing a flattened string.
     #[error("provider auth resolution failed: {0}")]
     ProviderAuth(#[from] crate::provider_runtime::errors::ProviderAuthError),
+    #[error(transparent)]
+    LiveConnection(#[from] crate::provider_runtime::LiveConnectionResolutionError),
+    #[error(transparent)]
+    LiveTarget(#[from] crate::provider_runtime::LiveTargetError),
 
     /// Building the concrete LLM client from a resolved connection failed,
     /// carrying the typed [`ProviderClientError`] cause rather than a flattened
@@ -61,6 +65,13 @@ pub enum FactoryError {
         "experimental model '{model}' for provider '{provider}' requires an admitted live-channel execution identity"
     )]
     ExperimentalModelRequiresLiveChannel {
+        provider: &'static str,
+        model: String,
+    },
+    #[error(
+        "continuous model '{model}' for provider '{provider}' requires a Live profile, not an ordinary agent"
+    )]
+    ContinuousModelRequiresLiveProfile {
         provider: &'static str,
         model: String,
     },

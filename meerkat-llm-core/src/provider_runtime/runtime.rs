@@ -75,6 +75,13 @@ pub trait ProviderRuntime: Send + Sync {
         Err(ProviderClientError::MissingFeature("realtime-session"))
     }
 
+    fn build_live_adapter_factory(
+        &self,
+        _target: crate::provider_runtime::ResolvedLiveTarget,
+    ) -> Result<Arc<dyn crate::live_adapter_factory::LiveAdapterFactory>, ProviderClientError> {
+        Err(ProviderClientError::MissingFeature("continuous-live"))
+    }
+
     /// Construct an optional image-generation executor from the same resolved
     /// provider connection used for the text client.
     fn build_image_generation_executor(

@@ -317,6 +317,23 @@ impl ProviderRuntimeRegistry {
         runtime.build_text_client(target)
     }
 
+    pub fn build_live_adapter_factory(
+        &self,
+        target: crate::provider_runtime::ResolvedLiveTarget,
+    ) -> Result<Arc<dyn crate::live_adapter_factory::LiveAdapterFactory>, ProviderClientError> {
+        let runtime = self.runtimes.get(&target.voice_identity().provider).ok_or(
+            ProviderClientError::MissingFeature("runtime-not-registered"),
+        )?;
+        let expected = target.voice_profile().profile().interaction_kind;
+        let factory = runtime.build_live_adapter_factory(target)?;
+        if factory.interaction_kind() != expected {
+            return Err(ProviderClientError::ClientInit(
+                "Live adapter factory does not match the resolved interaction kind".into(),
+            ));
+        }
+        Ok(factory)
+    }
+
     /// Build a realtime-capable text client through the owning provider
     /// runtime. The registry keeps realtime transport construction behind the
     /// same provider/auth seam as ordinary clients.

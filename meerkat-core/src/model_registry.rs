@@ -444,11 +444,14 @@ fn append_custom_models(
         }
 
         let vision = model.vision.unwrap_or(false);
+        let interaction_kind = model
+            .interaction_kind
+            .unwrap_or(crate::model_profile::ModelInteractionKind::Text);
         let profile = ModelProfile {
             provider: model.provider,
             release_stage: ModelReleaseStage::OperatorDefined,
             model_family: model_id.clone(),
-            supports_temperature: true,
+            supports_temperature: interaction_kind.supports_text_execution(),
             supports_thinking: false,
             supports_reasoning: false,
             supports_web_search: model.web_search.unwrap_or(false),
@@ -457,7 +460,7 @@ fn append_custom_models(
             vision,
             image_input: vision,
             image_tool_results: vision,
-            interaction_kind: crate::model_profile::ModelInteractionKind::Text,
+            interaction_kind,
             image_generation: false,
             params_schema: serde_json::json!({}),
             beta_headers: Vec::new(),
@@ -604,10 +607,17 @@ fn insert_unique(
 ) -> Result<(), ConfigError> {
     let model_id = entry.id.clone();
     let provider = entry.provider;
-    if entries.insert(model_id.clone(), entry).is_some() {
-        return Err(ConfigError::Validation(format!(
-            "model id '{model_id}' must be unique across built-in, custom, and self-hosted entries"
-        )));
+    match entries.entry(model_id.clone()) {
+        std::collections::btree_map::Entry::Occupied(_) => {
+            return Err(ConfigError::Validation(format!(
+                "model id '{model_id}' must be unique across built-in, custom, and self-hosted entries; \
+                 remove or rename the conflicting custom [models.{model_id}] or \
+                 [self_hosted.models.{model_id}] definition before retrying"
+            )));
+        }
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(entry);
+        }
     }
     profiles.insert((provider, model_id), profile);
     Ok(())
@@ -773,6 +783,7 @@ mod tests {
             "authority-rotation-probe".to_string(),
             CustomModelConfig {
                 provider: Provider::OpenAI,
+                interaction_kind: None,
                 display_name: None,
                 context_window: Some(32_000),
                 max_input_tokens: None,
@@ -958,6 +969,7 @@ mod tests {
     fn custom_model(provider: Provider) -> CustomModelConfig {
         CustomModelConfig {
             provider,
+            interaction_kind: None,
             display_name: Some("Claude Custom".to_string()),
             context_window: Some(500_000),
             max_input_tokens: None,
@@ -966,6 +978,43 @@ mod tests {
             web_search: None,
             call_timeout_secs: Some(900),
         }
+    }
+
+    #[test]
+    fn custom_model_interaction_kind_is_declared_not_inferred_from_its_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::model_profile::ModelInteractionKind;
+        let mut config = Config::default();
+        let mut voice = custom_model(Provider::OpenAI);
+        voice.interaction_kind = Some(ModelInteractionKind::ContinuousLive);
+        config
+            .models
+            .custom
+            .insert("ordinary-looking-name".into(), voice);
+        config.models.custom.insert(
+            "gpt-live-looking-text".into(),
+            custom_model(Provider::OpenAI),
+        );
+        let registry = ModelRegistry::from_config(&config, test_catalog())?;
+        let voice = registry
+            .profile_for_provider(Provider::OpenAI, "ordinary-looking-name")
+            .ok_or("voice")?;
+        assert_eq!(voice.interaction_kind, ModelInteractionKind::ContinuousLive);
+        assert!(!voice.supports_temperature);
+        assert_eq!(
+            registry
+                .profile_for_provider(Provider::OpenAI, "gpt-live-looking-text")
+                .ok_or("text")?
+                .interaction_kind,
+            ModelInteractionKind::Text
+        );
+        assert!(
+            serde_json::from_value::<CustomModelConfig>(serde_json::json!({
+                "provider":"openai", "interaction_kind":"unknown_transport"
+            }))
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1043,6 +1092,61 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("must be unique"));
+        assert!(err.to_string().contains("remove or rename"));
+        assert!(
+            err.to_string()
+                .contains(&format!("[models.{OPENAI_MODEL}]"))
+        );
+    }
+
+    #[test]
+    fn rejected_custom_collision_preserves_catalog_entry_and_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = ModelRegistry::from_config(&Config::default(), test_catalog())?;
+        let original_display = registry.entries[OPENAI_MODEL].display_name.clone();
+        let original_profile =
+            registry.profiles[&(Provider::OpenAI, OPENAI_MODEL.to_owned())].clone();
+        let original_count = registry.entries.len();
+        let conflicting =
+            BTreeMap::from([(OPENAI_MODEL.to_owned(), custom_model(Provider::Anthropic))]);
+        assert!(
+            append_custom_models(&mut registry.entries, &mut registry.profiles, &conflicting,)
+                .is_err()
+        );
+        assert_eq!(registry.entries.len(), original_count);
+        assert_eq!(
+            registry.entries[OPENAI_MODEL].display_name,
+            original_display
+        );
+        assert_eq!(registry.entries[OPENAI_MODEL].provider, Provider::OpenAI);
+        assert_eq!(
+            serde_json::to_value(&registry.profiles[&(Provider::OpenAI, OPENAI_MODEL.to_owned())])?,
+            serde_json::to_value(&original_profile)?,
+        );
+        assert!(
+            !registry
+                .profiles
+                .contains_key(&(Provider::Anthropic, OPENAI_MODEL.to_owned()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extra_custom_catalog_collision_has_the_same_migration_diagnostic() {
+        let conflicting =
+            BTreeMap::from([(OPENAI_MODEL.to_owned(), custom_model(Provider::OpenAI))]);
+        let error = match ModelRegistry::from_config_with_models(
+            &Config::default(),
+            &conflicting,
+            test_catalog(),
+        ) {
+            Ok(_) => panic!("extra custom catalog collision must refuse"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("must be unique"));
+        assert!(message.contains("remove or rename"));
+        assert!(message.contains(&format!("[models.{OPENAI_MODEL}]")));
     }
 
     #[test]

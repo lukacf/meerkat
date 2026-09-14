@@ -6,8 +6,81 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
+
+/// One local channel's received-TEXT counter, independent of durable ledger
+/// sequence numbers. Clones share the same counter; no receipt is a grant.
+#[derive(Clone, Default)]
+pub struct LiveObservationReceiveClock(Arc<AtomicU64>);
+
+#[derive(Clone)]
+pub struct LiveObservationReceiveReceipt {
+    clock: Arc<AtomicU64>,
+    ordinal: NonZeroU64,
+}
+
+impl LiveObservationReceiveClock {
+    pub fn record_received(
+        &self,
+    ) -> Result<LiveObservationReceiveReceipt, LiveObservationValueError> {
+        let previous = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| LiveObservationValueError::ReceiveSequenceExhausted)?;
+        let ordinal = previous
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(LiveObservationValueError::ReceiveSequenceExhausted)?;
+        Ok(LiveObservationReceiveReceipt {
+            clock: Arc::clone(&self.0),
+            ordinal,
+        })
+    }
+
+    pub fn received_ordinal(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl LiveObservationReceiveReceipt {
+    pub fn belongs_to(&self, clock: &LiveObservationReceiveClock) -> bool {
+        Arc::ptr_eq(&self.clock, &clock.0)
+    }
+
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal.get()
+    }
+}
+
+impl std::fmt::Debug for LiveObservationReceiveClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveObservationReceiveClock")
+            .field("received", &self.received_ordinal())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LiveObservationReceiveReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveObservationReceiveReceipt")
+            .field("ordinal", &self.ordinal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for LiveObservationReceiveReceipt {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.clock, &other.clock) && self.ordinal == other.ordinal
+    }
+}
+impl Eq for LiveObservationReceiveReceipt {}
 
 /// A Meerkat-assigned ordinal within one session's committed Live ledger.
 ///
@@ -159,10 +232,47 @@ impl fmt::Debug for LiveTranscriptObservation {
 /// Invalid observation vocabulary; values are omitted from diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LiveObservationValueError {
+    #[error("local Live observation receive sequence is exhausted")]
+    ReceiveSequenceExhausted,
     #[error("a committed live observation sequence must be positive")]
     ZeroSequence,
     #[error("live observation timestamps must be finite")]
     NonFiniteRange,
     #[error("live observation range must be nonnegative and ordered")]
     InvalidRange,
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+
+    #[test]
+    fn receive_receipts_bind_one_shared_clock_without_reconstructible_ordinals()
+    -> Result<(), LiveObservationValueError> {
+        let clock = LiveObservationReceiveClock::default();
+        let shared = clock.clone();
+        let first = clock.record_received()?;
+        let second = shared.record_received()?;
+        assert_eq!(first.ordinal(), 1);
+        assert_eq!(second.ordinal(), 2);
+        assert_eq!(clock.received_ordinal(), 2);
+        assert!(first.belongs_to(&shared));
+        let foreign = LiveObservationReceiveClock::default();
+        let foreign_first = foreign.record_received()?;
+        assert!(!first.belongs_to(&foreign));
+        assert_ne!(first, foreign_first);
+        assert_eq!(first, first.clone());
+        Ok(())
+    }
+
+    #[test]
+    fn receive_clock_exhaustion_never_wraps_or_mints_zero() {
+        let clock = LiveObservationReceiveClock::default();
+        clock.0.store(u64::MAX, Ordering::Release);
+        assert_eq!(
+            clock.record_received().err(),
+            Some(LiveObservationValueError::ReceiveSequenceExhausted)
+        );
+        assert_eq!(clock.received_ordinal(), u64::MAX);
+    }
 }

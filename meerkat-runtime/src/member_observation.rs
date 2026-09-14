@@ -19,6 +19,9 @@
 
 use std::sync::Arc;
 
+use meerkat_contracts::wire::live_observation::{
+    LiveObservationPage, LiveObservationPageQuery, LiveObservationReadFailure,
+};
 use meerkat_contracts::wire::supervisor_bridge::{
     BridgeBoundedResultSpec, BridgeBoundedTurnResult, BridgeDeliveryRejectionCause,
     BridgeHostRuntimeIncarnation, BridgeMemberIncarnation, BridgeTrackedInputCancelOutcome,
@@ -39,6 +42,11 @@ pub const MAX_TURN_OUTCOME_RECORD_BYTES: usize = 64 * 1024;
 /// Typed failure vocabulary for member observation serving.
 #[derive(Debug, thiserror::Error)]
 pub enum MemberObservationError {
+    #[error("Live observation read failed ({failure:?}): {reason}")]
+    LiveHistory {
+        failure: LiveObservationReadFailure,
+        reason: String,
+    },
     /// The addressed host-member residency changed while the observation was
     /// being served. Maps to the wire `StaleFence` authority rejection.
     #[error("stale member observation residency: {reason}")]
@@ -350,6 +358,19 @@ pub trait MemberObservationHost: Send + Sync {
         from_index: Option<u64>,
         limit: Option<u32>,
     ) -> Result<MemberHistoryWindow, MemberObservationError>;
+
+    /// Read retained Live observations independently of ordinary Message
+    /// history, active channels, or activation grants.
+    async fn read_live_observations(
+        &self,
+        _session: &SessionId,
+        _query: LiveObservationPageQuery,
+    ) -> Result<LiveObservationPage, MemberObservationError> {
+        Err(MemberObservationError::LiveHistory {
+            failure: LiveObservationReadFailure::Unsupported,
+            reason: "host does not declare retained Live observation-page support".into(),
+        })
+    }
 
     /// Bounded long-poll over the member's event log (DEC-P6E-4/5).
     async fn poll_events(

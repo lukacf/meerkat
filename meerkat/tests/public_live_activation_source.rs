@@ -73,6 +73,185 @@ fn lookup<'a>(declaration: &'a Declaration, realm: &'a RealmId) -> LiveActivatio
     }
 }
 
+fn profile_lookup<'a>(
+    declaration: &'a Declaration,
+    realm: &'a RealmId,
+) -> meerkat::live_profile_source::LiveProfileDeclarationLookup<'a, ()> {
+    meerkat::live_profile_source::LiveProfileDeclarationLookup {
+        profile_id: &declaration.profile_id,
+        requesting_realm: realm,
+        executor: &declaration.executor,
+        now: chrono::DateTime::UNIX_EPOCH,
+    }
+}
+
+#[tokio::test]
+async fn owning_host_profile_source_rereads_config_and_exact_activation_revision() -> TestResult {
+    use std::sync::Arc;
+
+    use meerkat::live_profile_source::{
+        CurrentLiveProfileDeclaration, LiveProfileDeclarationSource,
+        LiveProfileDeclarationSourceError,
+    };
+    use meerkat_core::live_execution::profile::{LiveProfileDefinition, LiveProfileEntry};
+    use meerkat_store::realm::FilesystemRealmConfigSource;
+
+    let directory = tempfile::tempdir()?;
+    let config_source = Arc::new(FilesystemRealmConfigSource::new(
+        directory.path(),
+        directory.path().join("absent-global.toml"),
+        meerkat_models::canonical(),
+    ));
+    let owner = RealmId::parse("owner")?;
+    let child = RealmId::parse("child")?;
+    let owner_path = config_source.config_doc_path(&owner);
+    let child_path = config_source.config_doc_path(&child);
+    tokio::fs::create_dir_all(owner_path.parent().ok_or("owner parent")?).await?;
+    tokio::fs::create_dir_all(child_path.parent().ok_or("child parent")?).await?;
+    let mut owner_config = Config::default();
+    owner_config
+        .realm
+        .insert("owner".into(), Default::default());
+    let mut child_config = Config::default();
+    child_config.realm.insert(
+        "child".into(),
+        serde_json::from_value(json!({"parent": "owner"}))?,
+    );
+    tokio::fs::write(&owner_path, toml::to_string(&owner_config)?).await?;
+    tokio::fs::write(&child_path, toml::to_string(&child_config)?).await?;
+    let owner_activation = LiveActivationDocumentLocator::beside_config_document(&owner_path)?;
+    let source = LiveProfileDeclarationSource::new(
+        meerkat_core::EffectiveConfigReader::new(config_source),
+        FileLiveExecutionGrantSource::new(BTreeMap::from([
+            (owner.clone(), owner_activation.clone()),
+            (
+                child.clone(),
+                LiveActivationDocumentLocator::beside_config_document(&child_path)?,
+            ),
+        ])),
+    );
+    let mut declaration = declaration()?;
+    assert!(matches!(
+        source.load(profile_lookup(&declaration, &child)).await?,
+        CurrentLiveProfileDeclaration::Missing
+    ));
+    let mut definition: LiveProfileDefinition = serde_json::from_value(json!({
+        "voice_identity": {
+            "provider": "openai", "model": "gpt-live-1",
+            "auth_binding": {"realm": "owner", "binding": "voice"}
+        },
+        "execution": {"mode": "client_context", "request_policy": "snapshot_at_delegation"},
+        "instructions": "first owner guidance",
+        "context_projection": "reject"
+    }))?;
+    owner_config.live.profiles.insert(
+        declaration.profile_id.clone(),
+        LiveProfileEntry::Configured(Box::new(definition.clone())),
+    );
+    tokio::fs::write(&owner_path, toml::to_string(&owner_config)?).await?;
+    assert!(matches!(
+        source.load(profile_lookup(&declaration, &child)).await?,
+        CurrentLiveProfileDeclaration::Configured(snapshot)
+            if matches!(snapshot.activation(), LiveActivationSelection::Disabled)
+    ));
+    declaration.profile_revision = LiveProfileRevision::of(&definition)?;
+    let docs = documents(declaration.clone())?;
+    tokio::fs::write(
+        owner_activation.path(),
+        toml::to_string(docs.get(&owner).ok_or("owner document")?)?,
+    )
+    .await?;
+    let CurrentLiveProfileDeclaration::Configured(first) =
+        source.load(profile_lookup(&declaration, &child)).await?
+    else {
+        return Err("expected current owner profile".into());
+    };
+    assert_eq!(first.definition(), &definition);
+    assert_eq!(first.profile_id(), &declaration.profile_id);
+    assert_eq!(first.requesting_realm(), &child);
+    assert_eq!(first.revision(), declaration.profile_revision);
+    assert!(
+        matches!(first.activation(), LiveActivationSelection::Selected { declaration: selected, .. }
+        if **selected == declaration)
+    );
+    let observed = source.observe(profile_lookup(&declaration, &child)).await?;
+    let child_activation = LiveActivationDocumentLocator::beside_config_document(&child_path)?;
+    tokio::fs::write(child_activation.path(), "").await?;
+    let present_empty = source.observe(profile_lookup(&declaration, &child)).await?;
+    assert_ne!(
+        observed.digest(),
+        present_empty.digest(),
+        "absent and empty activation documents are different observations"
+    );
+    assert!(
+        matches!(present_empty.declaration(), CurrentLiveProfileDeclaration::Configured(snapshot)
+        if snapshot.definition() == first.definition())
+    );
+
+    definition.instructions = Some("second owner guidance".into());
+    owner_config.live.profiles.insert(
+        declaration.profile_id.clone(),
+        LiveProfileEntry::Configured(Box::new(definition.clone())),
+    );
+    tokio::fs::write(&owner_path, toml::to_string(&owner_config)?).await?;
+    assert!(matches!(
+        source.load(profile_lookup(&declaration, &child)).await,
+        Err(LiveProfileDeclarationSourceError::Activation(
+            LiveActivationSourceError::ProfileRevisionMismatch
+        ))
+    ));
+    declaration.profile_revision = LiveProfileRevision::of(&definition)?;
+    let docs = documents(declaration.clone())?;
+    tokio::fs::write(
+        owner_activation.path(),
+        toml::to_string(docs.get(&owner).ok_or("owner document")?)?,
+    )
+    .await?;
+    let CurrentLiveProfileDeclaration::Configured(current) =
+        source.load(profile_lookup(&declaration, &child)).await?
+    else {
+        return Err("expected changed owner profile".into());
+    };
+    assert_eq!(current.definition(), &definition);
+    assert_ne!(
+        first.definition().instructions,
+        current.definition().instructions
+    );
+    assert!(
+        matches!(current.activation(), LiveActivationSelection::Selected { declaration: selected, .. }
+        if selected.profile_revision == declaration.profile_revision)
+    );
+
+    child_config
+        .live
+        .profiles
+        .insert(declaration.profile_id.clone(), LiveProfileEntry::Disabled);
+    tokio::fs::write(&child_path, toml::to_string(&child_config)?).await?;
+    assert!(matches!(
+        source.load(profile_lookup(&declaration, &child)).await?,
+        CurrentLiveProfileDeclaration::Disabled
+    ));
+    tokio::fs::write(owner_activation.path(), "private = \"SENTINEL\"\n[").await?;
+    let error = source
+        .observe(profile_lookup(&declaration, &child))
+        .await
+        .err()
+        .ok_or("malformed activation accepted")?;
+    assert!(matches!(
+        error,
+        LiveProfileDeclarationSourceError::Activation(
+            LiveActivationSourceError::InvalidDocument { .. }
+        )
+    ));
+    assert!(!format!("{error:?} {error}").contains("SENTINEL"));
+    tokio::fs::write(&child_path, "[invalid configuration").await?;
+    assert!(matches!(
+        source.load(profile_lookup(&declaration, &child)).await,
+        Err(LiveProfileDeclarationSourceError::Config(_))
+    ));
+    Ok(())
+}
+
 #[test]
 fn absent_disabled_inherit_and_set_preserve_whole_entry_owner() -> TestResult {
     let declaration = declaration()?;

@@ -11,6 +11,7 @@ from .generated.types import (
     MobBindHostResult,
     MobHostStatus,
     MobMemberHistoryResult,
+    MobMemberLiveObservationsResult,
     MobAdoptMemberIdentityDeclarationParams,
     MobRevokeHostResult,
     MobRouteInstallsResult,
@@ -490,6 +491,19 @@ class Mob:
         remote; typed placement + provenance on the envelope)."""
         return await self._client.mob_member_history(
             self.id, agent_identity, from_index=from_index, limit=limit
+        )
+
+    async def member_live_observations(
+        self,
+        agent_identity: str,
+        *,
+        channel_id: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> MobMemberLiveObservationsResult:
+        """Read retained Live records through this mob's ReadHistory grant."""
+        return await self._client.mob_member_live_observations(
+            self.id, agent_identity, channel_id=channel_id, cursor=cursor, limit=limit
         )
 
     async def hosts(self) -> list[MobHostStatus]:

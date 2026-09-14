@@ -291,6 +291,7 @@ impl OpenAiCompatibleClient {
     /// `openai_compatible` transport path). It is not a supported host API.
     #[doc(hidden)]
     pub fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        request.validate_native_tool_policy()?;
         let tag = crate::client::openai_tag(request);
         let author_explicit_breakpoints = tag.is_some_and(|tag| {
             tag.prompt_cache_enabled != Some(false)
@@ -414,6 +415,11 @@ impl OpenAiCompatibleClient {
             }
         }
 
+        crate::tool_schema::enforce_native_tool_policy(
+            request,
+            &mut body,
+            crate::tool_schema::FunctionToolWireShape::ChatCompletions,
+        )?;
         Ok(body)
     }
 
@@ -623,6 +629,53 @@ impl OpenAiCompatibleClient {
         .map(|(request, _)| request)
     }
 
+    async fn send_chat_completions_request(
+        &self,
+        request: &LlmRequest,
+        body: &Value,
+        url: &str,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> Result<
+        (
+            reqwest::Response,
+            meerkat_core::HttpAuthorizationReceipt,
+            Option<meerkat_core::execution_scope::ScopedModelEffectCustody>,
+        ),
+        LlmError,
+    > {
+        let (builder, receipt) = self
+            .apply_dynamic_auth_with_receipt(
+                self.http.post(url),
+                "POST",
+                url,
+                "application/json",
+                meerkat_core::HttpAuthorizationContent {
+                    has_images: request.has_images(),
+                },
+            )
+            .await?;
+        let (response, custody) = http::send_model_request(
+            scope,
+            http::ModelRequestSendEvidence {
+                provider: self.provider,
+                encoding: meerkat_core::LoweredRequestEncoding::OpenAiChatCompletionsJson,
+                model: &request.model,
+                route: url,
+                body,
+                native_tools: request.provider_native_tools,
+            },
+            async {
+                builder
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(Self::map_send_error)
+            },
+        )
+        .await?;
+        Ok((response, receipt, custody))
+    }
+
     fn parse_chat_completions_line(line: &str) -> Result<ChatCompletionsLine, LlmError> {
         if let Some(data) = line
             .strip_prefix("data: ")
@@ -685,6 +738,16 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiCompatibleClient {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        meerkat_core::execution_scope::ScopedModelEffectSupport::PhysicalDispatch
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        meerkat_core::NativeToolPolicySupport::RequestScoped
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         let mode = match self.mode {
             OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
@@ -745,6 +808,14 @@ impl LlmClient for OpenAiCompatibleClient {
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_with_execution_context(request, None)
+    }
+
+    fn stream_with_execution_context<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        mut scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> LlmStream<'a> {
         match self.mode {
             OpenAiCompatibleMode::Responses => {
                 let Some(delegate) = self.responses_delegate.as_ref() else {
@@ -759,7 +830,9 @@ impl LlmClient for OpenAiCompatibleClient {
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
                     let mut translated = self.request_with_remote_model(request);
                     translated.messages = self.project_replay_messages(&request.messages)?;
-                    let mut stream = delegate.stream(&translated);
+                    let mut stream = delegate.stream_with_dispatch_identity(
+                        &translated, scope, self.provider, &request.model,
+                    );
                     while let Some(event) = stream.next().await {
                         match event? {
                             LlmEvent::UsageUpdate { usage } => {
@@ -781,31 +854,25 @@ impl LlmClient for OpenAiCompatibleClient {
                 streaming::ensure_terminal_done(inner)
             }
             OpenAiCompatibleMode::ChatCompletions => {
+                let feedback = streaming::ScopedModelStreamFeedback::new(scope.as_ref());
+                let response_feedback = feedback.clone();
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
                     let mut projected_request = request.clone();
                     projected_request.messages = self.project_replay_messages(&request.messages)?;
                     let body = self.build_chat_completions_body(&projected_request)?;
-                    let content = meerkat_core::HttpAuthorizationContent {
-                        has_images: projected_request.has_images(),
-                    };
                     let url = format!("{}/chat/completions", self.base_url);
-                    let request_builder = self.http.post(&url);
-                    let (request_builder, receipt) = self
-                        .apply_dynamic_auth_with_receipt(
-                            request_builder,
-                            "POST",
-                            &url,
-                            "application/json",
-                            content,
-                        )
+                    let (mut response, receipt, mut custody) = self
+                        .send_chat_completions_request(&projected_request, &body, &url, scope.clone())
                         .await?;
-                    let mut response = request_builder
-                        .json(&body)
-                        .send()
-                        .await
-                        .map_err(Self::map_send_error)?;
 
                     let mut status_code = response.status().as_u16();
+                    if !(200..=299).contains(&status_code)
+                        && let Some(claimed) = custody.take()
+                    {
+                        scope = Some(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                            message: format!("chat-completions rejection feedback failed: {error}"),
+                        })?);
+                    }
                     if !(200..=299).contains(&status_code)
                         && let Some(authorizer) = &self.authorizer
                         && authorizer
@@ -823,22 +890,20 @@ impl LlmClient for OpenAiCompatibleClient {
                             })?
                             == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
                     {
-                        let request_builder = self.http.post(&url);
-                        let (request_builder, retry_receipt) = self
-                            .apply_dynamic_auth_with_receipt(
-                                request_builder,
-                                "POST",
-                                &url,
-                                "application/json",
-                                content,
-                            )
+                        let retried = self
+                            .send_chat_completions_request(&projected_request, &body, &url, scope)
                             .await?;
-                        response = request_builder
-                            .json(&body)
-                            .send()
-                            .await
-                            .map_err(Self::map_send_error)?;
+                        response = retried.0;
+                        let retry_receipt = retried.1;
+                        custody = retried.2;
                         status_code = response.status().as_u16();
+                        if !(200..=299).contains(&status_code)
+                            && let Some(claimed) = custody.take()
+                        {
+                            drop(claimed.settle_rejected().await.map_err(|error| LlmError::Unknown {
+                                message: format!("chat-completions retry rejection feedback failed: {error}"),
+                            })?);
+                        }
                         authorizer
                             .observe_response_with_receipt(
                                 retry_receipt,
@@ -854,10 +919,13 @@ impl LlmClient for OpenAiCompatibleClient {
                             })?;
                     }
                     let stream_result = if (200..=299).contains(&status_code) {
+                        response_feedback.install(custody)?;
                         Ok(response.bytes_stream())
                     } else {
                         let headers = response.headers().clone();
-                        let text = response.text().await.unwrap_or_default();
+                        let text = response.text().await.map_err(|error| LlmError::StreamParseError {
+                            message: format!("cannot read chat-completions rejection body: {error}"),
+                        })?;
                         Err(LlmError::from_http_response(status_code, text, &headers))
                     };
                     let mut stream = stream_result?;
@@ -1197,7 +1265,7 @@ impl LlmClient for OpenAiCompatibleClient {
                     };
                 });
 
-                streaming::ensure_terminal_done(inner)
+                streaming::ensure_terminal_done(feedback.wrap(inner))
             }
         }
     }

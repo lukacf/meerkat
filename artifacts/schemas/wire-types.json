@@ -9389,7 +9389,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -9603,7 +9603,7 @@
       "current_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
         "default": 6,
-        "description": "Protocol version implemented by the responding member runtime."
+        "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
       },
       "default_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
@@ -10728,6 +10728,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -10796,6 +10807,50 @@
           "steer"
         ],
         "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveObservationCursor": {
+        "description": "Opaque query token, never a read authorization or bearer credential.",
+        "type": "string"
+      },
+      "LiveObservationPageQuery": {
+        "additionalProperties": false,
+        "description": "Bounded query content. Owner identity comes from the authorized route,\nnever from this query or its cursor.",
+        "properties": {
+          "channel_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveChannelId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 64,
+            "format": "uint16",
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
       },
       "LiveOpenTransport": {
         "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
@@ -11330,6 +11385,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -13792,6 +13856,41 @@
           "epoch",
           "protocol_version",
           "expected_member"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "const": "read_member_live_observations",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "$ref": "#/$defs/BridgeMemberIncarnation"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "query": {
+            "$ref": "#/$defs/LiveObservationPageQuery"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "expected_member",
+          "query"
         ],
         "type": "object"
       },
@@ -16627,7 +16726,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -16971,7 +17070,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -17242,7 +17341,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -18467,7 +18566,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -19136,6 +19235,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -19361,6 +19471,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -27235,6 +27354,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -27356,6 +27508,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -27386,6 +27642,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -28096,7 +28356,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -28112,6 +28372,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -31086,6 +31368,17 @@
         ],
         "type": "string"
       },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
+        ],
+        "type": "string"
+      },
       "MemberBuildRejection": {
         "description": "Typed \"host cannot build the member\" taxonomy (§14.4). Closed — every\nowning-host build failure maps onto one of these, never a generic\nfailure. Externally tagged (like the parent cause enum) so the\n`kind`-named detail fields don't collide with a tag key.",
         "oneOf": [
@@ -31440,6 +31733,26 @@
         },
         "required": [
           "history_row_too_large"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "live_observation_read": {
+            "properties": {
+              "failure": {
+                "$ref": "#/$defs/LiveObservationReadFailure"
+              }
+            },
+            "required": [
+              "failure"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "live_observation_read"
         ],
         "type": "object"
       },
@@ -33853,7 +34166,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -34886,6 +35199,26 @@
             },
             "required": [
               "history_row_too_large"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/$defs/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
             ],
             "type": "object"
           },
@@ -36282,6 +36615,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "DiscardedCacheBreakpoint": {
         "additionalProperties": false,
         "description": "One provider-authored cache proof that could not be retained.",
@@ -36878,6 +37244,10 @@
           }
         ]
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -37010,6 +37380,17 @@
           }
         ]
       },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
+        ],
+        "type": "string"
+      },
       "LiveObservationRecord": {
         "additionalProperties": false,
         "properties": {
@@ -37094,6 +37475,10 @@
         ],
         "type": "object"
       },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
       "LiveRefreshStatus": {
         "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps\nSDK codegen on the simple-struct path.",
         "oneOf": [
@@ -37103,6 +37488,98 @@
             "type": "string"
           }
         ]
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
       },
       "LiveTranscriptDirection": {
         "description": "Direction of observed speech, not a completed transcript role.",
@@ -37778,6 +38255,10 @@
           "medium",
           "high"
         ],
+        "type": "string"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
         "type": "string"
       },
       "OutputSchema": {
@@ -40036,7 +40517,7 @@
         ]
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -40052,6 +40533,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -41043,7 +41546,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -47162,7 +47665,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -47866,6 +48369,41 @@
               "epoch",
               "protocol_version",
               "expected_member"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "const": "read_member_live_observations",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "query": {
+                "$ref": "#/$defs/LiveObservationPageQuery"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "query"
             ],
             "type": "object"
           },
@@ -49979,6 +50517,26 @@
             },
             "required": [
               "history_row_too_large"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/$defs/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
             ],
             "type": "object"
           },
@@ -52394,6 +52952,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -52458,6 +53027,39 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
         "type": "object"
       },
       "DiscardedCacheBreakpoint": {
@@ -53109,6 +53711,10 @@
           }
         ]
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -53241,6 +53847,53 @@
           }
         ]
       },
+      "LiveObservationPageQuery": {
+        "additionalProperties": false,
+        "description": "Bounded query content. Owner identity comes from the authorized route,\nnever from this query or its cursor.",
+        "properties": {
+          "channel_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveChannelId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 64,
+            "format": "uint16",
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
+        ],
+        "type": "string"
+      },
       "LiveObservationRecord": {
         "additionalProperties": false,
         "properties": {
@@ -53333,6 +53986,10 @@
         ],
         "type": "string"
       },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
       "LiveRefreshStatus": {
         "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps\nSDK codegen on the simple-struct path.",
         "oneOf": [
@@ -53342,6 +53999,98 @@
             "type": "string"
           }
         ]
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
       },
       "LiveTranscriptDirection": {
         "description": "Direction of observed speech, not a completed transcript role.",
@@ -54421,6 +55170,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -57470,7 +58228,7 @@
         ]
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -57486,6 +58244,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -58695,7 +59475,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -61422,6 +62202,41 @@
           },
           {
             "additionalProperties": false,
+            "properties": {
+              "command": {
+                "const": "read_member_live_observations",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "query": {
+                "$ref": "#/$defs/LiveObservationPageQuery"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "query"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Long-poll a remote member's durable event stream (V4).\n\n`wait_ms` must stay bounded well under the bridge transport budget so a\nlong-poll never masquerades as a dead peer.",
             "properties": {
               "command": {
@@ -63237,6 +64052,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -63305,6 +64131,50 @@
           "steer"
         ],
         "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveObservationCursor": {
+        "description": "Opaque query token, never a read authorization or bearer credential.",
+        "type": "string"
+      },
+      "LiveObservationPageQuery": {
+        "additionalProperties": false,
+        "description": "Bounded query content. Owner identity comes from the authorized route,\nnever from this query or its cursor.",
+        "properties": {
+          "channel_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveChannelId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 64,
+            "format": "uint16",
+            "maximum": 256,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
       },
       "LiveOpenTransport": {
         "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
@@ -63839,6 +64709,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -67639,7 +68518,7 @@
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
             "default": 6,
-            "description": "Protocol version implemented by the responding member runtime."
+            "description": "Protocol version implemented by the responding member runtime.\nLegacy omission never declares support for public Live."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
@@ -68672,6 +69551,26 @@
             },
             "required": [
               "history_row_too_large"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/$defs/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
             ],
             "type": "object"
           },
@@ -70893,6 +71792,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "DiscardedCacheBreakpoint": {
         "additionalProperties": false,
         "description": "One provider-authored cache proof that could not be retained.",
@@ -71489,6 +72421,10 @@
           }
         ]
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -71621,6 +72557,17 @@
           }
         ]
       },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
+        ],
+        "type": "string"
+      },
       "LiveObservationRecord": {
         "additionalProperties": false,
         "properties": {
@@ -71705,6 +72652,10 @@
         ],
         "type": "object"
       },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
       "LiveRefreshStatus": {
         "description": "Status of a `live/refresh` request relative to the adapter pump.\n\nR4-5 (P3): the refresh path is asynchronous — host queue acceptance happens\nbefore the adapter pump has applied the resulting `session.update`. The\nrealtime stream is the source of truth for the actual refresh outcome\n(failures surface as `LiveAdapterObservation::Error`).\n\nToday generated runtime authority emits only `Queued`. The enum is\n`#[non_exhaustive]` so a future generated contract can add a typed status\nwithout changing the object shape. SDK consumers must route on the string\nvalue and fail closed for values outside the generated contract they were\nbuilt with.\n\nSerializes as a plain string (no envelope) so [`LiveRefreshResult`] keeps\nSDK codegen on the simple-struct path.",
         "oneOf": [
@@ -71714,6 +72665,98 @@
             "type": "string"
           }
         ]
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
       },
       "LiveTranscriptDirection": {
         "description": "Direction of observed speech, not a completed transcript role.",
@@ -72389,6 +73432,10 @@
           "medium",
           "high"
         ],
+        "type": "string"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
         "type": "string"
       },
       "OutputSchema": {
@@ -74647,7 +75694,7 @@
         ]
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -74663,6 +75710,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -75654,7 +76723,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -92252,7 +93321,7 @@
             "type": "object"
           },
           {
-            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
             "properties": {
               "debug": {
                 "type": "string"
@@ -92463,9 +93532,37 @@
   },
   "LiveSendInputErrorData": {
     "$defs": {
+      "ContinuousLiveInputError": {
+        "enum": [
+          "unsupported_input_kind",
+          "unsupported_frontend_modality",
+          "unsupported_capability",
+          "requires_owner_control",
+          "audio_uses_another_transport",
+          "invalid_audio_format",
+          "invalid_audio_frame"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterErrorCode": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterErrorCode`].\n\nInternally-tagged on `code` (snake_case). SDK consumers route on `code`\nto distinguish payload-less variants from typed payload variants\n(`config_rejected { reason }`, `other { raw }`). FIX-SDK-OBS: makes the\nR5-9 `CommandRejected` observation's typed code visible at the SDK\nboundary instead of a free-form blob.\n\nR5-2 (P2 dogma): `config_rejected.reason` is now a typed\n[`WireLiveConfigRejectionReason`] mirror so SDK consumers route on the\nvariant rather than parsing English from the previous free-form\n`String`.",
         "oneOf": [
+          {
+            "properties": {
+              "code": {
+                "const": "continuous_input_rejected",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/ContinuousLiveInputError"
+              }
+            },
+            "required": [
+              "code",
+              "reason"
+            ],
+            "type": "object"
+          },
           {
             "properties": {
               "code": {
@@ -94913,6 +96010,26 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/$defs/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
+            ],
+            "type": "object"
+          },
+          {
             "const": "unavailable",
             "description": "The addressed member/host is transiently unable to serve the\ncommand (observation degrades typed, never quiet).",
             "type": "string"
@@ -95263,6 +96380,17 @@
           "binding_invalid",
           "provider_mismatch",
           "realm_chain"
+        ],
+        "type": "string"
+      },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
         ],
         "type": "string"
       },
@@ -95700,6 +96828,26 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
+            "properties": {
+              "live_observation_read": {
+                "properties": {
+                  "failure": {
+                    "$ref": "#/$defs/LiveObservationReadFailure"
+                  }
+                },
+                "required": [
+                  "failure"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "live_observation_read"
+            ],
+            "type": "object"
+          },
+          {
             "const": "unavailable",
             "description": "The addressed member/host is transiently unable to serve the\ncommand (observation degrades typed, never quiet).",
             "type": "string"
@@ -96050,6 +97198,17 @@
           "binding_invalid",
           "provider_mismatch",
           "realm_chain"
+        ],
+        "type": "string"
+      },
+      "LiveObservationReadFailure": {
+        "enum": [
+          "unsupported",
+          "unavailable",
+          "invalid_query",
+          "cursor_mismatch",
+          "cursor_expired",
+          "integrity"
         ],
         "type": "string"
       },
@@ -99876,6 +101035,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -101022,6 +102192,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -104222,6 +105401,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -104343,6 +105555,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -104373,6 +105689,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -105083,7 +106403,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -105099,6 +106419,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -106144,6 +107486,315 @@
       "provenance"
     ],
     "title": "MobMemberHistoryResult",
+    "type": "object"
+  },
+  "MobMemberLiveObservationsResult": {
+    "$defs": {
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveObservationCoverage": {
+        "enum": [
+          "complete_accepted_prefix",
+          "known_local_gap",
+          "unknown_extent_crash_discontinuity"
+        ],
+        "type": "string"
+      },
+      "LiveObservationCursor": {
+        "description": "Opaque query token, never a read authorization or bearer credential.",
+        "type": "string"
+      },
+      "LiveObservationEncodingProfile": {
+        "enum": [
+          "v1"
+        ],
+        "type": "string"
+      },
+      "LiveObservationFilter": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_channels",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel_id": {
+                "$ref": "#/$defs/LiveChannelId"
+              },
+              "kind": {
+                "const": "channel",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "channel_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveObservationOwner": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveObservationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "after_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encoding_profile": {
+            "$ref": "#/$defs/LiveObservationEncodingProfile"
+          },
+          "filter": {
+            "$ref": "#/$defs/LiveObservationFilter"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveObservationCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owner": {
+            "$ref": "#/$defs/LiveObservationOwner"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/$defs/LiveObservationRecord"
+            },
+            "type": "array"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/LiveObservationSnapshot"
+          }
+        },
+        "required": [
+          "encoding_profile",
+          "owner",
+          "filter",
+          "snapshot",
+          "after_sequence",
+          "records",
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "LiveObservationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "observation": {
+            "$ref": "#/$defs/LiveTranscriptObservation"
+          },
+          "sequence": {
+            "$ref": "#/$defs/LiveObservationSeq"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel_id",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "LiveObservationSeq": {
+        "description": "A Meerkat-assigned ordinal within one session's committed Live ledger.\n\nThis is never a provider event, response, item, or turn identifier.",
+        "format": "uint64",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "LiveObservationSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "$ref": "#/$defs/LiveObservationCoverage"
+          },
+          "end_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prefix_digest": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation",
+          "revision",
+          "end_sequence",
+          "prefix_digest",
+          "coverage"
+        ],
+        "type": "object"
+      },
+      "LiveTranscriptDirection": {
+        "description": "Direction of observed speech, not a completed transcript role.",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "type": "string"
+      },
+      "LiveTranscriptObservation": {
+        "additionalProperties": false,
+        "description": "Exact observed transcript text before canonical sequence assignment.\n\nWhitespace and empty deltas are content facts. Request construction and\npermission are separate owners and must not turn this value into a final\nuser transcript or an executable task by itself.",
+        "properties": {
+          "direction": {
+            "$ref": "#/$defs/LiveTranscriptDirection"
+          },
+          "range": {
+            "$ref": "#/$defs/LiveTranscriptRange"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction",
+          "range",
+          "text"
+        ],
+        "type": "object"
+      },
+      "LiveTranscriptRange": {
+        "additionalProperties": false,
+        "description": "Finite session-relative half-open interval in milliseconds.\n\nFractional values, overlaps with other observations, and zero-width\nintervals are retained. An interval proves neither a turn boundary nor\nplayback completion.",
+        "properties": {
+          "end_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "start_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "start_ms",
+          "end_ms"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WireHostRef": {
+        "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
+        "type": "string"
+      },
+      "WireProjectionProvenance": {
+        "description": "Who attests a remotely-served projection (§7/§20): `HostClaimed` facts\nare only what the owning host reports; `ControllingHostVerified` facts\nwere checked against controlling-machine records.",
+        "enum": [
+          "host_claimed",
+          "controlling_host_verified"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "page": {
+        "$ref": "#/$defs/LiveObservationPage"
+      },
+      "placement": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireHostRef"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "provenance": {
+        "$ref": "#/$defs/WireProjectionProvenance"
+      }
+    },
+    "required": [
+      "page",
+      "provenance"
+    ],
+    "title": "MobMemberLiveObservationsResult",
     "type": "object"
   },
   "MobMemberSendParams": {
@@ -113209,6 +114860,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -113250,6 +114912,15 @@
           "provider"
         ],
         "type": "object"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
+        ],
+        "type": "string"
       },
       "PortableSkillSource": {
         "description": "Skill source that can travel: inline content only. A filesystem `Path`\nvariant is structurally unrepresentable — paths are meaningless on the\nmember host.",
@@ -113597,6 +115268,17 @@
               "null"
             ]
           },
+          "interaction_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omission preserves text execution; continuous models require a Live profile."
+          },
           "max_input_tokens": {
             "description": "Separate input-token ceiling, independent of the shared context window.",
             "format": "uint32",
@@ -113780,6 +115462,15 @@
           "provider_unavailable",
           "transport",
           "empty_output"
+        ],
+        "type": "string"
+      },
+      "ModelInteractionKind": {
+        "description": "Catalog-owned interaction contract, independent of a provider's model name.",
+        "enum": [
+          "text",
+          "turn_based_realtime",
+          "continuous_live"
         ],
         "type": "string"
       },
@@ -128671,6 +130362,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -128705,6 +130429,110 @@
         ],
         "type": "object"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -128735,6 +130563,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -128874,6 +130706,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -129437,7 +131273,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -129453,6 +131289,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -139591,6 +141449,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -139712,6 +141603,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -139742,6 +141737,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -140452,7 +142451,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -140468,6 +142467,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -143648,6 +145669,18 @@
   },
   "WireLiveAdapterErrorCode": {
     "$defs": {
+      "ContinuousLiveInputError": {
+        "enum": [
+          "unsupported_input_kind",
+          "unsupported_frontend_modality",
+          "unsupported_capability",
+          "requires_owner_control",
+          "audio_uses_another_transport",
+          "invalid_audio_format",
+          "invalid_audio_frame"
+        ],
+        "type": "string"
+      },
       "WireLiveConfigRejectionReason": {
         "oneOf": [
           {
@@ -144114,6 +146147,22 @@
       {
         "properties": {
           "code": {
+            "const": "continuous_input_rejected",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/ContinuousLiveInputError"
+          }
+        },
+        "required": [
+          "code",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "code": {
             "const": "connection_failed",
             "type": "string"
           }
@@ -144225,9 +146274,101 @@
   },
   "WireLiveAdapterObservation": {
     "$defs": {
+      "ContinuousLiveInputError": {
+        "enum": [
+          "unsupported_input_kind",
+          "unsupported_frontend_modality",
+          "unsupported_capability",
+          "requires_owner_control",
+          "audio_uses_another_transport",
+          "invalid_audio_format",
+          "invalid_audio_frame"
+        ],
+        "type": "string"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveObservationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "observation": {
+            "$ref": "#/$defs/LiveTranscriptObservation"
+          },
+          "sequence": {
+            "$ref": "#/$defs/LiveObservationSeq"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel_id",
+          "observation"
+        ],
+        "type": "object"
+      },
+      "LiveObservationSeq": {
+        "description": "A Meerkat-assigned ordinal within one session's committed Live ledger.\n\nThis is never a provider event, response, item, or turn identifier.",
+        "format": "uint64",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "LiveTranscriptDirection": {
+        "description": "Direction of observed speech, not a completed transcript role.",
+        "enum": [
+          "input",
+          "output"
+        ],
+        "type": "string"
+      },
+      "LiveTranscriptObservation": {
+        "additionalProperties": false,
+        "description": "Exact observed transcript text before canonical sequence assignment.\n\nWhitespace and empty deltas are content facts. Request construction and\npermission are separate owners and must not turn this value into a final\nuser transcript or an executable task by itself.",
+        "properties": {
+          "direction": {
+            "$ref": "#/$defs/LiveTranscriptDirection"
+          },
+          "range": {
+            "$ref": "#/$defs/LiveTranscriptRange"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction",
+          "range",
+          "text"
+        ],
+        "type": "object"
+      },
+      "LiveTranscriptRange": {
+        "additionalProperties": false,
+        "description": "Finite session-relative half-open interval in milliseconds.\n\nFractional values, overlaps with other observations, and zero-width\nintervals are retained. An interval proves neither a turn boundary nor\nplayback completion.",
+        "properties": {
+          "end_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "start_ms": {
+            "format": "double",
+            "minimum": 0.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "start_ms",
+          "end_ms"
+        ],
+        "type": "object"
       },
       "PresentedTokenConvention": {
         "description": "Provider-native convention used to normalize tokens presented to a model.",
@@ -144685,6 +146826,22 @@
       "WireLiveAdapterErrorCode": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterErrorCode`].\n\nInternally-tagged on `code` (snake_case). SDK consumers route on `code`\nto distinguish payload-less variants from typed payload variants\n(`config_rejected { reason }`, `other { raw }`). FIX-SDK-OBS: makes the\nR5-9 `CommandRejected` observation's typed code visible at the SDK\nboundary instead of a free-form blob.\n\nR5-2 (P2 dogma): `config_rejected.reason` is now a typed\n[`WireLiveConfigRejectionReason`] mirror so SDK consumers route on the\nvariant rather than parsing English from the previous free-form\n`String`.",
         "oneOf": [
+          {
+            "properties": {
+              "code": {
+                "const": "continuous_input_rejected",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/ContinuousLiveInputError"
+              }
+            },
+            "required": [
+              "code",
+              "reason"
+            ],
+            "type": "object"
+          },
           {
             "properties": {
               "code": {
@@ -145533,6 +147690,22 @@
       {
         "properties": {
           "observation": {
+            "const": "live_observation_committed",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/$defs/LiveObservationRecord"
+          }
+        },
+        "required": [
+          "observation",
+          "record"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "observation": {
             "const": "ready",
             "type": "string"
           }
@@ -146317,7 +148490,7 @@
         "type": "object"
       },
       {
-        "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+        "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveContinuityMode`] enum is `#[non_exhaustive]`. When a\nfuture variant lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing into `Fresh` — a \"plausible lie\" that would tell\nSDK consumers a brand-new live channel exists when in reality the\nserver emitted a continuity mode the client does not yet\nunderstand. SDK consumers route on the `mode: \"unknown\"`\ndiscriminator and treat it as unrecognized — never as `Fresh`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `TryFrom` impl. Internal or unmapped core facts are rejected,\nnever formatted into this retained wire shape.**",
         "properties": {
           "debug": {
             "type": "string"
@@ -146924,6 +149097,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -147045,6 +149251,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -147075,6 +149385,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -147785,7 +150099,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -147801,6 +150115,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -153639,6 +155975,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -153760,6 +156129,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -153790,6 +156263,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -154500,7 +156977,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -154516,6 +156993,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -155882,6 +158381,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -156003,6 +158535,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -156033,6 +158669,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -156743,7 +159383,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -156759,6 +159399,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -158585,6 +161247,39 @@
         },
         "type": "object"
       },
+      "DelegatedRequestProvenance": {
+        "additionalProperties": false,
+        "description": "Non-human transcript provenance. No grant, tool policy or final-speech\nassertion can be serialized into this content descriptor.",
+        "properties": {
+          "evidence_kind": {
+            "$ref": "#/$defs/LiveRequestEvidenceKind"
+          },
+          "request_digest": {
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          },
+          "request_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceKey"
+          }
+        },
+        "required": [
+          "request_id",
+          "source",
+          "evidence_kind",
+          "request_digest"
+        ],
+        "type": "object"
+      },
       "ExternalToolDeltaPhase": {
         "description": "Canonical lifecycle phase for external-tool boundary deltas.",
         "enum": [
@@ -158706,6 +161401,110 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "LiveApplicationRequestId": {
+        "description": "Application-selected identity for an explicit snapshot resubmission.\n\nA new UUID is a new source, not proof that its content may execute.",
+        "type": "string"
+      },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveProviderReference": {
+        "description": "Opaque provider equality material. It is not a Meerkat control handle.",
+        "type": "string"
+      },
+      "LiveRequestEvidenceKind": {
+        "description": "Which content evidence a trusted grant may admit. Neither variant is\nprovider-final user speech or an effect permission by itself.",
+        "enum": [
+          "application_snapshot",
+          "structured_function_request"
+        ],
+        "type": "string"
+      },
+      "LiveSourceIdentity": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "client_delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "call": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "delegation": {
+                "$ref": "#/$defs/LiveProviderReference"
+              },
+              "kind": {
+                "const": "function_call",
+                "type": "string"
+              },
+              "response": {
+                "$ref": "#/$defs/LiveProviderReference"
+              }
+            },
+            "required": [
+              "kind",
+              "delegation",
+              "response",
+              "call"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "application_request",
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "#/$defs/LiveApplicationRequestId"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "LiveSourceKey": {
+        "additionalProperties": false,
+        "description": "Exact durable lookup key, independent of when admission is observed.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "source": {
+            "$ref": "#/$defs/LiveSourceIdentity"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "source"
+        ],
+        "type": "object"
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -158736,6 +161535,10 @@
           "target_model"
         ],
         "type": "object"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
       },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
@@ -159446,7 +162249,7 @@
         "type": "string"
       },
       "TranscriptUserRole": {
-        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\nordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
         "oneOf": [
           {
             "const": "conversational",
@@ -159462,6 +162265,28 @@
             "const": "injected_context",
             "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Non-human application/model request content. The exact source and\nprovisional evidence grade are content, never execution authority.",
+            "properties": {
+              "delegated_request": {
+                "additionalProperties": false,
+                "properties": {
+                  "provenance": {
+                    "$ref": "#/$defs/DelegatedRequestProvenance"
+                  }
+                },
+                "required": [
+                  "provenance"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "delegated_request"
+            ],
+            "type": "object"
           }
         ]
       },

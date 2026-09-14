@@ -198,6 +198,18 @@ fn commit_live_head_events_in_txn(
     let before = live_stored_head_in_snapshot(tx, prepared.session_id())?;
     let session_id = prepared.session_id().to_string();
     let operation = prepared.operation_digest(encoded)?;
+    let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+    for fence in prepared.input_read_fences() {
+        enforce_input_row_expected_version(
+            tx,
+            &runtime_id,
+            fence.input_id(),
+            fence.expected_row_digest(),
+        )?;
+        if let Some(expected) = prepared.expected_lifecycle() {
+            enforce_machine_lifecycle_expected_version(tx, &runtime_id, expected)?;
+        }
+    }
     if before.as_ref() == Some(prepared.successor()) {
         let receipt: Option<Vec<u8>> = tx
             .query_row(
@@ -225,6 +237,55 @@ fn commit_live_head_events_in_txn(
             {
                 return Err(RuntimeStoreError::ReadFailed(
                     "live source replay differs from committed content".into(),
+                ));
+            }
+        }
+        for input in prepared
+            .input_admission()
+            .into_iter()
+            .chain(prepared.input_stage().map(|stage| stage.input()))
+        {
+            let expected = serde_json::to_vec(input.as_stored())
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+            let current = tx
+                .query_row(
+                    "SELECT CASE WHEN length(CAST(state_json AS BLOB)) = ?3 THEN state_json END
+                     FROM runtime_input_states WHERE runtime_id=?1 AND input_id=?2",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        input.as_stored().state.input_id.to_string(),
+                        expected.len()
+                    ],
+                    |row| {
+                        Ok(row
+                            .get::<_, Option<JsonColumnBytes>>(0)?
+                            .map(JsonColumnBytes::into_bytes))
+                    },
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .flatten();
+            if current.as_deref() != Some(expected.as_slice()) {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "Live admission replay input is missing or differs".into(),
+                ));
+            }
+        }
+        if let Some(stage) = prepared.input_stage() {
+            let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+            let expected = stage.lifecycle().store_record().encode()?;
+            let current = tx
+                .query_row(
+                    "SELECT runtime_state_json FROM runtime_states WHERE runtime_id=?1",
+                    [runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, JsonColumnBytes>(0),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if current.map(JsonColumnBytes::into_bytes).as_deref() != Some(expected.as_slice()) {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "Live stage replay lifecycle differs".into(),
                 ));
             }
         }
@@ -279,12 +340,17 @@ fn commit_live_head_events_in_txn(
             load_head_canonical_authority(tx, &runtime_id)?
         }
     };
-    if actor.is_none()
+    if (actor.is_none() && !prepared.is_archive_ingress_fence())
         || prepared
             .expected_actor()
             .is_some_and(|expected| Some(expected) != actor.as_ref())
     {
         return Ok(LiveLedgerCommitOutcome::ActorConflict { current: actor });
+    }
+    if let Some(expected) = prepared.expected_lifecycle()
+        && prepared.input_read_fences().is_empty()
+    {
+        enforce_machine_lifecycle_expected_version(tx, &runtime_id, expected)?;
     }
     let mut source_charges = LiveSourceChargeDelta::default();
     for source in prepared.sources() {
@@ -303,6 +369,33 @@ fn commit_live_head_events_in_txn(
         }
     }
     prepared.validate(before.as_ref(), encoded, source_charges)?;
+    if let Some(input) = prepared.input_admission() {
+        let exists = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_input_states WHERE runtime_id=?1 AND input_id=?2)",
+                params![runtime_id_text(&runtime_id), input.as_stored().state.input_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        if exists {
+            return Err(RuntimeStoreError::InputRowVersionConflict {
+                input_id: input.as_stored().state.input_id.to_string(),
+            });
+        }
+        upsert_input_states(tx, &runtime_id, &[(input.clone_stored(), None)])?;
+    }
+    if let Some(stage) = prepared.input_stage() {
+        let input = stage.input();
+        upsert_input_states(
+            tx,
+            &runtime_id,
+            &[(
+                input.clone_stored(),
+                input.expected_row_digest().map(str::to_owned),
+            )],
+        )?;
+        upsert_machine_lifecycle_snapshot(tx, &runtime_id, stage.lifecycle().snapshot())?;
+    }
     let head = prepared.successor();
     tx.execute(
         "INSERT INTO runtime_live_heads (

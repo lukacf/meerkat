@@ -43,6 +43,25 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
+// Future cancellation releases only local dispatch custody, not canonical run
+// state or already-admitted physical effects.
+struct RunDispatchContextGuard<
+    'a,
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+> {
+    agent: &'a mut Agent<C, T, S>,
+}
+
+impl<C: AgentLlmClient + ?Sized, T: AgentToolDispatcher + ?Sized, S: AgentSessionStore + ?Sized>
+    Drop for RunDispatchContextGuard<'_, C, T, S>
+{
+    fn drop(&mut self) {
+        self.agent.tool_dispatch_context = crate::ToolDispatchContext::default();
+    }
+}
+
 /// Owned operation-local future prepared for one noncommitting live bridge
 /// execution. Native executors retain the cross-thread `Send` guarantee;
 /// wasm32 uses the repository's single-threaded local-future convention.
@@ -697,6 +716,9 @@ where
         &mut self,
         results: Vec<crate::types::ToolResult>,
     ) -> Result<bool, AgentError> {
+        self.session
+            .require_session_policy_callback_application()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
         let resolution = self
             .session
             .resolve_pending_callback_tool_results(results)
@@ -718,36 +740,23 @@ where
                 ordered_results,
             } => (batch, ordered_results),
         };
-        let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
-            batch.session_effects.iter().cloned().partition(|effect| {
-                matches!(
+        let pre_tool_effects: Vec<_> = batch
+            .session_effects
+            .iter()
+            .filter(|effect| {
+                !matches!(
                     effect,
                     crate::ops::SessionEffect::AppendAssistantBlocks { .. }
                 )
-            });
+            })
+            .cloned()
+            .collect();
 
         if !pre_tool_effects.is_empty() {
             self.apply_session_effects(&pre_tool_effects, Some(&batch.run_id))?;
         }
 
-        let post_tool_messages = post_tool_effects
-            .into_iter()
-            .filter_map(|effect| match effect {
-                crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
-                    let mut message = crate::types::BlockAssistantMessage::new(
-                        blocks,
-                        crate::types::StopReason::EndTurn,
-                    );
-                    message.identity = self
-                        .active_transcript_identity
-                        .clone()
-                        .unwrap_or_default()
-                        .with_run_id(batch.run_id.clone());
-                    Some(crate::types::Message::BlockAssistant(message))
-                }
-                _ => None,
-            })
-            .collect();
+        let post_tool_messages = batch.post_tool_messages(self.active_transcript_identity.as_ref());
         self.session
             .commit_pending_callback_tool_results(&batch, ordered_results, post_tool_messages)
             .map_err(|error| {
@@ -1718,8 +1727,15 @@ where
 
     /// Run the agent with a user message.
     pub async fn run(&mut self, user_input: ContentInput) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), Vec::new(), None, None)
-            .await
+        self.run_inner(
+            user_input,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
     }
 
     /// Run the agent with events streamed to the provided channel.
@@ -1728,8 +1744,15 @@ where
         user_input: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), Vec::new(), None, Some(event_tx))
-            .await
+        self.run_inner(
+            user_input,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(event_tx),
+            Default::default(),
+        )
+        .await
     }
 
     /// Execute one live bridge request through this exact agent's client,
@@ -1967,6 +1990,27 @@ where
             injected_context,
             transcript_identity,
             Some(event_tx),
+            Default::default(),
+        )
+        .await
+    }
+
+    pub async fn run_with_events_and_execution_context(
+        &mut self,
+        user_input: ContentInput,
+        typed_turn_appends: Vec<ConversationAppend>,
+        injected_context: Vec<ContentInput>,
+        transcript_identity: Option<TranscriptMessageIdentity>,
+        execution_context: crate::execution_scope::RunExecutionContext,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
+        self.run_inner(
+            user_input,
+            typed_turn_appends,
+            injected_context,
+            transcript_identity,
+            Some(event_tx),
+            execution_context,
         )
         .await
     }
@@ -2001,7 +2045,7 @@ where
     /// Returns `NoPendingBoundary` when generated pending-continuation
     /// authority does not admit the current transcript tail.
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
-        self.run_pending_inner(None).await
+        self.run_pending_inner(None, Default::default()).await
     }
 
     /// Run the agent using the pending continuation boundary, with event streaming.
@@ -2011,7 +2055,17 @@ where
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_pending_inner(Some(event_tx)).await
+        self.run_pending_inner(Some(event_tx), Default::default())
+            .await
+    }
+
+    pub async fn run_pending_with_events_and_execution_context(
+        &mut self,
+        execution_context: crate::execution_scope::RunExecutionContext,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
+        self.run_pending_inner(Some(event_tx), execution_context)
+            .await
     }
 
     fn push_transcript_append(&mut self, append: ConversationAppend) -> Result<(), AgentError> {
@@ -2050,6 +2104,19 @@ where
                 );
                 self.session.push(Message::User(message));
             }
+            ConversationAppendRole::DelegatedRequest { provenance } => {
+                let CoreRenderable::Text { text } = append.content else {
+                    return Err(AgentError::ConfigError(
+                        "delegated request append requires exact immutable text".to_string(),
+                    ));
+                };
+                let request = crate::live_execution::evidence::LiveRequestText::new(text)
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                let message = crate::types::UserMessage::delegated_request(request, *provenance)
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                let message = self.stamp_user_message_identity(message);
+                self.session.push(Message::User(message));
+            }
             ConversationAppendRole::Assistant | ConversationAppendRole::Tool => {
                 return Err(AgentError::ConfigError(
                     "runtime transcript append role is not supported for turn start".to_string(),
@@ -2070,6 +2137,99 @@ where
         injected_context: Vec<ContentInput>,
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
+        execution_context: crate::execution_scope::RunExecutionContext,
+    ) -> Result<RunResult, AgentError> {
+        let run = RunDispatchContextGuard { agent: self };
+        if let Err(error) = run.agent.install_run_execution_context(execution_context) {
+            run.agent.clear_runtime_execution_kind();
+            return Err(error);
+        }
+        run.agent
+            .run_inner_guarded(
+                user_input,
+                typed_turn_appends,
+                injected_context,
+                transcript_identity,
+                event_tx,
+            )
+            .await
+    }
+
+    fn install_run_execution_context(
+        &mut self,
+        execution_context: crate::execution_scope::RunExecutionContext,
+    ) -> Result<(), AgentError> {
+        use crate::execution_scope::{
+            RunExecutionContext, ScopedModelEffectSupport, ScopedToolEffectSupport,
+        };
+        self.tool_dispatch_context = crate::ToolDispatchContext::default();
+        let RunExecutionContext::Scoped(context) = execution_context else {
+            self.session
+                .require_session_policy_callback_continuation()
+                .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+            return Ok(());
+        };
+        let scope = context.scope();
+        if &scope.record().executor.session_id != self.session.id()
+            || !self
+                .epoch_cursor_state
+                .as_ref()
+                .is_some_and(|cursor| context.matches_actor_cursor(cursor))
+            || self.started_primitive_run_from_authority()?.as_ref() != Some(&scope.record().run_id)
+            || self.live_bridge_dispatch_admission.is_some()
+        {
+            return Err(AgentError::ConfigError(
+                "scoped run does not match this actor's native binding and generated primitive start".into(),
+            ));
+        }
+        if self.client.scoped_model_effect_support() != ScopedModelEffectSupport::PhysicalDispatch
+            || !matches!(
+                self.tools.scoped_tool_effect_support(),
+                ScopedToolEffectSupport::PhysicalDispatch
+                    | ScopedToolEffectSupport::RejectsAllCalls
+            )
+        {
+            return Err(AgentError::ConfigError(
+                "scoped run requires conforming model and physical dispatcher owners".into(),
+            ));
+        }
+        if self.compaction_transaction.is_some()
+            || self.in_flight_compaction_stage.is_some()
+            || self.memory_store.is_some()
+            || self.skill_engine.is_some()
+            || self.comms_runtime.is_some()
+            || self.hook_engine.is_some()
+        {
+            return Err(AgentError::ConfigError(
+                "configured auxiliary preparation and callback owners do not yet retain scoped execution".into(),
+            ));
+        }
+        self.tool_dispatch_context = crate::ToolDispatchContext::default()
+            .with_scoped_execution(context)
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        Ok(())
+    }
+
+    fn replace_turn_dispatch_context(
+        &mut self,
+        mut context: crate::ToolDispatchContext,
+    ) -> Result<(), AgentError> {
+        if let Some(scope) = self.tool_dispatch_context.scoped_execution().cloned() {
+            context = context
+                .with_scoped_execution(scope)
+                .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        }
+        self.tool_dispatch_context = context;
+        Ok(())
+    }
+
+    async fn run_inner_guarded(
+        &mut self,
+        user_input: ContentInput,
+        typed_turn_appends: Vec<ConversationAppend>,
+        injected_context: Vec<ContentInput>,
+        transcript_identity: Option<TranscriptMessageIdentity>,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         self.reset_runtime_terminal_failure_witness();
         if let Err(err) =
@@ -2077,6 +2237,12 @@ where
         {
             self.clear_runtime_execution_kind();
             return Err(err);
+        }
+        for append in &typed_turn_appends {
+            if let Err(error) = append.validate_delegated_content() {
+                self.clear_runtime_execution_kind();
+                return Err(AgentError::ConfigError(error.to_string()));
+            }
         }
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
@@ -2201,14 +2367,16 @@ where
                 serde_json::Value::String(objective_id.to_string()),
             );
         }
-        self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&run_prompt_input)
-            .with_turn_metadata(dispatch_metadata)
-            .with_runtime_identity(
-                self.session.id().clone(),
-                self.active_transcript_identity
-                    .as_ref()
-                    .and_then(|identity| identity.interaction_id),
-            );
+        self.replace_turn_dispatch_context(
+            crate::ToolDispatchContext::from_run_input(&run_prompt_input)
+                .with_turn_metadata(dispatch_metadata)
+                .with_runtime_identity(
+                    self.session.id().clone(),
+                    self.active_transcript_identity
+                        .as_ref()
+                        .and_then(|identity| identity.interaction_id),
+                ),
+        )?;
         if let Some(admission) = self.live_bridge_dispatch_admission.clone() {
             self.tool_dispatch_context = self
                 .tool_dispatch_context
@@ -2264,14 +2432,60 @@ where
     pub(super) async fn run_pending_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
+        execution_context: crate::execution_scope::RunExecutionContext,
     ) -> Result<RunResult, AgentError> {
-        self.reset_runtime_terminal_failure_witness();
-        if let Err(err) = self
+        let run = RunDispatchContextGuard { agent: self };
+        if let Err(error) = run.agent.install_run_execution_context(execution_context) {
+            run.agent.clear_runtime_execution_kind();
+            return Err(error);
+        }
+        run.agent.reset_runtime_terminal_failure_witness();
+        if let Err(error) = run
+            .agent
             .require_runtime_execution_kind(crate::lifecycle::RuntimeExecutionKind::ResumePending)
         {
-            self.clear_runtime_execution_kind();
-            return Err(err);
+            run.agent.clear_runtime_execution_kind();
+            return Err(error);
         }
+        if let Err(error) = run.agent.prepare_scoped_callback_application().await {
+            run.agent.clear_runtime_execution_kind();
+            return Err(error);
+        }
+        run.agent.run_pending_inner_guarded(event_tx).await
+    }
+
+    async fn prepare_scoped_callback_application(&mut self) -> Result<(), AgentError> {
+        let Some(context) = self.tool_dispatch_context.scoped_execution().cloned() else {
+            return Ok(());
+        };
+        let readiness = self
+            .session
+            .scoped_callback_readiness(context.scope())
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+        match readiness {
+            crate::session::StagedCallbackResultsObservation::Complete(_) => {
+                let permit = context
+                    .claim_callback_application()
+                    .await
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                self.session
+                    .apply_scoped_callback_tool_results(
+                        permit,
+                        self.active_transcript_identity.as_ref(),
+                    )
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))
+            }
+            crate::session::StagedCallbackResultsObservation::AlreadyApplied { .. } => Ok(()),
+            crate::session::StagedCallbackResultsObservation::Incomplete { .. } => Err(
+                AgentError::ConfigError("scoped callback results are incomplete".into()),
+            ),
+        }
+    }
+
+    async fn run_pending_inner_guarded(
+        &mut self,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<RunResult, AgentError> {
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -2318,14 +2532,17 @@ where
             }
         };
 
-        let committed_images = self
-            .session
-            .apply_pending_callback_resume_effects()
-            .map_err(|error| {
-                AgentError::InternalError(format!(
-                    "failed to apply callback-staged resume effects: {error}"
-                ))
-            })?;
+        let committed_images = match self.tool_dispatch_context.scoped_execution() {
+            Some(context) => self
+                .session
+                .apply_scoped_callback_resume_effects(context.scope()),
+            None => self.session.apply_pending_callback_resume_effects(),
+        }
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "failed to apply callback-staged resume effects: {error}"
+            ))
+        })?;
         for image in committed_images {
             let event = AgentEvent::AssistantImageAppended { image };
             crate::event_tap::tap_try_send(&self.event_tap, &event);
@@ -2372,14 +2589,16 @@ where
                 serde_json::Value::String(objective_id.to_string()),
             );
         }
-        self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&prompt)
-            .with_turn_metadata(dispatch_metadata)
-            .with_runtime_identity(
-                self.session.id().clone(),
-                self.active_transcript_identity
-                    .as_ref()
-                    .and_then(|identity| identity.interaction_id),
-            );
+        self.replace_turn_dispatch_context(
+            crate::ToolDispatchContext::from_run_input(&prompt)
+                .with_turn_metadata(dispatch_metadata)
+                .with_runtime_identity(
+                    self.session.id().clone(),
+                    self.active_transcript_identity
+                        .as_ref()
+                        .and_then(|identity| identity.interaction_id),
+                ),
+        )?;
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2906,6 +3125,52 @@ mod skill_activation_effect_tests {
 
         fn model(&self) -> &'static str {
             "pending-mock-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn run_future_drop_clears_dispatch_context_for_content_and_pending() {
+        for pending in [false, true] {
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .build_standalone(
+                    Arc::new(PendingLlmClient),
+                    Arc::new(NoTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+            if pending {
+                agent
+                    .session_mut()
+                    .push(Message::User(UserMessage::text("pending continuation")));
+            }
+            let (events, mut receiver) = mpsc::channel(64);
+            let mut run: std::pin::Pin<
+                Box<dyn Future<Output = Result<RunResult, AgentError>> + '_>,
+            > = if pending {
+                Box::pin(agent.run_pending_with_events(events))
+            } else {
+                Box::pin(agent.run_with_events(ContentInput::Text("current run".into()), events))
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        result = &mut run => panic!("pending client returned: {result:?}"),
+                        event = receiver.recv() => {
+                            if matches!(event.expect("run event"), AgentEvent::RunStarted { .. }) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("run reached execution");
+            drop(run);
+            assert_eq!(
+                agent.tool_dispatch_context,
+                crate::ToolDispatchContext::default(),
+                "dropping a {pending:?} pending-mode run must release its dispatch context",
+            );
         }
     }
 
@@ -3952,6 +4217,90 @@ mod skill_activation_effect_tests {
             matches!(err, AgentError::ConfigError(_)),
             "expected typed config error, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn public_live_delegated_append_materializes_only_exact_request_content() {
+        use crate::live_execution::evidence::{DelegatedRequestProvenance, LiveRequestText};
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let request = LiveRequestText::new(" exact provisional request ").unwrap();
+        let provenance: DelegatedRequestProvenance = serde_json::from_value(serde_json::json!({
+            "request_id":uuid::Uuid::from_u128(1),
+            "source":{"session_id":agent.session().id(),"channel_id":"voice",
+                "source":{"kind":"client_delegation","delegation":"d"}},
+            "evidence_kind":"application_snapshot",
+            "request_digest":request.digest()
+        }))
+        .unwrap();
+        let append = |content| ConversationAppend {
+            role: ConversationAppendRole::DelegatedRequest {
+                provenance: Box::new(provenance.clone()),
+            },
+            content,
+            identity: None,
+        };
+        let before = agent.session().messages().len();
+        agent
+            .push_transcript_append(append(CoreRenderable::Text {
+                text: request.as_str().to_owned(),
+            }))
+            .unwrap();
+        assert_eq!(agent.session().messages().len(), before + 1);
+        assert!(matches!(agent.session().messages().last(),
+            Some(Message::User(message))
+                if message.transcript_role.is_delegated_request()
+                    && message.text_content() == request.as_str()));
+        for content in [
+            CoreRenderable::Text {
+                text: "changed".to_string(),
+            },
+            CoreRenderable::Json {
+                value: serde_json::json!({"request":request.as_str()}),
+            },
+        ] {
+            assert!(matches!(
+                agent.push_transcript_append(append(content)),
+                Err(AgentError::ConfigError(_))
+            ));
+            assert_eq!(agent.session().messages().len(), before + 1);
+        }
+        let encoded = serde_json::to_value(append(CoreRenderable::Text {
+            text: request.as_str().to_owned(),
+        }))
+        .unwrap();
+        let decoded: ConversationAppend = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(matches!(
+            decoded.role,
+            ConversationAppendRole::DelegatedRequest { .. }
+        ));
+        let mut forged = encoded;
+        forged["role"]["delegated_request"]["grant"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ConversationAppend>(forged).is_err());
+
+        let (tx, _rx) = mpsc::channel(8);
+        let failure = agent
+            .run_with_events_and_typed_turn_appends(
+                "projected prompt".to_string().into(),
+                vec![
+                    ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "must not land".to_string(),
+                        },
+                        identity: None,
+                    },
+                    append(CoreRenderable::Text {
+                        text: "changed".to_string(),
+                    }),
+                ],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .expect_err("invalid immutable request must reject the complete append batch");
+        assert!(matches!(failure, AgentError::ConfigError(_)));
+        assert_eq!(agent.session().messages().len(), before + 1);
     }
 
     #[tokio::test]

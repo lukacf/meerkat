@@ -149,6 +149,8 @@ import type {
   MobMemberHistoryResult,
   MobMemberLiveChannelParams,
   MobMemberLiveControlParams,
+  MobMemberLiveObservationsParams,
+  MobMemberLiveObservationsResult,
   MobMemberLiveOpenParams,
   MobMemberLiveStatusParams,
   MobMemberParams,
@@ -905,6 +907,10 @@ export interface RpcMethodContracts {
   "mob/member_history": {
     params: MobMemberHistoryParams;
     result: (MobMemberHistoryResult) & Record<string, unknown>;
+  };
+  "mob/member_live_observations": {
+    params: MobMemberLiveObservationsParams;
+    result: (MobMemberLiveObservationsResult) & Record<string, unknown>;
   };
   "mob/hosts": {
     params: MobIdParams;

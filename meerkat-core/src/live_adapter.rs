@@ -232,6 +232,12 @@ pub enum LiveAdapterCommand {
 #[serde(tag = "observation", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveAdapterObservation {
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    Continuous {
+        event: crate::live_execution::observation::ContinuousLiveObservation,
+        receive: Option<crate::live_observation::LiveObservationReceiveReceipt>,
+    },
     Ready,
     UserTranscriptFinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +491,9 @@ mod base64_bytes {
 #[serde(tag = "code", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveAdapterErrorCode {
+    ContinuousInputRejected {
+        reason: crate::live_execution::frontend::ContinuousLiveInputError,
+    },
     ConnectionFailed,
     ConnectionLost,
     /// R12: a local guard (model swap, provider swap, audio-rate mismatch,

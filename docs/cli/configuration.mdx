@@ -148,10 +148,25 @@ web_search = false
 call_timeout_secs = 900
 ```
 
+`interaction_kind` optionally declares `text`, `turn_based_realtime`, or
+`continuous_live`; omission preserves the existing `text` default. The registry
+uses this declaration, not a model-name prefix. Continuous models cannot become
+ordinary agent identities, including through client overrides or identity
+preflight: they require a named Live profile and a supporting Live host.
+The built-in public `gpt-live-1` row is continuous and remains separate from
+private `gpt-live-1-codex` and turn-based `gpt-realtime-2`.
+
 `provider` parses into the closed provider vocabulary and fails closed on
 unknown names. Self-hosted models belong under `[self_hosted.models]` (below),
 not `[models]`. The same `[models.<id>]` table shape is accepted inside a mob
 definition (`mob.toml`) for mob-scoped models.
+
+Model IDs must be unique across built-in, custom, and self-hosted entries,
+including mob-scoped definitions. If an upgrade adds a formerly custom model to
+the built-in catalog, registry construction refuses the collision and names the
+conflicting configuration table. Remove or rename that definition explicitly;
+Meerkat never silently replaces it or uses custom fields to override the new
+built-in model's capabilities.
 
 ## Self-hosted model config
 

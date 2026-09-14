@@ -355,6 +355,35 @@ projection are not session commit authority; the committed transcript and
 The `RuntimeStore`/backend carrier owns restart authority. `SessionStore` rows
 are component/content state, not a second currentness owner.
 
+### Retained member Live observations
+
+`mob/member_live_observations` reads the independent retained Live ledger
+through the member's current owner, including after channel close or owner
+restart. It returns typed continuous observations, not finalized `Message`
+rows. The response includes the original session/member identity, exact
+captured snapshot prefix, coverage, and controlling-host versus remote-host
+provenance.
+
+Pass `mob_id`, `agent_identity`, optional `channel_id`, optional opaque
+`cursor`, and a positive `limit` (default 64, maximum 256). Continue only with
+the returned `next_cursor` while `has_more` is true. Later appends do not
+rebase the captured prefix. Expired snapshots, mismatched cursors, unsupported
+owners, and integrity faults are explicit failures, not empty-history
+fallbacks. The complete compact bridge reply is bounded to 128 KiB.
+
+Every page requires `ReadHistory` authorization; neither an active channel nor
+a Live execution grant is required. Remote retained reads require bridge V7;
+older peers reject them without falling back to ordinary transcript history.
+Legacy member opens without a profile selector retain their V4 protocol, and
+ordinary bridge authority defaults remain V6.
+
+The same read is available as `rkat mob member-live-observations`, Python
+`mob.member_live_observations(...)`, TypeScript
+`mob.memberLiveObservations(...)`, REST
+`GET /mob/{id}/members/{agent_identity}/live-observations`, and public MCP
+`meerkat_mob_member_live_observations`. REST and public MCP still expose no
+Live mutation/control family.
+
 ## Sending image input
 
 Image input is turn context, not a response trigger by itself. Check the

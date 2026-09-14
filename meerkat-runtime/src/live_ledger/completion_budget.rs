@@ -36,10 +36,30 @@ use crate::live_resources::{
     LIVE_EVENT_STORAGE_ALLOWANCE_BYTES, LiveCompletionObligation, LiveResourceCharge,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CompletionCreditSchema {
-    #[serde(rename = "completion_credits_v1")]
-    V1,
+pub use crate::live_ledger::authority::dsl::LiveCompletionCreditSchema as CompletionCreditSchema;
+
+pub(crate) fn token_accounting_encoding_extrema()
+-> impl Iterator<Item = meerkat_core::execution_scope::ScopedEffectTokenAccounting> {
+    use meerkat_core::execution_scope::ScopedEffectTokenAccounting as Accounting;
+    [Accounting::NotApplicable {}, Accounting::Unmeasured {}]
+        .into_iter()
+        .chain(
+            meerkat_core::Provider::ALL_CONCRETE
+                .iter()
+                .copied()
+                .chain([meerkat_core::Provider::Other])
+                .flat_map(|reported_provider| {
+                    [false, true]
+                        .into_iter()
+                        .map(move |identity_disputed| Accounting::Measured {
+                            normalized_tokens: u64::MAX,
+                            reported_provider,
+                            reported_model_digest: [255; 32],
+                            normalized_counter_digest: [255; 32],
+                            identity_disputed,
+                        })
+                }),
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,9 +271,26 @@ pub fn minimal_completion_record(
     mut event: LiveCompletionEvent,
 ) -> Result<LiveCompletionRecord, CompletionBudgetError> {
     match &mut event {
-        LiveCompletionEvent::ChannelControl { diagnostic, .. }
-        | LiveCompletionEvent::EffectTerminal { diagnostic, .. } => {
+        LiveCompletionEvent::ChannelControl { diagnostic, .. } => {
             *diagnostic = LiveCompletionText::new("")?;
+        }
+        LiveCompletionEvent::EffectTerminal {
+            diagnostic,
+            token_accounting,
+            ..
+        } => {
+            *diagnostic = LiveCompletionText::new("")?;
+            if let meerkat_core::execution_scope::ScopedEffectTokenAccounting::Measured {
+                normalized_tokens,
+                reported_model_digest,
+                normalized_counter_digest,
+                ..
+            } = token_accounting
+            {
+                *normalized_tokens = 0;
+                *reported_model_digest = [0; 32];
+                *normalized_counter_digest = [0; 32];
+            }
         }
         LiveCompletionEvent::RequestOutcome { outcome, .. } => match outcome {
             LiveRequestCompletionFact::Completed { result, .. } => {
@@ -261,6 +298,10 @@ pub fn minimal_completion_record(
             }
             LiveRequestCompletionFact::Failed { detail, .. } => {
                 *detail = LiveCompletionText::new("")?;
+            }
+            LiveRequestCompletionFact::OrdinaryTerminal { receipt_digest, .. }
+            | LiveRequestCompletionFact::OrdinaryRunlessTerminal { receipt_digest, .. } => {
+                *receipt_digest = LiveCompletionText::new("")?;
             }
             LiveRequestCompletionFact::Refused { .. }
             | LiveRequestCompletionFact::CancelledWithoutRun { .. }
@@ -289,6 +330,17 @@ pub fn minimal_completion_record(
                     last_valid_seconds, ..
                 } => *last_valid_seconds = Some(zero),
             }
+        }
+        LiveCompletionEvent::ChannelProviderStarted { provider_session } => {
+            *provider_session = LiveCompletionText::new("a")?;
+        }
+        LiveCompletionEvent::ChannelProviderDiagnostic { diagnostic } => {
+            *diagnostic = meerkat_core::live_execution::backend::LiveProviderDiagnostic::new(
+                diagnostic.category(),
+                meerkat_core::live_execution::backend::LiveBackendOwnership::Unowned {},
+                std::num::NonZeroU64::MIN,
+            )
+            .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?;
         }
         LiveCompletionEvent::ChannelDiscontinuity { discontinuity } => match discontinuity {
             LiveDiscontinuity::KnownLocalGap {
@@ -359,6 +411,91 @@ pub fn maximal_completion_events() -> Result<Vec<LiveCompletionEvent>, Completio
         "\0".repeat(LIVE_CONTEXT_CHUNK_MAX_BYTES),
     )?;
     let mut events = Vec::new();
+    events.push(LiveCompletionEvent::ChannelProviderStarted {
+        provider_session: LiveCompletionText::new("\0".repeat(LIVE_COMPLETION_ID_MAX_BYTES))?,
+    });
+    // A validated diagnostic is at most 1024 encoded bytes, below the existing
+    // escaped 1024-byte ChannelControl text. That variant bounds this class.
+    use meerkat_core::live_execution::backend::{
+        LiveBackendCandidates, LiveBackendOwnership, LiveBackendResponseKey,
+        LiveProviderDiagnostic, LiveProviderDiagnosticCategory,
+    };
+    use meerkat_core::live_execution::request::LiveProviderReference;
+    for category in [
+        LiveProviderDiagnosticCategory::BackendAdvisoryError,
+        LiveProviderDiagnosticCategory::ProtocolInconsistency,
+        LiveProviderDiagnosticCategory::AccountingUnmeasured,
+        LiveProviderDiagnosticCategory::AccountingDisputed,
+        LiveProviderDiagnosticCategory::UnsupportedProviderEvent,
+        LiveProviderDiagnosticCategory::UncorrelatedContextAcknowledgment,
+    ] {
+        events.push(LiveCompletionEvent::ChannelProviderDiagnostic {
+            diagnostic: LiveProviderDiagnostic::new(
+                category,
+                LiveBackendOwnership::Unowned {},
+                std::num::NonZeroU64::MAX,
+            )
+            .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?,
+        });
+    }
+    let reference = |value: String| {
+        LiveProviderReference::new(value).map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)
+    };
+    let response = reference("\0".repeat(128))?;
+    let category = LiveProviderDiagnosticCategory::UncorrelatedContextAcknowledgment;
+    let sized = LiveProviderDiagnostic::new(
+        category,
+        LiveBackendOwnership::Owned {
+            response: LiveBackendResponseKey {
+                response: response.clone(),
+                delegation: Some(reference("a".into())?),
+            },
+        },
+        std::num::NonZeroU64::MAX,
+    )
+    .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?;
+    let size = serde_json::to_vec(&sized)
+        .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?
+        .len();
+    let remaining = meerkat_core::live_execution::backend::LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES
+        .checked_sub(size)
+        .ok_or(CompletionBudgetError::MaximumEnvelopeInvalid)?;
+    for attribution in [
+        LiveBackendOwnership::Owned {
+            response: LiveBackendResponseKey {
+                response: response.clone(),
+                delegation: None,
+            },
+        },
+        LiveBackendOwnership::Owned {
+            response: LiveBackendResponseKey {
+                response,
+                delegation: Some(reference("a".repeat(remaining + 1))?),
+            },
+        },
+        LiveBackendOwnership::Ambiguous {
+            candidates: LiveBackendCandidates::new(vec![
+                LiveBackendResponseKey {
+                    response: reference("a".into())?,
+                    delegation: None,
+                },
+                LiveBackendResponseKey {
+                    response: reference("b".into())?,
+                    delegation: Some(reference("d".into())?),
+                },
+            ])
+            .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?,
+        },
+    ] {
+        events.push(LiveCompletionEvent::ChannelProviderDiagnostic {
+            diagnostic: LiveProviderDiagnostic::new(
+                category,
+                attribution,
+                std::num::NonZeroU64::MAX,
+            )
+            .map_err(|_| CompletionBudgetError::MaximumEnvelopeInvalid)?,
+        });
+    }
     for outcome in LiveChannelControlOutcome::ALL {
         events.push(LiveCompletionEvent::ChannelControl {
             outcome: *outcome,
@@ -425,18 +562,28 @@ pub fn maximal_completion_events() -> Result<Vec<LiveCompletionEvent>, Completio
     ] {
         events.push(LiveCompletionEvent::ChannelDiscontinuity { discontinuity });
     }
-    let mut terminal = Vec::new();
-    terminal.push(LiveRequestCompletionFact::Completed {
-        input_id: input(),
-        run_id: run(),
-        result: result.clone(),
-    });
-    terminal.push(LiveRequestCompletionFact::Failed {
-        input_id: input(),
-        run_id: run(),
-        detail: diagnostic.clone(),
-    });
-    terminal.push(LiveRequestCompletionFact::AdmissionUnconfirmed {});
+    let mut terminal = vec![
+        LiveRequestCompletionFact::OrdinaryRunlessTerminal {
+            input_id: input(),
+            receipt_digest: LiveCompletionText::new("\0".repeat(64))?,
+        },
+        LiveRequestCompletionFact::OrdinaryTerminal {
+            input_id: input(),
+            run_id: run(),
+            receipt_digest: LiveCompletionText::new("\0".repeat(64))?,
+        },
+        LiveRequestCompletionFact::Completed {
+            input_id: input(),
+            run_id: run(),
+            result: result.clone(),
+        },
+        LiveRequestCompletionFact::Failed {
+            input_id: input(),
+            run_id: run(),
+            detail: diagnostic.clone(),
+        },
+        LiveRequestCompletionFact::AdmissionUnconfirmed {},
+    ];
     for reason in [
         LiveRequestCancellationReason::OperatorRequested,
         LiveRequestCancellationReason::GrantRevoked,
@@ -471,14 +618,17 @@ pub fn maximal_completion_events() -> Result<Vec<LiveCompletionEvent>, Completio
                 outcome,
             }),
     );
-    events.extend(LivePhysicalEffectOutcome::ALL.iter().map(|outcome| {
-        LiveCompletionEvent::EffectTerminal {
-            claim_id: operation(),
-            request_id: operation(),
-            outcome: *outcome,
-            diagnostic: diagnostic.clone(),
+    for outcome in LivePhysicalEffectOutcome::ALL {
+        for token_accounting in token_accounting_encoding_extrema() {
+            events.push(LiveCompletionEvent::EffectTerminal {
+                claim_id: operation(),
+                request_id: operation(),
+                outcome: *outcome,
+                token_accounting,
+                diagnostic: diagnostic.clone(),
+            });
         }
-    }));
+    }
     events.push(LiveCompletionEvent::CallbackSuspended {
         claim_id: operation(),
         request_id: operation(),

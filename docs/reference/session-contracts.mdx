@@ -98,6 +98,387 @@ worker. Do not rely on the model to notice and act once for every item in a
 batched prompt.
 </Warning>
 
+### Callback result staging
+
+The Rust service's `StageToolResultsRequest.callback_target` identifies the
+exact pending callback batch. An explicit target must match the session,
+originating run and scope, transcript boundary, and batch digest. Scoped
+batches require that target; ordinary callers retain untargeted ingress
+compatibility.
+
+Results may arrive in separate subsets. Each subset is checked against the
+entire pending batch before it is staged. Identical retries coalesce; conflicting
+payloads, foreign call IDs, mixed targets, and targets from older batches refuse
+without rebinding the results. Persistent staging retains the target across
+cold reopen and revalidates it against the actor immediately before application.
+Reusing a tool-call ID in a later batch does not make the earlier target valid.
+Staging is not continuation admission and grants no scoped execution permission.
+
+`Session::observe_staged_callback_results` reads the retained ordinary callback
+owner and deferred results for an exact target. It distinguishes missing results,
+a complete batch in the original assistant tool-use order (including completed
+siblings), and an already-applied batch. The complete-content digest is stable
+across subset arrival order and reload; malformed or mismatched retained data
+refuses rather than appearing ready. This is a content observation, not a
+current-store fence or continuation grant. A detached session can be stale, so
+execution must separately obtain generated admission against its exact durable
+predecessor.
+The ordinary applied receipt retains the complete ordered-result digest,
+including completed siblings, even though its redelivery payload contains only
+the external callback subset. That digest survives resume-effect application
+and reload. Older applied receipts without it have no complete-content digest;
+native scoped historical admission refuses rather than
+guessing the full digest from the subset.
+`PersistentSessionService::observe_committed_callback_results` binds that
+observation to the exact verified WholeBlob body or HeadCanonical
+materialization that produced it. It does not substitute a second, potentially
+newer authority read, consult actor caches, or reconcile the rewrite audit.
+The returned predecessor can still become stale and must be compared inside
+the continuation transaction.
+
+Scoped continuation content retains the exact prior callback target and ordered
+result digest inside `RunEffectScopeRecord`. `RunPrimitive` reads that target
+from its sealed execution authority rather than accepting an independent target
+that could be paired with another run. A callback-continuation primitive is an
+exclusive run-start input with no conversation appends; it cannot manufacture
+another delegated request. It starts a new generated conversation run despite
+having no prompt; ordinary empty staged inputs still do not start a run.
+These records alone do not enable the public Live path.
+
+Native public-profile declaration reads retain the selected definition,
+activation selection, model declarations, and credential-owner configuration
+as one immutable snapshot. Provider factory resolution uses that snapshot,
+not a second config read or the executor's credentials. The snapshot is not an
+execution grant: configuration or activation can change while credentials are
+being resolved, and generated activation/currentness checks remain required
+before installing or using a runnable binding.
+
+`live_config_external_edit_adjudication` defines the external-edit boundary:
+disk documents supply candidate observations; adoption or revocation through
+the existing generated Live owner makes a change runtime-effective. A profile
+observation binds every read configuration document, its raw key presence,
+ancestor chain, and activation document set, including absence. Typed values
+and presence must come from the same observed document bytes. This is not an
+atomic multi-file snapshot or a lock against editor writes. An uncooperative
+edit after the final observation becomes effective at the next owner adoption,
+not retroactively before an already-linearized effect claim.
+
+Owning hosts must observe and reobserve around awaited resolution and required
+admission/effect/send boundaries, then compare-and-swap the exact preparation
+generation/state without rebasing a stale candidate over newer revocation.
+Cooperating mutation and refresh paths may acknowledge runtime-effective
+success only after the required durable fence/update. Read, parse, coherence,
+or expiry failure permits no cached grant fallback. The coherent document
+reader implements observation only; these publication and interaction fences
+remain required before stock profile activation.
+
+Native continuous voice channels reserve control capacity before activation.
+Their cumulative seconds account belongs to the generated Live transcript
+owner, independently of ordinary run tokens. Periodic observations replace the
+account rather than add to it and use unreserved ledger capacity. Exact repeated
+observations reuse the existing receipt. Regressions, invalid durations, and
+conflicting finals retain the last valid value with an explicit dispute.
+Text ingress closure does not release provider-control credits: final usage and
+physical observation closure still have reserved capacity. Observation closure
+preserves a previously observed final; without one it retains unconfirmed usage,
+never a fabricated final zero. Closed accounts refuse new late observations.
+
+The same channel-bound native owner accepts identity-bearing provider-start
+facts and bounded typed diagnostics directly from the exclusive pump. Start
+is not answer delivery, media readiness, or an execution grant. Exact control
+content is bound to the session and channel and replays its retained event
+sequence, including after unrelated appends or SQLite reopen. Diagnostics do
+not terminalize ordinary work, advance the text frontier, or sum occurrence
+counts inferred from repeated content. Conflicting start identities and new
+controls after observation closure are explicitly unaccepted.
+
+Control appends debit their measured record and snapshot growth from the
+channel reserve while retaining three maximum-sized slots for ingress close,
+final accounting, and observation closure. Exhaustion refuses new controls
+without mutating the ledger; it does not consume those remaining slots.
+Duplicate controls append nothing. Private provider identifiers remain in
+bounded internal records, not public transport events. Stock public profile
+opening and public readiness subscriptions are not enabled by these primitives.
+Diagnostic refusal is a typed nonterminal host outcome, not a generic error
+that closes the pump before final accounting. A local provider-start waiter
+arms its wakeup before rereading the durable receipt; notifications carry no
+authority and may coalesce. Timeout stops only the wait, not the channel.
+Observing a start receipt, even after close, reports that historical fact only.
+
+The native client-delegation operation composes exact source reservation with
+ordinary input admission. It accepts a host-resolved grant per invocation,
+never caches it on the channel, and returns a new sealed admission only after
+the existing joint ordinary/Live commit succeeds. A retained refusal,
+cancellation, or earlier admission is returned as source observation without
+minting another handoff. Later text, channel closure, or a newly supplied grant
+cannot change that replay. This operation does not yet install a stock profile
+control route or provider result/continuation delivery.
+
+Initial Live admission also observes the exact source channel's generated
+ingress state from the same Live head used by its atomic commit. A reservation
+made before channel close is not an admission-won-close receipt: if close wins
+first, it cannot mint an ordinary input afterward. An already-admitted source
+still replays its original receipt and may stage or continue callbacks after
+voice close, subject to the existing grant, cancellation, and lifecycle guards.
+
+The native drain-begin fence separates source ingress from observation ingress.
+It prevents new source selection and initial admission for that channel while
+leaving TEXT persistence open for the sole provider reader's drain. It neither
+revokes previously admitted work nor reports that physical draining completed.
+For continuous attachments, the shared host coordinates bounded drain before
+physical adapter disposal. An active pump receives the close request; otherwise
+an owned cleanup task takes the same exclusive reader lease. Cancelling a close
+waiter does not cancel that cleanup. Requesting close or observing the provider's
+physical closed phase alone does not satisfy the disposal guard: the native
+owner must report committed observation closure. A failed drain retains the
+adapter and its typed outcome for retry or recovery.
+Continuous provider reads require an exclusive host pump lease retained across
+read and application. Both WebSocket and WebRTC retain that lease and pin their
+receive future; a second reader or an unleased raw read refuses before consuming
+a provider observation. The lease is mechanical reader custody, not a delegated
+execution grant or a completed drain.
+WebSocket self-close and publication loss switch the same pump into drain
+without discarding its pending receive. Close and observation reads progress
+concurrently, so a full provider event queue cannot deadlock close behind final
+usage. The default drain deadline is ten seconds, including reader handoff and
+native persistence; timeout is an explicit failure, not EOF or final usage.
+
+The public provider adapter binds WebSocket lifecycle observations to the
+actual `Started` identity and WebRTC observations to the created resource's
+identity. Contradictory lifecycle identities permanently refuse readiness,
+final usage, and further provider commands. A transport's raw closed phase is
+not a validated provider final. These are adapter-observation checks; identity
+fencing inside the physical command writer remains a separate requirement.
+
+The persisted `CallbackContinuation` input references that same immutable source,
+but carries its own admission commit and exact callback target/result digest.
+It never replaces the source's original admission receipt or materializes
+another prompt. Generated admission classifies `LiveCallbackContinuation` as
+exclusive `ResumePending` at queue/run-start; recovery rejects content-turn or
+steer substitutions. Staging and restoration bind the new run to its retained
+predecessor, rather than reusing the original input or admission identity.
+
+Native `MeerkatMachine::commit_live_callback_input_admission` routes through the
+same owned ordinary-ingress command as initial Live admission. It atomically
+compares the exact finalized originating input, committed callback body,
+runtime lifecycle/registration, unchanged source, and Live head before inserting
+the continuation. A disposable generated staging image measures the future
+snapshot growth reserved at admission; its sizing IDs are never persisted as
+runs. Historical retries observe the separate immutable continuation receipt
+without replacing the source receipt or issuing application permission.
+The runtime queue prepares materialized content without an executable primitive,
+then binds it to the committed generated run authority. A Live input cannot
+be converted through the ordinary, unscoped primitive path.
+
+If a rejected external admission degrades an idle runtime registration, the
+exact registration-owned recovery coordinator wakes its attached loop before
+awaiting teardown. This wake only makes the loop observe the existing
+`ReloadRequired` fence; it admits no input and publishes no Stop or retirement.
+
+The Live request owner records callback-application permission separately from
+ordinary callback results. Its one-shot claim does not mean results or sibling
+effects were applied, does not charge another tool invocation or tokens, and
+cannot be reset to retry an ambiguous application. The ordinary Pending/Applied
+receipt remains the application result authority. Native claims return sealed,
+non-cloneable custody only after a newly committed generated transition; dropping
+it does not reset the one-shot marker. The Core pending-run path consumes that
+custody and revalidates the ordinary complete result digest after the claim
+await, before applying results. Retained sibling transcript blocks use the same
+ordinary post-tool message construction and remain adjacent to the one complete
+ToolResults set. The ordinary Applied receipt prevents duplicate application.
+Scoped callback batches with asynchronous operations or authority-changing
+session effects still refuse before claiming application permission; their
+enforcement and public factory/service activation remain incomplete.
+
+Parallel scoped effects can contend for the same Live head before either
+invokes a tool. The native claim producer may prepare up to eight candidates
+for the same logical effect, target, and retained ordinary-policy evaluation,
+but only after a typed head-only conflict proves the preceding candidate did
+not commit. Every candidate rereads the generated scope, input, lifecycle,
+budgets, and current time; publication still checks the retained policy fence.
+Exhausted contention returns the typed conflict. Actor/source conflicts,
+already-committed results, and store/fence/sealing failures never trigger this
+reprepare path. This is not a retry of a physical invocation, and no invocation
+occurs before a newly committed one-use permit.
+
+An unapplied scoped run failure is not ordinary replay permission.
+MeerkatMachine classifies the exact failed run's contributors and retains a
+scoped input as non-runnable `Staged`, with its original run attribution, while
+the existing lifecycle owner durably records RunFailed. It neither requeues the
+input nor invents a `NeverExecuted` terminal or an input completion receipt.
+The process-local attempt observer can receive the actual run failure; that is
+not completion of the durable Live request. The failed-but-applied path still
+requires its actual session body and boundary receipt and consumes its inputs
+through the existing ordinary owner.
+
+Cold native recovery reads the retained source, exact input row, generated run
+scope and claims, and, for continuations, the committed ordinary callback
+observation before normalizing any input. A missing nonterminal payload or an
+ordinary run attribution that differs from the retained scope is corruption,
+including a missing run where the Live owner retains one. Terminal ingress
+retirement remains legal and is not mistaken for missing execution evidence.
+Unresolved scoped runs and ambiguous
+application permission return `RecoveryRepairBlocked`; binding preparation
+preserves this as typed `RuntimeBindingsError::RecoveryHeld`. These holds leave
+the durable evidence intact. Shared normalization also refuses to turn a staged
+Live input into queued work, including the later ephemeral reconstruction pass.
+A committed applied boundary permits ordinary input normalization, not Live
+request completion or settlement of outstanding effects. Completion discovery
+distinguishes an unfinished input still bound to the current durable run from
+held execution using generated classification over the exact retained evidence.
+Its typed hold observation includes an evidence digest; it does not introduce a
+second persisted request phase or a terminal result. Current durable run status
+is not a physical-liveness guarantee or permission to normalize a cold run.
+Automatic repair of held requests and public factory/service activation remain
+incomplete.
+
+An admitted Live input cancelled before staging closes through the ordinary
+runless completion owner. After that owner finalizes, a generated Live
+transition spends the reserved completion credit and retains an
+`ordinary_runless_terminal` reference to the exact input and receipt digest.
+It creates no run, scope, claim, or copied result. The ordinary outcome retains
+its original typed termination reason; it is not relabelled as a successful
+run. Live closure can be rediscovered from the Live owner after ordinary
+publication and ingress retirement, independently of a waiter.
+
+Native `MeerkatMachine::cancel_live_request` persists the first explicit
+source-keyed intent even before reservation or input admission. Generated source
+authority and the exact source row commit together; later reservation,
+admission, staging, callback continuation, and effect claims cannot bypass it.
+Known input delivery uses the existing exact-input/exact-run cancellation path
+after the Live commit, without holding a Live lock. The returned intent is not
+proof of physical cancellation or a new terminal result. Existing completed
+results and uncertain in-flight effects retain their own outcomes. Voice close
+and speech interruption do not invoke work cancellation.
+
+Known sources retain measured capacity for their cancellation-map, request-set,
+and source-row growth, independently of run completion credit. First-seen unknown
+sources consume bounded ledger capacity and can fail explicitly if it is
+unavailable; no cancellation receipt is returned for a failed commit.
+The explicit native host recovery pass
+`reconcile_live_request_cancellations` discovers pending admitted-source intents
+from generated state and retries exact delivery without a remembered caller
+request or waiter. The persistent runtime loop also discovers and delivers those
+intents before queue staging, outside driver and turn-finalization locks.
+A cancellation racing that observation still fails the joint stage fence:
+only a proven no-commit refusal authorizes generated restoration of the queued
+input and its previous attempt count before exact cancellation is reconciled.
+An attempted write with an uncertain result still requires cold reload; it never
+authorizes scoped replay. Public cancellation wiring remains unfinished.
+
+The independent `LiveTranscriptMachine` has a native observation/control writer.
+Its exclusive channel handle assigns a local receive ordinal before encoding or
+awaiting persistence. A failed receive does not become accepted text or a
+provider turn. The next successful append records any still-missing, exactly
+known receive interval first. Activation, gap, close, and cold-recovery records
+use the same head/event CAS without changing actor authority or request state.
+Control reservations cover both the bounded record encoding and snapshot growth;
+their actual debit includes the measured snapshot delta. The final reserved slot
+can close a known missing tail atomically, without relabeling it as crash
+uncertainty. After actual process/store loss, recovery instead records unknown
+extent against the retained head and never invents lost receive counts.
+This native primitive is not yet installed at provider ingress and does not
+complete public profile activation.
+
+The provider registry now has a distinct `LiveAdapterFactory` construction
+seam. Its legacy wrapper forwards the existing realtime projection unchanged;
+continuous configuration cannot enter that wrapper. The public OpenAI transport
+uses the resolved voice connection, with separate WebSocket start and WebRTC
+create/attach operations. The registered client-context adapter emits internal
+continuous facts, not finalized turns or legacy tool calls. Provider error/info
+remain redacted, nonterminal diagnostics; frontend text and turn controls reject
+before transport queueing. Raw continuous facts cannot be serialized to public
+observation JSON, and an unconfigured continuous sink fails explicitly rather
+than dropping them. Managed-function adapter observations and the shared public
+profile-host activation path remain unfinished.
+
+A continuous host attachment shares one receive clock with its native writer.
+The host records TEXT receipt before its next await; source selection sees
+that same high-water mark even while persistence is pending. Receipt origin
+and ordinal are checked before application, so another clock or a duplicate
+cannot supply missing custody. Invalid TEXT ranges still consume a receive
+ordinal and preserve a known gap. Only the native committed record produces a
+`live_observation_committed` WS/WebRTC event; raw internal facts remain
+unpublishable. A continuous attachment refuses legacy transcript, turn, and
+tool-call observations instead of reaching the unscoped tool dispatcher.
+
+Archive preparation fences native observation and request ingress together
+before physical channel cleanup and ordinary retirement. This runs in the
+existing archive preparation worker before it acquires the registration and
+mutation gates; it rechecks the exact registration after store IO. Generic
+retire, disposal, and construction rollback do not create `SessionArchived`
+source intents. The archive path retains those intents through the existing
+source owner; the ordinary archive/finalization path still owns input/run
+terminal outcomes. Neither the ingress fence nor cancellation settles unknown
+physical effects or deletes pending callback bodies.
+
+For an existing registration or durably retained session, archive creates a
+closed-ingress tombstone even when no Live head existed yet. Head absence and
+the exact present-or-missing lifecycle row are compared atomically, so a racing
+first open cannot slip between an absent-head read and archive preparation.
+An existing body used as existence evidence carries its exact actor CAS too.
+Wholly absent registration, body, lifecycle, and Live ledger preserve ordinary
+NotFound behavior without creating a tombstone. Missing lifecycle comparison is
+an archive-storage precondition, never permission for ordinary input admission,
+staging, or execution.
+
+Native heads pre-fund the encoded growth of the request ingress flag and the
+transcript ingress flag/generation. This is byte-only snapshot capacity, not a
+new work or effect budget. With generation one, an open transcript retains
+20 bytes even after all its channels close; an open request ingress retains one
+additional byte. Closing the corresponding generated ingress consumes/releases
+that capacity. This lets a fence publish before channel settlement without
+borrowing capacity promised to existing completions.
+
+Request completion capacity is funded when the generated source reservation is
+created, before ordinary input admission. Admission must consume that exact
+retained budget and cannot resize or fund it a second time. The generated owner
+tracks the live completion obligation separately from its immutable budget
+record: cancellation of never-admitted work releases unused completion capacity,
+whereas admitted, running, and callback-held work retains it until settlement.
+The native channel handle now realizes joint source lookup/range-freeze through
+the `live_source_reservation` composition. Source lookup precedes head/text
+capture. Complete selected-channel reads, including retained-prefix pages,
+bind the frozen record to one atomic actor/Live read; the source row and both
+generated successors publish in one exact CAS. A typed capacity refusal
+publishes neither key nor frontier. Publication uncertainty holds that channel's
+next source selection until the exact prior source can be found; it does not
+authorize refreezing. Provider installation and end-to-end admission remain
+unfinished.
+
+The `source_content_empty_adjudication` clarification distinguishes no
+observations (a zero-width range) from a nonzero accepted range whose complete
+request text is empty or Unicode-whitespace-only. Both yield `RefusedEmpty`;
+the latter retains its exact nonzero range and observations. Reservation must
+spend that range and source together, without an executable request, input, or
+run. Replay after later text or reopen retains the same refusal; it cannot trim,
+retry, or refreeze the source. Missing, gapped, incomplete, corrupt, or truncated
+evidence is not Empty. Nonempty request text keeps its exact whitespace, and
+structured function-request whitespace rejection is unchanged.
+
+An admitted callback continuation cancelled before staging has its own runless
+ordinary terminal owner. Live completion follows that exact continuation input,
+not the prior run's `CallbackPending` receipt. The generated completion retains
+the prior run chain and effect outcomes, records no new run or callback
+application, and spends request completion credit once.
+
+Cancellation before any continuation admission instead yields a generated
+**cancelled callback held** observation from the retained source cancellation
+and the exact finalized ordinary `CallbackPending` receipt. It does not add a
+second persisted callback phase, synthesize an ordinary terminal, or spend/release
+completion credits. Recovery stops redelivering cancellation to that finalized
+input; late callback results may remain retained evidence but cannot authorize
+continuation. Pending body cleanup and ordinary-policy readiness are not implied.
+
+Runless teardown may finalize a shared ordinary batch containing both Live and
+ordinary inputs. Live reads the owner's complete recipient batch in one bounded
+store snapshot and compares every observed row inside its ledger transaction.
+The full result stays on the ordinary batch owner; each Live reference identifies
+its own recipient input and the shared receipt. Runtime stores supporting this
+path implement `load_input_states_by_ids_with_versions` using exact physical
+row bytes and enforce every `input_read_fences()` comparison, not just the
+request's own row.
+
 ### Ordered System messages
 
 `system_prompt` on `StartTurnRequest` appends one ordinary `System` message at
@@ -271,6 +652,15 @@ Compaction is optional and non-fatal.
 - Triggered by token thresholds and turn guards.
 - On failure, emits `CompactionFailed` and continues with uncompacted history.
 - Compaction usage counts toward run budgets.
+
+Post-commit projection failures are distinct from a failed compaction attempt:
+the committed rewrite and its pending projection outbox remain durable for
+recovery. HeadCanonical finalization atomically removes the intent and advances
+store authority. Only after that succeeds does the actor acknowledge the exact
+metadata successor, updating its preparation baseline for the compaction-intent
+key alone. Unrelated actor-local changes remain pending; a mismatched metadata
+root or a still-pending durable outbox refuses acknowledgement. This preserves
+the predecessor check for the next callback staging or ordinary turn boundary.
 
 ## Durability
 

@@ -2240,6 +2240,8 @@ pub enum AdmissionInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+    LiveRequest,
+    LiveCallbackContinuation,
 }
 
 /// Typed continuation discriminant carried by `ResolveAdmissionPlan`.
@@ -2280,6 +2282,7 @@ pub enum AdmissionInputOriginKind {
     Flow,
     System,
     External,
+    LiveRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2416,6 +2419,7 @@ pub enum AdmissionRejectReasonKind {
     DerivedDurabilityForbiddenForInputKind,
     PeerHandlingModeInvalid,
     PeerResponseTerminalInvalid,
+    LiveRequestRequiresGrant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2473,6 +2477,8 @@ pub enum RecoveredInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+    LiveRequest,
+    LiveCallbackContinuation,
 }
 
 /// Generated recovery disposition for a persisted input row after the machine
@@ -2482,6 +2488,20 @@ pub enum RecoveredInputRecoveryDisposition {
     #[default]
     Retain,
     Discard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum FailedRunRecoveryDisposition {
+    #[default]
+    HoldScoped,
+    Ordinary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ScopedInputNormalizationDisposition {
+    #[default]
+    Hold,
+    Authorized,
 }
 
 /// Generated disposition for one recovered durable terminal-completion batch.
@@ -3559,6 +3579,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_runtime_execution_kind: Map<String, Enum<RecoveredRuntimeExecutionKind>>,
             input_runtime_peer_response_terminal_apply_intent: Map<String, Enum<RecoveredPeerResponseTerminalApplyIntent>>,
             input_is_prompt: Map<String, bool>,
+            input_exclusive_live_requests: Set<String>,
             // Unified work-lane membership for admitted inputs. Mutual
             // exclusion between Queue and Steer is structural: an input
             // maps to exactly one `InputLane` value by construction.
@@ -4182,6 +4203,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_runtime_execution_kind = EmptyMap,
             input_runtime_peer_response_terminal_apply_intent = EmptyMap,
             input_is_prompt = EmptyMap,
+            input_exclusive_live_requests = EmptySet,
             input_lane = EmptyMap,
             input_recovery_lanes = EmptyMap,
             admission_authorized_lanes = EmptyMap,
@@ -4934,6 +4956,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 peer_handling_mode_valid: bool,
                 peer_response_terminal_structurally_valid: bool,
                 peer_response_terminal_observed_status: Enum<PeerResponseTerminalObservedStatus>,
+            },
+            ResolveLiveAdmissionValidation {
+                input_id: String,
+                input_kind: Enum<AdmissionInputKind>,
+                input_origin: Enum<AdmissionInputOriginKind>,
+                durability: Enum<InputDurabilityKind>,
             },
             ResolveAdmissionIdempotency { input_id: String, idempotency_key: Option<String> },
             RegisterAcceptedIdempotency { input_id: String, idempotency_key: String },
@@ -6230,6 +6258,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 recipient_input_ids: Set<String>,
                 finalization: Enum<RuntimeCompletionFinalizationObservation>,
             },
+            ResolveFailedRunRecovery { run_id: RunId, input_ids: Set<String> },
+            AuthorizeScopedInputNormalization {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                has_run: bool,
+                applied_boundary_committed: Option<bool>,
+            },
+            AbortUncommittedLiveStage { input_id: String, run_id: RunId },
         }
 
         surface_only [
@@ -7412,6 +7448,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 result_class: Enum<RuntimeCompletionResultClass>,
                 cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
             },
+            FailedRunRecoveryResolved {
+                run_id: RunId,
+                input_ids: Set<String>,
+                disposition: Enum<FailedRunRecoveryDisposition>,
+            },
+            ScopedInputNormalizationResolved {
+                input_id: String,
+                disposition: Enum<ScopedInputNormalizationDisposition>,
+            },
         }
 
         // =====================================================================
@@ -7419,6 +7464,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // =====================================================================
 
         disposition RuntimeBound => routed [MobMachine] seam NoOwnerRealization,
+        disposition FailedRunRecoveryResolved => local seam SurfaceResultAlignment,
+        disposition ScopedInputNormalizationResolved => local seam SurfaceResultAlignment,
         disposition RuntimeRetired => routed [MobMachine] seam NoOwnerRealization,
         disposition RuntimeDestroyed => routed [MobMachine] seam NoOwnerRealization,
         disposition TurnRunStarted => local seam NoOwnerRealization,
@@ -8659,6 +8706,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant current_run_has_pre_run_phase {
             (self.current_run_id == None && self.pre_run_phase == None)
             || (self.current_run_id != None && self.pre_run_phase != None)
+        }
+
+        invariant live_request_run_associations_are_exclusive {
+            for_all(live in self.input_exclusive_live_requests,
+                self.input_run_associations.contains_key(live) == false
+                || for_all(associated in self.input_run_associations.keys(),
+                    associated == live
+                    || self.input_run_associations.get_cloned(associated).get("value")
+                        != self.input_run_associations.get_cloned(live).get("value")))
         }
 
         invariant staged_inputs_are_not_queued {
@@ -14352,6 +14408,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationDurabilityMissingRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "durability_missing" {
                 durability == InputDurabilityKind::Missing
             }
@@ -14367,6 +14428,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationExternalDerivedRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "external_derived_forbidden" {
                 durability == InputDurabilityKind::Derived
                 && (input_origin == AdmissionInputOriginKind::Operator
@@ -14385,6 +14451,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationDerivedKindRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "derived_forbidden_for_input_kind" {
                 durability == InputDurabilityKind::Derived
                 && (input_origin == AdmissionInputOriginKind::Flow
@@ -14407,6 +14478,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationPeerHandlingRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "durability_authorized" {
                 durability == InputDurabilityKind::Durable
                 || durability == InputDurabilityKind::Ephemeral
@@ -14432,6 +14508,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationPeerTerminalRejected {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "durability_authorized" {
                 durability == InputDurabilityKind::Durable
                 || durability == InputDurabilityKind::Ephemeral
@@ -14461,6 +14542,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionValidationAccepted {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard "ordinary_admission" {
+                input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                && input_origin != AdmissionInputOriginKind::LiveRequest
+            }
             guard "durability_authorized" {
                 durability == InputDurabilityKind::Durable
                 || durability == InputDurabilityKind::Ephemeral
@@ -14487,6 +14573,59 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition ResolveAdmissionValidationUnboundLiveRequestRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, input_kind, input_origin, durability, peer_handling_mode_valid, peer_response_terminal_structurally_valid, peer_response_terminal_observed_status }
+            guard {
+                input_kind == AdmissionInputKind::LiveRequest
+                || input_kind == AdmissionInputKind::LiveCallbackContinuation
+                || input_origin == AdmissionInputOriginKind::LiveRequest
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::LiveRequestRequiresGrant)
+            }
+        }
+
+        transition ResolveLiveAdmissionValidationAccepted {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveAdmissionValidation { input_id, input_kind, input_origin, durability }
+            guard {
+                (input_kind == AdmissionInputKind::LiveRequest
+                    || input_kind == AdmissionInputKind::LiveCallbackContinuation)
+                && input_origin == AdmissionInputOriginKind::LiveRequest
+                && durability == InputDurabilityKind::Durable
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Accept,
+                reject_reason: None
+            }
+        }
+
+        transition ResolveLiveAdmissionValidationRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveAdmissionValidation { input_id, input_kind, input_origin, durability }
+            guard {
+                (input_kind != AdmissionInputKind::LiveRequest
+                    && input_kind != AdmissionInputKind::LiveCallbackContinuation)
+                || input_origin != AdmissionInputOriginKind::LiveRequest
+                || durability != InputDurabilityKind::Durable
+            }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::LiveRequestRequiresGrant)
+            }
+        }
+
         // 26b. NormalizeRecoveredInputLifecycle: generated recovery
         // lifecycle-normalization authority. The shell supplies typed
         // observations from durable storage (observed phase and boundary
@@ -14495,6 +14634,29 @@ macro_rules! meerkat_catalog_machine_dsl {
         // recovered bundle. Consume-on-accept must arrive as an already
         // terminal seed; recovery does not consult persisted policy mirrors
         // to turn an accepted row into a terminal fact.
+        transition AuthorizeScopedInputNormalization {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input AuthorizeScopedInputNormalization {
+                input_id, phase, has_run, applied_boundary_committed
+            }
+            guard { input_id != "" }
+            update {}
+            to Idle
+            emit ScopedInputNormalizationResolved {
+                input_id: input_id,
+                disposition: if
+                    ((phase == RecoveredInputObservedPhase::Accepted
+                        || phase == RecoveredInputObservedPhase::Queued) && !has_run)
+                    || ((phase == RecoveredInputObservedPhase::Applied
+                        || phase == RecoveredInputObservedPhase::AppliedPendingConsumption)
+                        && has_run && applied_boundary_committed == Some(true)) {
+                    ScopedInputNormalizationDisposition::Authorized
+                } else {
+                    ScopedInputNormalizationDisposition::Hold
+                }
+            }
+        }
+
         transition NormalizeRecoveredInputAcceptedQueue {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input NormalizeRecoveredInputLifecycle { input_id, phase, applied_boundary_committed }
@@ -15849,13 +16011,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
-                self.input_runtime_execution_kind.insert(input_id, if input_kind == AdmissionInputKind::Continuation {
+                self.input_runtime_execution_kind.insert(input_id, if input_kind == AdmissionInputKind::Continuation
+                    || input_kind == AdmissionInputKind::LiveCallbackContinuation {
                     RecoveredRuntimeExecutionKind::ResumePending
                 } else {
                     RecoveredRuntimeExecutionKind::ContentTurn
                 });
                 self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
                 self.input_is_prompt.insert(input_id, input_kind == AdmissionInputKind::Prompt);
+                if input_kind == AdmissionInputKind::LiveRequest
+                    || input_kind == AdmissionInputKind::LiveCallbackContinuation {
+                    self.input_exclusive_live_requests.insert(input_id);
+                } else {
+                    self.input_exclusive_live_requests.remove(input_id);
+                }
             }
             to Idle
             emit AdmissionResolved {
@@ -15885,13 +16054,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
-                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
+                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation
+                    || input_kind == AdmissionInputKind::LiveCallbackContinuation {
                     AdmissionRuntimeExecutionKind::ResumePending
                 } else {
                     AdmissionRuntimeExecutionKind::ContentTurn
                 },
                 runtime_peer_response_terminal_apply_intent: None,
-                record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
+                record_transcript: input_kind != AdmissionInputKind::Continuation
+                    && input_kind != AdmissionInputKind::LiveCallbackContinuation
+                    && input_kind != AdmissionInputKind::Operation,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
                 wake_if_idle: without_wake == false
@@ -15912,6 +16084,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "steer_override" {
                 requested_lane == Some(InputLane::Steer)
+                && input_kind != AdmissionInputKind::LiveRequest
+                && input_kind != AdmissionInputKind::LiveCallbackContinuation
                 && input_kind != AdmissionInputKind::PeerResponseProgress
                 && input_kind != AdmissionInputKind::PeerResponseTerminal
                 && continuation_kind == AdmissionContinuationKind::Ordinary
@@ -20533,9 +20707,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 lane
             }
             guard "recovered_execution_kind_matches_input" {
-                (input_kind == RecoveredInputKind::Continuation
+                ((input_kind == RecoveredInputKind::Continuation
+                    || input_kind == RecoveredInputKind::LiveCallbackContinuation)
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ResumePending)
                 || (input_kind != RecoveredInputKind::Continuation
+                    && input_kind != RecoveredInputKind::LiveCallbackContinuation
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn)
             }
             guard "recovered_terminal_intent_matches_input" {
@@ -20548,9 +20724,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_boundary != RecoveredRunApplyBoundary::Immediate
                 || lane == InputLane::Steer
             }
+            guard "recovered_live_request_owns_exclusive_run_start" {
+                (input_kind != RecoveredInputKind::LiveRequest
+                    && input_kind != RecoveredInputKind::LiveCallbackContinuation)
+                || (lane == InputLane::Queue
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
+            }
             update {
                 self.recovered_admitted_inputs.insert(input_id);
                 self.recovered_admitted_lanes.insert(input_id, lane);
+                if input_kind == RecoveredInputKind::LiveRequest
+                    || input_kind == RecoveredInputKind::LiveCallbackContinuation {
+                    self.input_exclusive_live_requests.insert(input_id);
+                } else {
+                    self.input_exclusive_live_requests.remove(input_id);
+                }
             }
             to Idle
         }
@@ -20588,6 +20776,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || phase == InputPhase::Coalesced
                 || phase == InputPhase::Abandoned
                 || self.recovered_admitted_inputs.contains(input_id)
+            }
+            guard "recovered_live_request_is_not_operator_prompt" {
+                self.input_exclusive_live_requests.contains(input_id) == false
+                || is_prompt == false
             }
             guard "recovered_recovery_lane_matches_witness" {
                 (
@@ -20931,6 +21123,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id != None
                 && self.current_run_id.get("value") == run_id
             }
+            guard "live_request_uses_queue_lane" {
+                self.input_exclusive_live_requests.contains(input_id) == false
+                || self.input_lane.get_cloned(input_id).get("value") == InputLane::Queue
+            }
+            guard "live_request_run_is_exclusive" {
+                self.input_exclusive_live_requests.len() == 0
+                || for_all(associated in self.input_run_associations.keys(),
+                    associated == input_id
+                    || self.input_run_associations.get_cloned(associated).get("value") != run_id
+                    || (self.input_exclusive_live_requests.contains(input_id) == false
+                        && self.input_exclusive_live_requests.contains(associated) == false))
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
@@ -20957,15 +21161,71 @@ macro_rules! meerkat_catalog_machine_dsl {
         // supplies the target lane (the shell's `HandlingMode` at rollback
         // time) so the DSL can re-admit the input to its work lane without
         // external post-hoc writes.
+        transition ResolveFailedRunRecovery {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveFailedRunRecovery { run_id, input_ids }
+            guard "exact_staged_run_contributors" {
+                input_ids.len() > 0
+                && for_all(input_id in input_ids,
+                    self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                    && self.input_run_associations.get_cloned(input_id) == Some(run_id))
+                && for_all(input_id in self.input_run_associations.keys(),
+                    self.input_run_associations.get_cloned(input_id) != Some(run_id)
+                    || self.input_phases.get_cloned(input_id) != Some(InputPhase::Staged)
+                    || input_ids.contains(input_id))
+            }
+            update {}
+            to Idle
+            emit FailedRunRecoveryResolved {
+                run_id: run_id,
+                input_ids: input_ids,
+                disposition: if for_all(input_id in input_ids,
+                    self.input_exclusive_live_requests.contains(input_id) == false) {
+                    FailedRunRecoveryDisposition::Ordinary
+                } else {
+                    FailedRunRecoveryDisposition::HoldScoped
+                }
+            }
+        }
+
         transition RollbackStaged {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RollbackStaged { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "ordinary_input_can_be_replayed" {
+                self.input_exclusive_live_requests.contains(input_id) == false
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
                 self.input_lane.insert(input_id, lane);
                 self.input_recovery_lanes.insert(input_id, lane);
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // Only the joint-stage producer's no-commit witness may reach this
+        // command. Committed scoped work remains ineligible for replay.
+        transition AbortUncommittedLiveStage {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortUncommittedLiveStage { input_id, run_id }
+            guard "exact_unexecuted_live_stage" {
+                self.input_exclusive_live_requests.contains(input_id)
+                && self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                && self.input_run_associations.get_cloned(input_id) == Some(run_id)
+                && self.current_run_id == Some(run_id)
+                && self.input_recovery_lanes.get_cloned(input_id) == Some(InputLane::Queue)
+                && self.input_attempt_counts.get_cloned(input_id).get("value") > 0
+            }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Queued);
+                self.input_run_associations.remove(input_id);
+                self.input_lane.insert(input_id, InputLane::Queue);
+                self.input_attempt_counts.insert(
+                    input_id,
+                    self.input_attempt_counts.get_cloned(input_id).get("value") - 1
+                );
             }
             to Idle
             emit InputLifecycleNotice
@@ -20979,6 +21239,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ResolveStagedRollback { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "ordinary_input_can_be_replayed" {
+                self.input_exclusive_live_requests.contains(input_id) == false
+            }
             guard "input_staged" {
                 self.input_phases.get(input_id).get("value") == InputPhase::Staged
             }
@@ -21006,6 +21269,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ResolveStagedRollback { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "ordinary_input_can_be_replayed" {
+                self.input_exclusive_live_requests.contains(input_id) == false
+            }
             guard "input_staged" {
                 self.input_phases.get(input_id).get("value") == InputPhase::Staged
             }
@@ -21500,6 +21766,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_runtime_execution_kind.remove(input_id);
                 self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
                 self.input_is_prompt.remove(input_id);
+                self.input_exclusive_live_requests.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_recovery_lanes.remove(input_id);
                 self.admission_authorized_lanes.remove(input_id);
@@ -32071,7 +32338,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     RuntimeLoopBatchSource::Queue => InputLane::Queue,
                     RuntimeLoopBatchSource::Steer => InputLane::Steer,
                 };
+                if input_ids.iter().any(|input_id| state.input_exclusive_live_requests.contains(input_id))
+                    && (input_ids.len() != 1 || expected_lane != InputLane::Queue)
+                {
+                    return None;
+                }
                 for input_id in input_ids {
+                    if !state.input_exclusive_live_requests.is_empty()
+                        && state.input_run_associations.iter().any(|(associated, associated_run)| {
+                        associated != input_id
+                            && associated_run == run_id
+                            && (state.input_exclusive_live_requests.contains(input_id)
+                                || state.input_exclusive_live_requests.contains(associated))
+                    }) {
+                        return None;
+                    }
                     if state.input_phases.get(input_id) != Some(&InputPhase::Queued) {
                         return None;
                     }
@@ -32121,6 +32402,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 ordered: &[String],
                 first: &String,
             ) -> Vec<String> {
+                if state.input_exclusive_live_requests.contains(first) {
+                    return Vec::new();
+                }
                 let Some(target_boundary) = state.input_runtime_boundary.get(first).copied()
                 else {
                     return vec![first.clone()];
@@ -32137,7 +32421,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 ordered
                     .iter()
                     .take_while(|input_id| {
-                        state.input_runtime_boundary.get(*input_id).copied()
+                        !state.input_exclusive_live_requests.contains(*input_id)
+                            && state.input_runtime_boundary.get(*input_id).copied()
                             == Some(target_boundary)
                             && state.input_runtime_execution_kind.get(*input_id).copied()
                                 == Some(target_execution_kind)
@@ -32156,6 +32441,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 ordered: &[String],
                 first: &String,
             ) -> Vec<String> {
+                if state.input_exclusive_live_requests.contains(first) {
+                    return vec![first.clone()];
+                }
                 let Some(target_execution_kind) =
                     state.input_runtime_execution_kind.get(first).copied()
                 else {
@@ -32170,7 +32458,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 };
                 let mut selected = Vec::new();
                 for input_id in ordered {
-                    if state.input_runtime_execution_kind.get(input_id).copied()
+                    if state.input_exclusive_live_requests.contains(input_id)
+                        || state.input_runtime_execution_kind.get(input_id).copied()
                         != Some(target_execution_kind)
                         || state
                             .input_runtime_peer_response_terminal_apply_intent

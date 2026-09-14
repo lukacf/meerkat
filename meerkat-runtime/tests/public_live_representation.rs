@@ -6,12 +6,235 @@ use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+fn retention_image() -> serde_json::Value {
+    use meerkat_runtime::live_resources::LiveActiveResource;
+    let active = LiveActiveResource::ALL
+        .into_iter()
+        .map(|kind| {
+            (
+                kind,
+                meerkat_runtime::live_resources::LiveResourceCharge::default(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    json!({
+        "used":{"records":1000,"encoded_bytes":1048576},
+        "reserved":{"records":10,"encoded_bytes":65536},
+        "quota":{"records":1000000,"encoded_bytes":268435456},
+        "active":active,
+        "active_context_chunks":0
+    })
+}
+
 #[test]
-fn live_input_reference_cannot_encode_as_operator_prompt_or_runless_run() -> TestResult {
-    use meerkat_runtime::live_request::{
-        InputRunIsolation, LiveAdmissionFateRecord, LiveExecutionRequestRecord,
-    };
-    let value = json!({
+fn settled_history_does_not_occupy_unsettled_slots_or_reset_durable_charge() -> TestResult {
+    use meerkat_runtime::live_resources::{LiveActiveResource, LiveRetentionAccounting};
+    let image = retention_image();
+    let accounting: LiveRetentionAccounting = serde_json::from_value(image.clone())?;
+    assert_eq!(serde_json::to_value(&accounting)?, image);
+    assert_eq!(accounting.used().records, 1000);
+    for kind in LiveActiveResource::ALL {
+        assert_eq!(accounting.active(kind).records, 0);
+        let mut bounded = image.clone();
+        let key = serde_json::to_value(kind)?
+            .as_str()
+            .ok_or("resource name")?
+            .to_owned();
+        bounded["active"][&key] = serde_json::to_value(kind.limit())?;
+        let restored: LiveRetentionAccounting = serde_json::from_value(bounded.clone())?;
+        assert_eq!(restored.active(kind), kind.limit());
+        for field in ["records", "encoded_bytes"] {
+            let mut overflow = bounded.clone();
+            overflow["active"][&key][field] =
+                json!(overflow["active"][&key][field].as_u64().ok_or("counter")? + 1);
+            assert!(serde_json::from_value::<LiveRetentionAccounting>(overflow).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retention_requires_complete_counted_byte_and_shared_capacity_accounting() -> TestResult {
+    use meerkat_runtime::live_resources::LiveRetentionAccounting;
+    let original = retention_image();
+    for changed in [
+        json!({"records":1000000,"encoded_bytes":1048576}),
+        json!({"records":1000,"encoded_bytes":268435456}),
+        json!({"records":u64::MAX,"encoded_bytes":u64::MAX}),
+    ] {
+        let mut image = original.clone();
+        image["used"] = changed;
+        assert!(serde_json::from_value::<LiveRetentionAccounting>(image).is_err());
+    }
+    let mut incomplete = original.clone();
+    incomplete["active"]
+        .as_object_mut()
+        .ok_or("active")?
+        .remove("work");
+    assert!(serde_json::from_value::<LiveRetentionAccounting>(incomplete).is_err());
+    let mut shared = original.clone();
+    shared["active"]["outputs"] = json!({"records":128,"encoded_bytes":4194304});
+    shared["active"]["continuations"] = json!({"records":1,"encoded_bytes":1});
+    assert!(serde_json::from_value::<LiveRetentionAccounting>(shared).is_err());
+    for chunks in [1, 65] {
+        let mut image = original.clone();
+        image["active_context_chunks"] = json!(chunks);
+        assert!(serde_json::from_value::<LiveRetentionAccounting>(image).is_err());
+    }
+    let mut context = original;
+    context["active"]["context_plans"] = json!({"records":8,"encoded_bytes":65536});
+    context["active_context_chunks"] = json!(64);
+    assert!(serde_json::from_value::<LiveRetentionAccounting>(context).is_ok());
+    Ok(())
+}
+
+fn send_attempt_image() -> serde_json::Value {
+    json!({
+        "format":"live_ledger_v1",
+        "session_id":uuid::Uuid::from_u128(100),
+        "channel_id":"voice",
+        "attempt_id":uuid::Uuid::from_u128(200),
+        "send_generation":3,
+        "target":{"kind":"function_output","batch":{
+            "channel_id":"voice","delegation":"d","response":"r"
+        },"call_id":"call"},
+        "payload":{"sequence":1,"digest":vec![1;32]},
+        "disposition":{"kind":"authorized"},
+        "later_rejection":null
+    })
+}
+
+#[test]
+fn send_attempt_images_preserve_claim_write_fence_and_abandonment_without_retry_authority()
+-> TestResult {
+    use meerkat_runtime::live_ledger::send_attempt::LiveSendAttemptRecord;
+    let claim = json!({"revision":2,"digest":vec![2;32]});
+    let feedback = json!({"sequence":3,"digest":vec![3;32]});
+    let fence = json!({
+        "fenced_generation":3,"successor_generation":4,
+        "commit":{"revision":3,"digest":vec![4;32]}
+    });
+    for disposition in [
+        json!({"kind":"authorized"}),
+        json!({"kind":"claimed","claim":claim}),
+        json!({"kind":"not_enqueued","claim":claim,"feedback":feedback}),
+        json!({"kind":"written_consumption_unconfirmed","claim":claim,"feedback":feedback}),
+        json!({"kind":"ambiguous_unfenced","claim":claim}),
+        json!({"kind":"ambiguous_fenced","claim":claim,"fence":fence}),
+        json!({"kind":"not_sent","claim":claim,"no_write_feedback":feedback}),
+        json!({"kind":"rejected_before_write","no_write":{"kind":"before_claim"},"rejection":feedback}),
+        json!({"kind":"rejected_before_write","no_write":{"kind":"not_enqueued","claim":claim,"feedback":feedback},"rejection":{"sequence":4,"digest":vec![4;32]}}),
+        json!({"kind":"abandoned_before_claim","reason":"channel_closed"}),
+        json!({"kind":"abandoned_before_claim","reason":"request_cancelled"}),
+        json!({"kind":"abandoned_not_enqueued","claim":claim,"no_write_feedback":feedback,"reason":"channel_replaced"}),
+    ] {
+        let mut image = send_attempt_image();
+        image["disposition"] = disposition;
+        let bytes = serde_json::to_vec(&image)?;
+        let record: LiveSendAttemptRecord = serde_json::from_slice(&bytes)?;
+        assert_eq!(serde_json::to_value(&record)?, image);
+        assert_eq!(
+            serde_json::from_slice::<LiveSendAttemptRecord>(&serde_json::to_vec(&record)?)?,
+            record,
+        );
+        for field in [
+            "retry_authorized",
+            "provider_processed",
+            "private_bridge_proof",
+        ] {
+            let mut forged = image.clone();
+            forged["disposition"][field] = json!(true);
+            assert!(serde_json::from_value::<LiveSendAttemptRecord>(forged).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn lost_feedback_cannot_encode_not_sent_or_fenced_without_exact_evidence() -> TestResult {
+    use meerkat_runtime::live_ledger::send_attempt::LiveSendAttemptRecord;
+    let claim = json!({"revision":2,"digest":vec![2;32]});
+    for disposition in [
+        json!({"kind":"claimed"}),
+        json!({"kind":"not_sent","claim":claim}),
+        json!({"kind":"rejected_before_write","rejection":{"sequence":3,"digest":vec![3;32]}}),
+        json!({"kind":"rejected_before_write","no_write":{"kind":"not_enqueued","claim":claim},"rejection":{"sequence":3,"digest":vec![3;32]}}),
+        json!({"kind":"rejected_before_write","no_write":{"kind":"before_claim"},"rejection":{"sequence":1,"digest":vec![3;32]}}),
+        json!({"kind":"abandoned_not_enqueued","claim":claim,"reason":"channel_closed"}),
+        json!({"kind":"written_consumption_unconfirmed","claim":claim}),
+        json!({"kind":"written_consumption_unconfirmed","claim":claim,"feedback":{"sequence":1,"digest":vec![3;32]}}),
+        json!({"kind":"ambiguous_fenced","claim":claim}),
+        json!({"kind":"ambiguous_fenced","claim":claim,"fence":{
+            "fenced_generation":2,"successor_generation":4,"commit":{"revision":3,"digest":vec![4;32]}
+        }}),
+        json!({"kind":"ambiguous_fenced","claim":claim,"fence":{
+            "fenced_generation":3,"successor_generation":3,"commit":{"revision":3,"digest":vec![4;32]}
+        }}),
+        json!({"kind":"ambiguous_fenced","claim":claim,"fence":{
+            "fenced_generation":3,"successor_generation":4,"commit":{"revision":2,"digest":vec![4;32]}
+        }}),
+        json!({"kind":"provider_processed","claim":claim}),
+        json!({"kind":"playback_completed","claim":claim}),
+    ] {
+        let mut image = send_attempt_image();
+        image["disposition"] = disposition;
+        assert!(serde_json::from_value::<LiveSendAttemptRecord>(image).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn send_attempt_target_and_late_rejection_remain_exact_and_distinct_from_physical_write()
+-> TestResult {
+    use meerkat_runtime::live_ledger::send_attempt::LiveSendAttemptRecord;
+    let original = send_attempt_image();
+    let batch = original["target"]["batch"].clone();
+    for target in [
+        original["target"].clone(),
+        json!({"kind":"continuation","members":[batch]}),
+        json!({"kind":"context_chunk","plan_id":uuid::Uuid::from_u128(300),"chunk_index":63}),
+    ] {
+        let mut image = original.clone();
+        image["target"] = target;
+        let decoded: LiveSendAttemptRecord = serde_json::from_value(image.clone())?;
+        assert_eq!(serde_json::to_value(decoded)?, image);
+    }
+    for target in [
+        json!({"kind":"continuation","members":[]}),
+        json!({"kind":"continuation","members":[batch,batch]}),
+        json!({"kind":"continuation","members":[{"channel_id":"other","delegation":"d","response":"r"}]}),
+        json!({"kind":"function_output","batch":batch,"call_id":""}),
+        json!({"kind":"context_chunk","plan_id":uuid::Uuid::from_u128(300),"chunk_index":64}),
+    ] {
+        let mut image = original.clone();
+        image["target"] = target;
+        assert!(serde_json::from_value::<LiveSendAttemptRecord>(image).is_err());
+    }
+    let mut written = original;
+    written["disposition"] = json!({
+        "kind":"written_consumption_unconfirmed",
+        "claim":{"revision":2,"digest":vec![2;32]},
+        "feedback":{"sequence":3,"digest":vec![3;32]}
+    });
+    written["later_rejection"] = json!({"sequence":4,"digest":vec![4;32]});
+    let decoded: LiveSendAttemptRecord = serde_json::from_value(written.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?, written);
+    let mut raced = written.clone();
+    raced["later_rejection"]["sequence"] = json!(2);
+    let decoded: LiveSendAttemptRecord = serde_json::from_value(raced.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?, raced);
+    for invalid_sequence in [1, 3] {
+        let mut invalid = written.clone();
+        invalid["later_rejection"]["sequence"] = json!(invalid_sequence);
+        assert!(serde_json::from_value::<LiveSendAttemptRecord>(invalid).is_err());
+    }
+    written["disposition"] = json!({"kind":"authorized"});
+    assert!(serde_json::from_value::<LiveSendAttemptRecord>(written).is_err());
+    Ok(())
+}
+
+fn live_input_reference_image() -> serde_json::Value {
+    json!({
         "kind":"live_request",
         "provenance":{
             "request_id":uuid::Uuid::from_u128(1),
@@ -20,7 +243,99 @@ fn live_input_reference_cannot_encode_as_operator_prompt_or_runless_run() -> Tes
             "evidence_kind":"application_snapshot","request_digest":vec![1;32]
         },
         "source_row":vec![2;32]
+    })
+}
+
+fn callback_input_reference_image() -> serde_json::Value {
+    let mut image = live_input_reference_image();
+    image["kind"] = json!("callback_continuation");
+    image["continuation"] = json!({
+        "target": {
+            "session_id": uuid::Uuid::from_u128(2),
+            "run_id": uuid::Uuid::from_u128(3),
+            "execution_scope": uuid::Uuid::from_u128(4),
+            "execution_boundary": uuid::Uuid::from_u128(5),
+            "batch_digest": vec![3;32]
+        },
+        "results_digest": vec![4;32]
     });
+    image["admission_commit"] = json!({"revision": 2, "digest": vec![5;32]});
+    image
+}
+
+#[tokio::test]
+async fn ordinary_ingress_refuses_unsealed_live_input_without_creating_a_row() -> TestResult {
+    use meerkat_runtime::accept::{AcceptOutcome, RejectReason};
+    use meerkat_runtime::driver::EphemeralRuntimeDriver;
+    use meerkat_runtime::identifiers::{InputKind, LogicalRuntimeId};
+    use meerkat_runtime::input::{
+        Input, InputDurability, InputHeader, InputOrigin, InputVisibility, LiveRequestInput,
+        PromptInput,
+    };
+    use meerkat_runtime::traits::RuntimeDriver;
+
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("unsealed-live"));
+    for (image, expected_kind) in [
+        (live_input_reference_image(), InputKind::LiveRequest),
+        (
+            callback_input_reference_image(),
+            InputKind::LiveCallbackContinuation,
+        ),
+    ] {
+        for source in [InputOrigin::LiveRequest, InputOrigin::Operator] {
+            for durability in [
+                InputDurability::Durable,
+                InputDurability::Ephemeral,
+                InputDurability::Derived,
+            ] {
+                let input_id = meerkat_core::lifecycle::InputId::new();
+                let input = Input::LiveRequest(LiveRequestInput {
+                    header: InputHeader {
+                        id: input_id.clone(),
+                        timestamp: chrono::Utc::now(),
+                        source: source.clone(),
+                        durability,
+                        visibility: InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    request: serde_json::from_value(image.clone())?,
+                });
+                let encoded = serde_json::to_value(&input)?;
+                assert_eq!(encoded["input_type"], "live_request");
+                assert!(encoded.get("content").is_none());
+                let input: Input = serde_json::from_value(encoded)?;
+                assert_eq!(input.kind(), expected_kind);
+                assert!(matches!(
+                    driver.accept_input(input).await?,
+                    AcceptOutcome::Rejected {
+                        reason: RejectReason::LiveRequestRequiresGrant,
+                        ..
+                    }
+                ));
+                assert!(driver.input_state(&input_id).is_none());
+            }
+        }
+    }
+    let mut forged = PromptInput::new("ordinary text cannot mint a Live admission", None);
+    forged.header.source = InputOrigin::LiveRequest;
+    assert!(matches!(
+        driver.accept_input(Input::Prompt(forged)).await?,
+        AcceptOutcome::Rejected {
+            reason: RejectReason::LiveRequestRequiresGrant,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn live_input_reference_cannot_encode_as_operator_prompt_or_runless_run() -> TestResult {
+    use meerkat_runtime::live_request::{
+        InputRunIsolation, LiveAdmissionFateRecord, LiveExecutionRequestRecord,
+    };
+    let value = live_input_reference_image();
     let record: LiveExecutionRequestRecord = serde_json::from_value(value.clone())?;
     assert_eq!(serde_json::to_value(&record)?, value);
     assert!(matches!(

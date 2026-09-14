@@ -166,6 +166,13 @@ observation GETs only. The complete admin family lives on JSON-RPC and the
 Python/TypeScript SDKs; host binding/revoke, grants, and live control also have
 CLI verbs, while hard cancel is RPC/SDK-only.
 
+`GET /mob/{id}/members/{agent_identity}/live-observations` reads retained
+Live transcript observations, not ordinary `Message` history. Optional query
+parameters are `channel_id`, opaque `cursor`, and `limit` (default 64, range
+1-256). Every page requires the normal `ReadHistory` grant, not a Live
+activation grant. This read-only endpoint adds no Live mutation or control
+route.
+
 Durable member role migration is also outside the public REST contract. The
 shared OpenAPI component catalog includes private member-host bridge schemas,
 including `MaterializeLaunchMode`, because components are generated from shared

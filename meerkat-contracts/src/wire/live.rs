@@ -518,8 +518,8 @@ pub enum WireLiveContinuityMode {
     /// discriminator and treat it as unrecognized — never as `Fresh`.
     ///
     /// **When a new core variant is added, add an explicit arm in the
-    /// forward `From` impl above this variant — `Unknown` is the floor,
-    /// not the destination.**
+    /// forward `TryFrom` impl. Internal or unmapped core facts are rejected,
+    /// never formatted into this retained wire shape.**
     Unknown { debug: String },
 }
 
@@ -1229,6 +1229,9 @@ impl From<LiveAdapterStatus> for WireLiveAdapterStatus {
 #[serde(tag = "code", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum WireLiveAdapterErrorCode {
+    ContinuousInputRejected {
+        reason: meerkat_core::live_execution::frontend::ContinuousLiveInputError,
+    },
     ConnectionFailed,
     ConnectionLost,
     ConfigRejected {
@@ -1640,6 +1643,9 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
 impl From<LiveAdapterErrorCode> for WireLiveAdapterErrorCode {
     fn from(value: LiveAdapterErrorCode) -> Self {
         match value {
+            LiveAdapterErrorCode::ContinuousInputRejected { reason } => {
+                Self::ContinuousInputRejected { reason }
+            }
             LiveAdapterErrorCode::ConnectionFailed => Self::ConnectionFailed,
             LiveAdapterErrorCode::ConnectionLost => Self::ConnectionLost,
             LiveAdapterErrorCode::ConfigRejected { reason } => Self::ConfigRejected {
@@ -1679,6 +1685,9 @@ impl TryFrom<WireLiveAdapterErrorCode> for LiveAdapterErrorCode {
         // crate so even with `#[non_exhaustive]` the compiler enforces
         // exhaustive coverage here.
         match value {
+            WireLiveAdapterErrorCode::ContinuousInputRejected { reason } => {
+                Ok(Self::ContinuousInputRejected { reason })
+            }
             WireLiveAdapterErrorCode::ConnectionFailed => Ok(Self::ConnectionFailed),
             WireLiveAdapterErrorCode::ConnectionLost => Ok(Self::ConnectionLost),
             WireLiveAdapterErrorCode::ConfigRejected { reason } => Ok(Self::ConfigRejected {
@@ -1907,6 +1916,9 @@ impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
 #[serde(tag = "observation", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum WireLiveAdapterObservation {
+    LiveObservationCommitted {
+        record: super::live_observation::LiveObservationRecord,
+    },
     Ready,
     UserTranscriptFinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2065,9 +2077,39 @@ pub enum WireLiveAdapterObservation {
     },
 }
 
-impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
-    fn from(value: LiveAdapterObservation) -> Self {
-        match value {
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("internal or unmapped Live observation is not a public wire event")]
+pub struct LiveObservationNotPublic;
+
+impl WireLiveAdapterObservation {
+    pub fn encode_committed(
+        record: super::live_observation::LiveObservationRecord,
+    ) -> Result<String, super::live_observation::LiveObservationEncodingError> {
+        let bytes = super::live_observation::LiveObservationWireCodecV1::encode_ledger_record(
+            &Self::LiveObservationCommitted { record },
+        )?;
+        String::from_utf8(bytes).map_err(|_| {
+            super::live_observation::LiveObservationEncodingError::Serialization(
+                <serde_json::Error as serde::ser::Error>::custom(
+                    "JSON serializer produced invalid UTF-8",
+                ),
+            )
+        })
+    }
+
+    pub fn encode(value: LiveAdapterObservation) -> Result<String, serde_json::Error> {
+        let wire =
+            Self::try_from(value).map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+        serde_json::to_string(&wire)
+    }
+}
+
+impl TryFrom<LiveAdapterObservation> for WireLiveAdapterObservation {
+    type Error = LiveObservationNotPublic;
+
+    fn try_from(value: LiveAdapterObservation) -> Result<Self, LiveObservationNotPublic> {
+        Ok(match value {
+            LiveAdapterObservation::Continuous { .. } => return Err(LiveObservationNotPublic),
             LiveAdapterObservation::Ready => Self::Ready,
             LiveAdapterObservation::UserTranscriptFinal {
                 provider_item_id,
@@ -2241,24 +2283,8 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 code: code.into(),
                 message,
             },
-            // Core enum is `#[non_exhaustive]`. R3-6 (P2): surface unknown
-            // variants explicitly via `Unknown { debug }` rather than
-            // silently coercing to `TurnInterrupted` (the previous default
-            // — the worst-possible fallback because a real new event would
-            // surface as a barge-in and drop data downstream). When a new
-            // core variant lands, add an explicit arm above this comment.
-            other => {
-                debug_assert!(
-                    false,
-                    "WireLiveAdapterObservation::from saw an unmapped \
-                     LiveAdapterObservation variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
-                );
-                Self::Unknown {
-                    debug: format!("{other:?}"),
-                }
-            }
-        }
+            _ => return Err(LiveObservationNotPublic),
+        })
     }
 }
 
@@ -2830,9 +2856,10 @@ mod tests {
 
         for core in public_core_realtime_transcript_events() {
             let wire =
-                WireLiveAdapterObservation::from(LiveAdapterObservation::RealtimeTranscript {
+                WireLiveAdapterObservation::try_from(LiveAdapterObservation::RealtimeTranscript {
                     event: core,
-                });
+                })
+                .expect("public realtime observation");
             let value = serde_json::to_value(&wire).expect("public observation must serialize");
             assert!(
                 validator.is_valid(&value),
@@ -3024,7 +3051,7 @@ mod tests {
             content_index: 2,
             media_type: "image/webp".into(),
         };
-        let wire: WireLiveAdapterObservation = core.clone().into();
+        let wire = WireLiveAdapterObservation::try_from(core.clone()).expect("public observation");
         let json = serde_json::to_value(&wire).expect("receipt should serialize");
 
         assert_eq!(json["observation"], "user_content_committed");
@@ -3045,20 +3072,22 @@ mod tests {
     fn wire_conversion_defensively_redacts_internal_user_content_event() {
         use meerkat_core::types::{ContentBlock, ImageData};
 
-        let wire = WireLiveAdapterObservation::from(LiveAdapterObservation::RealtimeTranscript {
-            event: RealtimeTranscriptEvent::UserContentFinal {
-                idempotency_key: "image-request-1".into(),
-                item_id: "item_image".into(),
-                previous_item_id: None,
-                content_index: 0,
-                content: vec![ContentBlock::Image {
-                    media_type: "image/png".into(),
-                    data: ImageData::Inline {
-                        data: "private-image-base64".into(),
-                    },
-                }],
-            },
-        });
+        let wire =
+            WireLiveAdapterObservation::try_from(LiveAdapterObservation::RealtimeTranscript {
+                event: RealtimeTranscriptEvent::UserContentFinal {
+                    idempotency_key: "image-request-1".into(),
+                    item_id: "item_image".into(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: ImageData::Inline {
+                            data: "private-image-base64".into(),
+                        },
+                    }],
+                },
+            })
+            .expect("sanitized legacy observation");
         let json = serde_json::to_string(&wire).expect("filtered sentinel must serialize");
         assert!(json.contains("internal_user_content_filtered"));
         assert!(!json.contains("private-image-base64"));
@@ -3097,7 +3126,7 @@ mod tests {
             item_id: Some("item_audio".into()),
             content_index: Some(2),
         };
-        let wire: WireLiveAdapterObservation = core.clone().into();
+        let wire = WireLiveAdapterObservation::try_from(core.clone()).expect("public observation");
         let core_json = serde_json::to_value(&core).expect("round-trip should succeed");
         let wire_json = serde_json::to_value(&wire).expect("round-trip should succeed");
         assert_eq!(core_json, wire_json);
@@ -3111,7 +3140,7 @@ mod tests {
             },
             message: "rejected".into(),
         };
-        let wire: WireLiveAdapterObservation = core.clone().into();
+        let wire = WireLiveAdapterObservation::try_from(core.clone()).expect("public observation");
         let core_json = serde_json::to_value(&core).expect("round-trip should succeed");
         let wire_json = serde_json::to_value(&wire).expect("round-trip should succeed");
         assert_eq!(core_json, wire_json);
@@ -3156,7 +3185,7 @@ mod tests {
         let real_interrupt = LiveAdapterObservation::TurnInterrupted {
             response_id: Some("resp_real".into()),
         };
-        let wire: WireLiveAdapterObservation = real_interrupt.into();
+        let wire = WireLiveAdapterObservation::try_from(real_interrupt).expect("public interrupt");
         match &wire {
             WireLiveAdapterObservation::TurnInterrupted { response_id } => {
                 assert_eq!(response_id.as_deref(), Some("resp_real"));

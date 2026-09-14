@@ -61,6 +61,17 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let mob = owner_test_specs_for_machine("mob_machine");
     assert_eq!(mob.len(), 1);
     assert!(mob.iter().all(|spec| spec.package == "meerkat-mob"));
+
+    let live = owner_test_specs_for_machine("live_request");
+    assert_eq!(live.len(), 2);
+    assert!(live.iter().all(|spec| {
+        spec.package == "meerkat-runtime"
+            && spec.features == ["live", "sqlite-store"]
+            && !spec.filters.is_empty()
+    }));
+    assert_eq!(live[0].target, "lib");
+    assert_eq!(live[1].target, "public_live_scoped_authority");
+    assert!(owner_test_specs_for_machine("not_a_registered_machine").is_empty());
 }
 
 #[cfg(feature = "machine-authority")]

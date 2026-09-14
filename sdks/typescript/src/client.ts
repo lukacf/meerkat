@@ -208,6 +208,7 @@ import type {
   MobIdParams as RpcMobIdParams,
   MobMemberHistoryParams as RpcMobMemberHistoryParams,
   MobMemberHistoryResult as RpcMobMemberHistoryResult,
+  MobMemberLiveObservationsResult,
   MobMemberLiveChannelParams as RpcMobMemberLiveChannelParams,
   MobMemberLiveControlParams as RpcMobMemberLiveControlParams,
   MobMemberLiveOpenParams as RpcMobMemberLiveOpenParams,
@@ -474,6 +475,8 @@ import {
   parseWorkGraphEvent,
   parseWorkGraphSnapshot,
   parseWorkItem,
+  parseMobMemberLiveObservationsResult,
+  parseTranscriptUserRole,
   type AttentionListRequest,
   type AttentionListResult,
   type GoalStatusRequest,
@@ -2540,6 +2543,28 @@ export class MeerkatClient {
       observed_active_revision: observedActiveRevision,
       convergence,
     });
+  }
+
+  /**
+   * Read retained Live records without acquiring an active channel.
+   */
+  async mobMemberLiveObservations(
+    mobId: string,
+    agentIdentity: string,
+    opts?: { channelId?: string; cursor?: string; limit?: number },
+  ): Promise<MobMemberLiveObservationsResult> {
+    if (opts?.limit !== undefined &&
+        (!Number.isInteger(opts.limit) || opts.limit < 1 || opts.limit > 256)) {
+      throw new RangeError("Live observation page limit must be between 1 and 256");
+    }
+    const result = await this.request("mob/member_live_observations", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      ...(opts?.channelId !== undefined ? { channel_id: opts.channelId } : {}),
+      ...(opts?.cursor !== undefined ? { cursor: opts.cursor } : {}),
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+    });
+    return parseMobMemberLiveObservationsResult(result);
   }
 
   /**
@@ -5055,12 +5080,7 @@ export class MeerkatClient {
         );
       }
       if (Object.prototype.hasOwnProperty.call(raw, "transcript_role")) {
-        MeerkatClient.requireClosedStringField(
-          raw,
-          "transcript_role",
-          ["conversational", "compaction_summary", "injected_context"],
-          context,
-        );
+        parseTranscriptUserRole(raw.transcript_role, `${context}: transcript_role`);
       }
       return;
     }
@@ -7323,6 +7343,9 @@ export class MeerkatClient {
       body: data.body != null ? String(data.body) : undefined,
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
+      ...(data.transcript_role !== undefined
+        ? { transcriptRole: parseTranscriptUserRole(data.transcript_role, `${context}: transcript_role`) }
+        : {}),
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
       runId: data.run_id != null ? String(data.run_id) : undefined,

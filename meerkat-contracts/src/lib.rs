@@ -267,6 +267,8 @@ pub use wire::{
     MobMemberListEntryWire,
     MobMemberLiveChannelParams,
     MobMemberLiveControlParams,
+    MobMemberLiveObservationsParams,
+    MobMemberLiveObservationsResult,
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberParams,

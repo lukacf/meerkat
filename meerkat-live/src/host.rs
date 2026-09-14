@@ -398,6 +398,16 @@ impl LiveChannelStatusCommitAuthority {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ObservationOutcome {
+    ContinuousTranscriptCommitted {
+        record: meerkat_contracts::wire::live_observation::LiveObservationRecord,
+    },
+    /// Continuous facts were consumed by their installed owner, not converted
+    /// into an ordinary transcript, tool invocation, or public raw event.
+    ContinuousApplied,
+    /// No canonical control event was accepted. This is not a channel terminal.
+    ContinuousControlUnaccepted {
+        reason: meerkat_core::live_execution::observation::LiveProviderControlRefusal,
+    },
     /// Observation was a no-op at the projection level (audio chunk, idle event).
     Noop,
     /// Status was updated; new value is reported.
@@ -662,9 +672,71 @@ pub enum LiveTranscriptIdentityError {
     MissingItemId,
 }
 
+pub enum ContinuousTranscriptResult {
+    Committed(meerkat_contracts::wire::live_observation::LiveObservationRecord),
+    Rejected(meerkat_core::live_observation::LiveObservationValueError),
+}
+
+pub enum ContinuousControlResult {
+    Accepted,
+    Refused(meerkat_core::live_execution::observation::LiveProviderControlRefusal),
+}
+
+#[async_trait::async_trait]
+pub trait LiveContinuousTranscriptIngress: Send + Sync {
+    fn session_id(&self) -> &SessionId;
+    fn channel_id(&self) -> &LiveChannelId;
+    fn receive_clock(&self) -> meerkat_core::live_observation::LiveObservationReceiveClock;
+    async fn begin_drain(&self) -> Result<(), LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "continuous source-ingress drain fence is not attached".into(),
+        ))
+    }
+    async fn observation_closure_committed(&self) -> Result<bool, LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "continuous observation closure owner is not attached".into(),
+        ))
+    }
+    async fn apply_voice_observation(
+        &self,
+        _event: &meerkat_core::live_execution::observation::ContinuousLiveObservation,
+    ) -> Result<(), LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "continuous voice accounting owner is not attached".into(),
+        ))
+    }
+    async fn apply_provider_control(
+        &self,
+        _event: &meerkat_core::live_execution::observation::ContinuousLiveObservation,
+    ) -> Result<ContinuousControlResult, LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "continuous provider control owner is not attached".into(),
+        ))
+    }
+    async fn append(
+        &self,
+        receive: meerkat_core::live_observation::LiveObservationReceiveReceipt,
+        observation: Result<
+            meerkat_core::live_observation::LiveTranscriptObservation,
+            meerkat_core::live_observation::LiveObservationValueError,
+        >,
+    ) -> Result<ContinuousTranscriptResult, LiveProjectionError>;
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait LiveProjectionSink: Send + Sync {
+    async fn apply_continuous_observation(
+        &self,
+        _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _event: &meerkat_core::live_execution::observation::ContinuousLiveObservation,
+    ) -> Result<(), LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "continuous Live ingress owner is not installed".into(),
+        ))
+    }
+
     /// Append a finalized user transcript fragment to canonical session history.
     async fn append_user_transcript(
         &self,
@@ -1163,6 +1235,273 @@ impl LiveProjectionSink for NoOpProjectionSink {
 /// `close_channel` so post-close `live/status` can report `Closed { reason }`
 /// instead of `ChannelNotFound` (G42).
 const CLOSED_CHANNEL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+pub const DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+#[path = "host/pump_close_tests.rs"]
+mod pump_close_tests;
+
+#[derive(Clone)]
+struct AdapterBinding {
+    adapter: Arc<dyn LiveAdapter>,
+    continuous_ingress: Option<Arc<dyn LiveContinuousTranscriptIngress>>,
+    observation_reader: Arc<Mutex<()>>,
+    close_requests: tokio::sync::watch::Sender<Option<Arc<ContinuousCloseRequest>>>,
+}
+
+pub(crate) struct ContinuousCloseRequest {
+    observation: LiveChannelCloseObservation,
+    deadline: tokio::time::Instant,
+    result: tokio::sync::watch::Sender<Option<Result<(), LiveAdapterHostError>>>,
+}
+
+impl ContinuousCloseRequest {
+    pub(crate) fn remaining(&self) -> Duration {
+        self.deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+    }
+    pub(crate) fn complete(&self, result: Result<(), LiveAdapterHostError>) {
+        self.result.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(result.clone());
+            true
+        });
+    }
+
+    async fn wait(&self) -> Result<(), LiveAdapterHostError> {
+        let mut result = self.result.subscribe();
+        loop {
+            if let Some(result) = result.borrow_and_update().clone() {
+                return result;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| LiveAdapterHostError::CloseNotAuthorized)?;
+        }
+    }
+}
+
+struct ContinuousCloseCompletion(Arc<ContinuousCloseRequest>);
+
+impl Drop for ContinuousCloseCompletion {
+    fn drop(&mut self) {
+        self.0
+            .complete(Err(LiveAdapterHostError::ObservationDrainAborted));
+    }
+}
+
+pub(crate) type ContinuousCloseRequests =
+    Option<tokio::sync::watch::Receiver<Option<Arc<ContinuousCloseRequest>>>>;
+
+pub(crate) async fn wait_for_continuous_close(
+    requests: &mut ContinuousCloseRequests,
+) -> Result<Arc<ContinuousCloseRequest>, LiveAdapterHostError> {
+    let Some(requests) = requests else {
+        return std::future::pending().await;
+    };
+    loop {
+        if let Some(request) = requests.borrow_and_update().clone() {
+            return Ok(request);
+        }
+        requests
+            .changed()
+            .await
+            .map_err(|_| LiveAdapterHostError::CloseNotAuthorized)?;
+    }
+}
+
+/// Exclusive continuous-provider reader custody, held through read and apply.
+/// This is transport ownership, not permission to execute delegated work.
+struct LiveObservationReader {
+    host: Arc<LiveAdapterHost>,
+    channel_id: LiveChannelId,
+    binding: Option<AdapterBinding>,
+    _lease: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl LiveObservationReader {
+    async fn next_observation(
+        &mut self,
+    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
+        self.host
+            .next_observation_inner(&self.channel_id, self.binding.as_ref())
+            .await
+    }
+
+    async fn next_owned(
+        mut self,
+    ) -> (
+        Result<Option<LiveAdapterObservation>, LiveAdapterHostError>,
+        Self,
+    ) {
+        let observation = self.next_observation().await;
+        (observation, self)
+    }
+}
+
+type PendingLiveObservation = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (
+                    Result<Option<LiveAdapterObservation>, LiveAdapterHostError>,
+                    LiveObservationReader,
+                ),
+            > + Send,
+    >,
+>;
+
+/// One reader retained across normal observation and close-drain phases.
+/// Cancelling a wait does not cancel the inner provider receive future.
+pub struct LiveObservationPump {
+    host: Arc<LiveAdapterHost>,
+    channel_id: LiveChannelId,
+    binding: Option<AdapterBinding>,
+    pending: PendingLiveObservation,
+    deferred_terminal: Option<LiveAdapterObservation>,
+}
+
+impl LiveObservationPump {
+    fn new(
+        host: Arc<LiveAdapterHost>,
+        channel_id: LiveChannelId,
+        binding: Option<AdapterBinding>,
+        lease: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Self {
+        let reader = LiveObservationReader {
+            host: Arc::clone(&host),
+            channel_id: channel_id.clone(),
+            binding: binding.clone(),
+            _lease: lease,
+        };
+        Self {
+            host,
+            channel_id,
+            binding,
+            pending: Box::pin(reader.next_owned()),
+            deferred_terminal: None,
+        }
+    }
+
+    pub fn is_continuous(&self) -> bool {
+        self.binding.is_some()
+    }
+
+    pub(crate) fn close_requests(&self) -> ContinuousCloseRequests {
+        self.binding
+            .as_ref()
+            .map(|binding| binding.close_requests.subscribe())
+    }
+
+    pub async fn next_observation(
+        &mut self,
+    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
+        let (observation, reader) = self.pending.as_mut().await;
+        self.pending = Box::pin(reader.next_owned());
+        observation
+    }
+
+    /// Switch this same reader into bounded, non-publishing drain. The pending
+    /// receive is retained and native applications finish serially.
+    pub async fn drain(&mut self, timeout: Duration) -> Result<(), LiveAdapterHostError> {
+        if timeout.is_zero() || std::time::Instant::now().checked_add(timeout).is_none() {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "invalid observation drain deadline",
+            ));
+        }
+        let result = tokio::time::timeout(timeout, self.drain_inner())
+            .await
+            .map_err(|_| LiveAdapterHostError::ObservationDrainTimedOut)
+            .and_then(|result| result);
+        let request = self
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.close_requests.borrow().clone());
+        if let Some(request) = request {
+            request.complete(result.clone());
+        }
+        result
+    }
+
+    async fn drain_inner(&mut self) -> Result<(), LiveAdapterHostError> {
+        let binding = self
+            .binding
+            .clone()
+            .ok_or(LiveAdapterHostError::UnsupportedCommand(
+                "legacy observation pump has no continuous drain",
+            ))?;
+        let ingress =
+            binding
+                .continuous_ingress
+                .clone()
+                .ok_or(LiveAdapterHostError::UnsupportedCommand(
+                    "continuous drain has no native owner",
+                ))?;
+        let host = Arc::clone(&self.host);
+        let channel = self.channel_id.clone();
+        let current = host.adapter_binding_for(&channel, false).await?;
+        if !Arc::ptr_eq(&binding.adapter, &current.adapter)
+            || !matches!(&current.continuous_ingress, Some(current) if Arc::ptr_eq(current, &ingress))
+        {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        let drained = async {
+            ingress.begin_drain().await?;
+            let mut close = Box::pin(binding.adapter.close());
+            let mut close_result = None;
+            let mut observation_ended = false;
+            loop {
+                if observation_ended && let Some(result) = close_result.take() {
+                    result?;
+                    return Ok::<(), LiveAdapterHostError>(());
+                }
+                tokio::select! {
+                    result = &mut close, if close_result.is_none() => {
+                        close_result = Some(result);
+                    }
+                    received = self.next_observation(), if !observation_ended => {
+                        let observation = received?.unwrap_or(LiveAdapterObservation::Continuous {
+                            event: meerkat_core::live_execution::observation::ContinuousLiveObservation::ObservationStreamEnded,
+                            receive: None,
+                        });
+                        if LiveAdapterHost::observation_requires_generated_close(&observation) {
+                            self.deferred_terminal = Some(observation);
+                            continue;
+                        }
+                        host.apply_observation(&channel, &observation).await?;
+                        observation_ended = matches!(observation, LiveAdapterObservation::Continuous {
+                            event: meerkat_core::live_execution::observation::ContinuousLiveObservation::ObservationStreamEnded,
+                            ..
+                        });
+                    }
+                }
+            }
+        }.await;
+        if self.deferred_terminal.is_some() {
+            let mut inner = host.inner.lock().await;
+            let state = inner
+                .channels
+                .get_mut(&channel)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel.clone()))?;
+            if !state
+                .adapter
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &binding.adapter))
+            {
+                return Err(LiveAdapterHostError::CloseNotAuthorized);
+            }
+            state.pending_synthetic_obs = self.deferred_terminal.take();
+        }
+        drained?;
+        if !ingress.observation_closure_committed().await? {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        host.commit_physical_adapter_close(&channel, &binding.adapter)
+            .await
+    }
+}
 
 /// Per-channel transport state tracked by the host.
 struct ChannelState {
@@ -1180,6 +1519,10 @@ struct ChannelState {
     command_acceptance_sequence: u64,
     close_observation_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
+    continuous_ingress: Option<Arc<dyn LiveContinuousTranscriptIngress>>,
+    observation_reader: Arc<Mutex<()>>,
+    close_requests: tokio::sync::watch::Sender<Option<Arc<ContinuousCloseRequest>>>,
+    continuous_close_owner: Option<std::sync::Weak<LiveAdapterHost>>,
     /// Mechanical proof that no provider adapter remains reachable for this
     /// channel. New channels start absent, attachment clears the proof, and a
     /// successful adapter `close()` restores it. Generated close authority is
@@ -1506,6 +1849,10 @@ pub enum LiveAdapterHostError {
     OpenAuthorityAlreadyConsumed,
     #[error("live channel close lacks generated commit authority")]
     CloseNotAuthorized,
+    #[error("continuous provider observation drain exceeded its deadline")]
+    ObservationDrainTimedOut,
+    #[error("continuous provider observation drain worker exited without an outcome")]
+    ObservationDrainAborted,
     #[error("live channel close authority was already consumed")]
     CloseAuthorityAlreadyConsumed,
     #[error("live channel status lacks generated commit authority")]
@@ -1548,6 +1895,8 @@ impl LiveAdapterHostError {
             Self::OpenNotAuthorized => "open_not_authorized",
             Self::OpenAuthorityAlreadyConsumed => "open_authority_already_consumed",
             Self::CloseNotAuthorized => "close_not_authorized",
+            Self::ObservationDrainTimedOut => "observation_drain_timed_out",
+            Self::ObservationDrainAborted => "observation_drain_aborted",
             Self::CloseAuthorityAlreadyConsumed => "close_authority_already_consumed",
             Self::StatusNotAuthorized => "status_not_authorized",
             Self::StatusAuthorityAlreadyConsumed => "status_authority_already_consumed",
@@ -1572,6 +1921,7 @@ impl LiveAdapterHostError {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ObservationRouting {
+    Continuous,
     AdmitAssistantOutput,
     AppendTranscript,
     /// Pass-through of a structured [`RealtimeTranscriptEvent`] from the
@@ -1908,6 +2258,10 @@ impl LiveAdapterHost {
                 command_acceptance_sequence: 0,
                 close_observation_sequence: 0,
                 adapter: None,
+                continuous_ingress: None,
+                observation_reader: Arc::new(Mutex::new(())),
+                close_requests: tokio::sync::watch::channel(None).0,
+                continuous_close_owner: None,
                 physical_close_confirmed: true,
                 retire_at: None,
                 pending_synthetic_obs: None,
@@ -1937,10 +2291,42 @@ impl LiveAdapterHost {
         if channel.retire_at.is_some() {
             return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
         }
+        if channel.continuous_ingress.is_some() {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "continuous adapter replacement requires a new channel",
+            ));
+        }
         channel.adapter = Some(adapter);
         channel.physical_close_confirmed = false;
         // Intentionally NOT setting status to Ready (F32). Driven by
         // adapter observations.
+        Ok(())
+    }
+
+    pub async fn attach_continuous_adapter(
+        self: &Arc<Self>,
+        channel_id: &LiveChannelId,
+        adapter: Arc<dyn LiveAdapter>,
+        ingress: Arc<dyn LiveContinuousTranscriptIngress>,
+    ) -> Result<(), LiveAdapterHostError> {
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if channel.retire_at.is_some()
+            || channel.adapter.is_some()
+            || ingress.session_id() != &channel.session_id
+            || ingress.channel_id() != channel_id
+        {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "continuous ingress does not match a fresh channel attachment",
+            ));
+        }
+        channel.adapter = Some(adapter);
+        channel.continuous_ingress = Some(ingress);
+        channel.continuous_close_owner = Some(Arc::downgrade(self));
+        channel.physical_close_confirmed = false;
         Ok(())
     }
 
@@ -2303,6 +2689,58 @@ impl LiveAdapterHost {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
+        self.next_observation_inner(channel_id, None).await
+    }
+
+    pub async fn claim_observation_pump(
+        self: &Arc<Self>,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveObservationPump, LiveAdapterHostError> {
+        let continuous = {
+            let inner = self.inner.lock().await;
+            inner
+                .channels
+                .get(channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?
+                .continuous_ingress
+                .is_some()
+        };
+        if !continuous {
+            return Ok(LiveObservationPump::new(
+                Arc::clone(self),
+                channel_id.clone(),
+                None,
+                None,
+            ));
+        }
+        let binding = self.adapter_binding_for(channel_id, false).await?;
+        if binding.continuous_ingress.is_none() {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        if binding.close_requests.borrow().is_some() {
+            return Err(LiveAdapterHostError::UnsupportedCommand(
+                "continuous channel is draining",
+            ));
+        }
+        let gate = Arc::clone(&binding.observation_reader);
+        let lease = gate.try_lock_owned().map_err(|_| {
+            LiveAdapterHostError::UnsupportedCommand(
+                "continuous provider observation reader is already claimed",
+            )
+        })?;
+        Ok(LiveObservationPump::new(
+            Arc::clone(self),
+            channel_id.clone(),
+            Some(binding),
+            Some(lease),
+        ))
+    }
+
+    async fn next_observation_inner(
+        &self,
+        channel_id: &LiveChannelId,
+        claimed: Option<&AdapterBinding>,
+    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
         // CC1: check for a one-shot synthetic observation pushed by
         // `signal_terminal_error` before polling the adapter. This makes
         // typed terminal errors (e.g. R11 model_swap → `ConfigRejected`)
@@ -2319,11 +2757,51 @@ impl LiveAdapterHost {
                 return Ok(Some(obs));
             }
         }
-        let adapter = self
-            .adapter_for(channel_id, /* require_ready = */ false)
+        let current = self
+            .adapter_binding_for(channel_id, /* require_ready = */ false)
             .await?;
-        match adapter.next_observation().await {
-            Ok(Some(obs)) => Ok(Some(obs)),
+        let binding = if let Some(claimed) = claimed {
+            if !Arc::ptr_eq(&claimed.adapter, &current.adapter)
+                || !matches!((&claimed.continuous_ingress, &current.continuous_ingress),
+                    (Some(left), Some(right)) if Arc::ptr_eq(left, right))
+            {
+                return Err(LiveAdapterHostError::CloseNotAuthorized);
+            }
+            claimed
+        } else {
+            if current.continuous_ingress.is_some() {
+                return Err(LiveAdapterHostError::UnsupportedCommand(
+                    "continuous provider observations require a pump lease",
+                ));
+            }
+            &current
+        };
+        match binding.adapter.next_observation().await {
+            Ok(Some(mut obs)) => {
+                if let LiveAdapterObservation::Continuous { event, receive } = &mut obs {
+                    let ingress = binding.continuous_ingress.as_ref().ok_or(
+                        LiveAdapterHostError::UnsupportedCommand(
+                            "continuous receive owner is not attached",
+                        ),
+                    )?;
+                    let recorded = if matches!(event,
+                        meerkat_core::live_execution::observation::ContinuousLiveObservation::Transcript(_)
+                        | meerkat_core::live_execution::observation::ContinuousLiveObservation::TranscriptRejected(_))
+                    {
+                        Some(ingress.receive_clock().record_received().map_err(|error|
+                            LiveProjectionError::Rejected(error.to_string()))?)
+                    } else { None };
+                    if receive.is_some() {
+                        return Err(LiveAdapterHostError::UnsupportedCommand(
+                            "provider supplied host receive custody",
+                        ));
+                    }
+                    *receive = recorded;
+                } else if binding.continuous_ingress.is_some() {
+                    Self::validate_continuous_transport_observation(&obs)?;
+                }
+                Ok(Some(obs))
+            }
             Ok(None) => {
                 // R5-3 fallback: if the adapter closed before the
                 // synthetic observation was injected (or the adapter
@@ -2370,9 +2848,110 @@ impl LiveAdapterHost {
 
         let routing = Self::classify_observation(observation);
 
-        let session_id = self.channel_session(channel_id).await?;
+        let (session_id, continuous_ingress) = {
+            let inner = self.inner.lock().await;
+            let channel = inner
+                .channels
+                .get(channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            (
+                channel.session_id.clone(),
+                channel.continuous_ingress.clone(),
+            )
+        };
+        if continuous_ingress.is_some() {
+            Self::validate_continuous_transport_observation(observation)?;
+        }
 
         let result = match (routing, observation) {
+            (
+                ObservationRouting::Continuous,
+                LiveAdapterObservation::Continuous { event, receive },
+            ) => {
+                use meerkat_core::live_execution::observation::ContinuousLiveObservation as Event;
+                let input = match event {
+                    Event::Transcript(observation) => Some(Ok(observation.clone())),
+                    Event::TranscriptRejected(error) => Some(Err(*error)),
+                    _ => None,
+                };
+                if let Some(input) = input {
+                    let ingress =
+                        continuous_ingress.ok_or(LiveAdapterHostError::UnsupportedCommand(
+                            "continuous transcript owner is not attached",
+                        ))?;
+                    let receive =
+                        receive
+                            .clone()
+                            .ok_or(LiveAdapterHostError::UnsupportedCommand(
+                                "continuous transcript has no received-observation custody",
+                            ))?;
+                    match (ingress.append(receive, input).await?, event) {
+                        (
+                            ContinuousTranscriptResult::Committed(record),
+                            Event::Transcript(observation),
+                        ) if record.channel_id == *channel_id
+                            && record.observation == *observation =>
+                        {
+                            meerkat_contracts::wire::live_observation::LiveObservationWireCodecV1::check_record_fit(record.clone())
+                                .map_err(|error| LiveProjectionError::Rejected(error.to_string()))?;
+                            Ok(ObservationOutcome::ContinuousTranscriptCommitted { record })
+                        }
+                        (
+                            ContinuousTranscriptResult::Rejected(actual),
+                            Event::TranscriptRejected(expected),
+                        ) if actual == *expected => Ok(ObservationOutcome::ContinuousApplied),
+                        _ => Err(LiveProjectionError::Rejected(
+                            "continuous commit does not match received content".into(),
+                        )
+                        .into()),
+                    }
+                } else {
+                    if receive.is_some() {
+                        return Err(LiveAdapterHostError::UnsupportedCommand(
+                            "control fact carries transcript receive custody",
+                        ));
+                    }
+                    if matches!(
+                        event,
+                        Event::VoiceUsage(_)
+                            | Event::ProviderClosed { .. }
+                            | Event::ObservationStreamEnded
+                    ) {
+                        let ingress =
+                            continuous_ingress.ok_or(LiveAdapterHostError::UnsupportedCommand(
+                                "continuous voice accounting owner is not attached",
+                            ))?;
+                        ingress
+                            .apply_voice_observation(event)
+                            .await
+                            .map(|()| ObservationOutcome::ContinuousApplied)
+                            .map_err(Into::into)
+                    } else if matches!(event, Event::ProviderStarted { .. } | Event::Diagnostic(_))
+                    {
+                        let ingress =
+                            continuous_ingress.ok_or(LiveAdapterHostError::UnsupportedCommand(
+                                "continuous provider control owner is not attached",
+                            ))?;
+                        ingress
+                            .apply_provider_control(event)
+                            .await
+                            .map(|outcome| match outcome {
+                                ContinuousControlResult::Accepted => ObservationOutcome::ContinuousApplied,
+                                ContinuousControlResult::Refused(reason) => {
+                                    tracing::warn!(channel = %channel_id, ?reason, "continuous control observation unaccepted");
+                                    ObservationOutcome::ContinuousControlUnaccepted { reason }
+                                }
+                            })
+                            .map_err(Into::into)
+                    } else {
+                        self.projection_sink
+                            .apply_continuous_observation(&session_id, channel_id, event)
+                            .await
+                            .map(|()| ObservationOutcome::ContinuousApplied)
+                            .map_err(Into::into)
+                    }
+                }
+            }
             (ObservationRouting::Noop, _) => Ok(ObservationOutcome::Noop),
 
             (
@@ -2980,6 +3559,17 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         require_ready: bool,
     ) -> Result<Arc<dyn LiveAdapter>, LiveAdapterHostError> {
+        Ok(self
+            .adapter_binding_for(channel_id, require_ready)
+            .await?
+            .adapter)
+    }
+
+    async fn adapter_binding_for(
+        &self,
+        channel_id: &LiveChannelId,
+        require_ready: bool,
+    ) -> Result<AdapterBinding, LiveAdapterHostError> {
         let inner = self.inner.lock().await;
         let channel = inner
             .channels
@@ -3003,7 +3593,31 @@ impl LiveAdapterHost {
             .adapter
             .as_ref()
             .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
-        Ok(Arc::clone(adapter))
+        Ok(AdapterBinding {
+            adapter: Arc::clone(adapter),
+            continuous_ingress: channel.continuous_ingress.clone(),
+            observation_reader: Arc::clone(&channel.observation_reader),
+            close_requests: channel.close_requests.clone(),
+        })
+    }
+
+    fn validate_continuous_transport_observation(
+        observation: &LiveAdapterObservation,
+    ) -> Result<(), LiveAdapterHostError> {
+        if matches!(
+            observation,
+            LiveAdapterObservation::Continuous { .. }
+                | LiveAdapterObservation::AssistantAudioChunk { .. }
+                | LiveAdapterObservation::Error { .. }
+                | LiveAdapterObservation::CommandRejected { .. }
+                | LiveAdapterObservation::StatusChanged { .. }
+        ) {
+            Ok(())
+        } else {
+            Err(LiveAdapterHostError::UnsupportedCommand(
+                "legacy transcript/turn/tool fact on a continuous channel",
+            ))
+        }
     }
 
     /// CC1 / R11 wire-signal: enqueue a synthetic terminal `Error`
@@ -3158,12 +3772,118 @@ impl LiveAdapterHost {
     /// active-channel binding discoverable, so a retry cannot misread
     /// `ChannelNotFound` as proof of physical cleanup. A successful close
     /// drops the exact adapter only if no concurrent replacement occurred.
+    async fn request_continuous_close(
+        self: &Arc<Self>,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<(), LiveAdapterHostError> {
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
+        let binding = self.adapter_binding_for(&channel_id, false).await?;
+        let (request, fresh) = {
+            let inner = self.inner.lock().await;
+            let channel = inner
+                .channels
+                .get(&channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            if !channel
+                .adapter
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &binding.adapter))
+            {
+                return Err(LiveAdapterHostError::CloseNotAuthorized);
+            }
+
+            let existing = channel.close_requests.borrow().clone();
+            match existing {
+                Some(request)
+                    if request.result.borrow().as_ref().is_none_or(Result::is_ok)
+                        || request.observation.close_sequence() >= observation.close_sequence() =>
+                {
+                    (request, false)
+                }
+                _ => {
+                    let request = Arc::new(ContinuousCloseRequest {
+                        observation: observation.clone(),
+                        deadline: tokio::time::Instant::now()
+                            + DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT,
+                        result: tokio::sync::watch::channel(None).0,
+                    });
+                    channel
+                        .close_requests
+                        .send_replace(Some(Arc::clone(&request)));
+                    (request, true)
+                }
+            }
+        };
+        if fresh {
+            let host = Arc::clone(self);
+            let request = Arc::clone(&request);
+            tokio::spawn(async move {
+                let _completion = ContinuousCloseCompletion(Arc::clone(&request));
+                let result = tokio::time::timeout_at(request.deadline, async {
+                    let ingress = binding
+                        .continuous_ingress
+                        .as_ref()
+                        .ok_or(LiveAdapterHostError::CloseNotAuthorized)?;
+                    ingress.begin_drain().await?;
+                    let lease = tokio::select! {
+                        result = request.wait() => return result,
+                        lease = Arc::clone(&binding.observation_reader).lock_owned() => lease,
+                    };
+                    if let Some(result) = request.result.borrow().clone() {
+                        return result;
+                    }
+                    let closed = {
+                        let inner = host.inner.lock().await;
+                        inner.channels.get(&channel_id).is_some_and(|channel| {
+                            channel.physical_close_confirmed
+                                && channel.adapter.is_none()
+                                && Arc::ptr_eq(
+                                    &channel.observation_reader,
+                                    &binding.observation_reader,
+                                )
+                        })
+                    };
+                    if closed {
+                        return Ok(());
+                    }
+                    let mut pump =
+                        LiveObservationPump::new(host, channel_id, Some(binding), Some(lease));
+                    let remaining = request.remaining();
+                    if remaining.is_zero() {
+                        Err(LiveAdapterHostError::ObservationDrainTimedOut)
+                    } else {
+                        pump.drain(remaining).await
+                    }
+                })
+                .await
+                .map_err(|_| LiveAdapterHostError::ObservationDrainTimedOut)
+                .and_then(|result| result);
+                request.complete(result);
+            });
+        }
+        request.wait().await
+    }
+
+    #[cfg(feature = "webrtc")]
+    pub(crate) async fn is_continuous_channel(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<bool, LiveAdapterHostError> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .channels
+            .get(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?
+            .continuous_ingress
+            .is_some())
+    }
+
     pub async fn prepare_channel_physical_close(
         &self,
         observation: &LiveChannelCloseObservation,
     ) -> Result<(), LiveAdapterHostError> {
         let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
-        let adapter = {
+        let (adapter, continuous_ingress, close_owner) = {
             let mut inner = self.inner.lock().await;
             Self::reap_retired_locked(&mut inner);
             let channel = inner
@@ -3173,22 +3893,42 @@ impl LiveAdapterHost {
             if channel.physical_close_confirmed && channel.adapter.is_none() {
                 return Ok(());
             }
-            channel
+            let adapter = channel
                 .adapter
                 .as_ref()
                 .map(Arc::clone)
-                .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?
+                .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
+            (
+                adapter,
+                channel.continuous_ingress.clone(),
+                channel.continuous_close_owner.clone(),
+            )
         };
 
+        if continuous_ingress.is_some() {
+            let owner = close_owner
+                .and_then(|owner| owner.upgrade())
+                .ok_or(LiveAdapterHostError::CloseNotAuthorized)?;
+            return owner.request_continuous_close(observation).await;
+        }
         adapter.close().await?;
 
+        self.commit_physical_adapter_close(&channel_id, &adapter)
+            .await
+    }
+
+    async fn commit_physical_adapter_close(
+        &self,
+        channel_id: &LiveChannelId,
+        adapter: &Arc<dyn LiveAdapter>,
+    ) -> Result<(), LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
         let channel = inner
             .channels
-            .get_mut(&channel_id)
+            .get_mut(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
         match channel.adapter.as_ref() {
-            Some(current) if Arc::ptr_eq(current, &adapter) => {
+            Some(current) if Arc::ptr_eq(current, adapter) => {
                 channel.adapter = None;
                 channel.physical_close_confirmed = true;
                 Ok(())
@@ -3480,6 +4220,7 @@ impl LiveAdapterHost {
 
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
+            LiveAdapterObservation::Continuous { .. } => ObservationRouting::Continuous,
             LiveAdapterObservation::Ready => {
                 ObservationRouting::UpdateStatus(LiveAdapterStatus::Ready)
             }
@@ -3550,6 +4291,7 @@ impl LiveAdapterHost {
 
     fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
         match observation {
+            LiveAdapterObservation::Continuous { .. } => false,
             LiveAdapterObservation::Error { .. } => true,
             LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
             _ => false,

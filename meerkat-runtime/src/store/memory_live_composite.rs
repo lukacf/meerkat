@@ -14,6 +14,32 @@ use crate::store::live_read::{
     bounded_live_window,
 };
 
+fn enforce_memory_live_lifecycle_version(
+    inner: &Inner,
+    runtime_id: &LogicalRuntimeId,
+    expected: Option<&super::super::MachineLifecycleExpectedVersion>,
+) -> Result<(), RuntimeStoreError> {
+    use super::super::{MachineLifecycleExpectedVersion, MachineLifecycleObservationVersion};
+    let matches = match expected {
+        None => true,
+        Some(MachineLifecycleExpectedVersion::Missing) => {
+            !inner.runtime_lifecycle.contains_key(&runtime_id.0)
+        }
+        Some(MachineLifecycleExpectedVersion::Version(expected)) => inner
+            .runtime_lifecycle
+            .get(&runtime_id.0)
+            .is_some_and(|bytes| {
+                MachineLifecycleObservationVersion::from_raw_record(bytes) == *expected
+            }),
+    };
+    if !matches {
+        return Err(RuntimeStoreError::MachineLifecycleVersionConflict {
+            runtime_id: runtime_id.0.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_memory_live_prefix(
     inner: &Inner,
     session_id: &meerkat_core::SessionId,
@@ -411,7 +437,7 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
     }
 
     fn ledger_write_profile(&self) -> LiveLedgerWriteProfile {
-        LiveLedgerWriteProfile::AtomicHeadEventsSources
+        LiveLedgerWriteProfile::AtomicHeadEventsSourcesLifecycleAdmissionStageExecution
     }
 
     async fn read_live_history(
@@ -483,10 +509,23 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
         if let Some(head) = inner.live_heads.get(session_id) {
             head.head.validate_payload()?;
         }
-        Ok(inner
+        let captured = inner
             .live_heads
             .get(session_id)
-            .map(|stored| stored.head.clone()))
+            .map(|stored| stored.head.clone());
+        drop(inner);
+        #[cfg(test)]
+        let pause = self
+            .live_head_load_after_capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        if let Some((entered, release)) = pause {
+            entered.notify_one();
+            release.notified().await;
+        }
+        Ok(captured)
     }
 
     async fn commit_live_ledger(
@@ -503,6 +542,19 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
         if let Some(head) = before {
             head.validate_payload()?;
         }
+        let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+        for fence in prepared.input_read_fences() {
+            enforce_memory_input_row_version(
+                inner.input_states.get(&runtime_id.0),
+                fence.input_id(),
+                fence.expected_row_digest(),
+            )?;
+            enforce_memory_live_lifecycle_version(
+                &inner,
+                &runtime_id,
+                prepared.expected_lifecycle(),
+            )?;
+        }
         if before == Some(prepared.successor()) {
             if stored.is_none_or(|stored| stored.operation != operation) {
                 return Ok(LiveLedgerCommitOutcome::Conflict {
@@ -516,6 +568,38 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
                 }) {
                     return Err(RuntimeStoreError::ReadFailed(
                         "live source replay differs from committed content".into(),
+                    ));
+                }
+            }
+            for input in prepared
+                .input_admission()
+                .into_iter()
+                .chain(prepared.input_stage().map(|stage| stage.input()))
+            {
+                let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+                let current = inner
+                    .input_states
+                    .get(&runtime_id.0)
+                    .and_then(|states| states.get(&input.as_stored().state.input_id))
+                    .ok_or_else(|| {
+                        RuntimeStoreError::ReadFailed("Live admission input is missing".into())
+                    })?;
+                if serde_json::to_vec(current)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                    != serde_json::to_vec(input.as_stored())
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?
+                {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "Live admission replay input differs".into(),
+                    ));
+                }
+            }
+            if let Some(stage) = prepared.input_stage() {
+                let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+                let expected = stage.lifecycle().store_record().encode()?;
+                if inner.runtime_lifecycle.get(&runtime_id.0) != Some(&expected) {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "Live stage replay lifecycle differs".into(),
                     ));
                 }
             }
@@ -560,12 +644,19 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
             .get(&LogicalRuntimeId::for_session(prepared.session_id()).0)
             .cloned()
             .map(RuntimeSessionAuthority::WholeBlob);
-        if actor.is_none()
+        if (actor.is_none() && !prepared.is_archive_ingress_fence())
             || prepared
                 .expected_actor()
                 .is_some_and(|expected| Some(expected) != actor.as_ref())
         {
             return Ok(LiveLedgerCommitOutcome::ActorConflict { current: actor });
+        }
+        if prepared.input_read_fences().is_empty() {
+            enforce_memory_live_lifecycle_version(
+                &inner,
+                &runtime_id,
+                prepared.expected_lifecycle(),
+            )?;
         }
         let mut source_charges = LiveSourceChargeDelta::default();
         for source in prepared.sources() {
@@ -584,10 +675,65 @@ impl RuntimeLiveLedgerOps for InMemoryRuntimeStore {
             }
         }
         prepared.validate(before, &encoded, source_charges)?;
+        let runtime_id = LogicalRuntimeId::for_session(prepared.session_id());
+        let input_mutations = if let Some(input) = prepared.input_admission() {
+            let bundle = input.as_stored();
+            if inner
+                .input_states
+                .get(&runtime_id.0)
+                .is_some_and(|states| states.contains_key(&bundle.state.input_id))
+            {
+                return Err(RuntimeStoreError::InputRowVersionConflict {
+                    input_id: bundle.state.input_id.to_string(),
+                });
+            }
+            Some(prepare_memory_input_state_mutations(
+                &inner,
+                &runtime_id.0,
+                vec![MemoryInputStateMutation::Upsert(input.clone_stored())],
+            )?)
+        } else if let Some(stage) = prepared.input_stage() {
+            let input = stage.input();
+            precheck_fenced_input_updates(
+                inner.input_states.get(&runtime_id.0),
+                &[(
+                    input.clone_stored(),
+                    input.expected_row_digest().map(str::to_owned),
+                )],
+            )?;
+            Some(prepare_memory_input_state_mutations(
+                &inner,
+                &runtime_id.0,
+                vec![MemoryInputStateMutation::Upsert(input.clone_stored())],
+            )?)
+        } else {
+            None
+        };
+        let staged_lifecycle = prepared
+            .input_stage()
+            .map(|stage| {
+                stage
+                    .lifecycle()
+                    .store_record()
+                    .encode()
+                    .map(|bytes| (bytes, stage.lifecycle().runtime_state()))
+            })
+            .transpose()?;
         // Every fallible check is above this publication: Memory has no rollback.
         super::super::execute_optional_runtime_store_target_write(
             Some(write_fence.as_ref()),
             || {
+                if let Some((bytes, state)) = staged_lifecycle {
+                    inner.runtime_lifecycle.insert(runtime_id.0.clone(), bytes);
+                    sync_runtime_session_catalog_lifecycle(&mut inner, &runtime_id.0, state);
+                }
+                if let Some(mutations) = input_mutations {
+                    apply_prepared_memory_input_state_mutations(
+                        &mut inner,
+                        &runtime_id.0,
+                        mutations,
+                    );
+                }
                 let rows = inner
                     .live_records
                     .entry(prepared.session_id().clone())

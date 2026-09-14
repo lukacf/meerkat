@@ -627,6 +627,57 @@ fn valid_closed_event_is_terminal_even_with_active_snapshot() -> TestResult {
 }
 
 #[test]
+fn voice_usage_projects_physical_cumulative_evidence_without_summing_or_fabricating_final()
+-> TestResult {
+    use meerkat_core::live_execution::observation::LiveUsageSnapshot;
+    use meerkat_openai::public_live::voice_usage::observe_voice_usage;
+    for seconds in [0.0_f64, 12.75, 12.75, 9.0, 1066.5390310178614] {
+        let updated = Codec::default().decode_server(
+            &json!({
+                "type":"session.usage.updated","event_id":"usage","usage":{"seconds":seconds}
+            })
+            .to_string(),
+        )?;
+        let observed = observe_voice_usage(&updated.event)?.ok_or("usage observation")?;
+        let LiveUsageSnapshot::Periodic { cumulative_seconds } = observed else {
+            return Err("periodic usage was upgraded to final".into());
+        };
+        assert_eq!(cumulative_seconds.get().to_bits(), seconds.to_bits());
+        let final_frame = Codec::default().decode_server(
+            &json!({
+                "type":"session.closed","event_id":"closed",
+                "session":{"id":"live-a","model":"gpt-live-1","status":"active","expires_at":1000},
+                "reason":"close_requested","usage":{"seconds":seconds}
+            })
+            .to_string(),
+        )?;
+        let observed = observe_voice_usage(&final_frame.event)?.ok_or("final observation")?;
+        let LiveUsageSnapshot::SessionClosed { cumulative_seconds } = observed else {
+            return Err("confirmed closed event was downgraded by active snapshot".into());
+        };
+        assert_eq!(cumulative_seconds.get().to_bits(), seconds.to_bits());
+    }
+    let no_usage = Codec::default().decode_server(r#"{"type":"future.observation"}"#)?;
+    assert_eq!(observe_voice_usage(&no_usage.event)?, None);
+    for usage in [
+        json!(null),
+        json!({}),
+        json!({"seconds":null}),
+        json!({"seconds":-1}),
+    ] {
+        let raw = json!({
+            "type":"session.closed","event_id":"closed",
+            "session":{"id":"live-a","model":"gpt-live-1","status":"active","expires_at":1000},
+            "reason":"close_requested","usage":usage
+        });
+        if let Ok(frame) = Codec::default().decode_server(&raw.to_string()) {
+            assert!(observe_voice_usage(&frame.event).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn unknown_event_remains_explicit_and_debug_redacts_content() -> TestResult {
     let frame = Codec::default()
         .decode_server(r#"{"type":"future.observation","payload":"private-sentinel"}"#)?;

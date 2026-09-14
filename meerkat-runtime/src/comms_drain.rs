@@ -1516,6 +1516,11 @@ fn bridge_delivery_rejection_cause(
     reason: &crate::accept::RejectReason,
 ) -> BridgeDeliveryRejectionCause {
     match reason {
+        crate::accept::RejectReason::LiveRequestRequiresGrant => {
+            BridgeDeliveryRejectionCause::Internal {
+                detail: reason.to_string(),
+            }
+        }
         crate::accept::RejectReason::NotReady { state } => BridgeDeliveryRejectionCause::NotReady {
             state: runtime_state_to_bridge(*state),
         },
@@ -2451,6 +2456,10 @@ fn observation_error_to_bridge_rejection(
     error: &MemberObservationError,
 ) -> (BridgeRejectionCause, String) {
     match error {
+        MemberObservationError::LiveHistory { failure, .. } => (
+            BridgeRejectionCause::LiveObservationRead { failure: *failure },
+            error.to_string(),
+        ),
         MemberObservationError::StaleIncarnation { .. } => {
             (BridgeRejectionCause::StaleFence, error.to_string())
         }
@@ -5490,6 +5499,87 @@ async fn try_handle_supervisor_bridge_command(
             .await;
             true
         }
+        BridgeCommand::ReadMemberLiveObservations(payload) => {
+            let supervisor = BridgeSupervisorPayload {
+                supervisor: payload.supervisor.clone(),
+                epoch: payload.epoch,
+                protocol_version: payload.protocol_version,
+            };
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &supervisor,
+                "read member Live observations",
+            )
+            .await
+            {
+                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                return true;
+            }
+            if let Err((cause, reason)) = require_registered_member_incarnation(
+                adapter,
+                session_id,
+                &payload.expected_member,
+                "read member Live observations",
+            ) {
+                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                return true;
+            }
+            let Some(observation) = adapter.member_observation_host() else {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Unsupported,
+                    "host does not declare retained Live observation-page support",
+                    None,
+                )
+                .await;
+                return true;
+            };
+            let result = observation
+                .read_live_observations(session_id, payload.query)
+                .await;
+            if let Err((cause, reason)) = require_registered_member_incarnation(
+                adapter,
+                session_id,
+                &payload.expected_member,
+                "read member Live observations completion",
+            ) {
+                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                return true;
+            }
+            match result {
+                Ok(page) => {
+                    if let Err(error) =
+                        meerkat_contracts::wire::live_observation::LiveObservationWireCodecV1::encode_reply(&page)
+                    {
+                        send_bridge_failure(
+                            comms_runtime, candidate,
+                            BridgeRejectionCause::LiveObservationRead {
+                                failure: meerkat_contracts::wire::live_observation::LiveObservationReadFailure::Integrity,
+                            },
+                            error.to_string(), None,
+                        ).await;
+                        return true;
+                    }
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::MemberLiveObservationPage(page),
+                        None,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let (cause, reason) = observation_error_to_bridge_rejection(&error);
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                }
+            }
+            true
+        }
         BridgeCommand::ReadMemberHistory(payload) => {
             // DEC-P6E-6: one page projection, shared with the local path
             // via `WireMemberHistoryPageBody::try_from_history_page`.
@@ -7064,6 +7154,9 @@ fn runtime_state_to_bridge(state: crate::RuntimeState) -> BridgeMemberRuntimeSta
 #[allow(clippy::items_after_test_module)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
+    mod public_live_history_tests {
+        include!("comms_drain_public_live_tests.rs");
+    }
     use super::*;
     use meerkat_contracts::wire::supervisor_bridge::{
         supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
@@ -11136,6 +11229,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
+                callback_identity: None,
             },
         );
 
@@ -11941,7 +12035,7 @@ mod tests {
             projection
                 .injected_context_appends
                 .iter()
-                .map(|append| (append.role, append.content.render_text()))
+                .map(|append| (append.role.clone(), append.content.render_text()))
                 .collect::<Vec<_>>(),
             vec![
                 (

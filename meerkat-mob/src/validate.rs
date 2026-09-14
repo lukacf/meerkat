@@ -841,6 +841,7 @@ model = "claude-sonnet-4-5"
             "uncatalogued-model".to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider: meerkat_core::Provider::OpenAI,
+                interaction_kind: None,
                 display_name: None,
                 context_window: None,
                 max_input_tokens: None,
@@ -874,6 +875,7 @@ model = "claude-sonnet-4-5"
             "weird-model".to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider: meerkat_core::Provider::SelfHosted,
+                interaction_kind: None,
                 display_name: None,
                 context_window: None,
                 max_input_tokens: None,

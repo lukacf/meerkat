@@ -1,10 +1,12 @@
-//! §8 Input types — the 6 input variants accepted by the runtime layer.
+//! §8 Input types accepted by the runtime layer.
 //!
 //! Core never sees these. Generated admission authority resolves each accepted
 //! Input to a PolicyDecision, then the runtime translates accepted Inputs into
 //! RunPrimitive for core consumption.
 
 use chrono::{DateTime, Utc};
+#[cfg(test)]
+use meerkat_core::PeerConversationProjection;
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RuntimeTurnMetadata,
@@ -16,12 +18,12 @@ use meerkat_core::types::{
     SystemNoticeKind, SystemNoticePeer,
 };
 use meerkat_core::{
-    BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
-    PeerResponseProgressProjectionPhase, PeerResponseTerminalCorrelationId,
-    PeerResponseTerminalDisplayIdentity, PeerResponseTerminalFact, PeerResponseTerminalFactError,
-    PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
-    PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
-    PeerResponseTerminalTransportIdentity, externalize_content_blocks, hydrate_content_blocks,
+    BlobStore, BlobStoreError, MissingBlobBehavior, PeerResponseProgressProjectionPhase,
+    PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
+    PeerResponseTerminalFact, PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
+    PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
+    PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, externalize_content_blocks,
+    hydrate_content_blocks,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,6 +83,8 @@ pub enum InputOrigin {
     System,
     /// External event source.
     External { source_name: String },
+    /// Non-human request admitted from a committed Live source.
+    LiveRequest,
 }
 
 /// Durability requirement for an input.
@@ -114,7 +118,7 @@ impl Default for InputVisibility {
     }
 }
 
-/// The 6 input variants accepted by the runtime layer.
+/// Input families accepted by the runtime layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "input_type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -131,6 +135,15 @@ pub enum Input {
     Continuation(ContinuationInput),
     /// Explicit non-content operation/lifecycle input.
     Operation(OperationInput),
+    /// Body-free reference to a committed, immutable Live request source.
+    LiveRequest(LiveRequestInput),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveRequestInput {
+    pub header: InputHeader,
+    pub request: crate::live_request::LiveExecutionRequestRecord,
 }
 
 impl Input {
@@ -143,6 +156,7 @@ impl Input {
             Input::ExternalEvent(i) => &i.header,
             Input::Continuation(i) => &i.header,
             Input::Operation(i) => &i.header,
+            Input::LiveRequest(i) => &i.header,
         }
     }
 
@@ -159,6 +173,7 @@ impl Input {
             Input::ExternalEvent(i) => &mut i.header,
             Input::Continuation(i) => &mut i.header,
             Input::Operation(i) => &mut i.header,
+            Input::LiveRequest(i) => &mut i.header,
         }
     }
 
@@ -181,6 +196,13 @@ impl Input {
             Input::ExternalEvent(_) => InputKind::ExternalEvent,
             Input::Continuation(_) => InputKind::Continuation,
             Input::Operation(_) => InputKind::Operation,
+            Input::LiveRequest(input) => {
+                if input.request.is_callback_continuation() {
+                    InputKind::LiveCallbackContinuation
+                } else {
+                    InputKind::LiveRequest
+                }
+            }
         }
     }
 
@@ -198,6 +220,7 @@ impl Input {
             Input::Continuation(continuation) => Some(continuation.handling_mode),
             Input::Peer(peer) => peer.handling_mode,
             Input::Operation(_) => None,
+            Input::LiveRequest(_) => Some(HandlingMode::Queue),
         }
     }
 
@@ -259,7 +282,7 @@ pub async fn externalize_input_images(
                 externalize_content_blocks(blob_store, blocks).await?;
             }
         }
-        Input::Continuation(_) | Input::Operation(_) => {}
+        Input::Continuation(_) | Input::Operation(_) | Input::LiveRequest(_) => {}
     }
     Ok(())
 }
@@ -291,7 +314,7 @@ pub async fn hydrate_input_images(
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
         }
-        Input::Continuation(_) | Input::Operation(_) => {}
+        Input::Continuation(_) | Input::Operation(_) | Input::LiveRequest(_) => {}
     }
     Ok(())
 }
@@ -787,12 +810,14 @@ pub struct OperationInput {
 /// Peer-response terminal context projection is deliberately absent: the
 /// typed `SystemNotice` conversation append is the terminal fact's only
 /// Session representation.
+#[cfg(test)]
 pub(crate) fn peer_projection_from_peer_input(
     peer: &PeerInput,
 ) -> Option<PeerConversationProjection> {
     peer_projection_from_peer_input_with_id(peer, peer_canonical_id(peer)?.as_str())
 }
 
+#[cfg(test)]
 fn peer_projection_from_peer_input_with_id(
     peer: &PeerInput,
     peer_id: &str,
@@ -891,6 +916,7 @@ pub(crate) fn peer_projection(input: &Input) -> Option<PeerConversationProjectio
     peer_projection_from_peer_input(peer)
 }
 
+#[cfg(test)]
 fn peer_canonical_id(peer: &PeerInput) -> Option<String> {
     let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
         return None;
@@ -957,6 +983,7 @@ pub(crate) fn peer_reply_capability(
 }
 
 /// Rendered prompt-text projection for a peer input.
+#[cfg(test)]
 pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
     peer_projection_from_peer_input(peer)
         .map(|projection| {
@@ -970,8 +997,11 @@ pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
         .unwrap_or_else(|| peer.content.text_content())
 }
 
-pub(crate) fn input_prompt_text(input: &Input) -> String {
-    match input {
+#[cfg(test)]
+pub(crate) fn input_prompt_text(
+    input: &Input,
+) -> Result<String, crate::live_request::LiveRequestMaterializationError> {
+    Ok(match input {
         Input::Prompt(p) => p.content.text_content(),
         Input::Peer(p) => peer_prompt_text(p),
         Input::FlowStep(f) => f.content.text_content(),
@@ -983,9 +1013,13 @@ pub(crate) fn input_prompt_text(input: &Input) -> String {
                 operation.operation_id, operation.event
             )
         }
-    }
+        Input::LiveRequest(_) => {
+            return Err(crate::live_request::LiveRequestMaterializationError::MissingEvidence);
+        }
+    })
 }
 
+#[cfg(test)]
 fn external_event_projection_text(event: &ExternalEventInput) -> String {
     let source_name = match &event.header.source {
         InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
@@ -1139,7 +1173,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             ContentInput::Text(_) => (
                 ConversationAppendRole::User,
                 CoreRenderable::Text {
-                    text: input_prompt_text(input),
+                    text: p.content.text_content(),
                 },
             ),
         },
@@ -1154,7 +1188,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             external_event_notice_renderable(e),
         ),
         Input::Continuation(continuation) => return continuation.turn_append.clone(),
-        Input::Operation(_) => return None,
+        Input::Operation(_) | Input::LiveRequest(_) => return None,
     };
 
     Some(ConversationAppend {
@@ -1283,6 +1317,10 @@ pub(crate) fn runtime_input_projection(
         additional_appends: match input {
             Input::Prompt(prompt) => prompt.typed_turn_appends.clone(),
             _ => Vec::new(),
+        },
+        deferred_live_request: match input {
+            Input::LiveRequest(input) => Some(input.request.clone()),
+            _ => None,
         },
     }
 }
@@ -1945,6 +1983,7 @@ mod tests {
                 identity: None,
             }),
             additional_appends: Vec::new(),
+            deferred_live_request: None,
         };
 
         assert_eq!(
@@ -2051,6 +2090,7 @@ mod tests {
                 identity: None,
             }),
             additional_appends: Vec::new(),
+            deferred_live_request: None,
         };
         assert_eq!(
             projection_transient_context_text(&whitespace_projection, live_steer_semantics())
@@ -2068,6 +2108,7 @@ mod tests {
                 identity: None,
             }),
             additional_appends: Vec::new(),
+            deferred_live_request: None,
         };
         assert!(
             projection_transient_context_text(&append_projection, live_steer_semantics()).is_none()

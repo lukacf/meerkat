@@ -177,7 +177,8 @@ pub use config_runtime::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
-    ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, EffectiveConfigReader, FileConfigStore,
+    ConfigDocumentObservation, ConfigObservationDigest, ConfigResolvedPaths, ConfigStore,
+    ConfigStoreMetadata, EffectiveConfigObservation, EffectiveConfigReader, FileConfigStore,
     MemoryConfigStore, RealmConfigSource, TaggedConfigStore, apply_config_patch_preview,
     merge_patch,
 };
@@ -397,17 +398,18 @@ pub use session::{
     InstructionActivationProjectionWitness, InstructionActivationReadPage,
     InstructionActivationReadQuery, InstructionActivationReceipt, InstructionActivationRecord,
     InstructionActivationRequest, InvalidSessionLineageId,
-    MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES, PendingDeferredPrompt,
-    PendingToolResultsMessage, PersistedSessionMetadataView, PreparedTransientTurnContextBoundary,
-    ProviderNativeToolPolicy, Released0810ImportError, Released0810ImportEvidence,
-    Released0810ImportReceipt, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
-    SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_SCHEMA_VERSION,
-    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-    SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY, SESSION_VERSION, SerializedSessionArtifact,
-    Session, SessionBuildState, SessionDeferredTurnState, SessionGeneration,
-    SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataDigest,
-    SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionHeadMetadataValueDigest,
-    SessionLifecycleTerminal, SessionLineageId, SessionLlmIdentity, SessionLlmIdentityOverride,
+    MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES, NativeToolPolicySupport,
+    PendingDeferredPrompt, PendingToolResultsMessage, PersistedSessionMetadataView,
+    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy, Released0810ImportError,
+    Released0810ImportEvidence, Released0810ImportReceipt, SESSION_BUILD_STATE_KEY,
+    SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
+    SESSION_METADATA_SCHEMA_VERSION, SESSION_TOOL_VISIBILITY_STATE_KEY,
+    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
+    SESSION_VERSION, SerializedSessionArtifact, Session, SessionBuildState,
+    SessionDeferredTurnState, SessionGeneration, SessionHeadMetadataCell,
+    SessionHeadMetadataCellIdentity, SessionHeadMetadataDigest, SessionHeadMetadataIdentity,
+    SessionHeadMetadataProjection, SessionHeadMetadataValueDigest, SessionLifecycleTerminal,
+    SessionLineageId, SessionLlmIdentity, SessionLlmIdentityOverride,
     SessionLlmIdentityOverrideError, SessionLlmRequestPolicy, SessionMeta, SessionMetadata,
     SessionMetadataDocument, SessionToolVisibilityState, SessionTooling, SystemMessageAppendError,
     SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
@@ -470,16 +472,17 @@ pub use tool_catalog::{
     select_catalog_mode_from_snapshot,
 };
 pub use tool_consequence_policy::{
-    ApplicationToolPolicyBinding, BoundToolConsequencePolicy,
+    AllowedToolConsequenceEvaluation, ApplicationToolPolicyBinding, BoundToolConsequencePolicy,
     COMPILED_APPLICATION_TOOL_POLICY_SCHEMA_VERSION, CompiledApplicationToolPolicy,
     CompiledApplicationToolPolicyError, CompiledMemberToolAction, CompiledMemberToolGrant,
     CompiledMemberToolGrants, CompiledPolicySourceProvenance, CompiledToolConsequence,
     NoopToolConsequenceObserver, PolicyDigest, PolicyEvaluationProvenance,
     PolicyEvaluationSupervisor, PolicyEvaluationSupervisorConfig, PolicyId, PolicyIdentityError,
-    PolicyProviderGeneration, PolicyProviderId, PolicyRevision, ToolConsequenceDenial,
-    ToolConsequenceFailure, ToolConsequenceNarrowingPolicy, ToolConsequenceObservation,
-    ToolConsequenceObservationOutcome, ToolConsequenceObserver, ToolConsequencePolicyRegistry,
-    ToolConsequencePolicySnapshot, ToolConsequenceRequest, ToolConsequenceVerdict,
+    PolicyProviderGeneration, PolicyProviderId, PolicyPublicationError, PolicyRevision,
+    ToolConsequenceDenial, ToolConsequenceFailure, ToolConsequenceNarrowingPolicy,
+    ToolConsequenceObservation, ToolConsequenceObservationOutcome, ToolConsequenceObserver,
+    ToolConsequencePolicyRegistry, ToolConsequencePolicySnapshot, ToolConsequenceRequest,
+    ToolConsequenceVerdict,
 };
 pub use tool_execution::{
     DeadlineChainError, DeadlineChainExtensionError, DetachedToolExecutionPolicy,
@@ -492,8 +495,8 @@ pub use tool_execution::{
     ToolProgressPolicy, ephemeral_tool_catalog_binding_fingerprint,
 };
 pub use tool_execution_policy::{
-    ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
-    ToolExecutionPolicyError, ToolMutationClass,
+    EvaluatedToolExecutionPolicy, ExecutionPolicyGatedDispatcher, ToolDispatchAdmission,
+    ToolExecutionPolicy, ToolExecutionPolicyError, ToolMutationClass,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,

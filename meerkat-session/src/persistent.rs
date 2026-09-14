@@ -927,6 +927,16 @@ async fn load_committed_whole_blob_session(
     session_id: &SessionId,
     role: &str,
 ) -> Result<Option<(Session, CommittedWholeBlobSnapshot)>, SessionError> {
+    load_committed_whole_blob_snapshot(runtime_store, session_id, role)
+        .await
+        .map(|loaded| loaded.map(|snapshot| (snapshot.session().clone(), snapshot)))
+}
+
+async fn load_committed_whole_blob_snapshot(
+    runtime_store: &dyn RuntimeStore,
+    session_id: &SessionId,
+    role: &str,
+) -> Result<Option<CommittedWholeBlobSnapshot>, SessionError> {
     let snapshot = runtime_store
         .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(session_id))
         .await
@@ -949,7 +959,7 @@ async fn load_committed_whole_blob_session(
             // `CommittedWholeBlobSnapshot::new` already hashes and decodes the
             // atomically paired store row. Reuse that typed result instead of
             // parsing the same O(document) body a second time at materialization.
-            Ok((snapshot.session().clone(), snapshot))
+            Ok(snapshot)
         })
         .transpose()
 }
@@ -4137,11 +4147,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         role: &str,
     ) -> Result<Option<Session>, SessionError> {
+        self.load_committed_runtime_session_body_observation(id, role)
+            .await
+            .map(|observed| observed.map(|observed| observed.into_session()))
+    }
+
+    async fn load_committed_runtime_session_body_observation(
+        &self,
+        id: &SessionId,
+        role: &str,
+    ) -> Result<Option<meerkat_runtime::store::CommittedSessionBodyObservation>, SessionError> {
+        use meerkat_runtime::store::CommittedSessionBodyObservation;
+
         match self.runtime_store.session_persistence_profile() {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
-                load_committed_whole_blob_session(self.runtime_store.as_ref(), id, role)
+                load_committed_whole_blob_snapshot(self.runtime_store.as_ref(), id, role)
                     .await
-                    .map(|loaded| loaded.map(|(session, _snapshot)| session))
+                    .map(|loaded| loaded.map(CommittedSessionBodyObservation::from_whole_blob))
             }
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
                 let authority = self
@@ -4172,11 +4194,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "{role} cannot materialize HeadCanonical session {id} without incremental store capability"
                     )))
                 })?;
-                incremental
+                let materialized = incremental
                     .materialize_head(authority.boundary_head())
                     .await
-                    .map(|materialized| Some(materialized.session().as_ref().clone()))
-                    .map_err(|error| SessionError::Store(Box::new(error)))
+                    .map_err(|error| SessionError::Store(Box::new(error)))?;
+                CommittedSessionBodyObservation::from_head_canonical(
+                    authority.clone(),
+                    materialized,
+                )
+                .map(Some)
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to pair {role} HeadCanonical body for session {id}: {error}"
+                    )))
+                })
             }
             profile => Err(SessionError::Agent(AgentError::InternalError(format!(
                 "unsupported runtime session persistence profile {profile} while loading {role} for session {id}"
@@ -5529,32 +5560,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         SessionError,
     > {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
-        let session = self
-            .load_committed_runtime_session_for_body(id, "live context answer-ready catch-up")
+        let observed = self
+            .load_committed_runtime_session_body_observation(
+                id,
+                "live context answer-ready catch-up",
+            )
             .await?
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let authority = self
-            .runtime_store
-            .load_session_boundary_authority(&Self::runtime_id_for_session(id))
-            .await
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to load live context catch-up authority for session {id}: {error}"
-                )))
-            })?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let _ = PreparedRuntimeBoundaryIdentity::from_runtime_authority(&authority, id)?;
-        let authority_token = match authority {
+        let _ = PreparedRuntimeBoundaryIdentity::from_runtime_authority(observed.authority(), id)?;
+        let authority_token = match observed.authority() {
             RuntimeSessionAuthority::WholeBlob(authority) => authority.blob_sha256().to_string(),
             RuntimeSessionAuthority::HeadCanonical(authority) => {
                 authority.committed_head_token().to_string()
             }
         };
-        let committed = BoundSessionCommit::sealed(Arc::new(session)).map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to seal live context catch-up boundary for session {id}: {error}"
-            )))
-        })?;
+        let committed =
+            BoundSessionCommit::sealed(Arc::new(observed.into_session())).map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to seal live context catch-up boundary for session {id}: {error}"
+                )))
+            })?;
         Ok((committed, authority_token))
     }
 
@@ -7254,11 +7279,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         (
             Result<RunResult, meerkat_core::error::AgentError>,
             Option<meerkat_core::TurnErrorMetadata>,
+            Option<meerkat_core::session::CallbackBatchIdentity>,
         ),
         SessionError,
     > {
         let parts = execution.into_runtime_parts().map_err(SessionError::Agent);
-        let (result, witness) = match parts {
+        let (result, witness, callback_identity) = match parts {
             Ok(parts) => parts,
             Err(error) => {
                 if let Err(discard_error) = self.discard_live_session_unfenced(id).await {
@@ -7289,7 +7315,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "runtime terminal-witness validation failed after live mutation: {error}"
             )));
         }
-        Ok((result, witness))
+        Ok((result, witness, callback_identity))
     }
 
     fn terminal_surface_error(
@@ -7327,6 +7353,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         protocol: MachineServiceTurnCommitProtocol<'_>,
         turn_identity: &meerkat_runtime::MachineServiceTurnIdentity,
+        callback_identity: Option<&meerkat_core::session::CallbackBatchIdentity>,
     ) -> Result<(), SessionError> {
         // The execution-time recovery guard is deliberately released before
         // this helper. Acquire exact machine mutation authority first, then
@@ -7338,6 +7365,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .prepare_service_turn_commit_lease(turn_identity)
             .await
             .map_err(runtime_driver_error_to_session_error)?;
+        if callback_identity.is_some_and(|identity| {
+            identity.session_id() != id || identity.run_id() != commit_lease.run_id()
+        }) {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "callback identity does not match the service-turn commit lease".into(),
+            )));
+        }
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let turn_guard = recovery_gate.lock().await;
         // This live transcript is the just-finished turn awaiting its first
@@ -7481,7 +7515,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .map_err(|error| (error, None)),
         }?;
-        let (result, machine_terminal_failure) = self
+        let (result, machine_terminal_failure, callback_identity) = self
             .validated_runtime_execution_after_live_mutation(id, execution)
             .await
             .map_err(|error| (error, None))?;
@@ -7497,7 +7531,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     drop(turn_guard);
                     if let Err(commit_error) = self
-                        .commit_machine_service_turn_snapshot(id, protocol, turn_identity)
+                        .commit_machine_service_turn_snapshot(
+                            id,
+                            protocol,
+                            turn_identity,
+                            callback_identity.as_ref(),
+                        )
                         .await
                     {
                         let _ = self
@@ -7512,7 +7551,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         drop(turn_guard);
         if let Err(error) = self
-            .commit_machine_service_turn_snapshot(id, protocol, turn_identity)
+            .commit_machine_service_turn_snapshot(id, protocol, turn_identity, None)
             .await
         {
             let _ = self
@@ -9134,20 +9173,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
         match error {
-            SessionError::Agent(AgentError::CallbackPending {
-                tool_use_id,
-                tool_name,
-                args,
-            }) => Some(CoreApplyTerminal::CallbackPending {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                args: args.clone(),
-            }),
-            SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
-                Some(CoreApplyTerminal::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                })
-            }
+            SessionError::Agent(error) => CoreApplyTerminal::from_callback_error(error, None),
             _ => None,
         }
     }
@@ -9457,7 +9483,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .inner
             .start_runtime_turn_execution_with_admission_recovering_not_found(id, req, admission)
             .await?;
-        let (result, machine_terminal_failure) = self
+        let (result, machine_terminal_failure, callback_identity) = self
             .validated_runtime_execution_after_live_mutation(id, execution)
             .await
             .map_err(|error| (error, None))?;
@@ -9493,7 +9519,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await
                     .map_err(|error| (error, None))
-                } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
+                } else if let SessionError::Agent(error) = &error
+                    && let Some(terminal) =
+                        CoreApplyTerminal::from_callback_error(error, callback_identity)
+                {
                     self.build_runtime_output_after_live_mutation(
                         id,
                         run_id,
@@ -9546,7 +9575,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(|(error, _admission)| error),
             None => self.inner.start_runtime_turn_execution(id, req).await,
         }?;
-        let (result, machine_terminal_failure) = self
+        let (result, machine_terminal_failure, callback_identity) = self
             .validated_runtime_execution_after_live_mutation(id, execution)
             .await?;
         match result.map_err(SessionError::Agent) {
@@ -9580,7 +9609,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         Some(CoreApplyTerminal::MachineTerminalFailure { error }),
                     )
                     .await
-                } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
+                } else if let SessionError::Agent(error) = &error
+                    && let Some(terminal) =
+                        CoreApplyTerminal::from_callback_error(error, callback_identity)
+                {
                     self.build_runtime_output_after_live_mutation(
                         id,
                         run_id,
@@ -9741,6 +9773,50 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         }
         Ok(())
+    }
+
+    /// Acknowledge only the actual store-committed compaction metadata root.
+    /// The runtime caller already owns the turn-finalization boundary.
+    #[doc(hidden)]
+    pub async fn acknowledge_finalized_compaction_projections_under_runtime_turn_boundary(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let _guard = self.recovery_gate_for_session(id).await.lock_owned().await;
+        let runtime_id = Self::runtime_id_for_session(id);
+        if !self
+            .runtime_store
+            .load_pending_compaction_projections(&runtime_id)
+            .await
+            .map_err(activation_store_error_to_session_error)?
+            .is_empty()
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "cannot acknowledge compaction metadata while its durable outbox is pending".into(),
+            )));
+        }
+        let authority = self
+            .runtime_store
+            .load_session_boundary_authority(&runtime_id)
+            .await
+            .map_err(activation_store_error_to_session_error)?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let head = authority.head_canonical().filter(|authority| authority.session_id() == id)
+            .ok_or_else(|| SessionError::Agent(AgentError::InternalError(
+                "compaction metadata acknowledgement requires exact HeadCanonical session authority".into(),
+            )))?;
+        let identity = head
+            .boundary_head()
+            .metadata_identity
+            .clone()
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(
+                    "committed compaction boundary has no metadata identity".into(),
+                ))
+            })?;
+        self.inner
+            .acknowledge_finalized_compaction_metadata(id, identity)
+            .await
     }
 
     /// Abort the live invisible compaction stage after a rejected runtime
@@ -10992,6 +11068,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         PersistentSessionService::reconcile_runtime_compaction_projections(self, id, intents).await
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.acknowledge_finalized_compaction_projections_under_runtime_turn_boundary(id)
+            .await
+    }
+
     async fn abort_uncommitted_compaction_projections(
         &self,
         id: &SessionId,
@@ -11791,7 +11875,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
     async fn stage_tool_results(
         &self,
         id: &SessionId,
-        req: StageToolResultsRequest,
+        mut req: StageToolResultsRequest,
     ) -> Result<StageToolResultsResult, SessionError> {
         validate_tool_result_video(&req.results)?;
         let persistence_profile = self.runtime_store.session_persistence_profile();
@@ -11817,6 +11901,35 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             let mut attempts = 0usize;
             loop {
                 attempts += 1;
+                let prepared = match persistence_profile {
+                    RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                        self.inner
+                            .prepare_callback_result_ingress(id, req.clone())
+                            .await?
+                    }
+                    RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                        let session = self
+                            .load_authoritative_session_base(id)
+                            .await?
+                            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                        session.prepare_callback_result_ingress(
+                            &req.results,
+                            req.callback_target.as_ref(),
+                        )?
+                    }
+                    profile => {
+                        return Err(SessionError::Agent(AgentError::InternalError(format!(
+                            "unsupported runtime session persistence profile {profile} while preparing staged tool results for session {id}"
+                        ))));
+                    }
+                };
+                if prepared.already_applied() {
+                    return Ok(StageToolResultsResult {
+                        accepted_result_count: 0,
+                        disposition: StageToolResultsDisposition::AlreadyApplied,
+                    });
+                }
+                req.callback_target = prepared.callback_identity().cloned();
                 let (accepted, snapshot_state, persisted_state) = {
                     let guard = match state_arc.lock() {
                         Ok(guard) => guard,
@@ -11830,46 +11943,20 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     };
                     let snapshot_state = guard.clone();
                     let mut candidate = snapshot_state.clone();
-                    let accepted = candidate
-                        .try_stage_tool_results(req.results.clone(), accepted_at)
-                        .map_err(|error| {
-                            SessionError::Agent(AgentError::ConfigError(error.to_string()))
-                        })?;
+                    let accepted =
+                        prepared
+                            .stage_into(&mut candidate, accepted_at)
+                            .map_err(|error| {
+                                SessionError::Agent(AgentError::ConfigError(error.to_string()))
+                            })?;
                     (accepted, snapshot_state, candidate)
                 };
 
                 if accepted == 0 {
-                    let ingress = match persistence_profile {
-                        RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
-                            self.inner
-                                .classify_callback_result_ingress(id, req.results.clone())
-                                .await?
-                        }
-                        RuntimeSessionPersistenceProfile::WholeBlobV1 => {
-                            let session = self
-                                .load_authoritative_session_base(id)
-                                .await?
-                                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-                            session.classify_callback_result_ingress(&req.results)?
-                        }
-                        profile => {
-                            return Err(SessionError::Agent(AgentError::InternalError(format!(
-                                "unsupported runtime session persistence profile {profile} while classifying staged tool results for session {id}"
-                            ))));
-                        }
-                    };
-                    let disposition = if matches!(
-                        ingress,
-                        meerkat_core::session::CallbackResultIngress::AlreadyApplied
-                    ) {
-                        StageToolResultsDisposition::AlreadyApplied
-                    } else {
-                        StageToolResultsDisposition::AlreadyStaged
-                    };
                     drop(gate_guard);
                     return Ok(StageToolResultsResult {
                         accepted_result_count: accepted,
-                        disposition,
+                        disposition: StageToolResultsDisposition::AlreadyStaged,
                     });
                 }
 
@@ -11882,12 +11969,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                             drop(gate_guard);
                             return Err(SessionError::NotFound { id: id.clone() });
                         }
-                        if matches!(
-                            self.inner
-                                .classify_callback_result_ingress(id, req.results.clone())
-                                .await?,
-                            meerkat_core::session::CallbackResultIngress::AlreadyApplied
-                        ) {
+                        if self
+                            .inner
+                            .prepare_callback_result_ingress(id, req.clone())
+                            .await?
+                            .already_applied()
+                        {
                             drop(gate_guard);
                             return Ok(StageToolResultsResult {
                                 accepted_result_count: 0,
@@ -11937,10 +12024,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         self.reject_if_archived_session(id, &session)
                             .await
                             .map_err(crate::control_error_into_session_error)?;
-                        if matches!(
-                            session.classify_callback_result_ingress(&req.results)?,
-                            meerkat_core::session::CallbackResultIngress::AlreadyApplied
-                        ) {
+                        if session
+                            .prepare_callback_result_ingress(
+                                &req.results,
+                                req.callback_target.as_ref(),
+                            )?
+                            .already_applied()
+                        {
                             drop(gate_guard);
                             return Ok(StageToolResultsResult {
                                 accepted_result_count: 0,
@@ -11971,8 +12061,8 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     };
                     if *guard == snapshot_state {
                         Some(
-                            guard
-                                .try_stage_tool_results(req.results.clone(), accepted_at)
+                            prepared
+                                .stage_into(&mut guard, accepted_at)
                                 .map_err(|error| {
                                     SessionError::Agent(AgentError::ConfigError(error.to_string()))
                                 })?,
@@ -12027,18 +12117,17 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         self.reject_if_archived_session(id, &session)
             .await
             .map_err(crate::control_error_into_session_error)?;
-        if matches!(
-            session.classify_callback_result_ingress(&req.results)?,
-            meerkat_core::session::CallbackResultIngress::AlreadyApplied
-        ) {
+        let prepared =
+            session.prepare_callback_result_ingress(&req.results, req.callback_target.as_ref())?;
+        if prepared.already_applied() {
             return Ok(StageToolResultsResult {
                 accepted_result_count: 0,
                 disposition: StageToolResultsDisposition::AlreadyApplied,
             });
         }
         let mut state = session.deferred_turn_state().unwrap_or_default();
-        let accepted = state
-            .try_stage_tool_results(req.results, meerkat_core::time_compat::SystemTime::now())
+        let accepted = prepared
+            .stage_into(&mut state, meerkat_core::time_compat::SystemTime::now())
             .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))?;
         write_deferred_turn_state(&mut session, state)
             .map_err(crate::control_error_into_session_error)?;
@@ -12214,6 +12303,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<Session>, SessionError> {
         self.load_committed_runtime_session_for_body(id, "authoritative session observation")
             .await
+    }
+
+    /// Observe retained callback results and their exact committed predecessor.
+    /// No actor cache, rewrite-audit reconciliation, or continuation admission
+    /// participates in this read. Consumers must fence the returned authority
+    /// at their own generated commit.
+    pub async fn observe_committed_callback_results(
+        &self,
+        id: &SessionId,
+        target: &meerkat_core::session::CallbackBatchIdentity,
+    ) -> Result<meerkat_runtime::store::CommittedCallbackResultsObservation, SessionError> {
+        let observed = self
+            .load_committed_runtime_session_body_observation(id, "callback result observation")
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        observed
+            .observe_callback_results(target)
+            .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))
     }
 
     /// Ask the RuntimeStore-owned recovery authority to resolve one durable
@@ -29102,6 +29209,7 @@ mod tests {
             .stage_tool_results(
                 &stage_result.session_id,
                 StageToolResultsRequest {
+                    callback_target: None,
                     results: vec![ToolResult::new(
                         "tool-call-1".to_string(),
                         "callback result".to_string(),
@@ -30644,6 +30752,7 @@ mod tests {
             .stage_tool_results(
                 &result.session_id,
                 StageToolResultsRequest {
+                    callback_target: None,
                     results: vec![ToolResult::new(
                         "tool-call-1".to_string(),
                         "callback result".to_string(),
@@ -30736,6 +30845,7 @@ mod tests {
             .stage_tool_results(
                 &result.session_id,
                 StageToolResultsRequest {
+                    callback_target: None,
                     results: vec![ToolResult::new(
                         "tool-call-1".to_string(),
                         "callback result".to_string(),
@@ -30780,6 +30890,7 @@ mod tests {
                 .stage_tool_results(
                     &result.session_id,
                     StageToolResultsRequest {
+                        callback_target: None,
                         results: vec![rejected],
                     },
                 )
@@ -30848,6 +30959,7 @@ mod tests {
             .stage_tool_results(
                 &id,
                 StageToolResultsRequest {
+                    callback_target: None,
                     results: vec![ToolResult::new(
                         "tool-call-1".to_string(),
                         "callback result".to_string(),

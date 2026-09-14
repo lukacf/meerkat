@@ -62,7 +62,8 @@ fn wrong_requested_realm_selector_or_binding_cannot_enter_grant_record() -> Test
             json!("00000000-0000-0000-0000-000000000099"),
         ),
         ("/declaration/generation", json!(0)),
-        ("/executor/binding/binding_generation", json!(0)),
+        ("/executor/binding/binding_generation", json!(-1)),
+        ("/executor/binding/binding_generation", json!(0.5)),
     ] {
         let mut value = grant();
         *value.pointer_mut(pointer).ok_or("fixture field")? = wrong;
@@ -71,6 +72,16 @@ fn wrong_requested_realm_selector_or_binding_cannot_enter_grant_record() -> Test
             "{pointer}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn grant_record_preserves_zero_session_owned_binding_generation() -> TestResult {
+    let mut image = grant();
+    image["executor"]["binding"]["binding_generation"] = json!(0);
+    let record: LiveExecutionGrantRecord<()> = serde_json::from_value(image.clone())?;
+    assert_eq!(record.executor().binding.binding_generation, 0);
+    assert_eq!(serde_json::to_value(record)?, image);
     Ok(())
 }
 

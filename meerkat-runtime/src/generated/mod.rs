@@ -3,4 +3,8 @@
 // generated artifact so the generated-header audit can distinguish codegen
 // output from stable module wiring.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod live_request_state;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod live_transcript_state;
 pub mod meerkat_mob_seam;

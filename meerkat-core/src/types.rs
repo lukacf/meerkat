@@ -1614,7 +1614,7 @@ impl Message {
             // channel: ordinary conversation indexes, while runtime compaction
             // summaries (projections of already-indexed history) and
             // host-attached injected context carry typed exclusion reasons.
-            Message::User(u) => match u.transcript_role {
+            Message::User(u) => match &u.transcript_role {
                 TranscriptUserRole::Conversational => {
                     MemoryIndexableContent::Indexable(u.text_content())
                 }
@@ -1623,6 +1623,11 @@ impl Message {
                 }
                 TranscriptUserRole::InjectedContext => {
                     MemoryIndexableContent::Excluded(MemoryIndexExclusion::InjectedContext)
+                }
+                // Index as application input without promoting its provenance
+                // into human speech or granting execution permission.
+                TranscriptUserRole::DelegatedRequest { .. } => {
+                    MemoryIndexableContent::Indexable(u.text_content())
                 }
             },
             Message::BlockAssistant(ba) => {
@@ -2597,12 +2602,12 @@ impl SystemNoticeMessage {
 /// This is the canonical replacement for `[Context compacted]` string-prefix
 /// folklore in the transcript-continuity save-guard. A user message produced as
 /// a runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];
-/// everything else stays [`TranscriptUserRole::Conversational`]. The producer of
+/// ordinary user input stays [`TranscriptUserRole::Conversational`]. The producer of
 /// the compaction summary sets this typed marker; the save-guard reads the typed
 /// field instead of classifying the rendered message body by content.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptUserRole {
     /// Ordinary conversational user input.
     #[default]
@@ -2614,6 +2619,11 @@ pub enum TranscriptUserRole {
     /// satisfies the transcript-continuity save-guard
     /// ([`Self::is_compaction_summary`] stays `CompactionSummary`-only).
     InjectedContext,
+    /// Non-human application/model request content. The exact source and
+    /// provisional evidence grade are content, never execution authority.
+    DelegatedRequest {
+        provenance: Box<crate::live_execution::evidence::DelegatedRequestProvenance>,
+    },
 }
 
 impl TranscriptUserRole {
@@ -2636,28 +2646,120 @@ impl TranscriptUserRole {
     pub fn is_injected_context(&self) -> bool {
         matches!(self, Self::InjectedContext)
     }
+
+    #[must_use]
+    pub fn is_delegated_request(&self) -> bool {
+        matches!(self, Self::DelegatedRequest { .. })
+    }
+
+    /// Turn-retention classification; application requests are not ambient
+    /// injected context, even though they are not human speech.
+    #[must_use]
+    pub fn is_turn_input(&self) -> bool {
+        matches!(self, Self::Conversational | Self::DelegatedRequest { .. })
+    }
 }
 
 /// User message content
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserMessage {
-    #[serde(with = "content_blocks_serde")]
     pub content: Vec<ContentBlock>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
-    #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub identity: TranscriptMessageIdentity,
     /// Typed transcript role. Defaults to [`TranscriptUserRole::Conversational`];
     /// runtime compaction marks the summary boundary message as
     /// [`TranscriptUserRole::CompactionSummary`].
-    #[serde(default, skip_serializing_if = "TranscriptUserRole::is_conversational")]
     pub transcript_role: TranscriptUserRole,
-    #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
 }
 
+impl Serialize for UserMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(with = "content_blocks_serde")]
+            content: &'a Vec<ContentBlock>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            render_metadata: &'a Option<RenderMetadata>,
+            #[serde(skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
+            identity: &'a TranscriptMessageIdentity,
+            #[serde(skip_serializing_if = "TranscriptUserRole::is_conversational")]
+            transcript_role: &'a TranscriptUserRole,
+            created_at: &'a MessageTimestamp,
+        }
+        self.validate_delegated_request()
+            .map_err(serde::ser::Error::custom)?;
+        Wire {
+            content: &self.content,
+            render_metadata: &self.render_metadata,
+            identity: &self.identity,
+            transcript_role: &self.transcript_role,
+            created_at: &self.created_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UserMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(with = "content_blocks_serde")]
+            content: Vec<ContentBlock>,
+            #[serde(default)]
+            render_metadata: Option<RenderMetadata>,
+            #[serde(default)]
+            identity: TranscriptMessageIdentity,
+            #[serde(default)]
+            transcript_role: TranscriptUserRole,
+            #[serde(default = "message_timestamp_now")]
+            created_at: MessageTimestamp,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let message = Self {
+            content: wire.content,
+            render_metadata: wire.render_metadata,
+            identity: wire.identity,
+            transcript_role: wire.transcript_role,
+            created_at: wire.created_at,
+        };
+        message
+            .validate_delegated_request()
+            .map_err(serde::de::Error::custom)?;
+        Ok(message)
+    }
+}
+
 impl UserMessage {
+    /// Materialize immutable delegated content; this issues no permission,
+    /// admission receipt, run identity, or effect scope.
+    pub fn delegated_request(
+        request: crate::live_execution::evidence::LiveRequestText,
+        provenance: crate::live_execution::evidence::DelegatedRequestProvenance,
+    ) -> Result<Self, crate::live_execution::evidence::LiveEvidenceError> {
+        provenance.validate_request(request.as_str())?;
+        Ok(Self {
+            transcript_role: TranscriptUserRole::DelegatedRequest {
+                provenance: Box::new(provenance),
+            },
+            ..Self::text(request.as_str())
+        })
+    }
+
+    fn validate_delegated_request(
+        &self,
+    ) -> Result<(), crate::live_execution::evidence::LiveEvidenceError> {
+        let TranscriptUserRole::DelegatedRequest { provenance } = &self.transcript_role else {
+            return Ok(());
+        };
+        let [ContentBlock::Text { text }] = self.content.as_slice() else {
+            return Err(
+                crate::live_execution::evidence::LiveEvidenceError::InvalidDelegatedContent,
+            );
+        };
+        provenance.validate_request(text)
+    }
+
     /// Create a text-only user message.
     pub fn text(content: impl Into<String>) -> Self {
         Self::text_with_render_metadata(content, None)

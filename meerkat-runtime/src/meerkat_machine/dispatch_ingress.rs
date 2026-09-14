@@ -981,6 +981,8 @@ impl MeerkatMachine {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id,
                 input,
+                #[cfg(not(target_arch = "wasm32"))]
+                pending_live,
                 register_completion,
                 member_residency,
                 expected_attachment,
@@ -1262,6 +1264,14 @@ impl MeerkatMachine {
                     };
                     let flags = resolved.coarse_flags();
                     let stages_run_boundary = resolved.stages_run_boundary();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let resolved = match pending_live {
+                        Some(pending) => {
+                            pending.validation().validate(&input)?;
+                            resolved.with_pending_live(pending)
+                        }
+                        None => resolved,
+                    };
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {

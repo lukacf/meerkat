@@ -142,6 +142,10 @@ impl GeminiCopilotChatClient {
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 #[async_trait]
 impl LlmClient for GeminiCopilotChatClient {
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        self.inner.native_tool_policy_support()
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],

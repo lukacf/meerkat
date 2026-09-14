@@ -16,6 +16,9 @@ pub struct ContinuousLiveFrontendPolicy {
 }
 
 impl ContinuousLiveFrontendPolicy {
+    pub const fn audio_ingress(&self) -> LiveAudioIngress {
+        self.audio_ingress
+    }
     pub fn new(audio_ingress: LiveAudioIngress) -> Result<Self, ContinuousLiveInputError> {
         if matches!(
             audio_ingress,
@@ -81,7 +84,19 @@ impl ContinuousLiveFrontendPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    thiserror::Error,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuousLiveInputError {
     #[error("continuous Live does not accept this frontend input kind")]
     UnsupportedInputKind,

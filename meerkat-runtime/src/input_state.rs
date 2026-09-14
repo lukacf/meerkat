@@ -133,9 +133,13 @@ pub(crate) enum InteractionTerminalCandidate {
         tool_use_id: Option<String>,
         tool_name: String,
         args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_identity: Option<meerkat_core::session::CallbackBatchIdentity>,
     },
     CallbackBatchPending {
         pending_tool_calls: Vec<meerkat_core::error::PendingCallbackToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_identity: Option<meerkat_core::session::CallbackBatchIdentity>,
     },
     /// The runtime executor observed that the agent's generated turn machine
     /// had already reached a typed hard-failure terminal.  The metadata is
@@ -178,16 +182,20 @@ impl InteractionTerminalCandidate {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             }) => Self::CallbackPending {
                 tool_use_id: Some(tool_use_id.clone()),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                callback_identity: callback_identity.clone(),
             },
-            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
-                Self::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                }
-            }
+            Some(CoreApplyTerminal::CallbackBatchPending {
+                pending_tool_calls,
+                callback_identity,
+            }) => Self::CallbackBatchPending {
+                pending_tool_calls: pending_tool_calls.clone(),
+                callback_identity: callback_identity.clone(),
+            },
             Some(CoreApplyTerminal::MachineTerminalFailure { error }) => {
                 Self::MachineTerminalFailure {
                     error: error.clone(),
@@ -208,6 +216,7 @@ impl InteractionTerminalCandidate {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             } => Some(CoreApplyTerminal::CallbackPending {
                 // A v0.8.7 row never recorded the id; empty means "identity
                 // unknown, pre-0.8.8 row". Durable-callback consumers that
@@ -216,12 +225,15 @@ impl InteractionTerminalCandidate {
                 tool_use_id: tool_use_id.clone().unwrap_or_default(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                callback_identity: callback_identity.clone(),
             }),
-            Self::CallbackBatchPending { pending_tool_calls } => {
-                Some(CoreApplyTerminal::CallbackBatchPending {
-                    pending_tool_calls: pending_tool_calls.clone(),
-                })
-            }
+            Self::CallbackBatchPending {
+                pending_tool_calls,
+                callback_identity,
+            } => Some(CoreApplyTerminal::CallbackBatchPending {
+                pending_tool_calls: pending_tool_calls.clone(),
+                callback_identity: callback_identity.clone(),
+            }),
             Self::MachineTerminalFailure { error } => {
                 Some(CoreApplyTerminal::MachineTerminalFailure {
                     error: error.clone(),
@@ -449,6 +461,15 @@ impl InputTerminalCompletion {
         if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
             return Err("terminal completion candidate digest mismatch".into());
         }
+        if let InteractionTerminalCandidate::CallbackPending {
+            callback_identity, ..
+        }
+        | InteractionTerminalCandidate::CallbackBatchPending {
+            callback_identity, ..
+        } = candidate
+        {
+            self.validate_callback_run_identity(callback_identity.as_ref())?;
+        }
         match (&self.batch_key, candidate) {
             (
                 InputTerminalCompletionBatchKey::RuntimeTermination { .. },
@@ -462,6 +483,16 @@ impl InputTerminalCompletion {
                 return Err("terminal completion scope does not match its candidate".into());
             }
             (InputTerminalCompletionBatchKey::Run { .. }, _) => {}
+        }
+        Ok(())
+    }
+
+    fn validate_callback_run_identity(
+        &self,
+        identity: Option<&meerkat_core::session::CallbackBatchIdentity>,
+    ) -> Result<(), String> {
+        if identity.is_some_and(|identity| self.batch_key.run_id() != Some(identity.run_id())) {
+            return Err("terminal callback identity belongs to another run".into());
         }
         Ok(())
     }
@@ -544,6 +575,20 @@ impl InputTerminalCompletion {
                 if interaction_terminal_payload_digest(&(outcome, finalization))? != *receipt_digest
                 {
                     return Err("terminal completion receipt digest mismatch".into());
+                }
+                self.validate_callback_run_identity(outcome.callback_identity())?;
+                if *finalization == InputTerminalCompletionFinalizationVerdict::Succeeded
+                    && let Some(candidate) = candidate
+                    && let InteractionTerminalCandidate::CallbackPending {
+                        callback_identity, ..
+                    }
+                    | InteractionTerminalCandidate::CallbackBatchPending {
+                        callback_identity,
+                        ..
+                    } = candidate
+                    && callback_identity.as_ref() != outcome.callback_identity()
+                {
+                    return Err("terminal completion lost or replaced its callback identity".into());
                 }
                 match (finalization, outcome) {
                     (
@@ -1091,6 +1136,7 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
                 tool_use_id,
                 tool_name,
                 args,
+                ..
             },
             AgentEvent::InteractionCallbackPending {
                 tool_name: event_tool,
@@ -1125,7 +1171,9 @@ pub(crate) fn interaction_terminal_candidate_matches_event(
                 }
         }
         (
-            InteractionTerminalCandidate::CallbackBatchPending { pending_tool_calls },
+            InteractionTerminalCandidate::CallbackBatchPending {
+                pending_tool_calls, ..
+            },
             AgentEvent::InteractionCallbackPending {
                 pending_tool_calls: event_pending,
                 ..
@@ -1860,6 +1908,136 @@ mod tests {
     }
 
     #[test]
+    fn callback_identity_survives_terminal_recovery_and_candidate_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::completion::CompletionOutcome;
+        use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+        let run_id = RunId::new();
+        let identity: meerkat_core::session::CallbackBatchIdentity =
+            serde_json::from_value(serde_json::json!({
+                "session_id": SessionId::new(),
+                "run_id": run_id,
+                "execution_scope": null,
+                "batch_digest": vec![7; 32],
+            }))?;
+        let terminal = CoreApplyTerminal::CallbackPending {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({"q": "first"}),
+            callback_identity: Some(identity.clone()),
+        };
+        let candidate = InteractionTerminalCandidate::from_core_apply_terminal(Some(&terminal));
+        let recovered: InteractionTerminalCandidate =
+            serde_json::from_slice(&serde_json::to_vec(&candidate)?)?;
+        assert_eq!(
+            recovered
+                .core_apply_terminal()
+                .as_ref()
+                .and_then(CoreApplyTerminal::callback_identity),
+            Some(&identity),
+        );
+        let input_id = InputId::new();
+        let mut row = InputTerminalCompletion {
+            input_id: input_id.clone(),
+            batch_ordinal: 0,
+            batch_key: InputTerminalCompletionBatchKey::Run { run_id },
+            owner_input_id: input_id.clone(),
+            candidate_digest: interaction_terminal_payload_digest(&candidate)?,
+            completion_input_ids_digest: interaction_terminal_payload_digest(&vec![
+                input_id.clone(),
+            ])?,
+            requires_session_checkpoint: true,
+            candidate: Some(recovered),
+            completion_input_ids: Some(vec![input_id]),
+            outcome: None,
+            phase: InputTerminalCompletionPhase::Pending,
+        };
+        row.validate_row()?;
+        let mut foreign_run = row.clone();
+        foreign_run.batch_key = InputTerminalCompletionBatchKey::Run {
+            run_id: RunId::new(),
+        };
+        assert!(foreign_run.validate_row().is_err());
+
+        let outcome = CompletionOutcome::CallbackPending {
+            tool_use_id: "callback".into(),
+            tool_name: "tool".into(),
+            args: serde_json::json!({"q": "first"}),
+            callback_identity: Some(identity.clone()),
+        };
+        let finalization = InputTerminalCompletionFinalizationVerdict::Succeeded;
+        row.phase = InputTerminalCompletionPhase::Finalized {
+            receipt_digest: interaction_terminal_payload_digest(&(&outcome, &finalization))?,
+            finalization,
+        };
+        row.outcome = Some(outcome.clone());
+        row.validate_row()?;
+
+        let mut replaced = row.clone();
+        let mut uncorrelated = outcome;
+        if let CompletionOutcome::CallbackPending {
+            callback_identity, ..
+        } = &mut uncorrelated
+        {
+            *callback_identity = None;
+        }
+        replaced.phase = InputTerminalCompletionPhase::Finalized {
+            receipt_digest: interaction_terminal_payload_digest(&(&uncorrelated, &finalization))?,
+            finalization,
+        };
+        replaced.outcome = Some(uncorrelated);
+        assert!(replaced.validate_row().is_err());
+
+        row.candidate = None;
+        let restored: InputTerminalCompletion = serde_json::from_slice(&serde_json::to_vec(&row)?)?;
+        restored.validate_row()?;
+        assert_eq!(
+            restored
+                .outcome
+                .as_ref()
+                .and_then(CompletionOutcome::callback_identity),
+            Some(&identity)
+        );
+        row.batch_key = InputTerminalCompletionBatchKey::Run {
+            run_id: RunId::new(),
+        };
+        assert!(row.validate_row().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn callback_identity_absence_preserves_legacy_terminal_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::completion::CompletionOutcome;
+        for (candidate_json, outcome_json) in [
+            (
+                r#"{"candidate_type":"callback_pending","tool_use_id":"callback","tool_name":"tool","args":{"q":"first"}}"#,
+                r#"{"completion_type":"callback_pending","tool_use_id":"callback","tool_name":"tool","args":{"q":"first"}}"#,
+            ),
+            (
+                r#"{"candidate_type":"callback_batch_pending","pending_tool_calls":[{"tool_use_id":"callback","tool_name":"tool","args":{"q":"first"}}]}"#,
+                r#"{"completion_type":"callback_batch_pending","pending_tool_calls":[{"tool_use_id":"callback","tool_name":"tool","args":{"q":"first"}}]}"#,
+            ),
+        ] {
+            let candidate: InteractionTerminalCandidate = serde_json::from_str(candidate_json)?;
+            let outcome: CompletionOutcome = serde_json::from_str(outcome_json)?;
+            assert_eq!(serde_json::to_string(&candidate)?, candidate_json);
+            assert_eq!(serde_json::to_string(&outcome)?, outcome_json);
+            let raw_candidate = serde_json::value::RawValue::from_string(candidate_json.into())?;
+            let raw_outcome = serde_json::value::RawValue::from_string(outcome_json.into())?;
+            assert_eq!(
+                interaction_terminal_payload_digest(&candidate)?,
+                interaction_terminal_payload_digest(&raw_candidate)?,
+            );
+            assert_eq!(
+                interaction_terminal_payload_digest(&outcome)?,
+                interaction_terminal_payload_digest(&raw_outcome)?,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn restart_after_terminal_transaction_observes_pending_exact_receipt() {
         let rows = restart_terminal_completion_rows(pending_terminal_completion_batch_fixture());
         let input_id = rows[1].state.input_id.clone();
@@ -2419,6 +2597,7 @@ mod tests {
             tool_use_id: None,
             tool_name: "external".to_string(),
             args: args.clone(),
+            callback_identity: None,
         };
         let event = |pending_tool_calls| AgentEvent::InteractionCallbackPending {
             interaction_id,
@@ -2450,6 +2629,7 @@ mod tests {
             tool_use_id: Some("call-9".to_string()),
             tool_name: "external".to_string(),
             args: args.clone(),
+            callback_identity: None,
         };
         assert!(!interaction_terminal_candidate_matches_event(
             &modern_candidate,
@@ -2676,6 +2856,7 @@ mod tests {
                 tool_name: "external".to_string(),
                 args: serde_json::json!({"value": 1}),
             }],
+            callback_identity: None,
         };
         let event = AgentEvent::InteractionFailed {
             interaction_id,

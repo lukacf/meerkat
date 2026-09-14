@@ -458,6 +458,16 @@ pub(super) enum PlacedBehaviorCompletion {
     },
 }
 
+pub(super) enum LiveObservationReadTarget {
+    Placed(super::bridge_protocol::BridgeMemberIncarnation),
+    Local {
+        session_id: SessionId,
+        generation: Generation,
+        agent_runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+    },
+}
+
 #[derive(Clone)]
 pub(super) struct LifecycleAdmissionSignal {
     sender: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
@@ -677,6 +687,12 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         expected_member: super::bridge_protocol::BridgeMemberIncarnation,
         completion: PlacedBehaviorCompletion,
+    },
+    MemberLiveObservationsCompleted {
+        agent_identity: AgentIdentity,
+        target: LiveObservationReadTarget,
+        result: Result<super::member_history_proxy::MemberLiveObservationsDomain, MobError>,
+        reply_tx: oneshot::Sender<Result<super::member_history_proxy::MemberLiveObservationsDomain, MobError>>,
     },
     Retire {
         agent_identity: AgentIdentity,
@@ -1228,6 +1244,11 @@ pub(super) enum MobCommand {
             Result<super::member_history_proxy::MemberHistoryPageDomain, crate::MobError>,
         >,
     },
+    MemberLiveObservations {
+        agent_identity: AgentIdentity,
+        query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+        reply_tx: oneshot::Sender<Result<super::member_history_proxy::MemberLiveObservationsDomain, MobError>>,
+    },
     /// Create one source-owned forked-participant capability (issue #159).
     /// Routed by CURRENT source residency: a local source is served by this
     /// runtime's own [`ForkedParticipantService`], a placed source by the V6
@@ -1737,6 +1758,8 @@ impl MobCommand {
             Self::ForceCancel { .. } => "ForceCancel",
             Self::HardCancelMember { .. } => "HardCancelMember",
             Self::MemberHistory { .. } => "MemberHistory",
+            Self::MemberLiveObservations { .. } => "MemberLiveObservations",
+            Self::MemberLiveObservationsCompleted { .. } => "MemberLiveObservationsCompleted",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",
             Self::RevokeForkedParticipant { .. } => "RevokeForkedParticipant",

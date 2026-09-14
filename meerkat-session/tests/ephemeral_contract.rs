@@ -1550,6 +1550,7 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         tool_use_id,
         tool_name,
         args,
+        callback_identity,
     }) = output.terminal
     else {
         return Err("expected callback pending terminal".to_string());
@@ -1557,6 +1558,7 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
     assert_eq!(tool_use_id, "call-1");
     assert_eq!(tool_name, "external_mock");
     assert_eq!(args, json!({ "value": "browser" }));
+    assert_eq!(callback_identity, None, "mock has no actual callback batch");
     Ok(())
 }
 

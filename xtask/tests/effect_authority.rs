@@ -26,9 +26,12 @@ trait CoreExecutor {
     fn turn_finalization_boundary_handle(&self) {}
     fn pre_dequeue_handle(&self) {}
     fn apply(&mut self) {}
+    fn apply_scoped(&mut self) {}
+    fn apply_with_execution_authority(&mut self) {}
     fn checkpoint_committed_session_snapshot(&mut self) {}
     fn acknowledge_committed_session_boundary(&mut self) {}
     fn reconcile_committed_compaction_projections(&mut self) {}
+    fn acknowledge_finalized_compaction_projections(&mut self) {}
     fn abort_uncommitted_compaction_projections(&mut self) {}
     fn abort_rejected_run_projections(&mut self) {}
     fn publish_interaction_terminals(&mut self) {}
@@ -52,9 +55,12 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
     fn turn_finalization_boundary_handle(&self) { self.inner.turn_finalization_boundary_handle() }
     fn pre_dequeue_handle(&self) { self.inner.pre_dequeue_handle() }
     fn apply(&mut self) { self.inner.apply() }
+    fn apply_scoped(&mut self) { self.inner.apply_scoped() }
+    fn apply_with_execution_authority(&mut self) { self.inner.apply_with_execution_authority() }
     fn checkpoint_committed_session_snapshot(&mut self) { self.inner.checkpoint_committed_session_snapshot() }
     fn acknowledge_committed_session_boundary(&mut self) { self.inner.acknowledge_committed_session_boundary() }
     fn reconcile_committed_compaction_projections(&mut self) { self.inner.reconcile_committed_compaction_projections() }
+    fn acknowledge_finalized_compaction_projections(&mut self) { self.inner.acknowledge_finalized_compaction_projections() }
     fn abort_uncommitted_compaction_projections(&mut self) { self.inner.abort_uncommitted_compaction_projections() }
     fn abort_rejected_run_projections(&mut self) { self.inner.abort_rejected_run_projections() }
     fn publish_interaction_terminals(&mut self) { self.inner.publish_interaction_terminals() }

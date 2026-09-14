@@ -205,6 +205,10 @@ pub enum AdmissionInputKind {
     Continuation,
     #[serde(rename = "Operation")]
     Operation,
+    #[serde(rename = "LiveRequest")]
+    LiveRequest,
+    #[serde(rename = "LiveCallbackContinuation")]
+    LiveCallbackContinuation,
 }
 impl AdmissionInputKind {
     pub fn as_str(&self) -> &'static str {
@@ -218,6 +222,8 @@ impl AdmissionInputKind {
             Self::ExternalEvent => "ExternalEvent",
             Self::Continuation => "Continuation",
             Self::Operation => "Operation",
+            Self::LiveRequest => "LiveRequest",
+            Self::LiveCallbackContinuation => "LiveCallbackContinuation",
         }
     }
 }
@@ -234,6 +240,8 @@ impl std::convert::TryFrom<&str> for AdmissionInputKind {
             "ExternalEvent" => Ok(Self::ExternalEvent),
             "Continuation" => Ok(Self::Continuation),
             "Operation" => Ok(Self::Operation),
+            "LiveRequest" => Ok(Self::LiveRequest),
+            "LiveCallbackContinuation" => Ok(Self::LiveCallbackContinuation),
             other => Err(format!("invalid AdmissionInputKind value `{other}`")),
         }
     }
@@ -275,6 +283,8 @@ pub enum AdmissionInputOriginKind {
     System,
     #[serde(rename = "External")]
     External,
+    #[serde(rename = "LiveRequest")]
+    LiveRequest,
 }
 impl AdmissionInputOriginKind {
     pub fn as_str(&self) -> &'static str {
@@ -284,6 +294,7 @@ impl AdmissionInputOriginKind {
             Self::Flow => "Flow",
             Self::System => "System",
             Self::External => "External",
+            Self::LiveRequest => "LiveRequest",
         }
     }
 }
@@ -296,6 +307,7 @@ impl std::convert::TryFrom<&str> for AdmissionInputOriginKind {
             "Flow" => Ok(Self::Flow),
             "System" => Ok(Self::System),
             "External" => Ok(Self::External),
+            "LiveRequest" => Ok(Self::LiveRequest),
             other => Err(format!("invalid AdmissionInputOriginKind value `{other}`")),
         }
     }
@@ -787,6 +799,8 @@ pub enum AdmissionRejectReasonKind {
     PeerHandlingModeInvalid,
     #[serde(rename = "PeerResponseTerminalInvalid")]
     PeerResponseTerminalInvalid,
+    #[serde(rename = "LiveRequestRequiresGrant")]
+    LiveRequestRequiresGrant,
 }
 impl AdmissionRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
@@ -798,6 +812,7 @@ impl AdmissionRejectReasonKind {
             }
             Self::PeerHandlingModeInvalid => "PeerHandlingModeInvalid",
             Self::PeerResponseTerminalInvalid => "PeerResponseTerminalInvalid",
+            Self::LiveRequestRequiresGrant => "LiveRequestRequiresGrant",
         }
     }
 }
@@ -812,6 +827,7 @@ impl std::convert::TryFrom<&str> for AdmissionRejectReasonKind {
             }
             "PeerHandlingModeInvalid" => Ok(Self::PeerHandlingModeInvalid),
             "PeerResponseTerminalInvalid" => Ok(Self::PeerResponseTerminalInvalid),
+            "LiveRequestRequiresGrant" => Ok(Self::LiveRequestRequiresGrant),
             other => Err(format!("invalid AdmissionRejectReasonKind value `{other}`")),
         }
     }
@@ -2055,6 +2071,58 @@ impl std::convert::TryFrom<String> for ExternalToolSurfaceFailureCause {
     }
 }
 impl std::fmt::Display for ExternalToolSurfaceFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FailedRunRecoveryDisposition {
+    #[default]
+    #[serde(rename = "HoldScoped")]
+    HoldScoped,
+    #[serde(rename = "Ordinary")]
+    Ordinary,
+}
+impl FailedRunRecoveryDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HoldScoped => "HoldScoped",
+            Self::Ordinary => "Ordinary",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FailedRunRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "HoldScoped" => Ok(Self::HoldScoped),
+            "Ordinary" => Ok(Self::Ordinary),
+            other => Err(format!(
+                "invalid FailedRunRecoveryDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FailedRunRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FailedRunRecoveryDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7071,6 +7139,10 @@ pub enum RecoveredInputKind {
     Continuation,
     #[serde(rename = "Operation")]
     Operation,
+    #[serde(rename = "LiveRequest")]
+    LiveRequest,
+    #[serde(rename = "LiveCallbackContinuation")]
+    LiveCallbackContinuation,
 }
 impl RecoveredInputKind {
     pub fn as_str(&self) -> &'static str {
@@ -7084,6 +7156,8 @@ impl RecoveredInputKind {
             Self::ExternalEvent => "ExternalEvent",
             Self::Continuation => "Continuation",
             Self::Operation => "Operation",
+            Self::LiveRequest => "LiveRequest",
+            Self::LiveCallbackContinuation => "LiveCallbackContinuation",
         }
     }
 }
@@ -7100,6 +7174,8 @@ impl std::convert::TryFrom<&str> for RecoveredInputKind {
             "ExternalEvent" => Ok(Self::ExternalEvent),
             "Continuation" => Ok(Self::Continuation),
             "Operation" => Ok(Self::Operation),
+            "LiveRequest" => Ok(Self::LiveRequest),
+            "LiveCallbackContinuation" => Ok(Self::LiveCallbackContinuation),
             other => Err(format!("invalid RecoveredInputKind value `{other}`")),
         }
     }
@@ -10255,6 +10331,58 @@ impl std::fmt::Display for RuntimeQueueAdmission {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ScopedInputNormalizationDisposition {
+    #[default]
+    #[serde(rename = "Hold")]
+    Hold,
+    #[serde(rename = "Authorized")]
+    Authorized,
+}
+impl ScopedInputNormalizationDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hold => "Hold",
+            Self::Authorized => "Authorized",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ScopedInputNormalizationDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Hold" => Ok(Self::Hold),
+            "Authorized" => Ok(Self::Authorized),
+            other => Err(format!(
+                "invalid ScopedInputNormalizationDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ScopedInputNormalizationDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ScopedInputNormalizationDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -12707,6 +12835,7 @@ pub struct State {
     pub input_runtime_peer_response_terminal_apply_intent:
         std::collections::BTreeMap<String, RecoveredPeerResponseTerminalApplyIntent>,
     pub input_is_prompt: std::collections::BTreeMap<String, bool>,
+    pub input_exclusive_live_requests: std::collections::BTreeSet<String>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
     pub input_recovery_lanes: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
@@ -13643,6 +13772,13 @@ pub mod inputs {
         pub peer_handling_mode_valid: bool,
         pub peer_response_terminal_structurally_valid: bool,
         pub peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveAdmissionValidation {
+        pub input_id: String,
+        pub input_kind: AdmissionInputKind,
+        pub input_origin: AdmissionInputOriginKind,
+        pub durability: InputDurabilityKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionIdempotency {
@@ -15341,6 +15477,23 @@ pub mod inputs {
         pub recipient_input_ids: std::collections::BTreeSet<String>,
         pub finalization: RuntimeCompletionFinalizationObservation,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveFailedRunRecovery {
+        pub run_id: RunId,
+        pub input_ids: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeScopedInputNormalization {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub has_run: bool,
+        pub applied_boundary_committed: Option<bool>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUncommittedLiveStage {
+        pub input_id: String,
+        pub run_id: RunId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15446,6 +15599,7 @@ pub enum Input {
     LiveBoundaryUnavailable(inputs::LiveBoundaryUnavailable),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
     ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
+    ResolveLiveAdmissionValidation(inputs::ResolveLiveAdmissionValidation),
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
     RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
     NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
@@ -15724,6 +15878,9 @@ pub enum Input {
     ClassifyTerminalCompletionCorrelation(inputs::ClassifyTerminalCompletionCorrelation),
     RecoverInputCompletionBoundary(inputs::RecoverInputCompletionBoundary),
     ResolveCheckpointCompletionResult(inputs::ResolveCheckpointCompletionResult),
+    ResolveFailedRunRecovery(inputs::ResolveFailedRunRecovery),
+    AuthorizeScopedInputNormalization(inputs::AuthorizeScopedInputNormalization),
+    AbortUncommittedLiveStage(inputs::AbortUncommittedLiveStage),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -15867,6 +16024,7 @@ impl Input {
             Self::LiveBoundaryUnavailable(_) => InputKind::LiveBoundaryUnavailable,
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
             Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
+            Self::ResolveLiveAdmissionValidation(_) => InputKind::ResolveLiveAdmissionValidation,
             Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
             Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
             Self::NormalizeRecoveredInputLifecycle(_) => {
@@ -16245,6 +16403,11 @@ impl Input {
             Self::ResolveCheckpointCompletionResult(_) => {
                 InputKind::ResolveCheckpointCompletionResult
             }
+            Self::ResolveFailedRunRecovery(_) => InputKind::ResolveFailedRunRecovery,
+            Self::AuthorizeScopedInputNormalization(_) => {
+                InputKind::AuthorizeScopedInputNormalization
+            }
+            Self::AbortUncommittedLiveStage(_) => InputKind::AbortUncommittedLiveStage,
         }
     }
 }
@@ -16349,6 +16512,7 @@ pub enum InputKind {
     LiveBoundaryUnavailable,
     ResolveAdmissionPlan,
     ResolveAdmissionValidation,
+    ResolveLiveAdmissionValidation,
     ResolveAdmissionIdempotency,
     RegisterAcceptedIdempotency,
     NormalizeRecoveredInputLifecycle,
@@ -16617,6 +16781,9 @@ pub enum InputKind {
     ClassifyTerminalCompletionCorrelation,
     RecoverInputCompletionBoundary,
     ResolveCheckpointCompletionResult,
+    ResolveFailedRunRecovery,
+    AuthorizeScopedInputNormalization,
+    AbortUncommittedLiveStage,
 }
 
 pub mod signals {
@@ -18104,6 +18271,17 @@ pub mod effects {
         pub result_class: RuntimeCompletionResultClass,
         pub cleanup_outcome: RuntimeCompletionObservedOutcome,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FailedRunRecoveryResolved {
+        pub run_id: RunId,
+        pub input_ids: std::collections::BTreeSet<String>,
+        pub disposition: FailedRunRecoveryDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScopedInputNormalizationResolved {
+        pub input_id: String,
+        pub disposition: ScopedInputNormalizationDisposition,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18346,6 +18524,8 @@ pub enum Effect {
     ),
     TerminalCompletionCorrelationClassified(effects::TerminalCompletionCorrelationClassified),
     CheckpointCompletionResultResolved(effects::CheckpointCompletionResultResolved),
+    FailedRunRecoveryResolved(effects::FailedRunRecoveryResolved),
+    ScopedInputNormalizationResolved(effects::ScopedInputNormalizationResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -18575,6 +18755,8 @@ pub enum EffectKind {
     RecoveredTerminalCompletionDeclaredUnrecoverable,
     TerminalCompletionCorrelationClassified,
     CheckpointCompletionResultResolved,
+    FailedRunRecoveryResolved,
+    ScopedInputNormalizationResolved,
 }
 
 pub mod command_capabilities {
@@ -19611,6 +19793,15 @@ pub enum TransitionId {
     ResolveAdmissionValidationAcceptedIdle,
     ResolveAdmissionValidationAcceptedAttached,
     ResolveAdmissionValidationAcceptedRunning,
+    ResolveAdmissionValidationUnboundLiveRequestRejectedIdle,
+    ResolveAdmissionValidationUnboundLiveRequestRejectedAttached,
+    ResolveAdmissionValidationUnboundLiveRequestRejectedRunning,
+    ResolveLiveAdmissionValidationAcceptedIdle,
+    ResolveLiveAdmissionValidationAcceptedAttached,
+    ResolveLiveAdmissionValidationAcceptedRunning,
+    ResolveLiveAdmissionValidationRejectedIdle,
+    ResolveLiveAdmissionValidationRejectedAttached,
+    ResolveLiveAdmissionValidationRejectedRunning,
     NormalizeRecoveredInputAcceptedQueueInitializing,
     NormalizeRecoveredInputAcceptedQueueIdle,
     NormalizeRecoveredInputAcceptedQueueAttached,
@@ -21313,6 +21504,22 @@ pub enum TransitionId {
     PrepareIdleRetainingUnsettledCompletion,
     PrepareAttachedRetainingUnsettledCompletion,
     DrainQueuedRunRetiredRetainingUnsettledCompletion,
+    AuthorizeScopedInputNormalizationInitializing,
+    AuthorizeScopedInputNormalizationIdle,
+    AuthorizeScopedInputNormalizationAttached,
+    AuthorizeScopedInputNormalizationRunning,
+    AuthorizeScopedInputNormalizationRetired,
+    AuthorizeScopedInputNormalizationStopped,
+    ResolveFailedRunRecoveryIdle,
+    ResolveFailedRunRecoveryAttached,
+    ResolveFailedRunRecoveryRunning,
+    ResolveFailedRunRecoveryRetired,
+    ResolveFailedRunRecoveryStopped,
+    AbortUncommittedLiveStageIdle,
+    AbortUncommittedLiveStageAttached,
+    AbortUncommittedLiveStageRunning,
+    AbortUncommittedLiveStageRetired,
+    AbortUncommittedLiveStageStopped,
     RecoverInputCompletionBoundaryInitializing,
     RecoverInputCompletionBoundaryIdle,
     RecoverInputCompletionBoundaryAttached,
@@ -21558,6 +21765,7 @@ pub fn initial_state() -> State {
         input_runtime_execution_kind: Default::default(),
         input_runtime_peer_response_terminal_apply_intent: Default::default(),
         input_is_prompt: Default::default(),
+        input_exclusive_live_requests: Default::default(),
         input_lane: Default::default(),
         input_recovery_lanes: Default::default(),
         admission_authorized_lanes: Default::default(),

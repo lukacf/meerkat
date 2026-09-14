@@ -94,6 +94,14 @@ impl<const MAX_BYTES: usize> schemars::JsonSchema for LiveCompletionText<MAX_BYT
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveRequestCompletionFact {
+    /// References the ordinary owner's complete finalized outcome, including
+    /// structured output, accounting, stop causes, and extraction failures.
+    /// This is neither a copied result nor a certified public artifact.
+    OrdinaryTerminal {
+        input_id: InputId,
+        run_id: RunId,
+        receipt_digest: LiveCompletionText<64>,
+    },
     Refused {
         reason: LiveRequestRefusal,
     },
@@ -120,6 +128,11 @@ pub enum LiveRequestCompletionFact {
         reason: LiveRequestHold,
     },
     AdmissionUnconfirmed {},
+    /// References the finalized ordinary owner for an admitted input that never ran.
+    OrdinaryRunlessTerminal {
+        input_id: InputId,
+        receipt_digest: LiveCompletionText<64>,
+    },
 }
 
 completion_states! { LiveRequestRefusal {
@@ -156,6 +169,7 @@ completion_states! { LiveChannelControlOutcome {
     RecoveryFenced,
     DeliveryFenced,
     StorageQuotaReached,
+    Activated,
 }}
 
 /// Terminal/control payloads reference previously persisted source, scope,
@@ -174,6 +188,13 @@ pub enum LiveCompletionEvent {
     ChannelUsage {
         snapshot: LiveUsageSnapshot,
     },
+    ChannelProviderStarted {
+        #[schemars(with = "String", extend("minLength" = 1, "maxLength" = LIVE_COMPLETION_ID_MAX_BYTES, "x-max-utf8-bytes" = LIVE_COMPLETION_ID_MAX_BYTES))]
+        provider_session: LiveCompletionText<LIVE_COMPLETION_ID_MAX_BYTES>,
+    },
+    ChannelProviderDiagnostic {
+        diagnostic: meerkat_core::live_execution::backend::LiveProviderDiagnostic,
+    },
     RequestOutcome {
         request_id: OperationId,
         outcome: LiveRequestCompletionFact,
@@ -182,6 +203,7 @@ pub enum LiveCompletionEvent {
         claim_id: OperationId,
         request_id: OperationId,
         outcome: LivePhysicalEffectOutcome,
+        token_accounting: meerkat_core::execution_scope::ScopedEffectTokenAccounting,
         diagnostic: LiveCompletionText<LIVE_TERMINAL_DIAGNOSTIC_MAX_BYTES>,
     },
     CallbackSuspended {
@@ -234,7 +256,9 @@ impl LiveCompletionEvent {
         match self {
             Self::ChannelControl { .. }
             | Self::ChannelDiscontinuity { .. }
-            | Self::ChannelUsage { .. } => LiveCompletionObligation::ChannelControl,
+            | Self::ChannelUsage { .. }
+            | Self::ChannelProviderStarted { .. }
+            | Self::ChannelProviderDiagnostic { .. } => LiveCompletionObligation::ChannelControl,
             Self::RequestOutcome { .. } => LiveCompletionObligation::RequestChain,
             Self::EffectTerminal { .. } | Self::CallbackSuspended { .. } => {
                 LiveCompletionObligation::EffectStart
@@ -272,6 +296,11 @@ impl LiveCompletionRecord {
             || self.channel_id.as_str().len() > LIVE_COMPLETION_ID_MAX_BYTES
         {
             return Err(LiveCompletionEncodingError::InvalidChannel);
+        }
+        if let LiveCompletionEvent::ChannelProviderStarted { provider_session } = &self.event
+            && provider_session.as_str().is_empty()
+        {
+            return Err(LiveCompletionEncodingError::InvalidProviderSession);
         }
         if let LiveCompletionEvent::ChannelDiscontinuity { discontinuity } = &self.event {
             let matches = match discontinuity {
@@ -336,6 +365,8 @@ pub enum LiveCompletionEncodingError {
     TextTooLarge { max_bytes: usize },
     #[error("live completion channel id is empty or exceeds its byte bound")]
     InvalidChannel,
+    #[error("live provider session id is empty")]
+    InvalidProviderSession,
     #[error("live discontinuity does not match its record session and channel")]
     DiscontinuityIdentityMismatch,
     #[error(transparent)]

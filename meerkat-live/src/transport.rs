@@ -42,9 +42,10 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::host::{
-    LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseCommitAuthority,
-    LiveChannelCloseObservation, LiveChannelId, LiveChannelStatusCommitAuthority,
-    LiveChannelStatusObservation, ObservationOutcome, ObservationRouting,
+    DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT, LiveAdapterHost, LiveAdapterHostError,
+    LiveChannelCloseCommitAuthority, LiveChannelCloseObservation, LiveChannelId,
+    LiveChannelStatusCommitAuthority, LiveChannelStatusObservation, LiveObservationPump,
+    ObservationOutcome, ObservationRouting, wait_for_continuous_close,
 };
 use crate::wire_input::{live_input_chunk_decode_rejection, live_input_chunk_from_wire};
 use axum::Router;
@@ -478,7 +479,7 @@ async fn send_ws_ingress_rejection(
         code: LiveAdapterErrorCode::ConfigRejected { reason },
         message: error.to_string(),
     };
-    match serde_json::to_string(&WireLiveAdapterObservation::from(observation)) {
+    match WireLiveAdapterObservation::encode(observation) {
         Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
         Err(_) => false,
     }
@@ -889,7 +890,51 @@ impl LiveWsState {
                 return false;
             }
         };
-        if let Err(err) = self.host.prepare_channel_physical_close(&observation).await {
+        self.finish_channel_close(channel_id, &observation).await
+    }
+
+    async fn close_channel_from_pump(
+        &self,
+        channel_id: &LiveChannelId,
+        pump: &mut LiveObservationPump,
+        continuous_attempted: &mut bool,
+    ) -> bool {
+        if !pump.is_continuous() {
+            return self.close_channel_with_generated_feedback(channel_id).await;
+        }
+        *continuous_attempted = true;
+        match self.host.generated_close_has_committed(channel_id).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(channel = %channel_id, %error, "cannot observe generated close before drain");
+                return false;
+            }
+        }
+        let observation = match self
+            .host
+            .reserve_channel_close_observation(channel_id)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(channel = %channel_id, %error, "cannot reserve continuous close observation");
+                return false;
+            }
+        };
+        if let Err(error) = pump.drain(DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT).await {
+            tracing::warn!(channel = %channel_id, %error, "continuous observation drain remains unconfirmed");
+            return false;
+        }
+        self.finish_channel_close(channel_id, &observation).await
+    }
+
+    async fn finish_channel_close(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveChannelCloseObservation,
+    ) -> bool {
+        if let Err(err) = self.host.prepare_channel_physical_close(observation).await {
             tracing::warn!(
                 channel = %channel_id,
                 error = %err,
@@ -899,7 +944,7 @@ impl LiveWsState {
         }
         let authority = match self
             .close_feedback
-            .record_live_channel_closed(channel_id, &observation)
+            .record_live_channel_closed(channel_id, observation)
             .await
         {
             Ok(authority) => authority,
@@ -914,7 +959,7 @@ impl LiveWsState {
         };
         if let Err(err) = self
             .host
-            .commit_channel_close_observation(&observation, &authority)
+            .commit_channel_close_observation(observation, &authority)
             .await
         {
             tracing::warn!(
@@ -1137,6 +1182,7 @@ async fn close_with(socket: &mut WebSocket, code: u16, reason: &str) {
 
 fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
     match observation {
+        LiveAdapterObservation::Continuous { .. } => false,
         LiveAdapterObservation::Error { .. } => true,
         LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
         _ => false,
@@ -1158,7 +1204,8 @@ fn observation_requires_generated_close(observation: &LiveAdapterObservation) ->
 pub(crate) fn should_publish_observation(observation: &LiveAdapterObservation) -> bool {
     !matches!(
         observation,
-        LiveAdapterObservation::Error { .. }
+        LiveAdapterObservation::Continuous { .. }
+            | LiveAdapterObservation::Error { .. }
             | LiveAdapterObservation::UserContentCommitted { .. }
             | LiveAdapterObservation::RealtimeTranscript {
                 event: meerkat_core::RealtimeTranscriptEvent::UserContentFinal { .. }
@@ -1229,14 +1276,40 @@ async fn handle_live_socket(
     // accumulates enough poll progress to resolve — a starvation regression
     // distinct from `biased;` ordering. We box+pin once and re-arm only
     // after an observation is consumed (or an error tears the loop down).
-    let mut observation_fut = Box::pin(state.host.next_observation_raw(&channel_id));
+    let mut observation_pump = match state.host.claim_observation_pump(&channel_id).await {
+        Ok(pump) => pump,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, %error, "cannot claim live observation pump");
+            return;
+        }
+    };
     let mut close_feedback_recorded = false;
+    let mut continuous_close_attempted = false;
+    let mut close_requests = observation_pump.close_requests();
 
     loop {
         // No `biased;` — fair scheduling prevents continuous mic-audio inbound
         // frames from starving the observation arm (assistant output, tool
         // observations, terminal close).
         tokio::select! {
+            request = wait_for_continuous_close(&mut close_requests) => {
+                continuous_close_attempted = true;
+                match request {
+                    Ok(request) => {
+                        let result = if request.remaining().is_zero() {
+                            Err(LiveAdapterHostError::ObservationDrainTimedOut)
+                        } else {
+                            observation_pump.drain(request.remaining()).await
+                        };
+                        if let Err(error) = &result {
+                            tracing::warn!(channel = %channel_id, %error, "requested continuous drain remains unconfirmed");
+                        }
+                        request.complete(result);
+                    }
+                    Err(error) => tracing::warn!(channel = %channel_id, %error, "continuous close owner disappeared"),
+                }
+                break;
+            }
             client_msg = socket.recv() => {
                 match client_msg {
                     Some(Ok(WsMessage::Text(text))) => {
@@ -1274,9 +1347,7 @@ async fn handle_live_socket(
                         let chunk = match serde_json::from_str::<LiveInputChunkWire>(text.as_str()) {
                             Ok(wire @ LiveInputChunkWire::Image { .. }) => {
                                 let observation = direct_websocket_image_rejection();
-                                if let Ok(json) = serde_json::to_string(
-                                    &WireLiveAdapterObservation::from(observation),
-                                ) {
+                                if let Ok(json) = WireLiveAdapterObservation::encode(observation) {
                                     let _ = socket.send(WsMessage::Text(json.into())).await;
                                 }
                                 drop(wire);
@@ -1293,9 +1364,7 @@ async fn handle_live_socket(
                                                 code,
                                                 message: convert_err.to_string(),
                                             };
-                                        if let Ok(json) = serde_json::to_string(
-                                            &WireLiveAdapterObservation::from(observation),
-                                        ) {
+                                        if let Ok(json) = WireLiveAdapterObservation::encode(observation) {
                                             let _ = socket.send(WsMessage::Text(json.into())).await;
                                         }
                                         continue;
@@ -1324,9 +1393,7 @@ async fn handle_live_socket(
                                     if let Some(observation) =
                                         scoped_command_rejection_from_host_error(&err)
                                     {
-                                        if let Ok(json) = serde_json::to_string(
-                                            &WireLiveAdapterObservation::from(observation),
-                                        ) {
+                                        if let Ok(json) = WireLiveAdapterObservation::encode(observation) {
                                             let _ = socket.send(WsMessage::Text(json.into())).await;
                                         }
                                         continue;
@@ -1342,7 +1409,7 @@ async fn handle_live_socket(
                                 }
                             }
                             None => {
-                                if !state.close_channel_with_generated_feedback(&channel_id).await {
+                                if !state.close_channel_from_pump(&channel_id, &mut observation_pump, &mut continuous_close_attempted).await {
                                     break;
                                 }
                                 close_feedback_recorded = true;
@@ -1356,7 +1423,7 @@ async fn handle_live_socket(
                                 channel = %channel_id,
                                 "binary frame received before format negotiation; closing"
                             );
-                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                            if !state.close_channel_from_pump(&channel_id, &mut observation_pump, &mut continuous_close_attempted).await {
                                 break;
                             }
                             close_feedback_recorded = true;
@@ -1394,9 +1461,7 @@ async fn handle_live_socket(
                             if let Some(observation) =
                                 scoped_command_rejection_from_host_error(&err)
                             {
-                                if let Ok(json) = serde_json::to_string(
-                                    &WireLiveAdapterObservation::from(observation),
-                                ) {
+                                if let Ok(json) = WireLiveAdapterObservation::encode(observation) {
                                     let _ = socket.send(WsMessage::Text(json.into())).await;
                                 }
                                 continue;
@@ -1420,7 +1485,7 @@ async fn handle_live_socket(
                             kind = ?std::mem::discriminant(&other),
                             "unsupported WS frame; closing"
                         );
-                        if !state.close_channel_with_generated_feedback(&channel_id).await {
+                        if !state.close_channel_from_pump(&channel_id, &mut observation_pump, &mut continuous_close_attempted).await {
                             break;
                         }
                         close_feedback_recorded = true;
@@ -1433,25 +1498,19 @@ async fn handle_live_socket(
                 }
             }
 
-            observation = &mut observation_fut => {
+            observation = observation_pump.next_observation() => {
                 // Re-arm the pinned observation future for the next loop
                 // iteration before processing this one — the new future
                 // must already be pinned by the time the next select!
                 // iteration polls it.
-                observation_fut = Box::pin(state.host.next_observation_raw(&channel_id));
                 // Wave-3 RPC pump migration: split the convenience wrapper
                 // into `next_observation_raw` + `apply_observation` so the
                 // pump can react to the typed `ObservationOutcome` after
                 // generated close authority has accepted terminal facts.
                 match observation {
                     Ok(Some(obs)) => {
-                        // R6-2 (P2): route the WS write through the typed
-                        // wire mirror at the public boundary so future core
-                        // variants surface as `observation: "unknown"`
-                        // (R3-6's fail-loud sentinel) rather than leaking
-                        // raw new tags at this seam. The conversion is
-                        // total (every core variant has an explicit arm)
-                        // and byte-compatible for known variants — see
+                        // Public conversion is fallible and excludes internal
+                        // continuous facts. Known legacy shapes remain byte-compatible; see
                         // `wire_live_adapter_observation_byte_compatible_with_core_for_audio_chunk`
                         // / `_command_rejected` in
                         // `meerkat-contracts/src/wire/live.rs`.
@@ -1459,7 +1518,7 @@ async fn handle_live_socket(
                         let publish_observation = should_publish_observation(&obs);
 
                         if close_observation {
-                            if !state.close_channel_with_generated_feedback(&channel_id).await {
+                            if !state.close_channel_from_pump(&channel_id, &mut observation_pump, &mut continuous_close_attempted).await {
                                 break;
                             }
                             close_feedback_recorded = true;
@@ -1492,9 +1551,7 @@ async fn handle_live_socket(
                             // preventing serialization, this avoids cloning
                             // inline image bytes from the internal canonical
                             // user-content event into a wire value at all.
-                            match serde_json::to_string(&WireLiveAdapterObservation::from(
-                                obs.clone(),
-                            )) {
+                            match WireLiveAdapterObservation::encode(obs.clone()) {
                                 Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
                                 Err(error) => {
                                     tracing::warn!(
@@ -1514,10 +1571,20 @@ async fn handle_live_socket(
                         }
 
                         match outcome {
+                            ObservationOutcome::ContinuousTranscriptCommitted { record } => {
+                                let json = match WireLiveAdapterObservation::encode_committed(record) {
+                                    Ok(json) => json,
+                                    Err(error) => {
+                                        tracing::warn!(channel = %channel_id, %error, "failed to encode committed Live observation");
+                                        break;
+                                    }
+                                };
+                                if socket.send(WsMessage::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
                             ObservationOutcome::UserContentCommitted { observation } => {
-                                let send_ok = match serde_json::to_string(
-                                    &WireLiveAdapterObservation::from(observation),
-                                ) {
+                                let send_ok = match WireLiveAdapterObservation::encode(observation) {
                                     Ok(json) => socket
                                         .send(WsMessage::Text(json.into()))
                                         .await
@@ -1567,9 +1634,13 @@ async fn handle_live_socket(
     }
 
     tracing::info!(channel = %channel_id, "live WebSocket disconnected");
-    if !close_feedback_recorded {
+    if !close_feedback_recorded && !continuous_close_attempted {
         state
-            .close_channel_with_generated_feedback(&channel_id)
+            .close_channel_from_pump(
+                &channel_id,
+                &mut observation_pump,
+                &mut continuous_close_attempted,
+            )
             .await;
     }
 }
@@ -1603,6 +1674,80 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn continuous_facts_have_an_explicit_internal_route_and_no_public_encoding() {
+        use meerkat_core::live_execution::backend::{
+            LiveBackendOwnership, LiveProviderDiagnostic, LiveProviderDiagnosticCategory,
+        };
+        use meerkat_core::live_execution::observation::{
+            ContinuousLiveObservation as Event, LiveUsageSnapshot, LiveVoiceDurationSeconds,
+        };
+        use meerkat_core::live_execution::request::LiveProviderReference;
+        use meerkat_core::live_observation::{
+            LiveTranscriptDirection, LiveTranscriptObservation, LiveTranscriptRange,
+        };
+        let seconds = LiveVoiceDurationSeconds::new(1.25).expect("duration");
+        let events = [
+            Event::ProviderStarted {
+                provider_session: LiveProviderReference::new("private-session").expect("key"),
+            },
+            Event::Transcript(LiveTranscriptObservation::new(
+                LiveTranscriptDirection::Input,
+                LiveTranscriptRange::new(0.0, 1.0).expect("range"),
+                "not yet committed private transcript",
+            )),
+            Event::TranscriptRejected(
+                meerkat_core::live_observation::LiveObservationValueError::InvalidRange,
+            ),
+            Event::ClientDelegation {
+                delegation: LiveProviderReference::new("internal-key").expect("key"),
+                offset_ms: 1.25,
+            },
+            Event::VoiceUsage(LiveUsageSnapshot::Periodic {
+                cumulative_seconds: seconds,
+            }),
+            Event::ProviderClosed {
+                usage: LiveUsageSnapshot::SessionClosed {
+                    cumulative_seconds: seconds,
+                },
+            },
+            Event::ObservationStreamEnded,
+            Event::Diagnostic(
+                LiveProviderDiagnostic::new(
+                    LiveProviderDiagnosticCategory::BackendAdvisoryError,
+                    LiveBackendOwnership::Unowned {},
+                    std::num::NonZeroU64::new(1).expect("count"),
+                )
+                .expect("diagnostic"),
+            ),
+        ];
+        for event in events {
+            let label = match &event {
+                Event::ProviderStarted { .. } => "started",
+                Event::Transcript(_) => "transcript",
+                Event::TranscriptRejected(_) => "rejected transcript",
+                Event::ClientDelegation { .. } => "delegation",
+                Event::VoiceUsage(_) => "usage",
+                Event::ProviderClosed { .. } => "closed",
+                Event::ObservationStreamEnded => "observation stream ended",
+                Event::Diagnostic(_) => "diagnostic",
+            };
+            let observation = LiveAdapterObservation::Continuous {
+                event,
+                receive: None,
+            };
+            assert_eq!(
+                LiveAdapterHost::classify_observation(&observation),
+                ObservationRouting::Continuous
+            );
+            assert!(!observation_requires_generated_close(&observation));
+            assert!(!should_publish_observation(&observation), "{label}");
+            assert!(serde_json::to_value(&observation).is_err());
+            assert!(WireLiveAdapterObservation::try_from(observation.clone()).is_err());
+            assert!(WireLiveAdapterObservation::encode(observation).is_err());
+        }
+    }
+
+    #[test]
     fn raw_user_content_event_and_adapter_receipt_are_filtered() {
         use meerkat_core::types::{ContentBlock, ImageData};
 
@@ -1630,8 +1775,8 @@ mod tests {
 
         assert!(!should_publish_observation(&internal));
         assert!(!should_publish_observation(&receipt));
-        let public_json = serde_json::to_string(&WireLiveAdapterObservation::from(receipt))
-            .expect("receipt should serialize");
+        let public_json =
+            WireLiveAdapterObservation::encode(receipt).expect("receipt should serialize");
         assert!(public_json.contains("user_content_committed"));
         assert!(!public_json.contains("sensitive-base64-payload"));
     }

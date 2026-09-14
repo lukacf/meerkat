@@ -200,6 +200,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/auth_binding_wire.rs",
@@ -255,6 +257,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/image_generation_wire.rs",
@@ -308,6 +312,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/jobs_wire.rs",
@@ -361,6 +367,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/live_audio_format.rs",
@@ -413,6 +421,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/live_barge_in.rs",
@@ -465,6 +475,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/live_deadline_and_jitter.rs",
@@ -517,6 +529,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/live_execution_identity_wire.rs",
@@ -569,6 +583,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/mob_wire.rs",
@@ -622,6 +638,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/public_live_wire.rs",
@@ -674,6 +692,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/regression_wire_types.rs",
@@ -729,6 +749,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/runtime_turn_metadata_wire_override.rs",
@@ -782,6 +804,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/session_accept_input_typed_round_trip.rs",
@@ -835,6 +859,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "tests/fixtures/delegated-request-message-v1.json",
+        "tests/fixtures/live-observation-page-v1.json",
     ],
     srcs = [
         "tests/skill_ref_wire_no_legacy.rs",

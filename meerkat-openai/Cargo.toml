@@ -81,6 +81,11 @@ name = "public_live_backend_facts"
 path = "tests/public_live_backend_facts.rs"
 required-features = ["live"]
 
+[[test]]
+name = "public_live_transport_contract"
+path = "tests/public_live_transport_contract.rs"
+required-features = ["live"]
+
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "base64", "indexmap", "tempfile"]
 

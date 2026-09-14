@@ -430,8 +430,12 @@ fn every_completion_and_runless_terminal_case_rejects_extra_authority_fields() -
     };
     for event in maximal_completion_events()? {
         let value = serde_json::to_value(maximal_completion_record(event)?)?;
-        for altered in extra_field_at_each_object(&value) {
-            assert!(serde_json::from_value::<LiveCompletionRecord>(altered).is_err());
+        for (index, altered) in extra_field_at_each_object(&value).into_iter().enumerate() {
+            assert!(
+                serde_json::from_value::<LiveCompletionRecord>(altered).is_err(),
+                "accepted extra field: event {:?}, nested object {index}",
+                value["event"]["kind"]
+            );
         }
     }
     for value in [

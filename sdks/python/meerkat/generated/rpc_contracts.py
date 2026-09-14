@@ -157,6 +157,8 @@ from .types import (
     MobMemberHistoryResult,
     MobMemberLiveChannelParams,
     MobMemberLiveControlParams,
+    MobMemberLiveObservationsParams,
+    MobMemberLiveObservationsResult,
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberParams,
@@ -1542,6 +1544,14 @@ class RpcRequest(Protocol):
         params: MobMemberHistoryParams,
         /,
     ) -> Awaitable[MobMemberHistoryResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/member_live_observations"],
+        params: MobMemberLiveObservationsParams,
+        /,
+    ) -> Awaitable[MobMemberLiveObservationsResult]: ...
 
     @overload
     def __call__(

@@ -60,6 +60,46 @@ test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
 	@scripts/run-build-backend-lane test-int
 
+.PHONY: test-public-live-contracts check-public-live-feature-isolation test-public-live-consumers test-public-live-browser-contract
+
+# Representation contracts only; this is not the real-provider qualification lane.
+test-public-live-contracts:
+	$(CARGO) test -p meerkat-core -p meerkat-contracts -p meerkat-llm-core \
+		-p meerkat-session -p meerkat-runtime -p meerkat-openai -p meerkat \
+		-p meerkat-integration-tests -p xtask \
+		--features meerkat/openai-live,meerkat-runtime/live,meerkat-openai/live,meerkat-integration-tests/openai-live-e2e \
+		--test 'public_live_*'
+	$(CARGO) test -p meerkat-core --test scoped_run_authority_contract
+	$(CARGO) test -p meerkat-core -p meerkat-session --lib public_live_delegated
+	$(CARGO) test -p meerkat-core --doc execution_scope
+	$(CARGO) test -p meerkat-runtime --features live,sqlite-store --lib live_ledger::write::tests
+	$(CARGO) test -p meerkat-runtime --features live,sqlite-store --lib public_live_history
+	$(CARGO) test -p meerkat-mob --test cross_host_events public_live_history
+	$(CARGO) test -p meerkat-rest --lib public_live_history
+	$(CARGO) test -p meerkat-mob-mcp --lib public_mcp::tests
+
+# Real downstream workspaces, without the root workspace's dev-feature union.
+test-public-live-consumers:
+	python3 scripts/test-public-live-dependency.py
+	python3 scripts/check-public-live-dependency.py --fixture ws
+	$(CARGO) test --locked --manifest-path tests/feature-fixtures/public-live-ws/Cargo.toml
+	python3 scripts/check-public-live-dependency.py --fixture rtc
+	$(CARGO) test --locked --manifest-path tests/feature-fixtures/public-live-rtc/Cargo.toml
+
+# Separate Cargo invocations prevent feature unification from hiding missing gates.
+check-public-live-feature-isolation: test-public-live-consumers
+	$(CARGO) check -p meerkat-runtime --no-default-features
+	$(CARGO) check -p meerkat-rpc --no-default-features
+	$(CARGO) check -p meerkat --no-default-features --features openai-live
+	$(CARGO) check -p meerkat-rpc --no-default-features --features openai-live
+	$(CARGO) check -p meerkat-openai --no-default-features --features live
+	$(CARGO) check -p meerkat --no-default-features --features experimental-gpt-live
+	$(CARGO) check -p meerkat --no-default-features --features openai-live,experimental-gpt-live
+
+test-public-live-browser-contract:
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract
+
 # Deterministic end-to-end lane (canonical integration harness)
 e2e-fast:
 	@echo "$(GREEN)Running e2e-fast lane...$(NC)"
@@ -871,6 +911,9 @@ help:
 	@echo "  $(GREEN)release$(NC)       - Build optimized release version"
 	@echo "  $(GREEN)test$(NC)          - Run fast tests (unit + integration-fast)"
 	@echo "  $(GREEN)test-unit$(NC)     - Run unit tests only"
+	@echo "  $(GREEN)test-public-live-contracts$(NC) - Native Live representation contracts (not provider qualification)"
+	@echo "  $(GREEN)check-public-live-feature-isolation$(NC) - Check Live features in separate Cargo invocations"
+	@echo "  $(GREEN)test-public-live-browser-contract$(NC) - Execute shared Live and existing browser contracts in Chrome"
 	@echo "  $(GREEN)test-int$(NC)      - Run integration-fast tests only"
 	@echo "  $(GREEN)e2e-fast$(NC)      - Run deterministic end-to-end lane"
 	@echo "  $(GREEN)e2e-build$(NC)     - Run build-composition e2e lane (ignored)"

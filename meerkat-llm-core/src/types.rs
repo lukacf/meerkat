@@ -37,6 +37,30 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    fn scoped_model_effect_support(
+        &self,
+    ) -> meerkat_core::execution_scope::ScopedModelEffectSupport {
+        meerkat_core::execution_scope::ScopedModelEffectSupport::Unsupported
+    }
+
+    fn prepared_scoped_model_effect_support(
+        &self,
+        _request: &PreparedLlmRequest,
+    ) -> Result<meerkat_core::execution_scope::ScopedModelEffectSupport, LlmError> {
+        Ok(self.scoped_model_effect_support())
+    }
+
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        meerkat_core::NativeToolPolicySupport::Unsupported
+    }
+
+    fn prepared_native_tool_policy_support(
+        &self,
+        _request: &PreparedLlmRequest,
+    ) -> Result<meerkat_core::NativeToolPolicySupport, LlmError> {
+        Ok(self.native_tool_policy_support())
+    }
+
     /// Prepare replay messages together with any opaque, request-scoped route
     /// witness required to keep later lowering and dispatch coherent.
     fn project_replay_request(
@@ -114,7 +138,22 @@ pub trait LlmClient: Send + Sync {
     /// Dispatch through the exact route witness captured while this request
     /// was projected.
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
-        self.stream(request.request())
+        self.stream_with_execution_context(request.request(), request.scoped_model().cloned())
+    }
+
+    fn stream_with_execution_context<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        scope: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
+    ) -> LlmStream<'a> {
+        if scope.is_some() {
+            return Box::pin(futures::stream::once(async {
+                Err(LlmError::InvalidRequest {
+                    message: "client does not implement scoped physical model dispatch".into(),
+                })
+            }));
+        }
+        self.stream(request)
     }
 
     /// Typed provider identity for this client.
@@ -190,6 +229,7 @@ impl LlmReplayProjection {
 pub struct PreparedLlmRequest {
     request: LlmRequest,
     route_witness: Option<LlmRequestRouteWitness>,
+    scoped_model: Option<Arc<meerkat_core::execution_scope::ScopedModelRequest>>,
 }
 
 impl PreparedLlmRequest {
@@ -198,11 +238,31 @@ impl PreparedLlmRequest {
         Self {
             request,
             route_witness: projection.route_witness,
+            scoped_model: None,
         }
     }
 
     pub fn request(&self) -> &LlmRequest {
         &self.request
+    }
+
+    pub fn with_scoped_model(
+        mut self,
+        scope: Arc<meerkat_core::execution_scope::ScopedModelRequest>,
+    ) -> Result<Self, LlmError> {
+        if self.request.provider_native_tools != meerkat_core::ProviderNativeToolPolicy::DisableAll
+        {
+            return Err(LlmError::InvalidRequest {
+                message: "scoped model dispatch requires disabled provider-native tools".into(),
+            });
+        }
+        self.request.validate_native_tool_policy()?;
+        self.scoped_model = Some(scope);
+        Ok(self)
+    }
+
+    pub fn scoped_model(&self) -> Option<&Arc<meerkat_core::execution_scope::ScopedModelRequest>> {
+        self.scoped_model.as_ref()
     }
 
     pub fn route_witness<T: Any>(&self) -> Option<&T> {
@@ -322,6 +382,11 @@ pub fn dimensions_from_size_preference(size: &ImageSizePreference) -> (u32, u32)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model: String,
+    #[serde(
+        default,
+        skip_serializing_if = "meerkat_core::ProviderNativeToolPolicy::is_inherit"
+    )]
+    pub provider_native_tools: meerkat_core::ProviderNativeToolPolicy,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub tools: Vec<Arc<ToolDef>>,
@@ -338,10 +403,49 @@ pub struct LlmRequest {
 }
 
 impl LlmRequest {
+    pub fn validate_native_tool_policy(&self) -> Result<(), LlmError> {
+        Self::validate_native_tool_params(self.provider_native_tools, self.provider_params.as_ref())
+    }
+
+    pub(crate) fn validate_native_tool_params(
+        policy: meerkat_core::ProviderNativeToolPolicy,
+        params: Option<&ProviderTag>,
+    ) -> Result<(), LlmError> {
+        if policy.is_inherit() {
+            return Ok(());
+        }
+        let native = match params {
+            Some(ProviderTag::Anthropic(tag)) => tag.web_search.as_ref(),
+            Some(ProviderTag::OpenAi(tag)) => tag.web_search.as_ref(),
+            Some(ProviderTag::Gemini(tag)) => tag.google_search.as_ref(),
+            Some(ProviderTag::Unknown { .. }) => {
+                return Err(LlmError::InvalidRequest {
+                    message: "native-tool restriction cannot attest unknown provider parameters"
+                        .into(),
+                });
+            }
+            None => None,
+        };
+        if native.is_some_and(|body| {
+            !matches!(
+                body.as_value(),
+                serde_json::Value::Null | serde_json::Value::Bool(false)
+            )
+        }) {
+            return Err(LlmError::InvalidRequest {
+                message:
+                    "enabled provider-native tool parameters contradict the request restriction"
+                        .into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Create a new request
     pub fn new(model: &str, messages: Vec<Message>) -> Self {
         Self {
             model: model.to_string(),
+            provider_native_tools: Default::default(),
             messages,
             tools: Vec::new(),
             max_tokens: 4096,
@@ -366,6 +470,14 @@ impl LlmRequest {
     /// Add tools
     pub fn with_tools(mut self, tools: Vec<Arc<ToolDef>>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_native_tool_policy(
+        mut self,
+        policy: meerkat_core::ProviderNativeToolPolicy,
+    ) -> Self {
+        self.provider_native_tools = policy;
         self
     }
 

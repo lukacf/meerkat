@@ -1702,6 +1702,22 @@ fn render_effect_emit(effect: &EffectEmit) -> String {
     }
 }
 
+#[cfg(test)]
+mod arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn integer_division_and_multiplication_render_with_explicit_grouping() {
+        assert_eq!(
+            render_expr(&Expr::Div(
+                Box::new(Expr::Mul(Box::new(Expr::U64(9)), Box::new(Expr::U64(4)))),
+                Box::new(Expr::Add(Box::new(Expr::U64(1)), Box::new(Expr::U64(2)))),
+            )),
+            "((9) * (4)) \\div (1 + 2)",
+        );
+    }
+}
+
 fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Bool(value) => value.to_string().to_uppercase(),
@@ -1715,6 +1731,7 @@ fn render_expr(expr: &Expr) -> String {
         Expr::FieldAccess { base, field } => {
             format!("{}.{}", render_expr(base), field.as_str())
         }
+
         Expr::EnumVariantIs { value, variant, .. } => {
             format!(
                 "{}.tag = {}",
@@ -1763,6 +1780,8 @@ fn render_expr(expr: &Expr) -> String {
         Expr::Neq(left, right) => format!("{} # {}", render_expr(left), render_expr(right)),
         Expr::Add(left, right) => format!("{} + {}", render_expr(left), render_expr(right)),
         Expr::Sub(left, right) => format!("{} - {}", render_expr(left), render_expr(right)),
+        Expr::Mul(left, right) => format!("({}) * ({})", render_expr(left), render_expr(right)),
+        Expr::Div(left, right) => format!("({}) \\div ({})", render_expr(left), render_expr(right)),
         Expr::Gt(left, right) => format!("{} > {}", render_expr(left), render_expr(right)),
         Expr::Gte(left, right) => format!("{} >= {}", render_expr(left), render_expr(right)),
         Expr::Lt(left, right) => format!("{} < {}", render_expr(left), render_expr(right)),

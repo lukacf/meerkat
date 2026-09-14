@@ -10,6 +10,7 @@ use super::request::{LiveDelegationAttribution, LiveProviderReference};
 /// The tracker's response association. `None` says no associated delegation
 /// is known; it does not erase absent versus null in the original envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LiveBackendResponseKey {
     pub response: LiveProviderReference,
@@ -17,6 +18,7 @@ pub struct LiveBackendResponseKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveBackendOwnership {
     Owned { response: LiveBackendResponseKey },
@@ -25,6 +27,7 @@ pub enum LiveBackendOwnership {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "Vec<LiveBackendResponseKey>")]
 pub struct LiveBackendCandidates(Vec<LiveBackendResponseKey>);
 
@@ -148,19 +151,124 @@ pub enum LiveBackendValueError {
     InvalidCandidateCount,
     #[error("live backend ambiguity repeats a response candidate")]
     DuplicateCandidate,
+    #[error("safe Live diagnostic exceeds its 1024-byte encoded bound")]
+    DiagnosticTooLarge,
+    #[error("safe Live diagnostic cannot be encoded")]
+    DiagnosticEncoding,
 }
+
+pub const LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES: usize = 1024;
 
 /// A safe, nonterminal diagnostic carries no arbitrary provider message, raw
 /// snapshot, error body, tool argument, or instruction string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-max-encoded-bytes" = LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES)))]
+#[serde(try_from = "LiveProviderDiagnosticParts")]
 pub struct LiveProviderDiagnostic {
+    category: LiveProviderDiagnosticCategory,
+    attribution: LiveBackendOwnership,
+    occurrences: std::num::NonZeroU64,
+}
+
+impl LiveProviderDiagnostic {
+    pub fn new(
+        category: LiveProviderDiagnosticCategory,
+        attribution: LiveBackendOwnership,
+        occurrences: std::num::NonZeroU64,
+    ) -> Result<Self, LiveBackendValueError> {
+        let validate = |response: &LiveBackendResponseKey| {
+            if response.response.as_str().len() > 128
+                || response
+                    .delegation
+                    .as_ref()
+                    .is_some_and(|id| id.as_str().len() > 128)
+            {
+                Err(LiveBackendValueError::InvalidResponseIdentity)
+            } else {
+                Ok(())
+            }
+        };
+        match &attribution {
+            LiveBackendOwnership::Owned { response } => validate(response)?,
+            LiveBackendOwnership::Ambiguous { candidates } => {
+                for candidate in candidates.iter() {
+                    validate(candidate)?;
+                }
+            }
+            LiveBackendOwnership::Unowned {} => {}
+        }
+        let record = Self {
+            category,
+            attribution,
+            occurrences,
+        };
+        let mut counter = DiagnosticByteCounter {
+            bytes: 0,
+            exceeded: false,
+        };
+        if serde_json::to_writer(&mut counter, &record).is_err() {
+            return Err(if counter.exceeded {
+                LiveBackendValueError::DiagnosticTooLarge
+            } else {
+                LiveBackendValueError::DiagnosticEncoding
+            });
+        }
+        Ok(record)
+    }
+
+    pub const fn category(&self) -> LiveProviderDiagnosticCategory {
+        self.category
+    }
+
+    pub fn attribution(&self) -> &LiveBackendOwnership {
+        &self.attribution
+    }
+
+    pub const fn occurrences(&self) -> std::num::NonZeroU64 {
+        self.occurrences
+    }
+}
+
+struct DiagnosticByteCounter {
+    bytes: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for DiagnosticByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > LIVE_PUBLIC_DIAGNOSTIC_MAX_BYTES - self.bytes {
+            self.exceeded = true;
+            return Err(std::io::Error::other("Live diagnostic byte limit"));
+        }
+        self.bytes += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct LiveProviderDiagnosticParts {
     pub category: LiveProviderDiagnosticCategory,
     pub attribution: LiveBackendOwnership,
     pub occurrences: std::num::NonZeroU64,
 }
 
+impl TryFrom<LiveProviderDiagnosticParts> for LiveProviderDiagnostic {
+    type Error = LiveBackendValueError;
+
+    fn try_from(parts: LiveProviderDiagnosticParts) -> Result<Self, Self::Error> {
+        Self::new(parts.category, parts.attribution, parts.occurrences)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LiveProviderDiagnosticCategory {
     BackendAdvisoryError,

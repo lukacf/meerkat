@@ -327,6 +327,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
             tool_use_id,
             tool_name,
             args,
+            ..
         } => {
             let pending_tool_calls = vec![meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id,
@@ -345,6 +346,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
         }
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
             pending_tool_calls,
+            ..
         } => {
             let first = pending_tool_calls.first().ok_or_else(|| {
                 anyhow::anyhow!("callback pending batch contained no pending tool calls")
@@ -3248,6 +3250,17 @@ enum MobCommands {
         /// Maximum transcript rows to return
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Read retained Live observations without opening a channel.
+    MemberLiveObservations {
+        mob_id: String,
+        agent_identity: String,
+        #[arg(long)]
+        channel_id: Option<String>,
+        #[arg(long)]
+        cursor: Option<meerkat_contracts::wire::live_observation::LiveObservationCursor>,
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=256))]
+        limit: u16,
     },
     /// Read outstanding cross-host route-install obligations.
     RouteInstalls {
@@ -9965,6 +9978,13 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             })
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service.acknowledge_finalized_compaction_projections(&self.session_id).await
+            .map_err(meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn abort_uncommitted_compaction_projections(
         &mut self,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
@@ -10202,6 +10222,15 @@ impl SessionService for RunMobSessionService {
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.inner
             .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .acknowledge_finalized_compaction_projections(id)
             .await
     }
 
@@ -13229,6 +13258,15 @@ impl SessionService for MobCliSessionService {
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.inner
             .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .acknowledge_finalized_compaction_projections(id)
             .await
     }
 
@@ -16722,6 +16760,29 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     meerkat_mob::AgentIdentity::from(agent_identity),
                     from_index,
                     limit,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::MemberLiveObservations {
+            mob_id,
+            agent_identity,
+            channel_id,
+            cursor,
+            limit,
+        } => {
+            let query = meerkat_contracts::wire::live_observation::LiveObservationPageQuery::new(
+                channel_id.map(meerkat_core::live_execution::LiveChannelId::new),
+                cursor,
+                usize::from(limit),
+            )?;
+            let result = state
+                .mob_member_live_observations(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
+                    query,
                 )
                 .await
                 .map_err(mob_anyhow)?;
@@ -20496,6 +20557,7 @@ default_model = "gemma"
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".into(),
                 args: serde_json::json!({ "value": "browser" }),
+                callback_identity: None,
             },
             &session_id,
             &realm,
@@ -22055,6 +22117,7 @@ default_model = "gemma"
         };
         let primitive =
             meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(StagedRunInput {
+                execution_authority: Default::default(),
                 boundary: RunApplyBoundary::RunStart,
                 appends: vec![ConversationAppend {
                     role: ConversationAppendRole::SystemNotice,

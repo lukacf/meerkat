@@ -756,6 +756,28 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         }
     }
 
+    fn build_live_adapter_factory(
+        &self,
+        target: meerkat_llm_core::provider_runtime::ResolvedLiveTarget,
+    ) -> Result<
+        Arc<dyn meerkat_llm_core::live_adapter_factory::LiveAdapterFactory>,
+        ProviderClientError,
+    > {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
+        {
+            Ok(Arc::new(
+                crate::public_live::adapter::OpenAiContinuousAdapterFactory::new(target)?,
+            ))
+        }
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "live")))]
+        {
+            let _ = target;
+            Err(ProviderClientError::MissingFeature(
+                "openai-continuous-live",
+            ))
+        }
+    }
+
     fn build_image_generation_executor(
         &self,
         connection: ResolvedConnection,

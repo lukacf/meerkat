@@ -19,6 +19,7 @@ use super::supervisor_bridge::BridgeReply;
 pub const LIVE_OBSERVATION_REPLY_MAX_BYTES: usize = 128 * 1024;
 pub const LIVE_OBSERVATION_TEXT_MAX_BYTES: usize = 64 * 1024;
 pub const LIVE_OBSERVATION_PAGE_MAX_RECORDS: usize = 256;
+pub const LIVE_OBSERVATION_PAGE_DEFAULT_LIMIT: u16 = 64;
 const ID_MAX_BYTES: usize = 128;
 const CURSOR_MAX_BYTES: usize = 4096;
 
@@ -140,10 +141,114 @@ impl LiveObservationSnapshot {
 #[serde(transparent)]
 pub struct LiveObservationCursor(String);
 
+impl std::str::FromStr for LiveObservationCursor {
+    type Err = LiveObservationEncodingError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty() || value.len() > CURSOR_MAX_BYTES {
+            return Err(LiveObservationEncodingError::InvalidCursor);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
 impl fmt::Debug for LiveObservationCursor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("LiveObservationCursor([REDACTED])")
     }
+}
+
+/// Bounded query content. Owner identity comes from the authorized route,
+/// never from this query or its cursor.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LiveObservationPageQueryWire")]
+pub struct LiveObservationPageQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<LiveChannelId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<LiveObservationCursor>,
+    limit: u16,
+}
+
+impl LiveObservationPageQuery {
+    pub fn new(
+        channel_id: Option<LiveChannelId>,
+        cursor: Option<LiveObservationCursor>,
+        limit: usize,
+    ) -> Result<Self, LiveObservationEncodingError> {
+        if let Some(channel_id) = &channel_id {
+            validate_id(channel_id.as_str())?;
+        }
+        validate_page_limit(limit)?;
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.0.is_empty() || cursor.0.len() > CURSOR_MAX_BYTES)
+        {
+            return Err(LiveObservationEncodingError::InvalidCursor);
+        }
+        Ok(Self {
+            channel_id,
+            cursor,
+            limit: u16::try_from(limit)
+                .map_err(|_| LiveObservationEncodingError::InvalidPageLimit)?,
+        })
+    }
+
+    pub fn into_parts(self) -> (LiveObservationFilter, Option<LiveObservationCursor>, usize) {
+        let filter = match self.channel_id {
+            Some(channel_id) => LiveObservationFilter::Channel { channel_id },
+            None => LiveObservationFilter::AllChannels {},
+        };
+        (filter, self.cursor, usize::from(self.limit))
+    }
+}
+
+impl Default for LiveObservationPageQuery {
+    fn default() -> Self {
+        Self {
+            channel_id: None,
+            cursor: None,
+            limit: default_page_limit(),
+        }
+    }
+}
+
+const fn default_page_limit() -> u16 {
+    LIVE_OBSERVATION_PAGE_DEFAULT_LIMIT
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveObservationPageQueryWire {
+    #[serde(default)]
+    channel_id: Option<LiveChannelId>,
+    #[serde(default)]
+    cursor: Option<LiveObservationCursor>,
+    #[serde(default = "default_page_limit")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 256)))]
+    limit: u16,
+}
+
+impl TryFrom<LiveObservationPageQueryWire> for LiveObservationPageQuery {
+    type Error = LiveObservationEncodingError;
+
+    fn try_from(value: LiveObservationPageQueryWire) -> Result<Self, Self::Error> {
+        Self::new(value.channel_id, value.cursor, usize::from(value.limit))
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveObservationReadFailure {
+    Unsupported,
+    Unavailable,
+    InvalidQuery,
+    CursorMismatch,
+    CursorExpired,
+    Integrity,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -325,13 +430,10 @@ impl LiveObservationWireCodecV1 {
         limit: usize,
         more_after_window: bool,
     ) -> Result<LiveObservationPage, LiveObservationEncodingError> {
-        if !(1..=LIVE_OBSERVATION_PAGE_MAX_RECORDS).contains(&limit)
-            || window.len() > LIVE_OBSERVATION_PAGE_MAX_RECORDS
-        {
+        Self::validate_query(&owner, &filter, limit)?;
+        if window.len() > LIVE_OBSERVATION_PAGE_MAX_RECORDS {
             return Err(LiveObservationEncodingError::InvalidPageLimit);
         }
-        owner.validate()?;
-        filter.validate()?;
         snapshot.validate()?;
         if more_after_window
             && window
@@ -414,31 +516,118 @@ impl LiveObservationWireCodecV1 {
         filter: &LiveObservationFilter,
         snapshot: &LiveObservationSnapshot,
     ) -> Result<u64, LiveObservationEncodingError> {
-        owner.validate()?;
-        filter.validate()?;
         snapshot.validate()?;
-        if cursor.0.len() > CURSOR_MAX_BYTES {
-            return Err(LiveObservationEncodingError::InvalidCursor);
-        }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(&cursor.0)
-            .map_err(|_| LiveObservationEncodingError::InvalidCursor)?;
-        let payload: CursorPayload = serde_json::from_slice(&bytes)
-            .map_err(|_| LiveObservationEncodingError::InvalidCursor)?;
-        if &payload.session_id != owner.session_id()
-            || &payload.filter != filter
-            || &payload.snapshot != snapshot
-            || payload.after_sequence > snapshot.end_sequence
-        {
+        let payload = decode_cursor(cursor, owner, filter)?;
+        if &payload.snapshot != snapshot {
             return Err(LiveObservationEncodingError::CursorMismatch);
         }
         Ok(payload.after_sequence)
     }
+
+    pub fn validate_query(
+        owner: &LiveObservationOwner,
+        filter: &LiveObservationFilter,
+        limit: usize,
+    ) -> Result<(), LiveObservationEncodingError> {
+        owner.validate()?;
+        filter.validate()?;
+        validate_page_limit(limit)
+    }
+
+    /// Validate remote claims against the actual requested owner/window. This
+    /// checks encoding and attribution, not the remote host's store authority.
+    pub fn validate_page_response(
+        page: &LiveObservationPage,
+        owner: &LiveObservationOwner,
+        query: &LiveObservationPageQuery,
+    ) -> Result<(), LiveObservationEncodingError> {
+        let (filter, cursor, limit) = query.clone().into_parts();
+        Self::validate_query(owner, &filter, limit)?;
+        page.snapshot.validate()?;
+        if &page.owner != owner || page.filter != filter {
+            return Err(LiveObservationEncodingError::CursorMismatch);
+        }
+        let after = match cursor {
+            Some(cursor) => Self::cursor_after_sequence(&cursor, owner, &filter, &page.snapshot)?,
+            None => 0,
+        };
+        if page.after_sequence != after
+            || after > page.snapshot.end_sequence
+            || page.records.len() > limit
+        {
+            return Err(LiveObservationEncodingError::InvalidWindow);
+        }
+        let mut previous = after;
+        for record in &page.records {
+            if record.sequence.get() <= previous
+                || record.sequence.get() > page.snapshot.end_sequence
+                || !filter.matches(record)
+            {
+                return Err(LiveObservationEncodingError::InvalidWindow);
+            }
+            Self::check_record_fit(record.as_ref().clone())?;
+            previous = record.sequence.get();
+        }
+        match (page.has_more, &page.next_cursor) {
+            (false, None) => {}
+            (true, Some(next))
+                if !page.records.is_empty()
+                    && previous < page.snapshot.end_sequence
+                    && Self::cursor_after_sequence(next, owner, &filter, &page.snapshot)?
+                        == previous => {}
+            _ => return Err(LiveObservationEncodingError::InvalidWindow),
+        }
+        Self::encode_reply(page)?;
+        Ok(())
+    }
+
+    /// Decode untrusted comparison material for a retained-prefix read.
+    /// The store must verify the prefix; coverage must be read independently
+    /// from committed records before this snapshot can appear in a reply.
+    pub fn cursor_snapshot(
+        cursor: &LiveObservationCursor,
+        owner: &LiveObservationOwner,
+        filter: &LiveObservationFilter,
+    ) -> Result<LiveObservationSnapshot, LiveObservationEncodingError> {
+        Ok(decode_cursor(cursor, owner, filter)?.snapshot)
+    }
+}
+
+fn decode_cursor(
+    cursor: &LiveObservationCursor,
+    owner: &LiveObservationOwner,
+    filter: &LiveObservationFilter,
+) -> Result<CursorPayload, LiveObservationEncodingError> {
+    owner.validate()?;
+    filter.validate()?;
+    if cursor.0.len() > CURSOR_MAX_BYTES {
+        return Err(LiveObservationEncodingError::InvalidCursor);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(&cursor.0)
+        .map_err(|_| LiveObservationEncodingError::InvalidCursor)?;
+    let payload: CursorPayload =
+        serde_json::from_slice(&bytes).map_err(|_| LiveObservationEncodingError::InvalidCursor)?;
+    payload.snapshot.validate()?;
+    if &payload.session_id != owner.session_id()
+        || &payload.filter != filter
+        || payload.after_sequence > payload.snapshot.end_sequence
+    {
+        return Err(LiveObservationEncodingError::CursorMismatch);
+    }
+    Ok(payload)
 }
 
 fn validate_id(value: &str) -> Result<(), LiveObservationEncodingError> {
     if value.is_empty() || value.len() > ID_MAX_BYTES {
         return Err(LiveObservationEncodingError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn validate_page_limit(limit: usize) -> Result<(), LiveObservationEncodingError> {
+    if !(1..=LIVE_OBSERVATION_PAGE_MAX_RECORDS).contains(&limit) {
+        return Err(LiveObservationEncodingError::InvalidPageLimit);
     }
     Ok(())
 }

@@ -25,7 +25,9 @@ use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
 #[cfg(test)]
-pub(crate) fn input_to_prompt(input: &Input) -> String {
+pub(crate) fn input_to_prompt(
+    input: &Input,
+) -> Result<String, crate::live_request::LiveRequestMaterializationError> {
     input_prompt_text(input)
 }
 
@@ -468,6 +470,16 @@ pub(crate) async fn reconcile_loaded_compaction_projection_outbox(
             driver
                 .mark_compaction_projection_finalized(&intent.projection)
                 .await?;
+        }
+        if !intents.is_empty() {
+            executor
+                .acknowledge_finalized_compaction_projections()
+                .await
+                .map_err(|error| {
+                    crate::RuntimeDriverError::Internal(format!(
+                        "failed to acknowledge committed compaction metadata: {error}"
+                    ))
+                })?;
         }
         return Ok(None);
     }
@@ -4184,7 +4196,11 @@ fn primitive_turn_start_input(
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
             },
         ),
-        RunPrimitive::StagedInput(staged) if staged.appends.is_empty() => None,
+        RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty() && primitive.callback_continuation().is_none() =>
+        {
+            None
+        }
         RunPrimitive::StagedInput(_) => {
             let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
                 primitive_admitted_content_shape(primitive),
@@ -4310,12 +4326,82 @@ pub(crate) fn try_inputs_to_primitive_with_boundary(
     try_projected_inputs_to_primitive_with_boundary(inputs, &projections, boundary, semantics)
 }
 
+#[cfg(test)]
 pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     projections: &[crate::ingress_types::RuntimeInputProjection],
     boundary: RunApplyBoundary,
     semantics: &[crate::ingress_types::RuntimeInputSemantics],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    prepare_projected_runtime_primitive(inputs, projections, boundary, semantics)?
+        .bind(meerkat_core::execution_scope::RunExecutionAuthority::SessionPolicy)
+}
+
+struct PreparedRuntimePrimitive {
+    boundary: RunApplyBoundary,
+    appends: Vec<meerkat_core::ConversationAppend>,
+    contributing_input_ids: Vec<InputId>,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    requires_scope: bool,
+}
+
+impl PreparedRuntimePrimitive {
+    fn bind(
+        self,
+        authority: meerkat_core::execution_scope::RunExecutionAuthority,
+    ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict>
+    {
+        if self.requires_scope == authority.is_session_policy() {
+            return Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "execution_scope",
+                    reason: "input kind must match its generated run authority",
+                },
+            );
+        }
+        if let meerkat_core::execution_scope::RunExecutionAuthority::Scoped(scope) = &authority
+            && self.contributing_input_ids.as_slice()
+                != std::slice::from_ref(&scope.record().input_id)
+        {
+            return Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "execution_scope",
+                    reason: "Live requests require their exact exclusive scoped input",
+                },
+            );
+        }
+        Ok(RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: authority,
+            boundary: self.boundary,
+            appends: self.appends,
+            contributing_input_ids: self.contributing_input_ids,
+            turn_metadata: self.turn_metadata,
+        }))
+    }
+}
+
+fn prepare_projected_runtime_primitive(
+    inputs: &[(InputId, Input)],
+    projections: &[crate::ingress_types::RuntimeInputProjection],
+    boundary: RunApplyBoundary,
+    semantics: &[crate::ingress_types::RuntimeInputSemantics],
+) -> Result<
+    PreparedRuntimePrimitive,
+    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+> {
+    if projections.len() != inputs.len()
+        || semantics.len() != inputs.len()
+        || projections
+            .iter()
+            .any(|projection| projection.deferred_live_request.is_some())
+    {
+        return Err(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                field: "primitive_projection",
+                reason: "all input projections must be present and materialized before staging",
+            },
+        );
+    }
     // Injected-context appends chain BEFORE the input's own append: the
     // delivery invariant is that host-attached injected context lands in the
     // transcript immediately before the turn's user/peer message, in order.
@@ -4334,12 +4420,15 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     // Scalar conflicts are typed errors; collection fields accumulate.
     let turn_metadata = merge_batch_turn_metadata(inputs, semantics)?;
 
-    Ok(RunPrimitive::StagedInput(StagedRunInput {
+    Ok(PreparedRuntimePrimitive {
         boundary,
         appends,
         contributing_input_ids,
         turn_metadata,
-    }))
+        requires_scope: inputs
+            .iter()
+            .any(|(_, input)| matches!(input, Input::LiveRequest(_))),
+    })
 }
 
 #[cfg(test)]
@@ -4411,6 +4500,46 @@ struct RuntimeLoopAuthorityBinding {
 }
 
 impl RuntimeLoopAuthorityBinding {
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn reconcile_live_cancellations(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<Vec<meerkat_core::live_execution::request::LiveSourceKey>, crate::RuntimeDriverError>
+    {
+        let owner = {
+            let driver = driver.lock().await;
+            match &*driver {
+                crate::meerkat_machine::DriverEntry::Persistent(driver) => {
+                    driver.live_cancellation_recovery_owner()?
+                }
+                crate::meerkat_machine::DriverEntry::Ephemeral(_) => None,
+            }
+        };
+        let Some(owner) = owner else {
+            return Ok(Vec::new());
+        };
+        let pending = owner
+            .pending_source_cancellations()
+            .await
+            .map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "Live cancellation discovery failed: {error}"
+                ))
+            })?;
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let machine = self
+            .machine
+            .upgrade()
+            .ok_or(crate::RuntimeDriverError::Destroyed)?;
+        let mut reconciled = Vec::with_capacity(pending.len());
+        for intent in pending {
+            reconciled.push(machine.cancel_live_request(intent).await?.source);
+        }
+        Ok(reconciled)
+    }
+
     fn new(
         machine: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
         session_id: meerkat_core::types::SessionId,
@@ -5769,6 +5898,12 @@ async fn process_queue(
 ) -> bool {
     let post_commit_hooks = authority_binding.post_commit_hooks().await;
     loop {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Err(error) = authority_binding.reconcile_live_cancellations(driver).await {
+            tracing::error!(%error,
+                "retained Live cancellation could not be delivered; queue remains unstarted");
+            return false;
+        }
         let turn_finalization_guard = match executor.turn_finalization_boundary_handle() {
             Some(boundary) => match boundary.acquire().await {
                 Ok(guard) => Some(guard),
@@ -5923,7 +6058,7 @@ async fn process_queue(
                 run_id: RunId,
                 primitive: Box<
                     Result<
-                        RunPrimitive,
+                        PreparedRuntimePrimitive,
                         meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
                     >,
                 >,
@@ -6022,8 +6157,25 @@ async fn process_queue(
                         semantics
                     },
                 );
-            let projections =
+            let mut projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
+            if let Some(projections) = &mut projections {
+                for ((input_id, _), projection) in staged_inputs.iter().zip(projections) {
+                    if let Some(request) = projection.deferred_live_request.take() {
+                        match d.materialize_live_request(input_id, &request).await {
+                            Ok(append) => projection.append = append,
+                            Err(error) => {
+                                let reason = format!("Live source materialization failed: {error}");
+                                tracing::error!(input_id = %input_id, error = %error, "Live source materialization failed before staging");
+                                break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
+                                    input_ids: staged_ids,
+                                    reason,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
             let primitive = match (semantics, projections) {
                 (Some(semantics), Some(projections)) => {
                     let boundary = semantics.first().map(|semantics| semantics.boundary).ok_or(
@@ -6033,7 +6185,7 @@ async fn process_queue(
                         },
                     );
                     match boundary {
-                        Ok(boundary) => try_projected_inputs_to_primitive_with_boundary(
+                        Ok(boundary) => prepare_projected_runtime_primitive(
                             &staged_inputs,
                             &projections,
                             boundary,
@@ -6073,59 +6225,95 @@ async fn process_queue(
                 primitive,
                 batch,
             } => {
-                match crate::meerkat_machine::prepare_runtime_loop_batch_start(
-                    driver,
-                    run_id.clone(),
-                    batch,
-                )
-                .await
-                {
-                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started) => {}
-                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
-                        reason,
-                        abandoned_input_ids,
-                    }) => {
-                        // The machine refused to stage an accepted batch. Its
-                        // members are already resolved (another attempt at the
-                        // back of the backlog, or terminalized at the retry
-                        // cap), so this wake keeps draining: returning here
-                        // dropped the wake and, under fifo, starved every input
-                        // behind the refused head indefinitely (field 0.8.22).
-                        tracing::warn!(
-                            %run_id,
-                            reason = %reason,
-                            abandoned = abandoned_input_ids.len(),
-                            "generated staging authority refused an accepted input batch; resolved through machine authority"
-                        );
-                        drop(queue_authority_guard);
-                        if !abandoned_input_ids.is_empty()
-                            && drain_recovered_interaction_terminal_outboxes_until_clear(
-                                driver,
-                                completions,
-                                executor,
-                                authority_binding,
-                                true,
-                                RuntimeProjectionRecoveryAuthority::RuntimeLoop,
-                            )
-                            .await
-                        {
-                            return true;
+                let execution_authority =
+                    match crate::meerkat_machine::prepare_runtime_loop_batch_start(
+                        driver,
+                        run_id.clone(),
+                        batch,
+                    )
+                    .await
+                    {
+                        Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started(
+                            authority,
+                        )) => authority,
+                        #[cfg(not(target_arch = "wasm32"))]
+                        Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::LiveStageRefused {
+                            source,
+                            reason,
+                        }) => {
+                            drop(queue_authority_guard);
+                            drop(turn_finalization_guard);
+                            match authority_binding.reconcile_live_cancellations(driver).await {
+                                Ok(reconciled) if reconciled.contains(&source) => {
+                                    tracing::debug!(%run_id, %reason,
+                                        "uncommitted Live stage returned to queue for exact cancellation");
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    tracing::error!(%run_id, %reason,
+                                        "Live stage refused before commit without pending source cancellation");
+                                }
+                                Err(error) => {
+                                    tracing::error!(%run_id, %reason, %error,
+                                        "Live stage cancellation reconciliation failed");
+                                }
+                            }
+                            if let Some(completions) = completions.as_ref() {
+                                fail_completion_waiters(
+                                    &mut *completions.lock().await,
+                                    &input_ids,
+                                    format!("Live staging refused without commit: {reason}"),
+                                );
+                            }
+                            return false;
                         }
-                        continue;
-                    }
-                    Err(err) => {
-                        tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
-                        if let Some(completions) = completions.as_ref() {
-                            let mut completions = completions.lock().await;
-                            fail_completion_waiters(
-                                &mut completions,
-                                &input_ids,
-                                format!("runtime batch preparation failed: {err}"),
+                        Ok(
+                            crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
+                                reason,
+                                abandoned_input_ids,
+                            },
+                        ) => {
+                            // The machine refused to stage an accepted batch. Its
+                            // members are already resolved (another attempt at the
+                            // back of the backlog, or terminalized at the retry
+                            // cap), so this wake keeps draining: returning here
+                            // dropped the wake and, under fifo, starved every input
+                            // behind the refused head indefinitely (field 0.8.22).
+                            tracing::warn!(
+                                %run_id,
+                                reason = %reason,
+                                abandoned = abandoned_input_ids.len(),
+                                "generated staging authority refused an accepted input batch; resolved through machine authority"
                             );
+                            drop(queue_authority_guard);
+                            if !abandoned_input_ids.is_empty()
+                                && drain_recovered_interaction_terminal_outboxes_until_clear(
+                                    driver,
+                                    completions,
+                                    executor,
+                                    authority_binding,
+                                    true,
+                                    RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+                                )
+                                .await
+                            {
+                                return true;
+                            }
+                            continue;
                         }
-                        return false;
-                    }
-                }
+                        Err(err) => {
+                            tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                fail_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("runtime batch preparation failed: {err}"),
+                                );
+                            }
+                            return false;
+                        }
+                    };
                 // The input is durably `Staged` from here: it has left its work
                 // lane and is owned by exactly one consumer. Everything below
                 // is inside the staged -> executing window, so the window's
@@ -6189,7 +6377,9 @@ async fn process_queue(
                     staged_at,
                     crate::run_progress::RUN_EXECUTION_START_NOTICE,
                 );
-                let primitive = match *primitive {
+                let primitive = match (*primitive)
+                    .and_then(|primitive| primitive.bind(execution_authority))
+                {
                     Ok(primitive) => primitive,
                     Err(conflict) => {
                         tracing::error!(
@@ -8361,7 +8551,7 @@ mod tests {
     #[test]
     fn input_to_prompt_extracts_text() {
         let input = make_prompt("hello world");
-        assert_eq!(input_to_prompt(&input), "hello world");
+        assert_eq!(input_to_prompt(&input).unwrap(), "hello world");
     }
 
     #[test]
@@ -8391,7 +8581,7 @@ mod tests {
             payload: None,
             handling_mode: None,
         });
-        assert_eq!(input_to_prompt(&input), "peer message");
+        assert_eq!(input_to_prompt(&input).unwrap(), "peer message");
     }
 
     #[test]
@@ -8422,7 +8612,7 @@ mod tests {
             handling_mode: None,
         });
 
-        assert_eq!(input_to_prompt(&input), "plain body payload");
+        assert_eq!(input_to_prompt(&input).unwrap(), "plain body payload");
     }
 
     #[test]
@@ -8456,7 +8646,7 @@ mod tests {
             handling_mode: None,
         });
 
-        let prompt = input_to_prompt(&input);
+        let prompt = input_to_prompt(&input).unwrap();
         assert!(
             prompt.starts_with("Peer request from peer_id 11111111-1111-4111-8111-111111111111")
         );
@@ -8865,6 +9055,25 @@ mod tests {
             "the mandatory requester reaction turn must have non-empty model-visible content"
         );
         Ok(())
+    }
+
+    #[test]
+    fn empty_ordinary_staged_input_does_not_start_a_conversation_run() {
+        for boundary in [
+            RunApplyBoundary::Immediate,
+            RunApplyBoundary::RunStart,
+            RunApplyBoundary::RunCheckpoint,
+        ] {
+            let primitive = RunPrimitive::StagedInput(StagedRunInput {
+                execution_authority:
+                    meerkat_core::execution_scope::RunExecutionAuthority::SessionPolicy,
+                boundary,
+                appends: Vec::new(),
+                contributing_input_ids: vec![InputId::new()],
+                turn_metadata: None,
+            });
+            assert!(primitive_turn_start_input(&RunId::new(), &primitive).is_none());
+        }
     }
 
     #[test]
@@ -10415,7 +10624,7 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+                crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started(_)
             ),
             "staging an accepted batch must succeed, got {outcome:?}"
         );
@@ -11076,7 +11285,10 @@ mod tests {
             render_metadata: None,
         });
 
-        assert_eq!(input_to_prompt(&input), "External event via webhook");
+        assert_eq!(
+            input_to_prompt(&input).unwrap(),
+            "External event via webhook"
+        );
         Ok(())
     }
 
@@ -11140,9 +11352,12 @@ mod tests {
             render_metadata: None,
         });
 
-        assert_eq!(input_to_prompt(&from_comms), input_to_prompt(&direct));
         assert_eq!(
-            input_to_prompt(&direct),
+            input_to_prompt(&from_comms).unwrap(),
+            input_to_prompt(&direct).unwrap()
+        );
+        assert_eq!(
+            input_to_prompt(&direct).unwrap(),
             "External event via webhook: build failed"
         );
         Ok(())
@@ -11209,6 +11424,7 @@ mod tests {
             tool_use_id: "call-1".to_string(),
             tool_name: "external_mock".to_string(),
             args: serde_json::json!({ "value": "browser" }),
+            callback_identity: None,
         });
 
         registry.resolve_process_local_runtime_completion_authorized(
@@ -11226,7 +11442,9 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                callback_identity,
             } => {
+                assert_eq!(callback_identity, None);
                 assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "external_mock");
                 assert_eq!(args, serde_json::json!({ "value": "browser" }));
@@ -12191,7 +12409,7 @@ mod tests {
         let shapes = staged
             .appends
             .iter()
-            .map(|append| (append.role, append.content.render_text()))
+            .map(|append| (append.role.clone(), append.content.render_text()))
             .collect::<Vec<_>>();
         assert_eq!(
             shapes,

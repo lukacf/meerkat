@@ -8704,6 +8704,7 @@ mod tests {
                     tool_use_id: "call-1".to_string(),
                     tool_name: "external_mock".to_string(),
                     args: json!({ "value": "browser" }),
+                    callback_identity: None,
                 },
             ),
         )
@@ -10139,6 +10140,15 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .reconcile_runtime_compaction_projections(&self.bridge_session_id, intents.to_vec())
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .acknowledge_finalized_compaction_projections(&self.bridge_session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {

@@ -1811,6 +1811,97 @@ where
         switch
     }
 
+    async fn prepare_run_request_attempt(
+        &self,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<crate::ProviderParamsOverride>,
+        prior_scope: Option<Arc<crate::execution_scope::ScopedModelRequest>>,
+    ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        let Some(context) = self.tool_dispatch_context.scoped_execution() else {
+            if prior_scope.is_some() {
+                return Err(AgentError::ConfigError(
+                    "scoped model preparation lost its actor context".into(),
+                ));
+            }
+            return Arc::clone(&self.client).prepare_request_attempt(
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                provider_params,
+            );
+        };
+        let identity = match self.client.active_model_fallback_identity() {
+            Some(identity) => identity,
+            None => self
+                .session
+                .try_session_metadata()
+                .map_err(|error| AgentError::ConfigError(error.to_string()))?
+                .ok_or_else(|| {
+                    AgentError::ConfigError(
+                        "scoped model preparation requires the selected session identity".into(),
+                    )
+                })?
+                .llm_identity(),
+        };
+        if identity.provider != self.client.provider() || identity.model != self.client.model() {
+            return Err(AgentError::ConfigError(
+                "scoped model preparation found a different selected client identity".into(),
+            ));
+        }
+        let scope = match prior_scope {
+            Some(scope) => {
+                if !scope.matches_context(context) {
+                    return Err(AgentError::ConfigError(
+                        "model retry does not belong to this actor invocation".into(),
+                    ));
+                }
+                scope.for_actor_preparation(identity).await
+            }
+            None => {
+                let id = context
+                    .model_request_id()
+                    .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                crate::execution_scope::ScopedModelRequest::restore(
+                    context.clone(),
+                    id.clone(),
+                    identity,
+                )
+                .await
+                .map(Arc::new)
+            }
+        }
+        .map_err(crate::execution_scope::ScopedModelPreparationError::into_agent_error)?;
+        // These are resolved actor/fallback defaults, not an adapter caller's
+        // explicit request. Restrict this owned copy without mutating config.
+        let mut provider_params = provider_params;
+        if context.scope().native_tools() == crate::ProviderNativeToolPolicy::DisableAll
+            && let Some(params) = provider_params.as_mut()
+        {
+            params.clear_provider_native_tools();
+        }
+        let attempt = Arc::clone(&self.client).prepare_scoped_request_attempt(
+            messages,
+            tools,
+            max_tokens,
+            temperature,
+            provider_params,
+            Arc::clone(&scope),
+        )?;
+        if !attempt
+            .scoped_model_request()
+            .is_some_and(|retained| Arc::ptr_eq(retained, &scope))
+        {
+            return Err(AgentError::ConfigError(
+                "prepared model attempt did not retain its exact scoped request".into(),
+            ));
+        }
+        Ok(attempt)
+    }
+
     async fn call_llm_with_retry(
         &mut self,
         request: LlmRetryRequest<'_>,
@@ -1838,6 +1929,7 @@ where
         let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
         let mut retry_request_pressure_recheck = false;
+        let mut scoped_retry_request = prepared_attempt.scoped_model_request().cloned();
         let mut next_request_attempt = Some(prepared_attempt);
 
         loop {
@@ -1916,13 +2008,17 @@ where
 
             let mut request_attempt = match next_request_attempt.take() {
                 Some(attempt) => attempt,
-                None => Arc::clone(&self.client).prepare_request_attempt(
-                    Arc::clone(&current_messages),
-                    Arc::clone(&current_tools),
-                    current_max_tokens,
-                    temperature,
-                    current_provider_params.clone(),
-                )?,
+                None => {
+                    self.prepare_run_request_attempt(
+                        Arc::clone(&current_messages),
+                        Arc::clone(&current_tools),
+                        current_max_tokens,
+                        temperature,
+                        current_provider_params.clone(),
+                        scoped_retry_request.clone(),
+                    )
+                    .await?
+                }
             };
 
             if std::mem::take(&mut retry_request_pressure_recheck) {
@@ -1936,13 +2032,16 @@ where
                                     < MAX_REQUEST_ROUTE_STABILIZATION_RETRIES =>
                         {
                             route_stabilization_attempt += 1;
-                            request_attempt = Arc::clone(&self.client).prepare_request_attempt(
-                                Arc::clone(&current_messages),
-                                Arc::clone(&current_tools),
-                                current_max_tokens,
-                                temperature,
-                                current_provider_params.clone(),
-                            )?;
+                            request_attempt = self
+                                .prepare_run_request_attempt(
+                                    Arc::clone(&current_messages),
+                                    Arc::clone(&current_tools),
+                                    current_max_tokens,
+                                    temperature,
+                                    current_provider_params.clone(),
+                                    request_attempt.scoped_model_request().cloned(),
+                                )
+                                .await?;
                         }
                         Err(error) => return Err(error),
                     }
@@ -2128,6 +2227,12 @@ where
                     })
                 }
             };
+
+            if let Some(scope) = request_attempt.scoped_model_request() {
+                scoped_retry_request = request_attempt
+                    .settled_scoped_model_successor()?
+                    .or_else(|| Some(Arc::clone(scope)));
+            }
 
             // 5. Handle call result
             match call_result {
@@ -2602,7 +2707,7 @@ where
             })
     }
 
-    fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
+    pub(super) fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
             return Ok(None);
@@ -2769,6 +2874,11 @@ where
                         current_boundary_index,
                     );
                     if compactor.should_compact(&ctx) {
+                        if self.tool_dispatch_context.scoped_execution().is_some() {
+                            return Err(AgentError::ConfigError(
+                                "scoped compaction requires scope-aware summary and projection owners".into(),
+                            ));
+                        }
                         let rollback_state = crate::agent::CompactionRollbackState {
                             rollback_session: self.session.clone(),
                             rollback_last_input_tokens: self.last_input_tokens,
@@ -4079,8 +4189,17 @@ where
     }
 
     /// The main agent loop
+    pub(super) fn run_loop(
+        &mut self,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> impl std::future::Future<Output = Result<RunResult, AgentError>> + '_ {
+        // One allocation per run keeps nested phase storage out of the
+        // runner and service poll frames, including unoptimized WASM.
+        Box::pin(self.run_loop_inner(event_tx))
+    }
+
     #[allow(unused_assignments)]
-    pub(super) async fn run_loop(
+    async fn run_loop_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
@@ -4141,6 +4260,11 @@ where
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
             run_id
         } else {
+            if self.tool_dispatch_context.scoped_execution().is_some() {
+                return Err(AgentError::ConfigError(
+                    "scoped execution cannot synthesize an ordinary run start".into(),
+                ));
+            }
             let run_id = self
                 .turn_state_handle
                 .as_deref()
@@ -4251,6 +4375,22 @@ where
 
             match self.turn_phase()? {
                 TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
+                    if let Some(scope) = self.tool_dispatch_context.scoped_execution() {
+                        let turn = self.turn_state_handle.as_deref().ok_or_else(|| {
+                            AgentError::InternalError("scoped actor lost its turn handle".into())
+                        })?;
+                        let cursor = self.epoch_cursor_state.as_ref().ok_or_else(|| {
+                            AgentError::InternalError("scoped actor lost its runtime cursor".into())
+                        })?;
+                        let scope = scope
+                            .at_turn_boundary(turn, cursor)
+                            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                        self.tool_dispatch_context = self
+                            .tool_dispatch_context
+                            .clone()
+                            .with_scoped_execution(scope)
+                            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
+                    }
                     // Per-phase helpers keep this arm's locals out of
                     // run_loop's own opt-level=0 poll frame; see
                     // `CallingLlmTurnCtx` for the stack-budget rationale.
@@ -5176,13 +5316,17 @@ where
         let call_tool_defs: Arc<[Arc<ToolDef>]> = call_tool_defs.to_vec().into();
         let mut route_stabilization_attempt = 0_u8;
         let (prepared_attempt, request_pressure) = loop {
-            let attempt = match Arc::clone(&self.client).prepare_request_attempt(
-                Arc::clone(&request_messages),
-                Arc::clone(&call_tool_defs),
-                prepared.effective_max_tokens,
-                prepared.effective_temperature,
-                prepared.typed_provider_params.clone(),
-            ) {
+            let attempt = match self
+                .prepare_run_request_attempt(
+                    Arc::clone(&request_messages),
+                    Arc::clone(&call_tool_defs),
+                    prepared.effective_max_tokens,
+                    prepared.effective_temperature,
+                    prepared.typed_provider_params.clone(),
+                    None,
+                )
+                .await
+            {
                 Ok(attempt) => attempt,
                 Err(error)
                     if agent_error_is_authorization_route_changed(&error)
@@ -5373,7 +5517,20 @@ where
 
     /// Terminalize one failed request preparation or LLM attempt through the
     /// owner of the active main-run or extraction phase.
-    async fn complete_calling_llm_request_failure(
+    // Keep the cold completion future out of every preflight error branch's
+    // stack slot. Unoptimized WASM otherwise reserves those slots even when
+    // the request succeeds, exhausting its linear stack before dispatch.
+    fn complete_calling_llm_request_failure<'a>(
+        &'a mut self,
+        ctx: &'a mut CallingLlmTurnCtx<'_>,
+        in_extraction: bool,
+        error: AgentError,
+    ) -> impl std::future::Future<Output = Result<CallingLlmGate<LlmStreamResult>, AgentError>> + 'a
+    {
+        Box::pin(self.complete_calling_llm_request_failure_inner(ctx, in_extraction, error))
+    }
+
+    async fn complete_calling_llm_request_failure_inner(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         in_extraction: bool,
@@ -6414,8 +6571,27 @@ where
             }
             let mut effects = pre_tool_effects.clone();
             effects.extend(post_tool_effects.clone());
+            let execution_boundary = self
+                .tool_dispatch_context
+                .scoped_execution()
+                .map(|context| context.model_request_id().cloned())
+                .transpose();
+            let execution_boundary = match execution_boundary {
+                Ok(boundary) => boundary,
+                Err(error) => {
+                    let error = AgentError::ConfigError(error.to_string());
+                    self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                        .await?;
+                    return Err(error);
+                }
+            };
             let batch = crate::session::PendingCallbackToolBatch {
                 run_id: ctx.run_id.clone(),
+                execution_scope: self
+                    .tool_dispatch_context
+                    .scoped_execution()
+                    .map(|context| context.scope().scope_id()),
+                execution_boundary,
                 tool_use_order: assistant_msg
                     .tool_calls()
                     .map(|call| call.id.to_string())
@@ -10874,6 +11050,38 @@ mod tests {
             .await
     }
 
+    #[tokio::test]
+    async fn run_loop_future_keeps_nested_phases_off_callers_stack() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let future = agent.run_loop(None);
+        assert_eq!(std::mem::size_of_val(&future), std::mem::size_of::<usize>());
+    }
+
+    #[tokio::test]
+    async fn request_failure_future_keeps_cold_completion_off_callers_stack() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let run_id = RunId::new();
+        let event_tx = None;
+        let mut event_stream_open = false;
+        let mut visible_output = false;
+        let mut sticky_visibility = None;
+        let mut ctx = super::CallingLlmTurnCtx {
+            run_id: &run_id,
+            event_tx: &event_tx,
+            event_stream_open: &mut event_stream_open,
+            run_has_visible_or_actionable_output: &mut visible_output,
+            sticky_fallback_durable_visibility_parent: &mut sticky_visibility,
+            turn_count: 0,
+            tool_call_count: 0,
+        };
+        let future = agent.complete_calling_llm_request_failure(
+            &mut ctx,
+            false,
+            AgentError::InternalError("unpolled failure".into()),
+        );
+        assert_eq!(std::mem::size_of_val(&future), std::mem::size_of::<usize>());
+    }
+
     fn incoming_peer_comms_renderable(
         sender_taint: Option<crate::comms::SenderContentTaint>,
     ) -> crate::lifecycle::run_primitive::CoreRenderable {
@@ -15198,6 +15406,16 @@ mod tests {
             "the callback batch must remain staged without partial results"
         );
         let before_partial = serde_json::to_value(agent.session()).unwrap();
+        let Some(crate::session::CallbackBatchObservation::Pending {
+            identity,
+            pending_tool_use_ids,
+        }) = agent.session().callback_batch_observation().unwrap()
+        else {
+            panic!("actual callback producer must retain exact pending batch identity");
+        };
+        assert_eq!(identity.session_id(), agent.session().id());
+        assert_eq!(identity.execution_scope(), None);
+        assert_eq!(pending_tool_use_ids, ["callback-a", "callback-b"]);
         agent
             .apply_pending_callback_tool_results(vec![ToolResult::new(
                 "callback-a".to_string(),
@@ -15226,6 +15444,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["callback-a", "callback-b"],
             "callback results must commit in original assistant order"
+        );
+        assert_eq!(
+            agent.session().callback_batch_observation().unwrap(),
+            Some(crate::session::CallbackBatchObservation::Applied {
+                identity,
+                pending_tool_use_ids,
+                resume_effects_applied: false,
+            }),
         );
     }
 
@@ -18148,6 +18374,7 @@ mod tests {
                 model.to_string(),
                 crate::config::CustomModelConfig {
                     provider: crate::Provider::OpenAI,
+                    interaction_kind: None,
                     display_name: None,
                     context_window: Some(128_000),
                     max_input_tokens,
@@ -21138,6 +21365,7 @@ mod tests {
             "claude-backup".to_string(),
             crate::config::CustomModelConfig {
                 provider: crate::Provider::Anthropic,
+                interaction_kind: None,
                 display_name: Some("Extraction fallback".to_string()),
                 context_window: Some(64_000),
                 max_input_tokens: None,

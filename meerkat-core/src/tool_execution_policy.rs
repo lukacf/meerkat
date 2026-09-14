@@ -215,6 +215,14 @@ impl ToolExecutionPolicy {
         self.constraints.is_empty()
     }
 
+    /// Content identity of this immutable, normalized policy. This is not a
+    /// mutable policy revision or permission to dispatch.
+    pub fn content_digest(&self) -> Result<crate::PolicyDigest, serde_json::Error> {
+        let canonical =
+            serde_json::to_vec(&("meerkat.tool-execution-policy.v1", &self.constraints))?;
+        Ok(crate::PolicyDigest::from_canonical_bytes(&canonical))
+    }
+
     /// Whether this policy admits calls solely on a read-only declaration.
     #[must_use]
     pub fn is_read_only_intent(&self) -> bool {
@@ -315,12 +323,123 @@ pub struct ExecutionPolicyGatedDispatcher<T: AgentToolDispatcher + ?Sized> {
     policy: ToolExecutionPolicy,
     consequence_policy: Option<crate::BoundToolConsequencePolicy>,
     dispatch_admission: Option<Arc<dyn ToolDispatchAdmission>>,
+    plan_owner: Arc<crate::tool_execution::ScopedPolicyPlanOwner>,
+}
+
+/// Candidate produced by the actual outer dispatcher after its ordinary checks.
+/// Its immutable-policy arm cannot be selected by deserializing content.
+///
+/// ```compile_fail
+/// let forged = serde_json::from_str::<meerkat_core::EvaluatedToolExecutionPolicy>("{}");
+/// ```
+///
+/// ```compile_fail
+/// fn duplicate(witness: meerkat_core::EvaluatedToolExecutionPolicy) {
+///     let another = witness.clone();
+/// }
+/// ```
+pub struct EvaluatedToolExecutionPolicy {
+    policy: ToolExecutionPolicy,
+    call_id: String,
+    tool: crate::ToolName,
+    arguments: Box<serde_json::value::RawValue>,
+    run_id: crate::RunId,
+    mutation: ToolMutationClass,
+    consequence: Option<crate::AllowedToolConsequenceEvaluation>,
+}
+
+impl EvaluatedToolExecutionPolicy {
+    /// Identity of the exact evaluated call. This is content, not a live
+    /// dispatcher binding lease or permission to invoke it.
+    pub fn target(&self) -> Result<crate::execution_scope::ScopedEffectTarget, serde_json::Error> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(
+            "meerkat.scoped-tool-invocation.v1",
+            &self.run_id,
+            &self.call_id,
+            &self.tool,
+            self.arguments.get(),
+            self.mutation,
+        ))?;
+        Ok(crate::execution_scope::ScopedEffectTarget::ToolDispatch {
+            call_id: self.call_id.clone(),
+            tool: self.tool.clone(),
+            invocation_digest: Sha256::digest(bytes).into(),
+            mutation: self.mutation,
+        })
+    }
+
+    pub fn policy(&self) -> &ToolExecutionPolicy {
+        &self.policy
+    }
+
+    pub fn call(&self) -> ToolCallView<'_> {
+        ToolCallView {
+            id: &self.call_id,
+            name: self.tool.as_str(),
+            args: &self.arguments,
+        }
+    }
+
+    pub fn run_id(&self) -> &crate::RunId {
+        &self.run_id
+    }
+
+    pub const fn mutation(&self) -> ToolMutationClass {
+        self.mutation
+    }
+
+    pub fn revision(
+        &self,
+    ) -> Result<crate::execution_scope::ScopedEffectPolicyRevision, ToolError> {
+        let ordinary_policy = self.policy.content_digest().map_err(|error| {
+            ToolError::policy_indeterminate(crate::ToolConsequenceFailure::InvalidProvenance {
+                reason: error.to_string(),
+            })
+        })?;
+        match &self.consequence {
+            None => Ok(
+                crate::execution_scope::ScopedEffectPolicyRevision::Immutable { ordinary_policy },
+            ),
+            Some(evaluation) => {
+                let revision = std::num::NonZeroU64::new(evaluation.provenance().revision.0)
+                    .ok_or_else(|| {
+                        ToolError::policy_indeterminate(
+                            crate::ToolConsequenceFailure::InvalidProvenance {
+                                reason: "evaluated policy has a zero revision".into(),
+                            },
+                        )
+                    })?;
+                Ok(
+                    crate::execution_scope::ScopedEffectPolicyRevision::Managed {
+                        ordinary_policy,
+                        provider_id: evaluation.request().provider_id.clone(),
+                        policy_id: evaluation.request().policy_id.clone(),
+                        generation: evaluation.generation(),
+                        revision,
+                        digest: evaluation.provenance().digest.clone(),
+                    },
+                )
+            }
+        }
+    }
+
+    pub fn publish_if_current<R>(
+        &self,
+        publication: impl FnOnce() -> R,
+    ) -> Result<R, crate::PolicyPublicationError> {
+        match &self.consequence {
+            Some(evaluation) => evaluation.publish_if_current(publication),
+            None => Ok(publication()),
+        }
+    }
 }
 
 impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     /// Wrap `inner` with the resolved execution policy.
     pub fn new(inner: Arc<T>, policy: ToolExecutionPolicy) -> Self {
         Self {
+            plan_owner: Arc::new(crate::tool_execution::ScopedPolicyPlanOwner),
             inner,
             policy,
             consequence_policy: None,
@@ -347,6 +466,61 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     pub fn with_dispatch_admission(mut self, admission: Arc<dyn ToolDispatchAdmission>) -> Self {
         self.dispatch_admission = Some(admission);
         self
+    }
+
+    pub async fn evaluate_for_scoped_effect(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<EvaluatedToolExecutionPolicy, ToolError> {
+        let run_id = context.run_id().cloned().ok_or_else(|| {
+            ToolError::policy_indeterminate(crate::ToolConsequenceFailure::EvaluationFailed {
+                reason: "scoped policy evaluation requires an actual run identity".into(),
+            })
+        })?;
+        self.evaluate_for_run(call, run_id).await
+    }
+
+    /// Evaluate against an already sealed runtime scope without fabricating a
+    /// dispatch context. The native claim still rechecks the scope and policy.
+    pub async fn evaluate_for_scoped_run(
+        &self,
+        call: ToolCallView<'_>,
+        scope: &crate::execution_scope::ScopedRunAuthority,
+    ) -> Result<EvaluatedToolExecutionPolicy, ToolError> {
+        self.evaluate_for_run(call, scope.record().run_id.clone())
+            .await
+    }
+
+    async fn evaluate_for_run(
+        &self,
+        call: ToolCallView<'_>,
+        run_id: crate::RunId,
+    ) -> Result<EvaluatedToolExecutionPolicy, ToolError> {
+        if !self.permits_inner_call(call.name) {
+            return Err(self.denial_error(call.name));
+        }
+        let consequence = match &self.consequence_policy {
+            Some(policy) => Some(
+                policy
+                    .evaluate_with_witness(call, Some(run_id.clone()))
+                    .await?,
+            ),
+            None => None,
+        };
+        let mutation = self.inner.tool_mutation_class(call.name);
+        if !self.policy.permits_call(call.name, mutation) {
+            return Err(self.denial_error(call.name));
+        }
+        Ok(EvaluatedToolExecutionPolicy {
+            policy: self.policy.clone(),
+            call_id: call.id.to_string(),
+            tool: crate::ToolName::new(call.name),
+            arguments: call.args.to_owned(),
+            run_id,
+            mutation,
+            consequence,
+        })
     }
 
     /// Whether the policy admits this call, consulting the inner dispatcher's
@@ -395,6 +569,129 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         policy
             .evaluate(call, context.and_then(ToolDispatchContext::run_id).cloned())
             .await
+    }
+
+    async fn dispatch_contextual(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError>
+    where
+        T: 'static,
+    {
+        use crate::execution_scope::ScopedEffectOutcome;
+
+        let scoped = context.scoped_execution();
+        if let Some(scoped) = scoped {
+            if self.scoped_tool_effect_support()
+                == crate::execution_scope::ScopedToolEffectSupport::Unsupported
+            {
+                return Err(ToolError::execution_failed(
+                    "dispatcher does not declare conforming scoped physical execution",
+                ));
+            }
+            let plan = plan.ok_or_else(|| {
+                ToolError::execution_failed("scoped dispatch requires a resolved execution plan")
+            })?;
+            if context.live_bridge_admission().is_some()
+                || context.run_id() != Some(&scoped.scope().record().run_id)
+                || context.origin_session_id() != Some(&scoped.scope().record().executor.session_id)
+            {
+                return Err(ToolError::execution_failed(
+                    "scoped dispatch requires the exact run, session, and resolved execution plan without private bridge authority",
+                ));
+            }
+            plan.validate_scoped_policy_call(
+                &self.plan_owner,
+                call,
+                &self.execution_binding_fingerprint(call.name)?,
+                scoped,
+            )?;
+        }
+        let custody = self.await_dispatch_admission(call, Some(context)).await?;
+        let preparation = async {
+            if !self.permits_inner_call(call.name) {
+                return Err(self.denial_error(call.name));
+            }
+            if let Some(scoped) = scoped {
+                let plan = plan.ok_or_else(|| {
+                    ToolError::execution_failed("scoped dispatch lost its resolved execution plan")
+                })?;
+                let evaluation = self.evaluate_for_scoped_run(call, scoped.scope()).await?;
+                let mutation = evaluation.mutation();
+                plan.validate_current_scoped_policy_binding(
+                    &self.plan_owner,
+                    call.name,
+                    &self.execution_binding_fingerprint(call.name)?,
+                )?;
+                let claimed = scoped.claim(evaluation).await?;
+                let binding = plan.validate_current_scoped_policy_binding(
+                    &self.plan_owner,
+                    call.name,
+                    &self.execution_binding_fingerprint(call.name)?,
+                );
+                if let Err(error) = binding {
+                    claimed.settle(ScopedEffectOutcome::Unknown).await?;
+                    return Err(ToolError::execution_failed(format!(
+                        "scoped tool binding changed before invocation: {error}",
+                    )));
+                }
+                if self.inner.tool_mutation_class(call.name) != mutation {
+                    claimed.settle(ScopedEffectOutcome::Unknown).await?;
+                    return Err(ToolError::execution_failed(
+                        "scoped tool binding changed before invocation",
+                    ));
+                }
+                Ok(Some(claimed))
+            } else {
+                self.evaluate_consequence_policy(call, Some(context))
+                    .await?;
+                Ok(None)
+            }
+        }
+        .await;
+        let mut scoped_custody = match preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                custody
+                    .settle(call, Some(context), crate::LiveBridgeEffectOutcome::Failed)
+                    .await?;
+                return Err(error);
+            }
+        };
+        if let Some(scoped) = scoped_custody.as_mut() {
+            scoped.begin_invocation()?;
+        }
+        let result = match plan {
+            Some(plan) => {
+                self.inner
+                    .dispatch_resolved_with_context(call, context, plan)
+                    .await
+            }
+            None => self.inner.dispatch_with_context(call, context).await,
+        };
+        let scoped_feedback = scoped_custody.map(|scoped| {
+            let outcome = match &result {
+                Ok(outcome) if outcome.async_ops.is_empty() && !outcome.result.is_error => {
+                    ScopedEffectOutcome::Succeeded
+                }
+                Ok(outcome) if outcome.async_ops.is_empty() => ScopedEffectOutcome::Failed,
+                Ok(_) | Err(_) => ScopedEffectOutcome::Unknown,
+            };
+            scoped.settle(outcome)
+        });
+        let outcome = if result.is_ok() {
+            crate::LiveBridgeEffectOutcome::Committed
+        } else {
+            crate::LiveBridgeEffectOutcome::Unknown
+        };
+        let admission_feedback = custody.settle(call, Some(context), outcome).await;
+        if let Some(feedback) = scoped_feedback {
+            feedback.await?;
+        }
+        admission_feedback?;
+        result
     }
 
     async fn await_dispatch_admission(
@@ -463,6 +760,21 @@ impl DispatchAdmissionCustody {
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
     for ExecutionPolicyGatedDispatcher<T>
 {
+    fn scoped_tool_effect_support(&self) -> crate::execution_scope::ScopedToolEffectSupport {
+        use crate::execution_scope::ScopedToolEffectSupport;
+        match self.inner.scoped_tool_effect_support() {
+            ScopedToolEffectSupport::RejectsAllCalls => ScopedToolEffectSupport::RejectsAllCalls,
+            ScopedToolEffectSupport::RequiresOuterClaim => {
+                ScopedToolEffectSupport::PhysicalDispatch
+            }
+            // Nested claim owners need a composed policy-publication fence,
+            // not a second claim or an omitted outer policy.
+            ScopedToolEffectSupport::Unsupported | ScopedToolEffectSupport::PhysicalDispatch => {
+                ScopedToolEffectSupport::Unsupported
+            }
+        }
+    }
+
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner.tools()
     }
@@ -533,8 +845,28 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 },
             });
         }
-        self.inner
-            .resolve_execution_plan(call, dispatch_context, resolution_context)
+        let before = if let Some(context) = dispatch_context.scoped_execution() {
+            Some((
+                self.execution_binding_fingerprint(call.name)?,
+                context.clone(),
+            ))
+        } else {
+            None
+        };
+        let plan = self
+            .inner
+            .resolve_execution_plan(call, dispatch_context, resolution_context)?;
+        if let Some((before, context)) = before {
+            if before != self.execution_binding_fingerprint(call.name)? {
+                return Err(crate::ToolExecutionResolutionError::Unavailable {
+                    tool_name: call.name.into(),
+                    reason: crate::ToolUnavailableReason::ExecutionOwnerChanged,
+                });
+            }
+            Ok(plan.bind_scoped_policy_owner(Arc::clone(&self.plan_owner), before, context))
+        } else {
+            Ok(plan)
+        }
     }
 
     fn validate_resolved_execution_plan(
@@ -590,28 +922,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        let custody = self.await_dispatch_admission(call, Some(context)).await?;
-        let pre_dispatch = async {
-            if !self.permits_inner_call(call.name) {
-                return Err(self.denial_error(call.name));
-            }
-            self.evaluate_consequence_policy(call, Some(context)).await
-        }
-        .await;
-        if let Err(error) = pre_dispatch {
-            custody
-                .settle(call, Some(context), crate::LiveBridgeEffectOutcome::Failed)
-                .await?;
-            return Err(error);
-        }
-        let result = self.inner.dispatch_with_context(call, context).await;
-        let outcome = if result.is_ok() {
-            crate::LiveBridgeEffectOutcome::Committed
-        } else {
-            crate::LiveBridgeEffectOutcome::Unknown
-        };
-        custody.settle(call, Some(context), outcome).await?;
-        result
+        self.dispatch_contextual(call, context, None).await
     }
 
     async fn dispatch_resolved_with_context(
@@ -620,31 +931,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         context: &ToolDispatchContext,
         plan: &crate::ResolvedToolExecutionPlan,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        let custody = self.await_dispatch_admission(call, Some(context)).await?;
-        let pre_dispatch = async {
-            if !self.permits_inner_call(call.name) {
-                return Err(self.denial_error(call.name));
-            }
-            self.evaluate_consequence_policy(call, Some(context)).await
-        }
-        .await;
-        if let Err(error) = pre_dispatch {
-            custody
-                .settle(call, Some(context), crate::LiveBridgeEffectOutcome::Failed)
-                .await?;
-            return Err(error);
-        }
-        let result = self
-            .inner
-            .dispatch_resolved_with_context(call, context, plan)
-            .await;
-        let outcome = if result.is_ok() {
-            crate::LiveBridgeEffectOutcome::Committed
-        } else {
-            crate::LiveBridgeEffectOutcome::Unknown
-        };
-        custody.settle(call, Some(context), outcome).await?;
-        result
+        self.dispatch_contextual(call, context, Some(plan)).await
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
@@ -676,6 +963,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 policy: owned.policy,
                 consequence_policy: owned.consequence_policy,
                 dispatch_admission: owned.dispatch_admission,
+                plan_owner: owned.plan_owner,
             });
             Ok(if bound {
                 BindOutcome::Bound(gated)
@@ -689,6 +977,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                     policy: owned.policy,
                     consequence_policy: owned.consequence_policy,
                     dispatch_admission: owned.dispatch_admission,
+                    plan_owner: owned.plan_owner,
                 },
             )))
         }
@@ -1728,6 +2017,229 @@ mod tests {
                 policy_id,
             )
             .expect("binding")
+    }
+
+    #[tokio::test]
+    async fn scoped_evaluation_retains_immutable_policy_and_exact_call_without_dispatch() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha", "beta"]));
+        let policy = allow_list(&["alpha"]);
+        let gated = ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), policy.clone());
+        let args = serde_json::value::RawValue::from_string(r#"{"path":"a"}"#.into()).unwrap();
+        let call = ToolCallView {
+            id: "scoped-alpha",
+            name: "alpha",
+            args: &args,
+        };
+        let mut context = ToolDispatchContext::default();
+        assert!(
+            gated
+                .evaluate_for_scoped_effect(call, &context)
+                .await
+                .is_err()
+        );
+        let run_id = crate::RunId::new();
+        context.bind_run_id(run_id.clone());
+        let evaluated = gated
+            .evaluate_for_scoped_effect(call, &context)
+            .await
+            .unwrap();
+        assert_eq!(evaluated.run_id(), &run_id);
+        assert_eq!(evaluated.call().id, call.id);
+        assert_eq!(evaluated.call().name, call.name);
+        assert_eq!(evaluated.call().args.get(), call.args.get());
+        assert_eq!(evaluated.policy(), &policy);
+        assert_eq!(evaluated.mutation(), ToolMutationClass::Unknown);
+        assert_eq!(
+            evaluated.revision().unwrap(),
+            crate::execution_scope::ScopedEffectPolicyRevision::Immutable {
+                ordinary_policy: policy.content_digest().unwrap(),
+            }
+        );
+        let published = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            evaluated
+                .publish_if_current(|| {
+                    published.fetch_add(1, Ordering::SeqCst);
+                    42
+                })
+                .unwrap(),
+            42
+        );
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        assert!(
+            inner.dispatched().is_empty(),
+            "an evaluation is not dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_evaluated_target_binds_run_call_name_arguments_and_mutation() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha", "beta"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        );
+        let args = empty_args();
+        let other_args =
+            serde_json::value::RawValue::from_string(r#"{"path":"other"}"#.into()).unwrap();
+        let mut context = ToolDispatchContext::default();
+        context.bind_run_id(crate::RunId::new());
+        let call = ToolCallView {
+            id: "call",
+            name: "alpha",
+            args: &args,
+        };
+        let evaluated = gated
+            .evaluate_for_scoped_effect(call, &context)
+            .await
+            .unwrap();
+        let target = evaluated.target().unwrap();
+        assert_eq!(
+            gated
+                .evaluate_for_scoped_effect(call, &context)
+                .await
+                .unwrap()
+                .target()
+                .unwrap(),
+            target
+        );
+        for changed in [
+            ToolCallView {
+                id: "other-call",
+                ..call
+            },
+            ToolCallView {
+                name: "beta",
+                ..call
+            },
+            ToolCallView {
+                args: &other_args,
+                ..call
+            },
+        ] {
+            assert_ne!(
+                gated
+                    .evaluate_for_scoped_effect(changed, &context)
+                    .await
+                    .unwrap()
+                    .target()
+                    .unwrap(),
+                target
+            );
+        }
+        context.bind_run_id(crate::RunId::new());
+        assert_ne!(
+            gated
+                .evaluate_for_scoped_effect(call, &context)
+                .await
+                .unwrap()
+                .target()
+                .unwrap(),
+            target
+        );
+        let mut different_mutation = evaluated;
+        different_mutation.mutation = ToolMutationClass::ReadOnly;
+        assert_ne!(different_mutation.target().unwrap(), target);
+        assert!(inner.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scoped_managed_evaluation_retains_identity_and_requires_publication_support() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha"]));
+        let policy = ToolExecutionPolicy::unrestricted();
+        let gated = ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), policy.clone())
+            .with_consequence_policy(bound_consequence_policy(
+                ToolConsequenceVerdict::Allow,
+                std::time::Duration::from_secs(1),
+            ));
+        let args = empty_args();
+        let call = ToolCallView {
+            id: "managed-alpha",
+            name: "alpha",
+            args: &args,
+        };
+        let mut context = ToolDispatchContext::default();
+        context.bind_run_id(crate::RunId::new());
+        let evaluated = gated
+            .evaluate_for_scoped_effect(call, &context)
+            .await
+            .unwrap();
+        assert_eq!(
+            evaluated.revision().unwrap(),
+            crate::execution_scope::ScopedEffectPolicyRevision::Managed {
+                ordinary_policy: policy.content_digest().unwrap(),
+                provider_id: PolicyProviderId::new("test-provider").unwrap(),
+                policy_id: PolicyId::new("test-policy").unwrap(),
+                generation: PolicyProviderGeneration(1),
+                revision: std::num::NonZeroU64::new(7).unwrap(),
+                digest: PolicyDigest::from_canonical_bytes(b"fixed-test-policy"),
+            }
+        );
+        let published = AtomicBool::new(false);
+        assert_eq!(
+            evaluated.publish_if_current(|| published.store(true, Ordering::SeqCst)),
+            Err(crate::PolicyPublicationError::Unsupported)
+        );
+        assert!(!published.load(Ordering::SeqCst));
+        assert!(inner.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scoped_evaluation_rechecks_mutation_declaration_after_policy_evaluation() {
+        struct ChangingDeclaration {
+            inner: SpyDispatcher,
+            reads: std::sync::atomic::AtomicUsize,
+        }
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl AgentToolDispatcher for ChangingDeclaration {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                self.inner.tools()
+            }
+
+            fn tool_mutation_class(&self, _name: &str) -> ToolMutationClass {
+                if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ToolMutationClass::ReadOnly
+                } else {
+                    ToolMutationClass::Mutating
+                }
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.inner.dispatch(call).await
+            }
+        }
+        let inner = Arc::new(ChangingDeclaration {
+            inner: SpyDispatcher::new(&["alpha"]),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::ReadOnly).unwrap(),
+        )
+        .with_consequence_policy(bound_consequence_policy(
+            ToolConsequenceVerdict::Allow,
+            std::time::Duration::from_secs(1),
+        ));
+        let args = empty_args();
+        let mut context = ToolDispatchContext::default();
+        context.bind_run_id(crate::RunId::new());
+        let result = gated
+            .evaluate_for_scoped_effect(
+                ToolCallView {
+                    id: "changing",
+                    name: "alpha",
+                    args: &args,
+                },
+                &context,
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::AccessDenied { .. })));
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 2);
+        assert!(inner.inner.dispatched().is_empty());
     }
 
     #[tokio::test]

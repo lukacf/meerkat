@@ -48,7 +48,8 @@ use webrtc::track::track_remote::TrackRemote;
 use webrtc_media::Sample;
 
 use crate::host::{
-    LiveAdapterHost, LiveAdapterHostError, LiveChannelId, ObservationOutcome, ObservationRouting,
+    DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelId,
+    ObservationOutcome, ObservationRouting, wait_for_continuous_close,
 };
 use crate::transport::{
     LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString, LiveWsState,
@@ -869,6 +870,7 @@ async fn close_construction_peer(
 
 fn observation_requires_generated_close(observation: &LiveAdapterObservation) -> bool {
     match observation {
+        LiveAdapterObservation::Continuous { .. } => false,
         LiveAdapterObservation::Error { .. } => true,
         LiveAdapterObservation::StatusChanged { status } => status.is_terminal(),
         _ => false,
@@ -1814,12 +1816,26 @@ async fn cleanup_peer_after_disconnect(context: PeerDisconnectContext) {
     // A callback from a stale replaced peer owns only that physical peer. It
     // must not terminalize the newer semantic channel binding.
     if is_current {
-        let _ = close_channel_with_generated_feedback(
+        let closed = close_channel_with_generated_feedback(
             context.host.as_ref(),
             context.close_feedback.as_ref(),
             &context.channel_id,
         )
         .await;
+        if !closed {
+            match context
+                .host
+                .is_continuous_channel(&context.channel_id)
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(channel = %context.channel_id, %error, "continuous cleanup identity could not be observed");
+                    return;
+                }
+            }
+        }
     }
 
     install_cleanup_from_disconnect_context(&context, &peer, answer_observation_sequence);
@@ -2208,11 +2224,44 @@ async fn pump_observations_to_data_channel(
         }
     };
     let mut close_feedback_recorded = false;
+    let mut observation_pump = match host.claim_observation_pump(&channel_id).await {
+        Ok(pump) => pump,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, %error, "cannot claim WebRTC observation pump");
+            return;
+        }
+    };
+    let mut close_requests = observation_pump.close_requests();
+    let mut continuous_drain_attempted = false;
     loop {
-        let observation = match tokio::select! {
-            () = wait_for_peer_task_shutdown(&mut shutdown_rx) => return,
-            observation = host.next_observation_raw(&channel_id) => observation,
-        } {
+        let received = tokio::select! {
+            () = wait_for_peer_task_shutdown(&mut shutdown_rx) => {
+                if observation_pump.is_continuous()
+                    && let Err(error) = observation_pump.drain(DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT).await {
+                        tracing::warn!(channel = %channel_id, %error, "WebRTC shutdown drain remains unconfirmed");
+                }
+                return;
+            },
+            request = wait_for_continuous_close(&mut close_requests) => {
+                match request {
+                    Ok(request) => {
+                        let result = if request.remaining().is_zero() {
+                            Err(LiveAdapterHostError::ObservationDrainTimedOut)
+                        } else {
+                            observation_pump.drain(request.remaining()).await
+                        };
+                        if let Err(error) = &result {
+                            tracing::warn!(channel = %channel_id, %error, "WebRTC requested drain remains unconfirmed");
+                        }
+                        request.complete(result);
+                    }
+                    Err(error) => tracing::warn!(channel = %channel_id, %error, "WebRTC drain owner disappeared"),
+                }
+                return;
+            },
+            observation = observation_pump.next_observation() => observation,
+        };
+        let observation = match received {
             Ok(Some(obs)) => obs,
             Ok(None) => break,
             Err(err) => {
@@ -2228,6 +2277,16 @@ async fn pump_observations_to_data_channel(
         let close_observation = observation_requires_generated_close(&observation);
         let publish_observation = should_publish_observation(&observation);
         if close_observation {
+            if observation_pump.is_continuous() {
+                continuous_drain_attempted = true;
+                if let Err(error) = observation_pump
+                    .drain(DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT)
+                    .await
+                {
+                    tracing::warn!(channel = %channel_id, %error, "WebRTC terminal drain remains unconfirmed");
+                    return;
+                }
+            }
             if !close_channel_with_generated_feedback(
                 host.as_ref(),
                 close_feedback.as_ref(),
@@ -2331,6 +2390,19 @@ async fn pump_observations_to_data_channel(
         }
 
         match outcome {
+            ObservationOutcome::ContinuousTranscriptCommitted { record } => {
+                let json = match WireLiveAdapterObservation::encode_committed(record) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        tracing::warn!(channel = %channel_id, %error, "failed to encode committed Live observation");
+                        break;
+                    }
+                };
+                if let Err(error) = data_channel.send_text(json).await {
+                    tracing::warn!(channel = %channel_id, %error, "failed to send committed Live observation");
+                    break;
+                }
+            }
             ObservationOutcome::UserContentCommitted { observation } => {
                 if let Err(err) = forward_observation_json(&data_channel, &observation).await {
                     tracing::warn!(channel = %channel_id, error = %err, "failed to send durable WebRTC user-content receipt");
@@ -2368,6 +2440,15 @@ async fn pump_observations_to_data_channel(
         }
     }
 
+    if observation_pump.is_continuous()
+        && !continuous_drain_attempted
+        && let Err(error) = observation_pump
+            .drain(DEFAULT_LIVE_OBSERVATION_DRAIN_TIMEOUT)
+            .await
+    {
+        tracing::warn!(channel = %channel_id, %error, "WebRTC publication detach drain remains unconfirmed");
+        return;
+    }
     if close_feedback_recorded {
         start_physical_cleanup(&cleanup_context);
     } else {
@@ -2712,8 +2793,7 @@ async fn forward_observation_json(
     data_channel: &RTCDataChannel,
     observation: &LiveAdapterObservation,
 ) -> Result<(), LiveWebrtcError> {
-    let wire = WireLiveAdapterObservation::from(observation.clone());
-    let json = serde_json::to_string(&wire)?;
+    let json = WireLiveAdapterObservation::encode(observation.clone())?;
     data_channel
         .send_text(json)
         .await

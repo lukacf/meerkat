@@ -104,6 +104,9 @@ pub struct RuntimeInputProjection {
     pub injected_context_appends: Vec<ConversationAppend>,
     pub append: Option<ConversationAppend>,
     pub additional_appends: Vec<ConversationAppend>,
+    /// Source content must be loaded and validated before primitive assembly.
+    /// Absence of an append while this is present is not an empty input.
+    pub deferred_live_request: Option<crate::live_request::LiveExecutionRequestRecord>,
 }
 
 impl RuntimeInputSemantics {

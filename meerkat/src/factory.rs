@@ -2747,6 +2747,115 @@ impl AgentFactory {
             .map_err(FactoryError::ClientBuild)
     }
 
+    /// Resolve only the selected voice profile against this current config
+    /// snapshot. No executor identity or credential participates in this path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn resolve_live_adapter_factory_for_profile(
+        &self,
+        config: &Config,
+        profile_id: &meerkat_core::live_execution::profile::LiveProfileId,
+        preferred_realm: Option<&RealmId>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<Arc<dyn meerkat_llm_core::live_adapter_factory::LiveAdapterFactory>, FactoryError>
+    {
+        use meerkat_core::live_execution::profile::LiveProfileEntry;
+        let definition = match config.live.profiles.get(profile_id) {
+            Some(LiveProfileEntry::Configured(definition)) => definition,
+            Some(LiveProfileEntry::Disabled) => {
+                return Err(FactoryError::ClientCreationFailed(format!(
+                    "Live profile '{}' is disabled",
+                    profile_id.as_str()
+                )));
+            }
+            None => {
+                return Err(FactoryError::ClientCreationFailed(format!(
+                    "Live profile '{}' is not configured",
+                    profile_id.as_str()
+                )));
+            }
+        };
+        self.resolve_live_adapter_factory_for_definition(
+            config,
+            profile_id,
+            definition,
+            preferred_realm,
+            auth_lease_handle,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn resolve_live_adapter_factory_for_definition(
+        &self,
+        config: &Config,
+        profile_id: &meerkat_core::live_execution::profile::LiveProfileId,
+        definition: &meerkat_core::live_execution::profile::LiveProfileDefinition,
+        preferred_realm: Option<&RealmId>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<Arc<dyn meerkat_llm_core::live_adapter_factory::LiveAdapterFactory>, FactoryError>
+    {
+        use meerkat_core::live_execution::profile::LiveProfileExecution;
+        use meerkat_llm_core::provider_runtime::{ResolvedLiveExecution, ResolvedLiveTarget};
+        if definition.voice_identity.provider_params.is_some() {
+            return Err(FactoryError::ClientCreationFailed(
+                "continuous voice provider_params are unsupported; use Live profile settings"
+                    .into(),
+            ));
+        }
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        let mut identity = definition.voice_identity.clone();
+        let voice = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed("Live voice model is not registered".into())
+            })?;
+        if voice.profile().interaction_kind
+            != meerkat_core::model_profile::ModelInteractionKind::ContinuousLive
+        {
+            return Err(
+                meerkat_llm_core::provider_runtime::LiveTargetError::VoiceNotContinuous.into(),
+            );
+        }
+        let execution = match &definition.execution {
+            LiveProfileExecution::ClientContext { request_policy } => {
+                ResolvedLiveExecution::ClientContext {
+                    request_policy: *request_policy,
+                }
+            }
+            LiveProfileExecution::FunctionBridge { backend } => {
+                let witness = registry
+                    .profile_witness_for_provider(backend.provider, &backend.model)
+                    .ok_or_else(|| {
+                        FactoryError::ClientCreationFailed(
+                            "Live backend model is not registered".into(),
+                        )
+                    })?;
+                ResolvedLiveExecution::function_bridge(backend, witness)?
+            }
+        };
+        execution.validate_for_voice(identity.provider)?;
+        let (realm, _, binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            preferred_realm,
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        let env = self.provider_resolver_environment(auth_lease_handle)?;
+        let connection = self
+            .provider_registry
+            .resolve_live_connection(&realm, &binding, &env)
+            .await?;
+        identity.auth_binding = Some(binding);
+        let target =
+            ResolvedLiveTarget::new(profile_id.clone(), identity, voice, connection, execution)?;
+        self.provider_registry
+            .build_live_adapter_factory(target)
+            .map_err(FactoryError::ClientBuild)
+    }
+
     /// Select an exact experimental live target and concrete auth binding
     /// without reading credentials or accepting caller-composed authority.
     #[cfg(not(target_arch = "wasm32"))]
@@ -3029,6 +3138,18 @@ impl AgentFactory {
         auth_binding: AuthBindingRef,
         auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
     ) -> Result<meerkat_providers::ResolvedConnection, FactoryError> {
+        let env = self.provider_resolver_environment(auth_lease_handle)?;
+        self.provider_registry
+            .resolve(&realm, &auth_binding, &env)
+            .await
+            .map_err(FactoryError::ProviderAuth)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn provider_resolver_environment(
+        &self,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<meerkat_providers::ResolverEnvironment, FactoryError> {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         if let Some(auth_lease_handle) = auth_lease_handle {
             env = env.with_auth_lease_handle(auth_lease_handle);
@@ -3039,10 +3160,7 @@ impl AgentFactory {
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        self.provider_registry
-            .resolve(&realm, &auth_binding, &env)
-            .await
-            .map_err(FactoryError::ProviderAuth)
+        Ok(env)
     }
 
     /// Build a fallback web-search executor for a provider whose active model
@@ -3147,31 +3265,35 @@ impl AgentFactory {
                 ));
             }
         };
+        type BuildWebSearchExecutor =
+            fn(String, Arc<dyn AgentLlmClient>) -> Arc<dyn meerkat_llm_core::WebSearchExecutor>;
+        let build_executor: Option<BuildWebSearchExecutor> = match search_provider {
+            #[cfg(feature = "openai")]
+            Provider::OpenAI => Some(|model, adapted| {
+                Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(model, adapted))
+            }),
+            #[cfg(feature = "gemini")]
+            Provider::Gemini => Some(|model, adapted| {
+                Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(model, adapted))
+            }),
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic => Some(|model, adapted| {
+                Arc::new(meerkat_anthropic::AnthropicWebSearchExecutor::new(
+                    model, adapted,
+                ))
+            }),
+            _ => None,
+        };
+        let Some(build_executor) = build_executor else {
+            return unavailable(format!(
+                "no web-search executor adapter for provider {search_provider:?}"
+            ));
+        };
         let adapted: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::try_for_provider_identity(client, model.clone(), search_provider)
                 .map_err(|error| BuildAgentError::Config(error.to_string()))?,
         );
-
-        let executor: Arc<dyn meerkat_llm_core::WebSearchExecutor> = match search_provider {
-            #[cfg(feature = "openai")]
-            Provider::OpenAI => {
-                Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(model, adapted))
-            }
-            #[cfg(feature = "gemini")]
-            Provider::Gemini => {
-                Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(model, adapted))
-            }
-            #[cfg(feature = "anthropic")]
-            Provider::Anthropic => Arc::new(meerkat_anthropic::AnthropicWebSearchExecutor::new(
-                model, adapted,
-            )),
-            _ => {
-                return unavailable(format!(
-                    "no web-search executor adapter for provider {search_provider:?}"
-                ));
-            }
-        };
-        Ok(Some(executor))
+        Ok(Some(build_executor(model, adapted)))
     }
 
     /// Create a minimal factory for environments without filesystem access (e.g. wasm32).
@@ -4062,6 +4184,23 @@ impl AgentFactory {
         ))
     }
 
+    fn validate_text_execution_model(
+        registry: &ModelRegistry,
+        provider: Provider,
+        model: &str,
+    ) -> Result<(), FactoryError> {
+        if registry
+            .profile_for_provider(provider, model)
+            .is_some_and(|profile| !profile.interaction_kind.supports_text_execution())
+        {
+            return Err(FactoryError::ContinuousModelRequiresLiveProfile {
+                provider: provider.as_str(),
+                model: model.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Validate one exact model/provider/binding tuple through the same model
     /// registry and provider-runtime resolver used by [`Self::build_agent`].
     ///
@@ -4115,6 +4254,10 @@ impl AgentFactory {
             });
         }
 
+        Self::validate_text_execution_model(&registry, identity.provider, &identity.model)
+            .map_err(|error| LlmIdentityPreflightError::ModelUnresolvable {
+                detail: error.to_string(),
+            })?;
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
                 .build_self_hosted_client_for_identity(
@@ -4187,6 +4330,7 @@ impl AgentFactory {
                 model: identity.model.clone(),
             });
         }
+        Self::validate_text_execution_model(&registry, identity.provider, &identity.model)?;
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
                 .build_self_hosted_client_for_identity(
@@ -5243,6 +5387,8 @@ impl AgentFactory {
                 },
             ));
         }
+        Self::validate_text_execution_model(&registry, provider, &build_config.model)
+            .map_err(BuildAgentError::LlmClient)?;
         if let Some(client) = build_config.llm_client_override.as_ref() {
             let claimed_provider = client.provider();
             if !matches!(claimed_provider, Provider::Other) && claimed_provider != provider {
@@ -7156,23 +7302,18 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
-        if tool_execution_policy.is_some()
-            || bound_consequence_policy.is_some()
-            || tool_dispatch_admission.is_some()
-        {
-            let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
-                tools,
-                tool_execution_policy
-                    .unwrap_or_else(meerkat_core::ToolExecutionPolicy::unrestricted),
-            );
-            if let Some(policy) = bound_consequence_policy {
-                gate = gate.with_consequence_policy(policy);
-            }
-            if let Some(admission) = tool_dispatch_admission {
-                gate = gate.with_dispatch_admission(admission);
-            }
-            tools = Arc::new(gate);
+        // Unrestricted agents still need this owner for later scoped runs.
+        let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
+            tools,
+            tool_execution_policy.unwrap_or_else(meerkat_core::ToolExecutionPolicy::unrestricted),
+        );
+        if let Some(policy) = bound_consequence_policy {
+            gate = gate.with_consequence_policy(policy);
         }
+        if let Some(admission) = tool_dispatch_admission {
+            gate = gate.with_dispatch_admission(admission);
+        }
+        tools = Arc::new(gate);
 
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
@@ -8943,6 +9084,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuous_models_require_live_profiles_before_credentials_or_overrides()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for model in ["gpt-live-1", "operator-voice"] {
+            let factory = AgentFactory::minimal();
+            let mut config = Config::default();
+            if model == "operator-voice" {
+                config.models.custom.insert(
+                    model.into(),
+                    serde_json::from_value(serde_json::json!({
+                        "provider":"openai", "interaction_kind":"continuous_live"
+                    }))?,
+                );
+            }
+            let identity = SessionLlmIdentity {
+                model: model.into(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            };
+            assert!(matches!(
+                factory
+                    .preflight_llm_identity(&config, &identity, &BTreeMap::new(), None, None,)
+                    .await,
+                Err(LlmIdentityPreflightError::ModelUnresolvable { .. })
+            ));
+            assert!(matches!(
+                factory
+                    .build_llm_client_for_identity(&config, &identity)
+                    .await,
+                Err(FactoryError::ContinuousModelRequiresLiveProfile { .. })
+            ));
+            let provider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut build = AgentBuildConfig::new(model);
+            build.llm_client_override = Some(Arc::new(CountingExperimentalOverride {
+                provider_calls: Arc::clone(&provider_calls),
+            }));
+            assert!(matches!(
+                factory.build_agent(build, &config).await,
+                Err(BuildAgentError::LlmClient(
+                    FactoryError::ContinuousModelRequiresLiveProfile { .. }
+                ))
+            ));
+            assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn durable_build_rejects_experimental_release_stage_before_override_use() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
@@ -9836,6 +10026,7 @@ mod tests {
             meerkat_core::config::CustomModelConfig {
                 provider: Provider::OpenAI,
                 display_name: Some("Text-only backup".to_string()),
+                interaction_kind: None,
                 context_window: Some(32_000),
                 max_input_tokens: None,
                 max_output_tokens: Some(4_096),
@@ -10039,6 +10230,7 @@ mod tests {
             meerkat_core::config::CustomModelConfig {
                 provider: Provider::OpenAI,
                 display_name: Some("Text-only backup".to_string()),
+                interaction_kind: None,
                 context_window: Some(32_000),
                 max_input_tokens: None,
                 max_output_tokens: Some(4_096),
@@ -10659,6 +10851,305 @@ mod tests {
             );
         }
         section
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod public_live_profile_resolution {
+        use super::*;
+        use meerkat_llm_core::live_adapter_factory::{
+            LiveAdapterFactory, LiveAdapterOpenConfig, LiveAdapterOpenError,
+        };
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolvedLiveTarget, ResolverEnvironment, StaticLease,
+            ValidatedBinding,
+        };
+
+        struct ProbeFactory;
+        #[async_trait]
+        impl LiveAdapterFactory for ProbeFactory {
+            fn interaction_kind(&self) -> meerkat_core::model_profile::ModelInteractionKind {
+                meerkat_core::model_profile::ModelInteractionKind::ContinuousLive
+            }
+            async fn open_adapter(
+                &self,
+                _: &LiveAdapterOpenConfig,
+            ) -> Result<Arc<dyn meerkat_core::live_adapter::LiveAdapter>, LiveAdapterOpenError>
+            {
+                Err(meerkat_llm_core::LlmError::InvalidRequest {
+                    message: "resolution fixture does not open transport".into(),
+                }
+                .into())
+            }
+        }
+
+        struct ProbeRuntime {
+            targets: Arc<std::sync::Mutex<Vec<ResolvedLiveTarget>>>,
+            resolutions: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ProviderRuntime for ProbeRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                self.resolutions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let CredentialSourceSpec::InlineSecret { secret } = &binding.auth_profile().source
+                else {
+                    return Err(ProviderAuthError::SourceResolutionFailed(
+                        "unexpected fixture credential source".into(),
+                    ));
+                };
+                Ok(ResolvedConnection {
+                    provider: binding.provider(),
+                    backend: binding.backend(),
+                    backend_profile: binding.backend_profile().clone(),
+                    credential_identity: binding.credential_identity().clone(),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        secret.clone(),
+                        Default::default(),
+                        None,
+                        "fixture",
+                    )),
+                })
+            }
+            fn build_client(
+                &self,
+                _: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Err(ProviderClientError::MissingFeature(
+                    "ordinary client forbidden in Live fixture",
+                ))
+            }
+            fn build_live_adapter_factory(
+                &self,
+                target: ResolvedLiveTarget,
+            ) -> Result<Arc<dyn LiveAdapterFactory>, ProviderClientError> {
+                self.targets.lock().expect("targets").push(target);
+                Ok(Arc::new(ProbeFactory))
+            }
+        }
+
+        #[tokio::test]
+        async fn profile_factory_resolves_current_voice_owner_without_executor_credentials()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use meerkat_core::live_execution::profile::{LiveProfileEntry, LiveProfileId};
+            let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut factory = AgentFactory::minimal();
+            factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(ProbeRuntime {
+                    targets: Arc::clone(&targets),
+                    resolutions: Arc::clone(&resolutions),
+                }),
+            ));
+            let mut config = Config::default();
+            config.realm.insert(
+                "voice".into(),
+                openai_realm_with_bindings(&[("key", "voice-secret")]),
+            );
+            config.realm.insert(
+                "executor".into(),
+                openai_realm_with_bindings(&[("key", "executor-secret")]),
+            );
+            let profile = LiveProfileId::parse("voice-profile")?;
+            config.live.profiles.insert(profile.clone(), serde_json::from_value(serde_json::json!({
+                "state":"configured","definition":{
+                    "voice_identity":{"provider":"openai","model":"gpt-live-1","auth_binding":{"realm":"voice","binding":"key"}},
+                    "execution":{"mode":"client_context","request_policy":"snapshot_at_delegation"},
+                    "context_projection":"reject"
+                }
+            }))?);
+            let executor_realm = RealmId::parse("executor")?;
+            factory
+                .resolve_live_adapter_factory_for_profile(
+                    &config,
+                    &profile,
+                    Some(&executor_realm),
+                    None,
+                )
+                .await?;
+            config.realm.insert(
+                "voice".into(),
+                openai_realm_with_bindings(&[("key", "rotated-voice-secret")]),
+            );
+            factory
+                .resolve_live_adapter_factory_for_profile(
+                    &config,
+                    &profile,
+                    Some(&executor_realm),
+                    None,
+                )
+                .await?;
+            {
+                let targets = targets.lock().expect("targets");
+                assert_eq!(targets.len(), 2);
+                assert_eq!(
+                    targets[0].connection().resolved_secret().as_deref(),
+                    Some("voice-secret")
+                );
+                assert_eq!(
+                    targets[1].connection().resolved_secret().as_deref(),
+                    Some("rotated-voice-secret")
+                );
+                assert_eq!(
+                    targets[1]
+                        .voice_identity()
+                        .auth_binding
+                        .as_ref()
+                        .ok_or("binding")?
+                        .realm
+                        .as_str(),
+                    "voice"
+                );
+            }
+            config
+                .live
+                .profiles
+                .insert(profile.clone(), LiveProfileEntry::Disabled);
+            assert!(
+                factory
+                    .resolve_live_adapter_factory_for_profile(
+                        &config,
+                        &profile,
+                        Some(&executor_realm),
+                        None
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(resolutions.load(std::sync::atomic::Ordering::SeqCst), 2);
+            Ok(())
+        }
+
+        #[cfg(feature = "live")]
+        #[tokio::test]
+        async fn loaded_profile_resolves_its_own_config_after_source_changes()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use crate::live_activation::{
+                FileLiveExecutionGrantSource, LiveActivationDocumentLocator,
+                LiveActivationSelection,
+            };
+            use crate::live_profile_source::{
+                CurrentLiveProfileDeclaration, LiveProfileDeclarationLookup,
+                LiveProfileDeclarationSource,
+            };
+            use meerkat_core::live_execution::activation::LiveExecutorSelector;
+            use meerkat_core::live_execution::profile::{LiveProfileEntry, LiveProfileId};
+            use meerkat_store::realm::FilesystemRealmConfigSource;
+            use std::collections::BTreeMap;
+
+            let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut factory = AgentFactory::minimal();
+            factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(ProbeRuntime {
+                    targets: Arc::clone(&targets),
+                    resolutions: Arc::clone(&resolutions),
+                }),
+            ));
+            let directory = tempfile::tempdir()?;
+            let config_source = Arc::new(FilesystemRealmConfigSource::new(
+                directory.path(),
+                directory.path().join("absent-global.toml"),
+                meerkat_models::canonical(),
+            ));
+            let realm = RealmId::parse("voice")?;
+            let path = config_source.config_doc_path(&realm);
+            tokio::fs::create_dir_all(path.parent().ok_or("config parent")?).await?;
+            let source = LiveProfileDeclarationSource::new(
+                meerkat_core::EffectiveConfigReader::new(config_source),
+                FileLiveExecutionGrantSource::new(BTreeMap::from([(
+                    realm.clone(),
+                    LiveActivationDocumentLocator::beside_config_document(&path)?,
+                )])),
+            );
+            let profile = LiveProfileId::parse("voice-profile")?;
+            let mut definition: meerkat_core::live_execution::profile::LiveProfileDefinition =
+                serde_json::from_value(serde_json::json!({
+                    "voice_identity":{"provider":"openai","model":"gpt-live-1","auth_binding":{"realm":"voice","binding":"key"}},
+                    "execution":{"mode":"client_context","request_policy":"snapshot_at_delegation"},
+                    "instructions":"original guidance",
+                    "context_projection":"reject"
+                }))?;
+            let mut config = Config::default();
+            config.realm.insert(
+                "voice".into(),
+                openai_realm_with_bindings(&[("key", "original-voice-secret")]),
+            );
+            config.live.profiles.insert(
+                profile.clone(),
+                LiveProfileEntry::Configured(Box::new(definition.clone())),
+            );
+            tokio::fs::write(&path, toml::to_string(&config)?).await?;
+            let executor = LiveExecutorSelector::<()>::Session {
+                session_id: SessionId::new(),
+            };
+            let lookup = || LiveProfileDeclarationLookup {
+                profile_id: &profile,
+                requesting_realm: &realm,
+                executor: &executor,
+                now: chrono::DateTime::UNIX_EPOCH,
+            };
+            let CurrentLiveProfileDeclaration::Configured(original) = source.load(lookup()).await?
+            else {
+                return Err("expected original profile".into());
+            };
+            let debug = format!("{original:?}");
+            assert!(!debug.contains("original-voice-secret"));
+            assert!(!debug.contains("original guidance"));
+            config.realm.insert(
+                "voice".into(),
+                openai_realm_with_bindings(&[("key", "rotated-voice-secret")]),
+            );
+            definition.instructions = Some("replacement guidance".into());
+            config.live.profiles.insert(
+                profile.clone(),
+                LiveProfileEntry::Configured(Box::new(definition)),
+            );
+            tokio::fs::write(&path, toml::to_string(&config)?).await?;
+            let CurrentLiveProfileDeclaration::Configured(replacement) =
+                source.load(lookup()).await?
+            else {
+                return Err("expected replacement profile".into());
+            };
+            assert_ne!(original.revision(), replacement.revision());
+            config
+                .live
+                .profiles
+                .insert(profile, LiveProfileEntry::Disabled);
+            tokio::fs::write(&path, toml::to_string(&config)?).await?;
+            // Neither resolve may reread the disabled profile or pair the old
+            // declaration with the replacement credential configuration.
+            original.resolve_adapter_factory(&factory, None).await?;
+            replacement.resolve_adapter_factory(&factory, None).await?;
+            assert!(matches!(
+                original.activation(),
+                LiveActivationSelection::Disabled
+            ));
+            assert!(matches!(
+                replacement.activation(),
+                LiveActivationSelection::Disabled
+            ));
+            let targets = targets.lock().expect("targets");
+            assert_eq!(targets.len(), 2);
+            assert_eq!(
+                targets[0].connection().resolved_secret().as_deref(),
+                Some("original-voice-secret")
+            );
+            assert_eq!(
+                targets[1].connection().resolved_secret().as_deref(),
+                Some("rotated-voice-secret")
+            );
+            assert_eq!(resolutions.load(std::sync::atomic::Ordering::SeqCst), 2);
+            Ok(())
+        }
     }
 
     #[cfg(all(
@@ -15327,6 +15818,7 @@ mod tests {
             "claude-internal-preview".to_string(),
             meerkat_core::config::CustomModelConfig {
                 provider: Provider::Anthropic,
+                interaction_kind: None,
                 display_name: None,
                 context_window: Some(400_000),
                 max_input_tokens: None,

@@ -2688,6 +2688,16 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .acknowledge_finalized_compaction_projections(&self.session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.context
             .service
@@ -3072,6 +3082,7 @@ mod tests {
             .await
             .expect("test attachment should exist");
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::Immediate,
             appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
@@ -3161,6 +3172,7 @@ mod tests {
             .expect("simulate live session loss after preparation");
 
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
             boundary: RunApplyBoundary::RunCheckpoint,
             appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,

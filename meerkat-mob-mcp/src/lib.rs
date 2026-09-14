@@ -3333,6 +3333,26 @@ impl MobMcpState {
         })
     }
 
+    pub async fn mob_member_live_observations(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        query: meerkat_contracts::wire::live_observation::LiveObservationPageQuery,
+    ) -> Result<meerkat_contracts::wire::MobMemberLiveObservationsResult, MobError> {
+        let domain = self
+            .handle_for(mob_id)
+            .await?
+            .member_live_observations(self.console_principal.clone(), identity, query)
+            .await?;
+        Ok(meerkat_contracts::wire::MobMemberLiveObservationsResult {
+            page: domain.page,
+            placement: domain
+                .placement
+                .map(|host| meerkat_contracts::wire::WireHostRef(host.as_str().to_string())),
+            provenance: domain.provenance,
+        })
+    }
+
     /// Force-cancel's HARD sibling (DEC-P6E-8). `Cancel`-gated at
     /// chokepoint (a).
     pub async fn mob_hard_cancel_member(

@@ -2,6 +2,7 @@
 
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_forked_participant_lifecycle_machine,
+    dsl_live_request_machine_production_schema, dsl_live_transcript_machine_production_schema,
     dsl_meerkat_machine, dsl_meerkat_machine_production_schema, dsl_mob_machine,
     dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine, dsl_temporary_council_lifecycle_machine,
@@ -146,6 +147,17 @@ fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
             machine: "AuthMachine",
             catalog_schema: dsl_auth_machine_production_schema,
             production_schema: meerkat_runtime::machine_schema_exports::auth_machine_schema,
+        },
+        SchemaParityCase {
+            machine: "LiveRequestMachine",
+            catalog_schema: dsl_live_request_machine_production_schema,
+            production_schema: meerkat_runtime::machine_schema_exports::live_request_machine_schema,
+        },
+        SchemaParityCase {
+            machine: "LiveTranscriptMachine",
+            catalog_schema: dsl_live_transcript_machine_production_schema,
+            production_schema:
+                meerkat_runtime::machine_schema_exports::live_transcript_machine_schema,
         },
         SchemaParityCase {
             machine: "MobMachine",

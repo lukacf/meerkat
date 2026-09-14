@@ -32,6 +32,7 @@ from .types import (  # noqa: F401
     SchemaCompat,
     SchemaFormat,
     SenderContentTaint,
+    SessionId,
     SkillName,
     SourceUuid,
     ToolConfigChangeDomain,
@@ -1113,10 +1114,6 @@ class ServerToolKindProviderNative(TypedDict, total=False):
 # round-trip exactly on replay). It is the only variant carrying a string,
 # and that string IS the typed fact — not a re-derivable label.
 ServerToolKind = ServerToolKindWebSearch | ServerToolKindGoogleSearch | ServerToolKindProviderNative
-
-
-# Unique identifier for a session (UUID v7 for time-ordering)
-SessionId = str
 
 
 # Slug-validated capability identifier for skill requirements.

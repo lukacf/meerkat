@@ -131,6 +131,16 @@ pub(crate) fn classify_provider_turn_usage_identity(
 pub trait AgentLlmRequestAttempt: Send + Sync {
     fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError>;
 
+    fn scoped_model_request(&self) -> Option<&Arc<crate::execution_scope::ScopedModelRequest>> {
+        None
+    }
+
+    fn settled_scoped_model_successor(
+        &self,
+    ) -> Result<Option<Arc<crate::execution_scope::ScopedModelRequest>>, AgentError> {
+        Ok(None)
+    }
+
     async fn stream_response(&self) -> Result<LlmStreamResult, AgentError>;
 }
 
@@ -183,6 +193,59 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentLlmClient: Send + Sync {
+    fn scoped_model_effect_support(&self) -> crate::execution_scope::ScopedModelEffectSupport {
+        crate::execution_scope::ScopedModelEffectSupport::Unsupported
+    }
+
+    fn prepare_scoped_request_attempt(
+        self: Arc<Self>,
+        _messages: Arc<Vec<Message>>,
+        _tools: Arc<[Arc<ToolDef>]>,
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<ProviderParamsOverride>,
+        _scope: Arc<crate::execution_scope::ScopedModelRequest>,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError>
+    where
+        Self: 'static,
+    {
+        Err(AgentError::ConfigError(
+            "LLM client does not implement scoped physical model dispatch".into(),
+        ))
+    }
+
+    fn native_tool_policy_support(&self) -> crate::NativeToolPolicySupport {
+        crate::NativeToolPolicySupport::Unsupported
+    }
+
+    /// Prepare a request with an explicit neutral native-tool restriction.
+    /// An ordinary preparation implementation cannot silently consume it.
+    fn prepare_request_attempt_with_native_tool_policy(
+        self: Arc<Self>,
+        messages: Arc<Vec<Message>>,
+        tools: Arc<[Arc<ToolDef>]>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<ProviderParamsOverride>,
+        native_tools: crate::ProviderNativeToolPolicy,
+    ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError>
+    where
+        Self: 'static,
+    {
+        match native_tools {
+            crate::ProviderNativeToolPolicy::Inherit => self.prepare_request_attempt(
+                messages,
+                tools,
+                max_tokens,
+                temperature,
+                provider_params,
+            ),
+            crate::ProviderNativeToolPolicy::DisableAll => Err(AgentError::ConfigError(
+                "LLM client does not enforce request-scoped native-tool policy".into(),
+            )),
+        }
+    }
+
     /// Prepare one owned request attempt. Adapters with dynamic routing return
     /// a handle that binds all request-derived facts to one route witness.
     ///
@@ -684,6 +747,7 @@ pub struct ToolDispatchContext {
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
+    scoped_execution: Option<crate::execution_scope::ScopedExecutionContext>,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -949,6 +1013,7 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("run_id", &self.run_id)
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
+            .field("scoped_execution", &self.scoped_execution)
             .finish()
     }
 }
@@ -962,6 +1027,7 @@ impl PartialEq for ToolDispatchContext {
             && self.run_id == other.run_id
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && self.scoped_execution == other.scoped_execution
     }
 }
 
@@ -984,6 +1050,7 @@ impl ToolDispatchContext {
             run_id: None,
             streaming: None,
             live_bridge_admission: None,
+            scoped_execution: None,
         }
     }
 
@@ -1009,6 +1076,32 @@ impl ToolDispatchContext {
 
     pub fn current_turn(&self) -> Option<&CurrentTurnContent> {
         self.current_turn.as_ref()
+    }
+
+    pub fn with_scoped_execution(
+        mut self,
+        execution: crate::execution_scope::ScopedExecutionContext,
+    ) -> Result<Self, crate::execution_scope::ScopeRecordError> {
+        let record = execution.scope().record();
+        if self
+            .run_id
+            .as_ref()
+            .is_some_and(|run| run != &record.run_id)
+            || self
+                .origin_session_id
+                .as_ref()
+                .is_some_and(|session| session != &record.executor.session_id)
+        {
+            return Err(crate::execution_scope::ScopeRecordError::ClaimScopeMismatch);
+        }
+        self.run_id = Some(record.run_id.clone());
+        self.origin_session_id = Some(record.executor.session_id.clone());
+        self.scoped_execution = Some(execution);
+        Ok(self)
+    }
+
+    pub fn scoped_execution(&self) -> Option<&crate::execution_scope::ScopedExecutionContext> {
+        self.scoped_execution.as_ref()
     }
 
     /// Bind the runtime-owned durable identity of the turn being dispatched.
@@ -1208,6 +1301,10 @@ impl BindOutcome {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentToolDispatcher: Send + Sync {
+    fn scoped_tool_effect_support(&self) -> crate::execution_scope::ScopedToolEffectSupport {
+        crate::execution_scope::ScopedToolEffectSupport::Unsupported
+    }
+
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
 

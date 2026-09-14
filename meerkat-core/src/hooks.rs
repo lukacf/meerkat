@@ -132,6 +132,8 @@ pub enum HookRuntimeInputKind {
     ExternalEvent,
     Continuation,
     Operation,
+    LiveRequest,
+    LiveCallbackContinuation,
 }
 
 /// Runtime lifecycle state carried by a typed input rejection.
@@ -158,6 +160,7 @@ pub enum HookRuntimeInputRejection {
     DurabilityViolation { detail: String },
     PeerHandlingModeInvalid { detail: String },
     PeerResponseTerminalInvalid { detail: String },
+    LiveRequestRequiresGrant,
 }
 
 /// An input was durably admitted by runtime authority.

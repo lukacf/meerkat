@@ -72,7 +72,11 @@ pub(crate) async fn open_remote_member_live_channel(
     let command = BridgeCommand::OpenMemberLiveChannel(BridgeLiveOpenPayload {
         supervisor: sup_spec.into(),
         epoch: authority.epoch,
-        protocol_version: BridgeProtocolVersion::V4,
+        protocol_version: if profile_id.is_some() {
+            BridgeProtocolVersion::V7
+        } else {
+            BridgeProtocolVersion::V4
+        },
         expected_member,
         profile: profile_id.map(|profile_id| {
             meerkat_contracts::wire::supervisor_bridge::BridgeLiveProfileSelection::V1 {

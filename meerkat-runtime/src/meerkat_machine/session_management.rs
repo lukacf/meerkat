@@ -469,6 +469,30 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
         self.inner.apply(run_id, primitive).await
     }
 
+    async fn apply_with_execution_authority(
+        &mut self,
+        run_id: meerkat_core::RunId,
+        primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::lifecycle::CoreExecutorError,
+    > {
+        self.inner
+            .apply_with_execution_authority(run_id, primitive)
+            .await
+    }
+
+    async fn apply_scoped(
+        &mut self,
+        run_id: meerkat_core::RunId,
+        primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::lifecycle::CoreExecutorError,
+    > {
+        self.inner.apply_scoped(run_id, primitive).await
+    }
+
     async fn checkpoint_committed_session_snapshot(
         &mut self,
         session_snapshot: Arc<Vec<u8>>,
@@ -493,6 +517,14 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         self.inner
             .reconcile_committed_compaction_projections(intents)
+            .await
+    }
+
+    async fn acknowledge_finalized_compaction_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner
+            .acknowledge_finalized_compaction_projections()
             .await
     }
 
@@ -606,12 +638,56 @@ mod machine_managed_executor_forwarding_tests {
 
     struct ProjectionForwardingProbe {
         reconciles: Arc<AtomicUsize>,
+        acknowledgements: Arc<AtomicUsize>,
+        scoped_applies: Arc<AtomicUsize>,
+        authority_applies: Arc<AtomicUsize>,
+        expected_run: meerkat_core::RunId,
+        expected_primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
         compaction_aborts: Arc<AtomicUsize>,
         rejected_run_aborts: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl meerkat_core::lifecycle::CoreExecutor for ProjectionForwardingProbe {
+        async fn apply_scoped(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            assert_eq!(run_id, self.expected_run);
+            assert_eq!(primitive, self.expected_primitive);
+            self.scoped_applies.fetch_add(1, Ordering::SeqCst);
+            Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                "scoped forwarding probe refuses execution".into(),
+            ))
+        }
+
+        async fn apply_with_execution_authority(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            assert_eq!(run_id, self.expected_run);
+            assert_eq!(primitive, self.expected_primitive);
+            self.authority_applies.fetch_add(1, Ordering::SeqCst);
+            Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                "authority forwarding probe refuses execution".into(),
+            ))
+        }
+
+        async fn acknowledge_finalized_compaction_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn apply(
             &mut self,
             _run_id: meerkat_core::RunId,
@@ -665,12 +741,33 @@ mod machine_managed_executor_forwarding_tests {
 
     #[tokio::test]
     async fn machine_managed_post_stop_decorator_forwards_projection_contract() {
+        use meerkat_core::lifecycle::CoreExecutor;
+        use meerkat_core::lifecycle::run_primitive::{
+            RunApplyBoundary, RunPrimitive, StagedRunInput,
+        };
+
         let reconciles = Arc::new(AtomicUsize::new(0));
+        let acknowledgements = Arc::new(AtomicUsize::new(0));
+        let scoped_applies = Arc::new(AtomicUsize::new(0));
+        let authority_applies = Arc::new(AtomicUsize::new(0));
+        let run_id = meerkat_core::RunId::new();
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            execution_authority: Default::default(),
+            boundary: RunApplyBoundary::RunStart,
+            appends: Vec::new(),
+            contributing_input_ids: vec![meerkat_core::InputId::new()],
+            turn_metadata: None,
+        });
         let compaction_aborts = Arc::new(AtomicUsize::new(0));
         let rejected_run_aborts = Arc::new(AtomicUsize::new(0));
         let mut executor = MachineManagedPostStopExecutor {
             inner: Box::new(ProjectionForwardingProbe {
                 reconciles: Arc::clone(&reconciles),
+                acknowledgements: Arc::clone(&acknowledgements),
+                scoped_applies: Arc::clone(&scoped_applies),
+                authority_applies: Arc::clone(&authority_applies),
+                expected_run: run_id.clone(),
+                expected_primitive: primitive.clone(),
                 compaction_aborts: Arc::clone(&compaction_aborts),
                 rejected_run_aborts: Arc::clone(&rejected_run_aborts),
             }),
@@ -696,6 +793,25 @@ mod machine_managed_executor_forwarding_tests {
             .expect("decorator must forward whole rejected-run projection cleanup");
 
         assert_eq!(reconciles.load(Ordering::SeqCst), 1);
+        assert!(
+            executor
+                .acknowledge_finalized_compaction_projections()
+                .await
+                .is_ok()
+        );
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(executor.apply_scoped(run_id.clone(), primitive.clone()).await,
+                Err(meerkat_core::lifecycle::CoreExecutorError::Internal(ref reason))
+                    if reason == "scoped forwarding probe refuses execution")
+        );
+        assert!(
+            matches!(executor.apply_with_execution_authority(run_id, primitive).await,
+                Err(meerkat_core::lifecycle::CoreExecutorError::Internal(ref reason))
+                    if reason == "authority forwarding probe refuses execution")
+        );
+        assert_eq!(scoped_applies.load(Ordering::SeqCst), 1);
+        assert_eq!(authority_applies.load(Ordering::SeqCst), 1);
         assert_eq!(compaction_aborts.load(Ordering::SeqCst), 1);
         assert_eq!(rejected_run_aborts.load(Ordering::SeqCst), 1);
     }
@@ -5143,6 +5259,21 @@ impl MeerkatMachine {
                         coordinator_id,
                         result_rx: result_rx.clone(),
                     });
+                // A rejected external write can degrade an otherwise idle loop.
+                // Wake this T-fenced attachment so it observes ReloadRequired and
+                // publishes the paired teardown slot; do not admit work or Stop it.
+                if let Some(wake_tx) = entry.wake_sender() {
+                    match wake_tx.try_send(()) {
+                        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
+                        Err(mpsc::error::TrySendError::Closed(())) => {
+                            tracing::debug!(
+                                session_id = %witness.session_id(),
+                                %coordinator_id,
+                                "durability reload wake raced runtime-loop exit; awaiting exact teardown publication"
+                            );
+                        }
+                    }
+                }
                 (
                     result_rx,
                     Some((
@@ -5241,7 +5372,17 @@ impl MeerkatMachine {
         // handoff is the only operation allowed before M: it releases that
         // retained fence without publishing stop, retire, or unregister
         // authority. T admission paired this exact slot with the coordinator.
+        tracing::debug!(
+            session_id = %witness.session_id(),
+            %coordinator_id,
+            "durability reload awaiting exact runtime-loop teardown publication"
+        );
         teardown_slot.wait_until_published().await;
+        tracing::debug!(
+            session_id = %witness.session_id(),
+            %coordinator_id,
+            "durability reload received exact runtime-loop teardown publication"
+        );
         teardown_slot.discard_after_reload_required().await?;
         #[cfg(feature = "live")]
         let Some(live_lifecycle_lease) = self

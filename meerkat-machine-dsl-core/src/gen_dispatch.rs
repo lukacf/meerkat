@@ -765,7 +765,7 @@ fn gen_transition_body(def: &MachineDef, t: &TransitionDef) -> TokenStream {
     let mut stmts = Vec::new();
 
     for update in &t.updates {
-        stmts.push(gen_update(update, prefix));
+        stmts.push(gen_update(update, prefix, &def.state_fields));
     }
 
     if let Some(phase_field) = def.phase_field_name() {
@@ -872,13 +872,13 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             quote! { (#(#parts)||*) }
         }
         ExprDef::Eq(l, r) => {
-            let left = gen_expr(l, prefix);
-            let right = gen_expr(r, prefix);
+            let left = gen_equality_operand(l, prefix);
+            let right = gen_equality_operand(r, prefix);
             quote! { (#left == #right) }
         }
         ExprDef::Neq(l, r) => {
-            let left = gen_expr(l, prefix);
-            let right = gen_expr(r, prefix);
+            let left = gen_equality_operand(l, prefix);
+            let right = gen_equality_operand(r, prefix);
             quote! { (#left != #right) }
         }
         ExprDef::Gt(l, r) => {
@@ -911,6 +911,16 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let right = gen_expr(r, prefix);
             quote! { (#left - #right) }
         }
+        ExprDef::Mul(l, r) => {
+            let left = gen_expr(l, prefix);
+            let right = gen_expr(r, prefix);
+            quote! { (#left * #right) }
+        }
+        ExprDef::Div(l, r) => {
+            let left = gen_expr(l, prefix);
+            let right = gen_expr(r, prefix);
+            quote! { (#left / #right) }
+        }
         ExprDef::Contains { collection, value } => {
             let coll = gen_expr(collection, prefix);
             let val = gen_expr(value, prefix);
@@ -923,12 +933,12 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
         }
         ExprDef::Len(inner) => {
             let e = gen_expr(inner, prefix);
-            quote! { #e.len() as u64 }
+            quote! { (#e.len() as u64) }
         }
         ExprDef::Count { collection, value } => {
             let collection = gen_expr(collection, prefix);
             let value = gen_expr(value, prefix);
-            quote! { #collection.iter().filter(|candidate| *candidate == &#value).count() as u64 }
+            quote! { (#collection.iter().filter(|candidate| *candidate == &#value).count() as u64) }
         }
         ExprDef::MapGet { map, key } => {
             let m = gen_expr(map, prefix);
@@ -998,16 +1008,231 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
     }
 }
 
+fn gen_equality_operand(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
+    match expr {
+        ExprDef::StringLit(value) => quote! { #value },
+        _ => gen_expr(expr, prefix),
+    }
+}
+
+#[cfg(test)]
+mod equality_tests {
+    use super::*;
+
+    #[test]
+    fn direct_string_equality_literals_do_not_allocate() {
+        for prefix in [FieldPrefix::AuthorityState, FieldPrefix::DirectSelf] {
+            for value in ["", "nonempty", "escaped\n\0\"text"] {
+                for other in [
+                    ExprDef::Binding(format_ident!("input")),
+                    ExprDef::Field(format_ident!("value")),
+                ] {
+                    for (left, right) in [
+                        (ExprDef::StringLit(value.into()), other.clone()),
+                        (other, ExprDef::StringLit(value.into())),
+                    ] {
+                        for expression in [
+                            ExprDef::Eq(Box::new(left.clone()), Box::new(right.clone())),
+                            ExprDef::Neq(Box::new(left), Box::new(right)),
+                        ] {
+                            let generated = gen_expr(&expression, prefix).to_string();
+                            assert!(!generated.contains("to_string"), "{generated}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn string_value_and_option_construction_keep_owned_types() {
+        let literal = ExprDef::StringLit("owned".into());
+        let value = gen_expr(&literal, FieldPrefix::AuthorityState);
+        assert_eq!(
+            value.to_string(),
+            quote! { "owned".to_string() }.to_string()
+        );
+        let option_equality = ExprDef::Eq(
+            Box::new(ExprDef::Field(format_ident!("optional"))),
+            Box::new(ExprDef::Some(Box::new(literal))),
+        );
+        assert_eq!(
+            gen_expr(&option_equality, FieldPrefix::AuthorityState).to_string(),
+            quote! { (self.state.optional == Some("owned".to_string())) }.to_string()
+        );
+    }
+}
+
 /// Convenience alias for authority-context expressions.
 #[allow(dead_code)]
 pub(crate) fn gen_guard_expr(expr: &ExprDef) -> TokenStream {
     gen_expr(expr, FieldPrefix::AuthorityState)
 }
 
-fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
+fn gen_value_expr(expr: &ExprDef, prefix: FieldPrefix, fields: &[FieldDef]) -> TokenStream {
+    match expr {
+        ExprDef::Field(name) => {
+            let value = gen_expr(expr, prefix);
+            if fields.iter().any(|field| {
+                field.name == *name
+                    && !matches!(field.ty, TypeDef::Bool | TypeDef::U32 | TypeDef::U64)
+            }) {
+                quote! { (#value).clone() }
+            } else {
+                value
+            }
+        }
+        ExprDef::Some(inner) => {
+            let value = gen_value_expr(inner, prefix, fields);
+            quote! { Some(#value) }
+        }
+        ExprDef::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let condition = gen_expr(condition, prefix);
+            let then_value = gen_value_expr(then_expr, prefix, fields);
+            let else_value = gen_value_expr(else_expr, prefix, fields);
+            quote! { if #condition { #then_value } else { #else_value } }
+        }
+        _ => gen_expr(expr, prefix),
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn multiplicative_emission_keeps_nested_arithmetic_grouped() -> syn::Result<()> {
+        let expression = ExprDef::Div(
+            Box::new(ExprDef::Mul(
+                Box::new(ExprDef::Field(format_ident!("limit"))),
+                Box::new(ExprDef::U64(3)),
+            )),
+            Box::new(ExprDef::Add(
+                Box::new(ExprDef::U64(1)),
+                Box::new(ExprDef::U64(2)),
+            )),
+        );
+        for prefix in [FieldPrefix::AuthorityState, FieldPrefix::DirectSelf] {
+            let emitted = gen_expr(&expression, prefix);
+            let syn::Expr::Paren(outer) = syn::parse2::<syn::Expr>(emitted)? else {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "arithmetic must remain parenthesized",
+                ));
+            };
+            let syn::Expr::Binary(division) = *outer.expr else {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "expected division",
+                ));
+            };
+            assert!(matches!(division.op, syn::BinOp::Div(_)));
+            assert!(matches!(*division.left, syn::Expr::Paren(_)));
+            assert!(matches!(*division.right, syn::Expr::Paren(_)));
+        }
+        Ok(())
+    }
+
+    fn fields() -> Vec<FieldDef> {
+        vec![
+            FieldDef {
+                name: format_ident!("record"),
+                ty: TypeDef::String,
+                span: proc_macro2::Span::call_site(),
+            },
+            FieldDef {
+                name: format_ident!("limit"),
+                ty: TypeDef::U64,
+                span: proc_macro2::Span::call_site(),
+            },
+        ]
+    }
+
+    #[test]
+    fn cardinality_casts_parse_on_both_sides_of_comparisons() -> syn::Result<()> {
+        for cardinality in [
+            ExprDef::Len(Box::new(ExprDef::Field(format_ident!("items")))),
+            ExprDef::Count {
+                collection: Box::new(ExprDef::Field(format_ident!("items"))),
+                value: Box::new(ExprDef::StringLit("item".into())),
+            },
+        ] {
+            for prefix in [FieldPrefix::AuthorityState, FieldPrefix::DirectSelf] {
+                for comparison in [
+                    ExprDef::Lt(Box::new(cardinality.clone()), Box::new(ExprDef::U64(2))),
+                    ExprDef::Gt(Box::new(ExprDef::U64(2)), Box::new(cardinality.clone())),
+                ] {
+                    syn::parse2::<syn::Expr>(gen_expr(&comparison, prefix))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consuming_state_values_clone_without_cloning_comparison_operands() {
+        let fields = fields();
+        let record = ExprDef::Field(format_ident!("record"));
+        let limit = ExprDef::Field(format_ident!("limit"));
+        assert_eq!(
+            gen_value_expr(&record, FieldPrefix::AuthorityState, &fields).to_string(),
+            quote! { (self.state.record).clone() }.to_string()
+        );
+        assert_eq!(
+            gen_value_expr(&limit, FieldPrefix::AuthorityState, &fields).to_string(),
+            quote! { self.state.limit }.to_string()
+        );
+        assert_eq!(
+            gen_value_expr(
+                &ExprDef::Some(Box::new(record.clone())),
+                FieldPrefix::DirectSelf,
+                &fields,
+            )
+            .to_string(),
+            quote! { Some((self.record).clone()) }.to_string()
+        );
+        assert_eq!(
+            gen_expr(
+                &ExprDef::Eq(
+                    Box::new(record),
+                    Box::new(ExprDef::StringLit("bound".into()))
+                ),
+                FieldPrefix::AuthorityState,
+            )
+            .to_string(),
+            quote! { (self.state.record == "bound") }.to_string()
+        );
+    }
+
+    #[test]
+    fn map_insert_consumes_owned_keys_and_values() {
+        assert_eq!(
+            gen_update(
+                &UpdateDef::MapInsert {
+                    field: format_ident!("records"),
+                    key: ExprDef::Field(format_ident!("record")),
+                    value: ExprDef::Field(format_ident!("record")),
+                },
+                FieldPrefix::AuthorityState,
+                &fields(),
+            )
+            .to_string(),
+            quote! {
+                self.state.records.insert((self.state.record).clone(), (self.state.record).clone());
+            }
+            .to_string()
+        );
+    }
+}
+
+fn gen_update(update: &UpdateDef, prefix: FieldPrefix, fields: &[FieldDef]) -> TokenStream {
     match update {
         UpdateDef::Assign { field, value } => {
-            let val = gen_expr(value, prefix);
+            let val = gen_value_expr(value, prefix, fields);
             match prefix {
                 FieldPrefix::AuthorityState => quote! { self.state.#field = #val; },
                 FieldPrefix::DirectSelf => quote! { self.#field = #val; },
@@ -1028,7 +1253,7 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             }
         }
         UpdateDef::SetInsert { field, value } => {
-            let val = gen_expr(value, prefix);
+            let val = gen_value_expr(value, prefix, fields);
             match prefix {
                 FieldPrefix::AuthorityState => quote! { self.state.#field.insert(#val); },
                 FieldPrefix::DirectSelf => quote! { self.#field.insert(#val); },
@@ -1042,8 +1267,8 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             }
         }
         UpdateDef::MapInsert { field, key, value } => {
-            let k = gen_expr(key, prefix);
-            let v = gen_expr(value, prefix);
+            let k = gen_value_expr(key, prefix, fields);
+            let v = gen_value_expr(value, prefix, fields);
             match prefix {
                 FieldPrefix::AuthorityState => quote! { self.state.#field.insert(#k, #v); },
                 FieldPrefix::DirectSelf => quote! { self.#field.insert(#k, #v); },
@@ -1057,7 +1282,7 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             }
         }
         UpdateDef::MapIncrement { field, key, amount } => {
-            let k = gen_expr(key, prefix);
+            let k = gen_value_expr(key, prefix, fields);
             let amt = gen_expr(amount, prefix);
             match prefix {
                 FieldPrefix::AuthorityState => quote! {
@@ -1075,7 +1300,7 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             }
         }
         UpdateDef::MapDecrement { field, key, amount } => {
-            let k = gen_expr(key, prefix);
+            let k = gen_value_expr(key, prefix, fields);
             let amt = gen_expr(amount, prefix);
             match prefix {
                 FieldPrefix::AuthorityState => quote! {
@@ -1098,8 +1323,14 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
             else_updates,
         } => {
             let cond = gen_expr(condition, prefix);
-            let then_stmts: Vec<_> = then_updates.iter().map(|u| gen_update(u, prefix)).collect();
-            let else_stmts: Vec<_> = else_updates.iter().map(|u| gen_update(u, prefix)).collect();
+            let then_stmts: Vec<_> = then_updates
+                .iter()
+                .map(|u| gen_update(u, prefix, fields))
+                .collect();
+            let else_stmts: Vec<_> = else_updates
+                .iter()
+                .map(|u| gen_update(u, prefix, fields))
+                .collect();
             if else_stmts.is_empty() {
                 quote! { if #cond { #(#then_stmts)* } }
             } else {

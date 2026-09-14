@@ -4389,7 +4389,13 @@ async fn handle_meerkat_resume(
             .collect();
         let staged = state
             .service
-            .stage_tool_results(&session_id, StageToolResultsRequest { results })
+            .stage_tool_results(
+                &session_id,
+                StageToolResultsRequest {
+                    results,
+                    callback_target: None,
+                },
+            )
             .await
             .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
         if callback_resume_is_already_applied(staged.disposition) {

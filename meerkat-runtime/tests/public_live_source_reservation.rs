@@ -137,7 +137,7 @@ fn application_fingerprint_must_bind_the_same_frozen_interval() -> TestResult {
 }
 
 #[test]
-fn automatic_empty_work_and_nonempty_empty_refusal_are_inexpressible() -> TestResult {
+fn automatic_empty_work_and_empty_refusal_with_executable_text_are_inexpressible() -> TestResult {
     let mut value = image()?;
     value["context"]["interval"] = json!({"after":3,"through":3});
     value["frozen_request"]["observations"] = json!({"after":3,"through":3});
@@ -156,8 +156,16 @@ fn automatic_empty_work_and_nonempty_empty_refusal_are_inexpressible() -> TestRe
     let mut value = image()?;
     value["disposition"] = json!({"kind":"refused","reason":"empty"});
     assert!(serde_json::from_value::<LiveSourceReservationRecord>(value.clone()).is_err());
-    value["context"]["interval"] = json!({"after":3,"through":3});
     value["frozen_request"] = Value::Null;
+    let nonzero: LiveSourceReservationRecord = serde_json::from_value(value.clone())?;
+    assert_eq!(
+        nonzero.context().interval,
+        LiveObservationInterval::new(0, 3)?
+    );
+    value["context"]["read_coverage"] = json!("window_continues");
+    assert!(serde_json::from_value::<LiveSourceReservationRecord>(value.clone()).is_err());
+    value["context"]["read_coverage"] = json!("complete_to_captured_head");
+    value["context"]["interval"] = json!({"after":3,"through":3});
     let valid: LiveSourceReservationRecord = serde_json::from_value(value)?;
     assert_eq!(valid.context().interval.after(), valid.reserved_frontier());
     Ok(())
@@ -462,10 +470,10 @@ fn incomplete_future_or_wrong_owner_snapshots_cannot_be_reserved_for_execution()
     let mut value = image()?;
     value["context"]["interval"]["through"] = json!(2);
     value["frozen_request"]["observations"]["through"] = json!(2);
-    assert!(
-        serde_json::from_value::<LiveSourceReservationRecord>(value).is_err(),
-        "automatic client snapshots cannot silently shrink the durable prefix"
-    );
+    let selected: LiveSourceReservationRecord = serde_json::from_value(value)?;
+    assert_eq!(selected.reserved_frontier(), 2);
+    // The generated transcript owner, not the mixed ledger head count, owns
+    // the channel watermark. A DTO is not a reservation capability.
     Ok(())
 }
 

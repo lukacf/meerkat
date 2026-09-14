@@ -498,6 +498,8 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     machine_lifecycle_load_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
+    live_head_load_after_capture: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
+    #[cfg(test)]
     machine_lifecycle_load_calls: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_load_panics_remaining: Arc<AtomicUsize>,
@@ -528,6 +530,8 @@ impl InMemoryRuntimeStore {
             input_state_batch_cas_after_commit: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             machine_lifecycle_load_before: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            live_head_load_after_capture: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             machine_lifecycle_load_calls: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -601,6 +605,18 @@ impl InMemoryRuntimeStore {
     ) {
         *self
             .machine_lifecycle_load_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
+    }
+
+    #[cfg(all(test, feature = "live", not(target_arch = "wasm32")))]
+    pub(crate) fn block_next_live_head_after_capture(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self
+            .live_head_load_after_capture
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
@@ -1576,16 +1592,25 @@ fn precheck_fenced_input_updates(
 ) -> Result<(), RuntimeStoreError> {
     for (bundle, expected) in input_updates {
         let Some(expected) = expected else { continue };
-        let current = states.and_then(|map| map.get(&bundle.state.input_id));
-        let matches = match current {
-            Some(current) => memory_input_row_version_digest(current)? == *expected,
-            None => false,
-        };
-        if !matches {
-            return Err(RuntimeStoreError::InputRowVersionConflict {
-                input_id: bundle.state.input_id.0.to_string(),
-            });
-        }
+        enforce_memory_input_row_version(states, &bundle.state.input_id, expected)?;
+    }
+    Ok(())
+}
+
+fn enforce_memory_input_row_version(
+    states: Option<&IndexMap<meerkat_core::lifecycle::InputId, StoredInputState>>,
+    input_id: &meerkat_core::lifecycle::InputId,
+    expected: &str,
+) -> Result<(), RuntimeStoreError> {
+    let current = states.and_then(|map| map.get(input_id));
+    let matches = match current {
+        Some(current) => memory_input_row_version_digest(current)? == *expected,
+        None => false,
+    };
+    if !matches {
+        return Err(RuntimeStoreError::InputRowVersionConflict {
+            input_id: input_id.to_string(),
+        });
     }
     Ok(())
 }
@@ -3230,13 +3255,36 @@ impl RuntimeStore for InMemoryRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         input_ids: &[InputId],
     ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+        Ok(self
+            .load_input_states_by_ids_with_versions(runtime_id, input_ids)
+            .await?
+            .into_iter()
+            .map(|row| row.map(|row| row.into_parts().0))
+            .collect())
+    }
+
+    async fn load_input_states_by_ids_with_versions(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<Option<ExactInputStateObservation>>, RuntimeStoreError> {
         validate_input_state_batch_read_ids(input_ids)?;
         let inner = self.inner.lock().await;
         let states = inner.input_states.get(&runtime_id.0);
-        Ok(input_ids
+        input_ids
             .iter()
-            .map(|input_id| states.and_then(|rows| rows.get(input_id).cloned()))
-            .collect())
+            .map(|input_id| {
+                states
+                    .and_then(|rows| rows.get(input_id))
+                    .map(|row| {
+                        ExactInputStateObservation::from_exact_stored_row(
+                            row.clone(),
+                            memory_input_row_version_digest(row)?,
+                        )
+                    })
+                    .transpose()
+            })
+            .collect()
     }
 
     async fn load_pending_terminal_owner_ids_page(

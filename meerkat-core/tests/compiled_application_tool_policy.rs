@@ -180,3 +180,234 @@ fn provider_owned_snapshot_pointer_rejects_revision_rollback() {
         })
     ));
 }
+
+struct PublicationState {
+    generation: PolicyProviderGeneration,
+    provenance: PolicyEvaluationProvenance,
+}
+
+struct PublicationProvider {
+    provider_id: PolicyProviderId,
+    policy_id: PolicyId,
+    state: RwLock<PublicationState>,
+}
+
+impl ToolConsequenceNarrowingPolicy for PublicationProvider {
+    fn provider_id(&self) -> &PolicyProviderId {
+        &self.provider_id
+    }
+
+    fn generation(&self) -> PolicyProviderGeneration {
+        self.state.read().unwrap().generation
+    }
+
+    fn snapshot(
+        &self,
+        policy_id: &PolicyId,
+    ) -> Result<Arc<dyn ToolConsequencePolicySnapshot>, ToolConsequenceFailure> {
+        assert_eq!(policy_id, &self.policy_id);
+        Ok(Arc::new(Snapshot(
+            self.state.read().unwrap().provenance.clone(),
+        )))
+    }
+
+    fn publish_if_current(
+        &self,
+        policy_id: &PolicyId,
+        generation: PolicyProviderGeneration,
+        provenance: &PolicyEvaluationProvenance,
+        publication: Box<dyn FnOnce() + '_>,
+    ) -> Result<(), meerkat_core::PolicyPublicationError> {
+        let current = self.state.read().unwrap();
+        if policy_id != &self.policy_id
+            || current.generation != generation
+            || &current.provenance != provenance
+        {
+            return Err(meerkat_core::PolicyPublicationError::NotCurrent);
+        }
+        publication();
+        drop(current);
+        Ok(())
+    }
+}
+
+fn publication_provider() -> Arc<PublicationProvider> {
+    Arc::new(PublicationProvider {
+        provider_id: PolicyProviderId::new("publication-owner").unwrap(),
+        policy_id: PolicyId::new("read-policy").unwrap(),
+        state: RwLock::new(PublicationState {
+            generation: PolicyProviderGeneration(3),
+            provenance: PolicyEvaluationProvenance {
+                revision: PolicyRevision(7),
+                digest: PolicyDigest::from_canonical_bytes(b"read-policy-v7"),
+            },
+        }),
+    })
+}
+
+async fn allowed_evaluation(
+    provider: Arc<dyn ToolConsequenceNarrowingPolicy>,
+    policy_id: PolicyId,
+) -> meerkat_core::AllowedToolConsequenceEvaluation {
+    let provider_id = provider.provider_id().clone();
+    let registry = Arc::new(
+        ToolConsequencePolicyRegistry::new(
+            vec![provider],
+            PolicyEvaluationSupervisorConfig::default(),
+            None,
+        )
+        .unwrap(),
+    );
+    let bound = registry
+        .bind(
+            MobMemberBinding {
+                mob_id: "mob".to_string(),
+                role: "reader".to_string(),
+                member: "member".to_string(),
+            },
+            provider_id,
+            policy_id,
+        )
+        .unwrap();
+    let args = serde_json::value::RawValue::from_string(r#"{"path":"a.txt"}"#.into()).unwrap();
+    bound
+        .evaluate_with_witness(
+            meerkat_core::ToolCallView {
+                id: "read-call",
+                name: "read_file",
+                args: &args,
+            },
+            Some(meerkat_core::RunId::new()),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn allowed_witness_retains_actual_request_and_holds_owner_lock_through_publication() {
+    let provider = publication_provider();
+    let evaluation = allowed_evaluation(provider.clone(), provider.policy_id.clone()).await;
+    assert_eq!(evaluation.request().provider_id, provider.provider_id);
+    assert_eq!(evaluation.request().policy_id, provider.policy_id);
+    assert_eq!(evaluation.request().tool_name.as_str(), "read_file");
+    assert_eq!(evaluation.request().tool_call_id, "read-call");
+    assert_eq!(evaluation.request().arguments_json, r#"{"path":"a.txt"}"#);
+    assert!(evaluation.request().run_id.is_some());
+    assert_eq!(evaluation.generation(), PolicyProviderGeneration(3));
+    assert_eq!(evaluation.provenance().revision, PolicyRevision(7));
+    let result = evaluation
+        .publish_if_current(|| {
+            assert!(provider.state.try_write().is_err());
+            "actual-publication-result"
+        })
+        .unwrap();
+    assert_eq!(result, "actual-publication-result");
+    assert!(provider.state.try_write().is_ok());
+}
+
+#[tokio::test]
+async fn evaluated_policy_changes_each_refuse_publication_after_await() {
+    for change in 0..3 {
+        let provider = publication_provider();
+        let evaluation = allowed_evaluation(provider.clone(), provider.policy_id.clone()).await;
+        {
+            let mut current = provider.state.write().unwrap();
+            match change {
+                0 => current.generation = PolicyProviderGeneration(4),
+                1 => current.provenance.revision = PolicyRevision(8),
+                2 => {
+                    current.provenance.digest =
+                        PolicyDigest::from_canonical_bytes(b"same-revision-different-bytes");
+                }
+                _ => unreachable!(),
+            }
+        }
+        let mut invoked = false;
+        assert_eq!(
+            evaluation.publish_if_current(|| invoked = true),
+            Err(meerkat_core::PolicyPublicationError::NotCurrent)
+        );
+        assert!(!invoked);
+    }
+}
+
+#[tokio::test]
+async fn ordinary_policy_provider_without_publication_support_refuses_without_callback() {
+    let provider = Arc::new(MutableProvider {
+        provider_id: PolicyProviderId::new("ordinary-only").unwrap(),
+        provenance: RwLock::new(PolicyEvaluationProvenance {
+            revision: PolicyRevision(7),
+            digest: PolicyDigest::from_canonical_bytes(b"ordinary-only-v7"),
+        }),
+        accepted_revision: 7,
+    });
+    let evaluation = allowed_evaluation(provider, PolicyId::new("ordinary-policy").unwrap()).await;
+    let mut invoked = false;
+    assert_eq!(
+        evaluation.publish_if_current(|| invoked = true),
+        Err(meerkat_core::PolicyPublicationError::Unsupported)
+    );
+    assert!(!invoked);
+}
+
+struct InvalidPublicationProvider {
+    inner: Arc<PublicationProvider>,
+    invoke_then_refuse: bool,
+}
+
+impl ToolConsequenceNarrowingPolicy for InvalidPublicationProvider {
+    fn provider_id(&self) -> &PolicyProviderId {
+        self.inner.provider_id()
+    }
+
+    fn generation(&self) -> PolicyProviderGeneration {
+        self.inner.generation()
+    }
+
+    fn snapshot(
+        &self,
+        policy_id: &PolicyId,
+    ) -> Result<Arc<dyn ToolConsequencePolicySnapshot>, ToolConsequenceFailure> {
+        self.inner.snapshot(policy_id)
+    }
+
+    fn publish_if_current(
+        &self,
+        _policy_id: &PolicyId,
+        _generation: PolicyProviderGeneration,
+        _provenance: &PolicyEvaluationProvenance,
+        publication: Box<dyn FnOnce() + '_>,
+    ) -> Result<(), meerkat_core::PolicyPublicationError> {
+        if self.invoke_then_refuse {
+            publication();
+            Err(meerkat_core::PolicyPublicationError::NotCurrent)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn publication_provider_cannot_report_success_without_call_or_refusal_after_call() {
+    for invoke_then_refuse in [false, true] {
+        let inner = publication_provider();
+        let policy_id = inner.policy_id.clone();
+        let evaluation = allowed_evaluation(
+            Arc::new(InvalidPublicationProvider {
+                inner,
+                invoke_then_refuse,
+            }),
+            policy_id,
+        )
+        .await;
+        let mut invoked = false;
+        let error = evaluation
+            .publish_if_current(|| invoked = true)
+            .expect_err("provider contract violations cannot be accepted");
+        assert!(matches!(
+            error,
+            meerkat_core::PolicyPublicationError::ContractViolation { .. }
+        ));
+        assert_eq!(invoked, invoke_then_refuse);
+    }
+}

@@ -766,6 +766,24 @@ impl CopilotRoutedClient {
 
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
+    fn native_tool_policy_support(&self) -> meerkat_core::NativeToolPolicySupport {
+        self.prepared_route
+            .read()
+            .client
+            .native_tool_policy_support()
+    }
+
+    fn prepared_native_tool_policy_support(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<meerkat_core::NativeToolPolicySupport, meerkat_llm_core::LlmError> {
+        let prepared = request
+            .route_witness::<PreparedCopilotRoute>()
+            .ok_or_else(Self::missing_route_witness)?;
+        self.ensure_prepared_route_current(prepared)?;
+        Ok(prepared.client.native_tool_policy_support())
+    }
+
     fn project_replay_request(
         &self,
         messages: &[meerkat_core::Message],
@@ -837,6 +855,14 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         &'a self,
         request: &'a meerkat_llm_core::PreparedLlmRequest,
     ) -> meerkat_llm_core::LlmStream<'a> {
+        if request.scoped_model().is_some() {
+            return Box::pin(futures::stream::once(async {
+                Err(meerkat_llm_core::LlmError::InvalidRequest {
+                    message: "Copilot route does not yet retain scoped physical model custody"
+                        .into(),
+                })
+            }));
+        }
         let Some(prepared) = request.route_witness::<PreparedCopilotRoute>().cloned() else {
             return Box::pin(futures::stream::once(async {
                 Err(Self::missing_route_witness())

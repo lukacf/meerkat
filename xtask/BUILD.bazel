@@ -45,7 +45,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
     proc_macro_deps = all_crate_deps(
@@ -83,7 +83,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
     tags = [
@@ -144,7 +144,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "xtask",
         "CARGO_MANIFEST_DIR": "xtask",
     },
@@ -186,7 +186,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "buildbuddy_static_lanes",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -278,7 +278,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "ci_gate_requires_rmat",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -342,7 +342,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "effect_authority",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -421,7 +421,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "machines_contracts",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -491,7 +491,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "no_provider_data_in_core",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -556,7 +556,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "protocol_codegen_drift",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -675,7 +675,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "release_workflow_asset_manifest",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -742,7 +742,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "released_enum_ordinals",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -806,7 +806,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "rmat_audit",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -879,7 +879,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "rmat_strict",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -942,7 +942,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "runtime_authority_bypass",
         "CARGO_MANIFEST_DIR": "./xtask",
     },
@@ -1004,7 +1004,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_PKG_VERSION": "0.8.38",
         "CARGO_BIN_NAME": "seam_inventory_strict",
         "CARGO_MANIFEST_DIR": "./xtask",
     },

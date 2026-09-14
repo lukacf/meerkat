@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.38] - 2026-09-14
+
 ### Breaking
 
 - **Shared GPT Live broker vocabulary (`meerkat-openai`):**
@@ -10488,7 +10490,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.37...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.38...HEAD
+[0.8.38]: https://github.com/lukacf/meerkat/compare/v0.8.37...v0.8.38
 [0.8.37]: https://github.com/lukacf/meerkat/compare/v0.8.36...v0.8.37
 [0.8.36]: https://github.com/lukacf/meerkat/compare/v0.8.35...v0.8.36
 [0.8.35]: https://github.com/lukacf/meerkat/compare/v0.8.34...v0.8.35

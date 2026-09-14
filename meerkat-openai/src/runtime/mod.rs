@@ -1027,10 +1027,14 @@ mod tests {
                 entry.release_stage == meerkat_core::ModelReleaseStage::Stable
                     && registry
                         .profile_for_provider(Provider::OpenAI, &entry.id)
-                        .is_some_and(|profile| profile.realtime)
+                        .is_some_and(|profile| {
+                            // The Realtime WebSocket factory never serves the
+                            // gpt-live family; that is the public Live broker.
+                            profile.realtime && profile.model_family != GPT_LIVE_MODEL_FAMILY
+                        })
             })
             .map(|entry| entry.id.clone())
-            .expect("stable OpenAI realtime model");
+            .expect("stable OpenAI Realtime model");
         let identity = meerkat_core::SessionLlmIdentity {
             model: model.clone(),
             provider: Provider::OpenAI,
@@ -1395,6 +1399,49 @@ mod tests {
             err,
             ProviderClientError::MissingFeature("openai-realtime-authorizer-auth")
         ));
+    }
+
+    #[test]
+    fn realtime_session_factory_rejects_gpt_live_family_rows() {
+        let registry = meerkat_core::ModelRegistry::from_config(
+            &meerkat_core::Config::default(),
+            meerkat_models::canonical(),
+        )
+        .expect("canonical model registry");
+        let live_row = registry
+            .entries_for_provider(Provider::OpenAI)
+            .find(|entry| {
+                registry
+                    .profile_for_provider(Provider::OpenAI, &entry.id)
+                    .is_some_and(|profile| {
+                        profile.model_family == GPT_LIVE_MODEL_FAMILY
+                            && profile.release_stage == meerkat_core::ModelReleaseStage::Stable
+                    })
+            })
+            .map(|entry| entry.id.clone())
+            .expect("released gpt-live catalog row");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: live_row,
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let witness = registry
+            .profile_witness_for_provider(Provider::OpenAI, &identity.model)
+            .expect("gpt-live witness");
+        let connection = resolved_openai_connection();
+        let target = meerkat_llm_core::provider_runtime::ResolvedRealtimeTarget::new(
+            identity, witness, connection,
+        )
+        .expect("matching target");
+        let err = OpenAiProviderRuntime
+            .build_realtime_session_factory(target)
+            .err()
+            .expect("gpt-live rows never reach the Realtime WebSocket factory");
+        assert!(
+            matches!(err, ProviderClientError::ClientInit(message) if message.contains("gpt-live"))
+        );
     }
 
     #[test]

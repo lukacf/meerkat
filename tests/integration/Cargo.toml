@@ -89,6 +89,11 @@ path = "tests/gpt_live_client_e2e.rs"
 required-features = ["experimental-gpt-live-e2e"]
 
 [[test]]
+name = "gpt_live_public_e2e"
+path = "tests/gpt_live_public_e2e.rs"
+required-features = ["openai-live-e2e"]
+
+[[test]]
 name = "system_shared_realm"
 path = "tests/system_shared_realm.rs"
 

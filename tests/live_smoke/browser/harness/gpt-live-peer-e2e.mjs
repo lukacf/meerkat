@@ -7,8 +7,23 @@ import { chromium } from 'playwright';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.resolve(here, '..', 'fixtures', 'gpt_live_client');
+// Provider protocol observed on the `oai-events` data channel:
+// - `experimental`: deprecated private ChatGPT-brokered protocol (`turn.*`).
+// - `public`: public OpenAI Live API (`session.*`). The browser only applies
+//   the answer SDP; it never sends `session.start` on the data channel.
+const PROTOCOLS = new Set(['experimental', 'public']);
+const protocol = parseProtocol(process.argv.slice(2));
 let browser;
 let page;
+
+function parseProtocol(args) {
+  const index = args.indexOf('--protocol');
+  const value = index === -1 ? 'experimental' : args[index + 1];
+  if (!PROTOCOLS.has(value)) {
+    throw new Error(`unsupported --protocol ${JSON.stringify(value)}; expected experimental or public`);
+  }
+  return value;
+}
 
 function audioDataUrl(name) {
   return `data:audio/wav;base64,${fs.readFileSync(path.join(fixtureRoot, name)).toString('base64')}`;
@@ -25,7 +40,7 @@ async function prepare() {
     greeting: audioDataUrl('no-delegation-greeting.wav'),
     delegation: audioDataUrl('delegate-working-directory.wav'),
   };
-  const offerSdp = await page.evaluate(async ({ fixtures }) => {
+  const offerSdp = await page.evaluate(async ({ fixtures, protocol }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });
     const fixtureBuffers = {};
     for (const [name, fixture] of Object.entries(fixtures)) {
@@ -144,15 +159,21 @@ async function prepare() {
         return;
       }
       state.events.push(parsed);
-      if (parsed?.type === 'turn.created'
-        && parsed?.turn?.role === 'assistant'
-        && state.bargeIn.armedFixture) {
+      // Assistant-start boundary used to fire an armed barge-in. The private
+      // protocol announces assistant turns; the public Live API has no turn
+      // identifiers, so the first assistant output delta is the boundary.
+      const assistantStarted = protocol === 'public'
+        ? (parsed?.type === 'session.output_transcript.delta'
+          || parsed?.type === 'session.output_audio.delta')
+        : (parsed?.type === 'turn.created' && parsed?.turn?.role === 'assistant');
+      if (assistantStarted && state.bargeIn.armedFixture) {
         const fixtureName = state.bargeIn.armedFixture;
         state.bargeIn.armedFixture = null;
         try {
           await state.startFixture(fixtureName, false);
           state.bargeIn.starts.push({
-            assistant_turn_id: parsed.turn.id,
+            assistant_turn_id: protocol === 'public' ? null : parsed.turn.id,
+            assistant_event_type: parsed.type,
             event_count_at_start: state.events.length,
           });
         } catch {
@@ -171,8 +192,8 @@ async function prepare() {
       ]);
     }
     return peer.localDescription?.sdp;
-  }, { fixtures });
-  return { offer_sdp: offerSdp };
+  }, { fixtures, protocol });
+  return { offer_sdp: offerSdp, protocol };
 }
 
 async function answer(sdp) {
@@ -237,7 +258,7 @@ async function snapshot() {
       events: state.events,
       barge_in: state.bargeIn,
     };
-  });
+  }).then((snapshot) => ({ ...snapshot, protocol }));
 }
 
 async function close() {

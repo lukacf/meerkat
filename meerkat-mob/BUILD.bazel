@@ -566,7 +566,9 @@ rust_test(
     tags = [
         "live",
     ],
-    data = [],
+    data = [
+        "//tests/integration:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "33554432",
     },
@@ -3189,7 +3191,9 @@ rust_test(
         "fast",
     ],
     size = "small",
-    data = [],
+    data = [
+        "//tests/integration:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "33554432",
     },

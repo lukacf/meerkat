@@ -816,8 +816,25 @@ function needsPackageRunfiles(target) {
   ].some((needle) => source.includes(needle));
 }
 
+const PATH_INCLUDED_MODULE = /#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;/g;
+
+// Source text of a target's crate root plus the shared fixture modules it
+// includes through explicit `#[path = "..."]` attributes, so runfile needs
+// that live in a shared module still reach the including target's `data`.
+// Plain `mod name;` modules are not followed: they are package-local by
+// construction and the crate root already names their runfile needs.
+function targetScanSource(target) {
+  const rootSource = readFileSync(target.src_path, "utf8");
+  const sources = [rootSource];
+  for (const match of rootSource.matchAll(PATH_INCLUDED_MODULE)) {
+    const included = resolve(dirname(target.src_path), match[1]);
+    if (existsSync(included)) sources.push(readFileSync(included, "utf8"));
+  }
+  return sources.join("\n");
+}
+
 function workspaceDataLabels(target) {
-  const source = readFileSync(target.src_path, "utf8");
+  const source = targetScanSource(target);
   const labels = new Set();
   if (source.includes("workspace_root") || source.includes("rev-parse")) {
     labels.add("//:workspace_metadata");
@@ -1279,7 +1296,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    16, 21, 22, 23, 25, 26, 27, 28, 30, 31, 38, 39,`,
     `    43, 44, 47, 48, 49, 50, 51, 52, 53, 54, 71, 72,`,
     `    74, 76, 77, 79, 80, 82, 83, 84, 85, 86, 87, 88,`,
-    `    89, 90, 92, 93, 94, 96,`,
+    `    89, 90, 92, 93, 94, 96, 97,`,
     `]`,
     ``,
     `E2E_SMOKE_TURBO_S_SUITES = [`,
@@ -1317,6 +1334,8 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        srcs = ["scripts/buildbuddy-e2e-smoke-remote-test"],`,
     `        data = E2E_SMOKE_REMOTE_DATA + (`,
     `            ["//tests/integration:gpt_live_client_e2e_test"] if scenario == 96 else []`,
+    `        ) + (`,
+    `            ["//tests/integration:gpt_live_public_e2e_test"] if scenario == 97 else []`,
     `        ),`,
     `        env = dict(`,
     `            E2E_SMOKE_REMOTE_ENV,`,

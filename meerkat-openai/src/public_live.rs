@@ -865,7 +865,20 @@ fn map_live_error(error: LiveError) -> GptLiveBrokerError {
         | LiveError::Provider(_)
         | LiveError::SessionIdentityMismatch(_)
         | LiveError::ContinuityLost => GptLiveBrokerTerminalClass::Protocol,
-        LiveError::Http { .. } => GptLiveBrokerTerminalClass::Http,
+        LiveError::Http {
+            status, request_id, ..
+        } => {
+            // Operators otherwise see only a sanitized transport class; the
+            // status and request id carry no credential or content material
+            // and distinguish entitlement (403) from availability failures.
+            tracing::warn!(
+                status,
+                request_id = request_id.as_deref().unwrap_or("<none>"),
+                entitlement_hint = status == 403,
+                "public Live HTTP request was rejected by the provider"
+            );
+            GptLiveBrokerTerminalClass::Http
+        }
         LiveError::Transport(_)
         | LiveError::Timeout
         | LiveError::AmbiguousWrite

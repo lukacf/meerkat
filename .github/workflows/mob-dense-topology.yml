@@ -22,7 +22,10 @@ jobs:
   unit-archive:
     name: Build Mob unit-test archive
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A release commit bumps every workspace crate version, which invalidates
+    # all compiled workspace artifacts in sccache and the cargo cache; the
+    # archive then builds cold and needs well over 15 minutes.
+    timeout-minutes: 30
     env:
       RUSTC_WRAPPER: sccache
     steps:

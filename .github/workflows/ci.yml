@@ -76,7 +76,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MAX_SECONDS: "1200"
+          # 40 minutes: the GitHub-hosted Mob archive lane builds cold after a
+          # release commit (see mob-dense-topology.yml) and must still finish
+          # inside this budget on its first attempt.
+          MAX_SECONDS: "2400"
         run: |
           set -euo pipefail
           created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
@@ -91,7 +94,7 @@ jobs:
           )"
           echo "Push-to-full-CI terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
           if ((elapsed > MAX_SECONDS)); then
-            echo "::error::Full CI exceeded the 20-minute push-to-terminal SLO (${elapsed}s)."
+            echo "::error::Full CI exceeded the 40-minute push-to-terminal SLO (${elapsed}s)."
             exit 1
           fi
 

@@ -64,12 +64,12 @@ impl Drop for ExperimentalLiveRpcNotification {
     }
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 struct ExperimentalLiveRpcObservationPublisher {
     tx: mpsc::Sender<ExperimentalLiveRpcNotification>,
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 #[async_trait::async_trait]
 impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
     for ExperimentalLiveRpcObservationPublisher
@@ -932,7 +932,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let notification_sink = NotificationSink::new(notification_tx);
         let (experimental_live_notification_tx, experimental_live_notification_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        #[cfg(not(feature = "experimental-gpt-live"))]
+        #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -947,7 +947,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
         let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)
             .with_skill_runtime(skill_runtime);
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
                 tx: experimental_live_notification_tx,
@@ -1035,7 +1035,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     /// Install the host-owned strict execution-identity admission authority.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub fn with_experimental_live_open_authority(
         mut self,
         authority: Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
@@ -1064,7 +1064,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let notification_sink = NotificationSink::new(notification_tx);
         let (experimental_live_notification_tx, experimental_live_notification_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        #[cfg(not(feature = "experimental-gpt-live"))]
+        #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -1090,7 +1090,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             mob_state,
         )
         .with_skill_runtime(skill_runtime);
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
                 tx: experimental_live_notification_tx,
@@ -2376,7 +2376,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn test_experimental_live_open_response(
         request: &RpcRequest,
         request_permit: RpcRequestAdmissionPermit,
@@ -2397,7 +2397,7 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn test_experimental_live_open_request(id: i64) -> RpcRequest {
         RpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -2414,7 +2414,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn test_experimental_live_binding(
         channel: &str,
         generation: u64,
@@ -2428,7 +2428,7 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn test_experimental_live_notification(
         binding: meerkat_live::ProviderWebrtcBinding,
     ) -> (
@@ -2573,7 +2573,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_open_custody_waits_for_successful_response_write() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2625,7 +2625,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_open_write_failure_rejects_delivery_custody() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2655,7 +2655,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_open_connection_shutdown_rejects_queued_delivery_custody() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2687,7 +2687,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_output_custody_waits_for_actual_notification_write() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2744,7 +2744,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_output_write_failure_rejects_delivery_custody() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2766,7 +2766,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_output_connection_shutdown_rejects_queued_custody() {
         let temp = tempfile::tempdir().expect("test tempdir");
@@ -2792,7 +2792,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn experimental_live_output_stale_binding_is_rejected_before_write() {
         let temp = tempfile::tempdir().expect("test tempdir");

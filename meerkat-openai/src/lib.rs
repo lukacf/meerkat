@@ -17,6 +17,11 @@ pub mod client_compatible;
 pub mod gpt_live;
 #[cfg(all(
     not(target_arch = "wasm32"),
+    any(feature = "experimental-gpt-live", feature = "live")
+))]
+pub mod gpt_live_broker;
+#[cfg(all(
+    not(target_arch = "wasm32"),
     feature = "experimental-gpt-live-gate0-harness"
 ))]
 #[doc(hidden)]
@@ -24,6 +29,8 @@ pub mod gpt_live_gate0;
 pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
+#[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
+pub mod public_live;
 pub(crate) mod request_support;
 mod responses_output;
 pub mod runtime;
@@ -48,6 +55,11 @@ pub use image_generation::{
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use live::OpenAiLiveClient;
+#[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
+pub use public_live::{
+    GPT_LIVE_MODEL_FAMILY, PublicLiveBootstrap, PublicLiveBrokerFactory, PublicLiveBrokerSession,
+    PublicLiveOpenConfig,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "copilot"))]
 pub use runtime::OpenAiCopilotChatCompletionsClientFactory;
 pub use runtime::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};

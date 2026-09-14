@@ -6,7 +6,7 @@
 )]
 
 mod agent_tools;
-#[cfg(all(feature = "experimental-gpt-live", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
 mod public_mcp;

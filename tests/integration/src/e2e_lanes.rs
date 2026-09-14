@@ -219,6 +219,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s94_cli_shorthand_prompt, 94);
             scenario(e2e_smoke_s95_cli_slow_mcp_resume_journey, 95);
             scenario(e2e_smoke_s96_gpt_live_client_context_vertical, 96);
+            scenario(e2e_smoke_s97_gpt_live_public_client_context_vertical, 97);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -2509,6 +2510,9 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
         "meerkat-integration-tests:gpt_live_client_e2e" => {
             Ok("tests/integration/gpt_live_client_e2e_test")
         }
+        "meerkat-integration-tests:gpt_live_public_e2e" => {
+            Ok("tests/integration/gpt_live_public_e2e_test")
+        }
         "meerkat-comms:e2e" => Ok("meerkat-comms/e2e_test"),
         "meerkat-mob:smoke_mob_flow_runtime" => Ok("meerkat-mob/smoke_mob_flow_runtime_test"),
         "meerkat-mob:smoke_mob_generated_image_comms" => {
@@ -4110,6 +4114,32 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 test_target: "gpt_live_client_e2e",
                 test_name: "e2e_scenario_96_gpt_live_client_context_vertical",
                 features: &["experimental-gpt-live-e2e"],
+                all_features: false,
+            },
+        }),
+        97 => Some(&Spec {
+            id: Some(97),
+            lane: Lane::Smoke,
+            title: "GPT Live public client-context production delegation vertical",
+            timeout_secs: 1200,
+            // The public Live API is reached with a plain OpenAI API key; the
+            // realm binding sources it from the environment.
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            // Same production composition as scenario 96 in one libtest
+            // thread; the default 16 MiB test stack is insufficient.
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_97_gpt_live_public_client_context_vertical",
+                features: &["openai-live-e2e"],
                 all_features: false,
             },
         }),
@@ -6316,6 +6346,44 @@ mod tests {
             }
             _ => panic!("scenario 96 must remain one sequential Cargo test shard"),
         }
+    }
+
+    #[test]
+    fn gpt_live_public_client_context_smoke_is_one_api_key_shard() {
+        let spec = scenario_spec(97).expect("GPT Live public client-context scenario");
+        assert_eq!(spec.lane, Lane::Smoke);
+        assert_eq!(
+            spec.required_env,
+            &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]]
+        );
+        assert_eq!(spec.cwd, "tests/live_smoke/browser");
+        assert_eq!(spec.pre_commands, scenario_spec(96).unwrap().pre_commands);
+        match spec.command {
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                features,
+                all_features,
+            } => {
+                assert_eq!(package, "meerkat-integration-tests");
+                assert_eq!(test_target, "gpt_live_public_e2e");
+                assert_eq!(
+                    test_name,
+                    "e2e_scenario_97_gpt_live_public_client_context_vertical"
+                );
+                // The public path must never pull in the deprecated private
+                // broker or its operator/Gate0 admission.
+                assert_eq!(features, &["openai-live-e2e"]);
+                assert!(!all_features);
+            }
+            _ => panic!("scenario 97 must remain one sequential Cargo test shard"),
+        }
+        assert_eq!(
+            super::bazel_rust_test_relative("meerkat-integration-tests:gpt_live_public_e2e")
+                .unwrap(),
+            "tests/integration/gpt_live_public_e2e_test"
+        );
     }
 
     #[test]

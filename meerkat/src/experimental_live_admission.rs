@@ -18,7 +18,7 @@ use thiserror::Error;
 
 pub const GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID: &str = "openai.gpt-live-1-codex.function-bridge.v1";
 pub const GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID: &str = "openai.gpt-live-1-codex.client-context.v1";
-const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
+pub(crate) const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
     "You are the low-latency voice layer for a Meerkat executor. ",
     "Delegate requests that need tools, files, current information, or extended reasoning to the client executor. ",
     "Treat returned executor context as authoritative, present it naturally, and never expose the internal split."

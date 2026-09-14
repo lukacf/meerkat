@@ -62,11 +62,17 @@ openai-realtime = ["meerkat/openai-realtime", "meerkat-client/openai-realtime"]
 schedule = ["meerkat/schedule"]
 workgraph = ["meerkat/workgraph"]
 live-webrtc = ["meerkat-live/webrtc", "meerkat/live-webrtc"]
-experimental-gpt-live = [
-    "meerkat/experimental-gpt-live",
-    "meerkat-mob-mcp/experimental-gpt-live",
+openai-live = [
+    "meerkat/openai-live",
+    "meerkat-mob-mcp/openai-live",
     "live-webrtc",
     "mob",
+]
+# DEPRECATED: private GPT Live protocol on top of the public machinery.
+experimental-gpt-live = [
+    "openai-live",
+    "meerkat/experimental-gpt-live",
+    "meerkat-mob-mcp/experimental-gpt-live",
 ]
 
 [dev-dependencies]

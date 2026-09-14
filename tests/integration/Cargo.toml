@@ -52,7 +52,13 @@ uuid = { workspace = true, features = ["v4"] }
 
 [features]
 integration-real-tests = []
+openai-live-e2e = [
+    "meerkat/openai-live",
+    "meerkat-mob-mcp/openai-live",
+    "meerkat-rpc/openai-live",
+]
 experimental-gpt-live-e2e = [
+    "openai-live-e2e",
     "meerkat/experimental-gpt-live",
     "meerkat-mob-mcp/experimental-gpt-live",
     "meerkat-rpc/experimental-gpt-live",
@@ -81,6 +87,11 @@ path = "tests/smoke_shared_realm.rs"
 name = "gpt_live_client_e2e"
 path = "tests/gpt_live_client_e2e.rs"
 required-features = ["experimental-gpt-live-e2e"]
+
+[[test]]
+name = "gpt_live_public_e2e"
+path = "tests/gpt_live_public_e2e.rs"
+required-features = ["openai-live-e2e"]
 
 [[test]]
 name = "system_shared_realm"

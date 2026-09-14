@@ -1,27 +1,24 @@
 #![cfg(all(feature = "experimental-gpt-live-e2e", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+#[path = "support/gpt_live_e2e.rs"]
+mod support;
+
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveOpenAuthorityConfig,
-    ExperimentalGptLiveWebrtcTransport, ExperimentalLiveCurrentConfigSource,
-    ExperimentalLiveOpenAuthorityError, ExperimentalLiveSessionBindingAuthority,
-    ExperimentalLiveSessionBindingAuthorization,
+    ExperimentalGptLiveWebrtcTransport,
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
-    ActingOnBehalfOf, AuthBindingRef, AuthBindingUseRequest, AuthGrant, BackendProfileConfig,
-    BindingId, BindingOrigin, BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore,
-    CredentialSourceSpec, GrantAction, GrantScope, MemoryConfigStore, PrincipalKind, PrincipalRef,
+    AuthBindingRef, BackendProfileConfig, BindingId, BindingOrigin, BindingPolicy, BlobStore,
+    Config, ConfigRuntime, ConfigStore, CredentialSourceSpec, MemoryConfigStore,
     ProviderBindingConfig, RealmConfigSection, RealmId,
 };
-use meerkat_mob_mcp::MobMcpState;
 use meerkat_providers::auth_store::{
     FileTokenStore, InMemoryCoordinator, PersistedAuthMode, PersistedTokens,
     ProviderAuthPersistence, TokenKey, TokenStore,
@@ -31,31 +28,20 @@ use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::BufReader;
 use tokio::time::{Duration, Instant, sleep, timeout};
+
+use support::{
+    BrowserPeer, BrowserPeerProtocol, ExplicitScenarioBindingAuthority, FixedConfigSource,
+    JsonlRpcClient, delegated_executor_diagnostic, execution_identity, wait_for_events,
+    wait_for_spoken_output,
+};
 
 const REALM: &str = "scenario-96-gpt-live-client";
 const BINDING: &str = "openai_oauth";
 const CLIENT_PROFILE: &str = "openai.gpt-live-1-codex.client-context.v1";
 const FUNCTION_BRIDGE_PROFILE: &str = "openai.gpt-live-1-codex.function-bridge.v1";
 const MIN_TTL_SECS: i64 = 5 * 60;
-
-fn workspace_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("MEERKAT_WORKSPACE_ROOT") {
-        return PathBuf::from(root);
-    }
-
-    let current_dir = std::env::current_dir().expect("current directory");
-    current_dir
-        .ancestors()
-        .find(|candidate| {
-            candidate.join("Cargo.toml").is_file()
-                && candidate.join("tests/live_smoke/browser").is_dir()
-        })
-        .expect("Meerkat workspace root")
-        .to_path_buf()
-}
 
 fn auth_binding() -> AuthBindingRef {
     AuthBindingRef {
@@ -183,482 +169,6 @@ fn scenario_config() -> Config {
     config
 }
 
-#[derive(Clone)]
-struct FixedConfigSource(Config);
-
-#[async_trait]
-impl ExperimentalLiveCurrentConfigSource for FixedConfigSource {
-    async fn current_config(&self) -> Result<Config, meerkat_core::ConfigError> {
-        Ok(self.0.clone())
-    }
-}
-
-struct ExplicitScenarioBindingAuthority {
-    session_id: meerkat_core::SessionId,
-    binding: AuthBindingRef,
-    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
-    mobs: Arc<MobMcpState>,
-}
-
-#[async_trait]
-impl ExperimentalLiveSessionBindingAuthority for ExplicitScenarioBindingAuthority {
-    async fn validate_live_durable_source_availability(
-        &self,
-        session_id: &meerkat_core::SessionId,
-    ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
-        if session_id != &self.session_id {
-            return Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable);
-        }
-        let owner = self
-            .mobs
-            .live_member_owner(session_id)
-            .await
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable)?;
-        owner
-            .is_some()
-            .then_some(())
-            .ok_or(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable)
-    }
-
-    async fn authorize_binding_use(
-        &self,
-        session_id: &meerkat_core::SessionId,
-        selected: &AuthBindingRef,
-    ) -> Result<ExperimentalLiveSessionBindingAuthorization, ExperimentalLiveOpenAuthorityError>
-    {
-        if session_id != &self.session_id || selected != &self.binding {
-            return Err(ExperimentalLiveOpenAuthorityError::BindingUseDenied);
-        }
-        let principal = PrincipalRef::new(PrincipalKind::Human, "scenario-96-operator")
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::AccessDenied)?;
-        let durable_target = PrincipalRef::new(PrincipalKind::PersonalAgent, "voice-executor")
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::AccessDenied)?;
-        let request =
-            AuthBindingUseRequest::new(principal.clone(), durable_target.clone(), selected.clone());
-        let grant = AuthGrant {
-            principal: principal.clone(),
-            scope: GrantScope::AuthBinding {
-                realm_id: selected.realm.clone(),
-                binding_id: selected.binding.clone(),
-                profile_id: selected.profile.clone(),
-            },
-            actions: BTreeSet::from([GrantAction::UseAuthBinding]),
-            acting_on_behalf_of: Some(ActingOnBehalfOf::new(principal, durable_target)),
-        };
-        let witness = meerkat_core::authorize_explicit_auth_binding_use(&request, &[grant])
-            .into_result()
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::AccessDenied)?;
-        Ok(
-            ExperimentalLiveSessionBindingAuthorization::from_machine_authority(
-                witness,
-                self.auth_lease.clone(),
-            ),
-        )
-    }
-}
-
-struct JsonlRpcClient {
-    reader: BufReader<ReadHalf<DuplexStream>>,
-    writer: WriteHalf<DuplexStream>,
-    next_id: i64,
-    notifications: VecDeque<Value>,
-}
-
-impl JsonlRpcClient {
-    fn new(stream: DuplexStream) -> Self {
-        let (reader, writer) = tokio::io::split(stream);
-        Self {
-            reader: BufReader::new(reader),
-            writer,
-            next_id: 1,
-            notifications: VecDeque::new(),
-        }
-    }
-
-    async fn call_raw(
-        &mut self,
-        method: &str,
-        params: Value,
-        timeout_secs: u64,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let request = json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params});
-        self.writer
-            .write_all(request.to_string().as_bytes())
-            .await?;
-        self.writer.write_all(b"\n").await?;
-        self.writer.flush().await?;
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        loop {
-            let mut line = String::new();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if timeout(remaining, self.reader.read_line(&mut line)).await?? == 0 {
-                return Err("RPC server closed".into());
-            }
-            let message: Value = serde_json::from_str(line.trim())?;
-            if message["id"].as_i64() != Some(id) {
-                if message["method"].is_string() {
-                    self.notifications.push_back(message);
-                }
-                continue;
-            }
-            return Ok(message);
-        }
-    }
-
-    async fn wait_for_notification(
-        &mut self,
-        method: &str,
-        timeout_secs: u64,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-        if let Some(index) = self
-            .notifications
-            .iter()
-            .position(|message| message["method"].as_str() == Some(method))
-        {
-            return Ok(self
-                .notifications
-                .remove(index)
-                .expect("indexed notification exists")["params"]
-                .clone());
-        }
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        loop {
-            let mut line = String::new();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if timeout(remaining, self.reader.read_line(&mut line)).await?? == 0 {
-                return Err("RPC server closed while awaiting notification".into());
-            }
-            let message: Value = serde_json::from_str(line.trim())?;
-            if message["method"].as_str() == Some(method) {
-                return Ok(message["params"].clone());
-            }
-            if message["method"].is_string() {
-                self.notifications.push_back(message);
-            }
-        }
-    }
-
-    async fn call(
-        &mut self,
-        method: &str,
-        params: Value,
-        timeout_secs: u64,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-        let response = self.call_raw(method, params, timeout_secs).await?;
-        if !response["error"].is_null() {
-            let code = response["error"]["code"].as_i64().unwrap_or_default();
-            let message = response["error"]["message"]
-                .as_str()
-                .unwrap_or("unspecified RPC error");
-            return Err(format!("RPC {method} failed with code {code}: {message}").into());
-        }
-        Ok(response["result"].clone())
-    }
-}
-
-struct BrowserPeer {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
-    last_raw_messages: u64,
-    last_parse_failures: u64,
-}
-
-impl BrowserPeer {
-    async fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let browser_root = workspace_root().join("tests/live_smoke/browser");
-        let script = browser_root.join("harness/gpt-live-peer-e2e.mjs");
-        let node = [
-            std::env::var_os("MEERKAT_E2E_LINUX_NODE_BIN"),
-            std::env::var_os("MEERKAT_E2E_DARWIN_NODE_BIN"),
-        ]
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from("node"));
-        let mut child = Command::new(node)
-            .current_dir(browser_root)
-            .arg(script)
-            .env_remove("MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let stdin = child.stdin.take().ok_or("missing peer stdin")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("missing peer stdout")?);
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
-            next_id: 1,
-            last_raw_messages: 0,
-            last_parse_failures: 0,
-        })
-    }
-
-    async fn call(&mut self, command: Value) -> Result<Value, Box<dyn std::error::Error>> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let mut command = command;
-        command["id"] = json!(id);
-        self.stdin.write_all(command.to_string().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
-        let mut line = String::new();
-        timeout(Duration::from_secs(120), self.stdout.read_line(&mut line)).await??;
-        let response: Value = serde_json::from_str(line.trim())?;
-        if response["id"].as_u64() != Some(id) {
-            return Err("browser peer response id mismatch".into());
-        }
-        if let Some(error) = response["error"].as_str() {
-            return Err(format!("browser peer failed: {error}").into());
-        }
-        Ok(response["result"].clone())
-    }
-
-    async fn snapshot(&mut self) -> Result<Value, Box<dyn std::error::Error>> {
-        self.call(json!({"type":"snapshot"})).await
-    }
-
-    async fn events(&mut self) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-        let snapshot = self.snapshot().await?;
-        self.last_raw_messages = snapshot["event_transport"]["rawMessages"]
-            .as_u64()
-            .unwrap_or(0);
-        self.last_parse_failures = snapshot["event_transport"]["parseFailures"]
-            .as_u64()
-            .unwrap_or(0);
-        Ok(snapshot["events"].as_array().cloned().unwrap_or_default())
-    }
-
-    async fn audio_evidence(&mut self) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
-        let snapshot = self.snapshot().await?;
-        let audio = &snapshot["audio"];
-        Ok(AudioEvidence {
-            decoded_non_silent_frames: audio["decoded_non_silent_frames"].as_u64().unwrap_or(0),
-            non_silent_frames: audio["non_silent_frames"].as_u64().unwrap_or(0),
-            total_audio_energy: audio["total_audio_energy"].as_f64().unwrap_or(0.0),
-            total_samples_received: audio["total_samples_received"].as_u64().unwrap_or(0),
-        })
-    }
-
-    async fn close(mut self) {
-        let _ = self.call(json!({"type":"close"})).await;
-        let _ = self.child.kill().await;
-    }
-}
-
-#[derive(Clone, Copy)]
-struct AudioEvidence {
-    decoded_non_silent_frames: u64,
-    non_silent_frames: u64,
-    total_audio_energy: f64,
-    total_samples_received: u64,
-}
-
-async fn wait_for_spoken_output(
-    peer: &mut BrowserPeer,
-    baseline: AudioEvidence,
-    timeout_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    const REQUIRED_NEW_FRAMES: u64 = 2;
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        let snapshot = peer.snapshot().await?;
-        let audio = &snapshot["audio"];
-        let non_silent_frames = audio["non_silent_frames"].as_u64().unwrap_or(0);
-        let decoded_non_silent_frames = audio["decoded_non_silent_frames"].as_u64().unwrap_or(0);
-        let total_audio_energy = audio["total_audio_energy"].as_f64().unwrap_or(0.0);
-        let total_samples_received = audio["total_samples_received"].as_u64().unwrap_or(0);
-        if decoded_non_silent_frames > baseline.decoded_non_silent_frames
-            || non_silent_frames.saturating_sub(baseline.non_silent_frames) >= REQUIRED_NEW_FRAMES
-            || (total_audio_energy > baseline.total_audio_energy
-                && total_samples_received > baseline.total_samples_received)
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let sampled_frames = audio["sampled_frames"].as_u64().unwrap_or(0);
-            let max_rms = audio["max_rms"].as_f64().unwrap_or(0.0);
-            let decoded_frames = audio["decoded_frames"].as_u64().unwrap_or(0);
-            let max_decoded_rms = audio["max_decoded_rms"].as_f64().unwrap_or(0.0);
-            let processor_supported = audio["processor_supported"].as_bool().unwrap_or(false);
-            let processor_errors = audio["processor_errors"].as_u64().unwrap_or(0);
-            let bytes_received = audio["bytes_received"].as_u64().unwrap_or(0);
-            let packets_received = audio["packets_received"].as_u64().unwrap_or(0);
-            return Err(format!(
-                "timed out waiting for spoken output; decoded_frames={decoded_frames}, decoded_non_silent_frames={decoded_non_silent_frames}, max_decoded_rms={max_decoded_rms:.6}, processor_supported={processor_supported}, processor_errors={processor_errors}, sampled_frames={sampled_frames}, non_silent_frames={non_silent_frames}, max_rms={max_rms:.6}, bytes_received={bytes_received}, packets_received={packets_received}, total_audio_energy={total_audio_energy:.6}, total_samples_received={total_samples_received}"
-            )
-            .into());
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn wait_for_events<F>(
-    peer: &mut BrowserPeer,
-    timeout_secs: u64,
-    predicate: F,
-) -> Result<Vec<Value>, Box<dyn std::error::Error>>
-where
-    F: Fn(&[Value]) -> bool,
-{
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        let events = peer.events().await?;
-        if predicate(&events) {
-            return Ok(events);
-        }
-        if Instant::now() >= deadline {
-            let event_summary = browser_event_summary(&events);
-            return Err(format!(
-                "timed out waiting for provider events; raw_messages={}, parse_failures={}, {event_summary}",
-                peer.last_raw_messages,
-                peer.last_parse_failures
-            )
-            .into());
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-}
-
-fn browser_event_kind_class(event: &Value) -> &'static str {
-    match event.get("type").and_then(Value::as_str) {
-        Some("session.started") => "session.started",
-        Some("session.context.appended") => "session.context.appended",
-        Some("input_transcript.added") => "input_transcript.added",
-        Some("output_transcript.added") => "output_transcript.added",
-        Some("turn.created") => "turn.created",
-        Some("turn.delta") => "turn.delta",
-        Some("turn.done") => "turn.done",
-        Some("delegation.created") => "delegation.created",
-        Some("delegation.context.appended") => "delegation.context.appended",
-        _ => "unknown",
-    }
-}
-
-fn browser_event_summary(events: &[Value]) -> String {
-    let mut kind_counts = std::collections::BTreeMap::<&'static str, usize>::new();
-    let mut normalized_json_bytes = 0usize;
-    for event in events {
-        *kind_counts
-            .entry(browser_event_kind_class(event))
-            .or_default() += 1;
-        normalized_json_bytes = normalized_json_bytes
-            .saturating_add(serde_json::to_vec(event).map_or(0, |encoded| encoded.len()));
-    }
-    format!(
-        "observed {} events across {} safe classes with normalized_json_bytes={normalized_json_bytes}: {kind_counts:?}",
-        events.len(),
-        kind_counts.len()
-    )
-}
-
-#[cfg(test)]
-mod browser_event_summary_tests {
-    use super::browser_event_summary;
-
-    #[test]
-    fn unknown_event_kinds_and_payloads_are_not_rendered() {
-        let events = vec![
-            serde_json::json!({
-                "type": "FIXTURE_PRIVATE_UNKNOWN_KIND",
-                "secret": "FIXTURE_PRIVATE_BROWSER_PAYLOAD"
-            }),
-            serde_json::json!({
-                "type": "turn.done",
-                "turn": { "transcript": "FIXTURE_PRIVATE_TRANSCRIPT" }
-            }),
-        ];
-
-        let summary = browser_event_summary(&events);
-        assert!(summary.contains("unknown"));
-        assert!(summary.contains("turn.done"));
-        assert!(!summary.contains("FIXTURE_PRIVATE_UNKNOWN_KIND"));
-        assert!(!summary.contains("FIXTURE_PRIVATE_BROWSER_PAYLOAD"));
-        assert!(!summary.contains("FIXTURE_PRIVATE_TRANSCRIPT"));
-    }
-}
-
-async fn delegated_executor_diagnostic(rpc: &mut JsonlRpcClient, mob_id: &str) -> String {
-    let roster = match rpc.call("mob/members", json!({"mob_id":mob_id}), 30).await {
-        Ok(roster) => roster,
-        Err(error) => return format!("roster_error={error}"),
-    };
-    let Some(worker) = roster["members"].as_array().and_then(|members| {
-        members.iter().find(|member| {
-            member["agent_identity"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("live-delegation-"))
-        })
-    }) else {
-        return "worker=absent".to_string();
-    };
-    let Some(identity) = worker["agent_identity"].as_str() else {
-        return "worker=present identity=invalid".to_string();
-    };
-    let status = match rpc
-        .call(
-            "mob/member_status",
-            json!({"mob_id":mob_id,"agent_identity":identity}),
-            30,
-        )
-        .await
-    {
-        Ok(status) => status,
-        Err(error) => return format!("worker={identity} status_error={error}"),
-    };
-    let history = match rpc
-        .call(
-            "mob/member_history",
-            json!({"mob_id":mob_id,"agent_identity":identity,"from_index":0,"limit":200}),
-            30,
-        )
-        .await
-    {
-        Ok(history) => history,
-        Err(error) => return format!("worker={identity} history_error={error}"),
-    };
-    let mut role_counts = BTreeMap::<String, usize>::new();
-    let mut has_tool_result = false;
-    let mut has_assistant_final = false;
-    if let Some(messages) = history.pointer("/page/messages").and_then(Value::as_array) {
-        for message in messages {
-            let role = message
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("<unknown>");
-            *role_counts.entry(role.to_string()).or_default() += 1;
-            has_tool_result |= role == "tool_results";
-            has_assistant_final |= role == "assistant";
-        }
-    }
-    format!(
-        "worker={identity} status={} is_final={} run_state={} in_flight={} last_progress={} health={} role_counts={role_counts:?} has_tool_result={has_tool_result} has_assistant_final={has_assistant_final}",
-        status["status"].as_str().unwrap_or("<unknown>"),
-        status["is_final"].as_bool().unwrap_or(false),
-        status["progress"]["run_state"]
-            .as_str()
-            .unwrap_or("<unknown>"),
-        status["progress"]["in_flight_work"].as_u64().unwrap_or(0),
-        status["progress"]["last_progress_event"]
-            .as_str()
-            .unwrap_or("<unknown>"),
-        status["progress"]["health"].as_str().unwrap_or("<unknown>"),
-    )
-}
-
-fn execution_identity(profile_id: &str) -> Value {
-    json!({
-        "version":"v1",
-        "profile_id":profile_id
-    })
-}
-
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dyn std::error::Error>>
@@ -670,13 +180,9 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         .with_test_writer()
         .try_init();
     let tokens = required_tokens()?;
-    let test_tmp_root = std::env::var_os("TEST_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&test_tmp_root)?;
     let temp = tempfile::Builder::new()
         .prefix("gpt-live-client-e2e-")
-        .tempdir_in(test_tmp_root)?;
+        .tempdir_in(support::test_tmp_root()?)?;
     let config = scenario_config();
     let binding = auth_binding();
     let token_store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(
@@ -821,6 +327,7 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
                 binding: binding.clone(),
                 auth_lease: runtime.generated_auth_lease_handle(),
                 mobs: Arc::clone(&mobs),
+                principal_id: "scenario-96-operator",
             }),
             execution_identity: meerkat_core::SessionLlmIdentity {
                 model: "gpt-live-1-codex".to_string(),
@@ -902,7 +409,7 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
         )
         .await?;
 
-    let mut peer = BrowserPeer::start().await?;
+    let mut peer = BrowserPeer::start(BrowserPeerProtocol::Experimental).await?;
     let offer = peer.call(json!({"type":"prepare"})).await?;
     let answer = rpc
         .call(
@@ -1024,7 +531,7 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
             .iter()
             .any(|event| event["type"] == "delegation.created"),
         "simple greeting must remain in the same live conversation; {}",
-        browser_event_summary(&greeting[before..])
+        peer.event_summary(&greeting[before..])
     );
 
     let before = greeting.len();
@@ -1090,7 +597,10 @@ async fn e2e_scenario_96_gpt_live_client_context_vertical() -> Result<(), Box<dy
                 delegated_executor_diagnostic(&mut rpc, &mob_id),
             )
             .await
-            .unwrap_or_else(|_| "diagnostic=timed_out".to_string());
+            .map_or_else(
+                |_| "diagnostic=timed_out".to_string(),
+                |diagnostic| diagnostic.to_string(),
+            );
             return Err(format!(
                 "timed out waiting for delegation context append; {executor_diagnostic}"
             )

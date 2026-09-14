@@ -10,13 +10,13 @@
 //! facade pipeline. `live/webrtc/answer` (signaling) stays RPC-only by
 //! design (DL9) and keeps its machine-reaching helpers here.
 
-#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "live-webrtc")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use meerkat::experimental_gpt_live::{
     ExperimentalLiveOpenAuthorityError, ExperimentalLiveOpenAuthorityProvider,
 };
@@ -800,15 +800,15 @@ pub struct LiveOpenHandlerContext<'a> {
     pub session_factory: Option<&'a dyn RealtimeSessionFactory>,
     /// Host-owned authority for strict channel-scoped execution identity.
     /// Absence is fail-closed and is the stock composition.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub experimental_live_open_authority:
         Option<&'a Arc<dyn ExperimentalLiveOpenAuthorityProvider>>,
     /// Opaque pending/readiness receipts retained by this RPC connection.
-    #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+    #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
     pub experimental_live_playback_custodies: &'a ExperimentalLivePlaybackCustodies,
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 fn experimental_live_open_authority_error_response(
     id: Option<RpcId>,
     authority_error: ExperimentalLiveOpenAuthorityError,
@@ -828,7 +828,7 @@ fn experimental_live_open_authority_error_response(
     RpcResponse::error(id, code, authority_error.to_string())
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 fn experimental_live_channel_open_error_response(
     id: Option<RpcId>,
     open_error: meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError,
@@ -865,7 +865,7 @@ fn experimental_live_channel_open_error_response(
     }
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 pub(crate) struct ExperimentalLiveOpenPublication {
     pub(crate) session_id: SessionId,
     pub(crate) channel_id: LiveChannelId,
@@ -876,7 +876,7 @@ pub(crate) struct ExperimentalLiveOpenPublication {
 /// one strict experimental channel. This is transport mechanics only: the
 /// generated machine remains the sole owner of pending phase and playback
 /// readiness, and every use revalidates these receipts against that authority.
-#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct ExperimentalLivePlaybackCustody {
@@ -885,12 +885,12 @@ pub struct ExperimentalLivePlaybackCustody {
     pub(crate) readiness_receipt: String,
 }
 
-#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
 #[doc(hidden)]
 pub type ExperimentalLivePlaybackCustodies =
     Arc<tokio::sync::Mutex<HashMap<LiveChannelId, ExperimentalLivePlaybackCustody>>>;
 
-#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
 async fn register_experimental_live_playback_custody(
     runtime: &SessionRuntime,
     pending: &meerkat::surface::ExperimentalLivePendingChannel,
@@ -923,7 +923,7 @@ async fn register_experimental_live_playback_custody(
     Ok(())
 }
 
-#[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+#[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
 async fn validate_experimental_live_playback_custody_before_answer(
     runtime: &SessionRuntime,
     channel_id: &LiveChannelId,
@@ -983,7 +983,7 @@ async fn validate_experimental_live_playback_custody_before_answer(
 
 pub(crate) struct LiveOpenHandlerResult {
     pub(crate) response: RpcResponse,
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub(crate) experimental_publication: Option<ExperimentalLiveOpenPublication>,
 }
 
@@ -991,7 +991,7 @@ impl From<RpcResponse> for LiveOpenHandlerResult {
     fn from(response: RpcResponse) -> Self {
         Self {
             response,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_publication: None,
         }
     }
@@ -1018,16 +1018,16 @@ pub(crate) async fn handle_live_open_routed(
         live_webrtc,
         runtime,
         session_factory,
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         experimental_live_open_authority,
-        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+        #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
         experimental_live_playback_custodies,
     } = ctx;
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.into(),
     };
-    #[cfg(not(feature = "experimental-gpt-live"))]
+    #[cfg(not(feature = "openai-live"))]
     if parsed.execution_identity.is_some() {
         return RpcResponse::error(
             id,
@@ -1040,7 +1040,7 @@ pub(crate) async fn handle_live_open_routed(
         .into();
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     if parsed.execution_identity.is_some() && experimental_live_open_authority.is_none() {
         return RpcResponse::error(
             id,
@@ -1074,7 +1074,7 @@ pub(crate) async fn handle_live_open_routed(
         Err(response) => return (*response).into(),
     };
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     if let Some(execution_identity) = parsed.execution_identity.as_ref() {
         let Some(authority) = experimental_live_open_authority else {
             return RpcResponse::error(
@@ -1220,17 +1220,17 @@ pub(crate) async fn handle_live_webrtc_answer(
     params: Option<&serde_json::value::RawValue>,
     answer_transport: &Arc<dyn LiveWebrtcAnswerTransport>,
     runtime: &Arc<SessionRuntime>,
-    #[cfg(feature = "experimental-gpt-live")] experimental_live_open_authority: Option<
+    #[cfg(feature = "openai-live")] experimental_live_open_authority: Option<
         &dyn ExperimentalLiveOpenAuthorityProvider,
     >,
-    #[cfg(feature = "experimental-gpt-live")] bound_channel_activator: Option<
+    #[cfg(feature = "openai-live")] bound_channel_activator: Option<
         Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator>,
     >,
-    #[cfg(feature = "experimental-gpt-live")] public_observation_publisher: Option<
+    #[cfg(feature = "openai-live")] public_observation_publisher: Option<
         Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>,
     >,
-    #[cfg(feature = "experimental-gpt-live")] live_adapter_host: &Arc<LiveAdapterHost>,
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")] live_adapter_host: &Arc<LiveAdapterHost>,
+    #[cfg(feature = "openai-live")]
     experimental_live_playback_custodies: &ExperimentalLivePlaybackCustodies,
 ) -> LiveWebrtcAnswerHandlerResult {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
@@ -1238,7 +1238,7 @@ pub(crate) async fn handle_live_webrtc_answer(
         Err(response) => return response.into(),
     };
     let channel_id = LiveChannelId::new(parsed.channel_id);
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     if let Err(error) = validate_experimental_live_playback_custody_before_answer(
         runtime,
         &channel_id,
@@ -1252,7 +1252,7 @@ pub(crate) async fn handle_live_webrtc_answer(
     let coordinated = meerkat::surface::coordinate_live_webrtc_answer(
         runtime.runtime_adapter(),
         Arc::clone(answer_transport),
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         experimental_live_open_authority.and_then(|authority| {
             authority.bound_ready_binder_for(
                 bound_channel_activator?,
@@ -1260,7 +1260,7 @@ pub(crate) async fn handle_live_webrtc_answer(
                 public_observation_publisher?,
             )
         }),
-        #[cfg(not(feature = "experimental-gpt-live"))]
+        #[cfg(not(feature = "openai-live"))]
         None,
         channel_id.clone(),
         parsed.token,
@@ -1708,7 +1708,7 @@ pub async fn handle_live_close(
     host: &LiveAdapterHost,
     runtime: &Arc<SessionRuntime>,
     #[cfg(feature = "live-webrtc")] answer_transport: Option<&dyn LiveWebrtcAnswerTransport>,
-    #[cfg(feature = "experimental-gpt-live")] experimental_live_open_authority: Option<
+    #[cfg(feature = "openai-live")] experimental_live_open_authority: Option<
         &dyn ExperimentalLiveOpenAuthorityProvider,
     >,
 ) -> RpcResponse {
@@ -1723,11 +1723,11 @@ pub async fn handle_live_close(
     // answer could publish one before the semantic close committed.
     #[cfg(feature = "live-webrtc")]
     let webrtc_close_authority = if answer_transport.is_some() || {
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         {
             experimental_live_open_authority.is_some()
         }
-        #[cfg(not(feature = "experimental-gpt-live"))]
+        #[cfg(not(feature = "openai-live"))]
         {
             false
         }
@@ -1838,7 +1838,7 @@ pub async fn handle_live_close(
 
     match runtime.close_live_channel(host, &channel_id).await {
         Ok(result) => {
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             if let (Some(authority), Some((session_id, _lease))) = (
                 experimental_live_open_authority,
                 webrtc_close_authority.as_ref(),

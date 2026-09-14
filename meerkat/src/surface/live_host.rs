@@ -21,10 +21,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_contracts::wire::supervisor_bridge::{BridgeLiveControlOutcome, BridgeLiveControlVerb};
 use meerkat_contracts::{LiveCloseStatus, LiveOpenResult, LiveOpenTransport, RealtimeTurningMode};
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use meerkat_contracts::{WireLiveExecutionIdentityOverrideV1, WireLiveExecutionIdentityVersion};
 use meerkat_core::connection::RealmId;
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use meerkat_core::live_adapter::LiveInputChunk;
 use meerkat_core::types::SessionId;
 use meerkat_live::{LiveAdapterHost, LiveChannelId, LiveWsState};
@@ -39,16 +39,16 @@ use meerkat_runtime::member_live::{
     MEMBER_LIVE_OPEN_CEILING, MemberLiveError, MemberLiveHost, MemberLiveStatus,
 };
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use crate::experimental_gpt_live::{
     ExperimentalLiveOpenAuthorityError, ExperimentalLivePhysicalClose,
 };
 use crate::service_factory::FactoryAgentBuilder;
 use crate::session_runtime::admission::StagedCapacityAdmissions;
 use crate::session_runtime::errors::{LiveChannelVerbError, LiveIngressError, LiveOpenError};
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use crate::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 use crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel;
 use crate::session_runtime::live_orchestration::{
     LiveOrchestrator, LiveSeedWindow, LiveSessionIngressReconciler, LiveTransportContext,
@@ -61,7 +61,7 @@ use crate::{PersistentSessionService, SessionAgentBuilder, StagedSessionRegistry
 /// ambiguous experimental-live delivery. The variant is the only exposed
 /// reason; result content, digests, provider identifiers, and internal
 /// authority remain sealed server-side.
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExperimentalLiveReplacementRequired {
     CanonicalContext {
@@ -75,7 +75,7 @@ pub enum ExperimentalLiveReplacementRequired {
 }
 
 /// Public-safe projection of one machine-minted playback owner readiness.
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Clone)]
 pub struct ExperimentalLivePlaybackOwnerReadiness {
     channel_id: LiveChannelId,
@@ -84,7 +84,7 @@ pub struct ExperimentalLivePlaybackOwnerReadiness {
 
 /// Machine-projected strict phase. Active is the only variant carrying the
 /// opaque receipt accepted by provider-affecting facade operations.
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExperimentalLiveChannelPhaseStatus {
     Pending,
@@ -96,7 +96,7 @@ pub enum ExperimentalLiveChannelPhaseStatus {
 /// Complete stateless custody projection sourced from one machine receipt.
 /// Durable target identity remains resolved from `session_id` by the owning
 /// Mob host; no caller-supplied identity or mode is trusted here.
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExperimentalLiveChannelCustodyStatus {
     session_id: SessionId,
@@ -105,7 +105,7 @@ pub struct ExperimentalLiveChannelCustodyStatus {
     phase: ExperimentalLiveChannelPhaseStatus,
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl std::fmt::Debug for ExperimentalLiveChannelCustodyStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -118,7 +118,7 @@ impl std::fmt::Debug for ExperimentalLiveChannelCustodyStatus {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl ExperimentalLiveChannelCustodyStatus {
     #[must_use]
     pub fn session_id(&self) -> &SessionId {
@@ -141,7 +141,7 @@ impl ExperimentalLiveChannelCustodyStatus {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl ExperimentalLiveChannelPhaseStatus {
     #[must_use]
     pub fn activation_receipt(&self) -> Option<&str> {
@@ -152,7 +152,7 @@ impl ExperimentalLiveChannelPhaseStatus {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl std::fmt::Debug for ExperimentalLivePlaybackOwnerReadiness {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -163,7 +163,7 @@ impl std::fmt::Debug for ExperimentalLivePlaybackOwnerReadiness {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl ExperimentalLivePlaybackOwnerReadiness {
     #[must_use]
     pub fn channel_id(&self) -> &LiveChannelId {
@@ -176,7 +176,7 @@ impl ExperimentalLivePlaybackOwnerReadiness {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl ExperimentalLiveReplacementRequired {
     #[must_use]
     pub fn open(&self) -> &LiveOpenResult {
@@ -200,7 +200,7 @@ impl ExperimentalLiveReplacementRequired {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Debug, thiserror::Error)]
 pub enum ExperimentalLiveContextRecoveryError {
     #[error("failed to close ambiguous live channel: {0}")]
@@ -397,7 +397,7 @@ pub trait LiveWebrtcBoundReadyCustody: Send {
     async fn rollback(self: Box<Self>) -> Result<(), String>;
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[derive(Debug, thiserror::Error)]
 pub enum ExperimentalLiveChannelCloseError {
     #[error("the experimental live channel is not active for the session")]
@@ -835,7 +835,7 @@ pub struct ServiceMemberLiveHost<B: SessionAgentBuilder + 'static = FactoryAgent
 /// the owning host's delegation activator, retains exact provider controls by
 /// generated channel identity, and publishes typed replacement-required
 /// bootstraps after ambiguous delivery.
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 pub struct ExperimentalGptLiveContextMirrorHost<
     B: SessionAgentBuilder + 'static = FactoryAgentBuilder,
 > {
@@ -855,7 +855,7 @@ pub struct ExperimentalGptLiveContextMirrorHost<
     >,
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
     #[must_use]
     pub fn new(
@@ -891,7 +891,7 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static>
     crate::experimental_gpt_live::ExperimentalLiveBoundChannelActivator
@@ -1028,7 +1028,7 @@ impl<B: SessionAgentBuilder + 'static>
     }
 }
 
-#[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+#[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::LiveContextMirrorHost
     for ExperimentalGptLiveContextMirrorHost<B>
@@ -1145,7 +1145,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         }
     }
 
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     async fn catch_up_live_context_after_bind(
         &self,
         binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
@@ -1233,7 +1233,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Register the sole playback owner against the exact current pending
     /// receipt. The returned receipt is an opaque projection; the sealed
     /// authority is reacquired from the machine before answer IO.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn register_experimental_live_playback_owner(
         &self,
         channel_id: &LiveChannelId,
@@ -1259,7 +1259,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Answer a strict pending channel only after reacquiring exact pending
     /// and playback-owner authority. No provider IO begins on a caller-only
     /// channel or receipt assertion.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn answer_experimental_live_webrtc_offer(
         &self,
@@ -1300,7 +1300,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Read the machine-owned strict phase without maintaining a facade
     /// mirror.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn experimental_live_channel_phase(
         &self,
         channel_id: &LiveChannelId,
@@ -1316,7 +1316,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Reacquire strict channel custody from the original opaque pending
     /// receipt. Active custody carries the exact machine activation receipt.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn validate_experimental_live_channel_custody(
         &self,
         channel_id: &LiveChannelId,
@@ -1337,7 +1337,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     }
 
     /// Reacquire strict channel custody from an exact active receipt.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn validate_experimental_live_channel_custody_by_activation(
         &self,
         channel_id: &LiveChannelId,
@@ -1357,7 +1357,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         Ok(Self::project_experimental_live_custody(projection))
     }
 
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     fn project_experimental_live_custody(
         projection: meerkat_runtime::meerkat_machine::LiveChannelCustodyProjection,
     ) -> ExperimentalLiveChannelCustodyStatus {
@@ -1388,7 +1388,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Reacquire the exact active receipt. Callers receive no authority they
     /// can use for provider IO; provider-affecting facade methods authorize
     /// and consume their own one-use control immediately before dispatch.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn validate_experimental_live_activation(
         &self,
         channel_id: &LiveChannelId,
@@ -1405,7 +1405,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Revoke the exact playback owner on local owner loss. The machine owns
     /// the phase transition; this never retires the durable Mob member.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn revoke_experimental_live_playback_owner(
         &self,
@@ -1446,7 +1446,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .map(|_| ())
     }
 
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     async fn experimental_live_session_for_channel(
         &self,
         channel_id: &LiveChannelId,
@@ -1499,7 +1499,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Resolve an experimental assistant output through its machine-sealed,
     /// public-safe address. Provider response and item identifiers never
     /// cross this facade.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn truncate_live_output(
         &self,
         channel_id: &LiveChannelId,
@@ -1533,7 +1533,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Commit the full staged assistant final only after the playback owner
     /// reports exact completion for the machine-sealed output address.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn complete_live_playback(
         &self,
         channel_id: &LiveChannelId,
@@ -1554,7 +1554,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Send one full-duplex input chunk only after exact active receipt
     /// validation and one-use control consumption immediately before the
     /// shared provider IO path.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn send_experimental_live_input(
         &self,
         channel_id: &LiveChannelId,
@@ -1572,7 +1572,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await
     }
 
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     async fn consume_experimental_live_active_control(
         &self,
         channel_id: &LiveChannelId,
@@ -1611,7 +1611,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Execute one provider-affecting control only after consuming exact
     /// active-channel authority immediately before the shared IO path.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn control_experimental_live_channel(
         &self,
         channel_id: &LiveChannelId,
@@ -1666,7 +1666,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
 
     /// Open a strict channel-scoped execution identity through Meerkat's one
     /// shared prepare/project/S5-S12/bind/cleanup coordinator.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn open_with_execution_identity(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -1695,7 +1695,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// old channel, opens the generated replacement identity, and returns the
     /// fresh signaling bootstrap. Generated execution binding remains pending
     /// until the client's new answer acknowledges the canonical seed.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn open_live_context_replacement(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -1822,7 +1822,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// Realize generated delegation-result ambiguity recovery through the
     /// same exact close, fresh open, seed, and answer bootstrap choreography
     /// as context recovery, while retaining the distinct result authority.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn open_live_result_replacement(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -1947,7 +1947,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     }
 
     /// Retire a bound strict open that its caller could not publish.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn cleanup_execution_identity_publication_failure(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -1964,7 +1964,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     /// One close coordinator for ordinary and experimental channels. The
     /// exact experimental authority selects physical custody internally;
     /// surfaces never probe provider errors or retain an owner map.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn close_live_channel(
         &self,
         authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
@@ -2018,7 +2018,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     }
 
     /// Strict close from an exact pending handle.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn close_experimental_live_pending_channel(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -2036,7 +2036,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     }
 
     /// Strict close from an exact active handle.
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     pub async fn close_experimental_live_active_channel(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
@@ -2053,7 +2053,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         .await
     }
 
-    #[cfg(all(feature = "live-webrtc", feature = "experimental-gpt-live"))]
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
     async fn close_experimental_live_channel_with_receipt(
         &self,
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,

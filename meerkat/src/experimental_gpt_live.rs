@@ -31,14 +31,21 @@ use meerkat_live::{
     ProviderWebrtcOffer, ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcSidebandSession,
     ProviderWebrtcSignalingError,
 };
+use meerkat_llm_core::provider_runtime::ResolvedRealtimeTarget;
 use meerkat_llm_core::realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSessionFactory, RealtimeSessionOpenConfig,
 };
 use meerkat_llm_core::{LlmError, RealtimeSession};
-use meerkat_openai::{
-    GptLiveAppendToken, GptLiveBrokerError, GptLiveBrokerFactory, GptLiveBrokerObservation,
-    GptLiveBrokerOpenConfig, GptLiveBrokerSession, GptLiveBrokerTerminalClass,
-    GptLiveDelegationRef, GptLiveResponsesSessionConfig, GptLiveTurnRef, GptLiveTurnRole,
+#[cfg(feature = "experimental-gpt-live")]
+use meerkat_openai::gpt_live::{
+    GptLiveBrokerFactory, GptLiveBrokerOpenConfig, GptLiveBrokerSession,
+};
+use meerkat_openai::gpt_live_broker::{
+    GptLiveAppendToken, GptLiveBrokerError, GptLiveBrokerObservation, GptLiveBrokerTerminalClass,
+    GptLiveDelegationRef, GptLiveTurnRef, GptLiveTurnRole,
+};
+use meerkat_openai::public_live::{
+    PublicLiveBrokerFactory, PublicLiveBrokerSession, PublicLiveOpenConfig,
 };
 use meerkat_runtime::live_execution::{
     LiveContextAppendAuthority, LiveDelegationResultDeliveryAuthority,
@@ -48,6 +55,14 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::session_runtime::live_orchestration::RealtimeSessionOpenProjection;
+
+/// Public Live client-context execution profile: the released `gpt-live-1`
+/// voice model speaks while the channel-bound Meerkat executor performs
+/// delegated work and returns commentary. Consumers select this identity
+/// through `live/open { execution_identity: { version: "v1", profile_id } }`.
+pub const GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID: &str = "openai.gpt-live-1.client-context.v1";
+/// Catalog model row served by the public Live broker.
+pub const GPT_LIVE_PUBLIC_MODEL: &str = "gpt-live-1";
 
 /// Sanitized failure from the host-injected experimental open authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -271,6 +286,37 @@ pub struct ExperimentalGptLiveOpenAuthorityConfig {
     pub voice: String,
 }
 
+/// Host composition for the public Live (`gpt-live-1`) open authority.
+///
+/// `execution_identity` is the host-owned voice identity: provider OpenAI,
+/// model `gpt-live-1`, and a configured auth binding in `realm` that resolves
+/// to an OpenAI API key. Session instructions default to the platform
+/// client-context guidance; hosts may replace them with their own trusted
+/// voice guidance. No operator, Gate0, or realm admission exists for the
+/// public path: the catalog row, the configured binding, and the compiled
+/// `openai-live` feature are the admission.
+pub struct PublicGptLiveOpenAuthorityConfig {
+    pub agent_factory: crate::AgentFactory,
+    pub config_source: Arc<dyn ExperimentalLiveCurrentConfigSource>,
+    pub binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
+    pub execution_identity: meerkat_core::SessionLlmIdentity,
+    pub realm: meerkat_core::RealmId,
+    pub transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+    pub voice: String,
+    pub session_instructions: Option<String>,
+}
+
+/// Which provider path an open authority admits targets through.
+enum GptLiveOpenAdmission {
+    #[cfg(feature = "experimental-gpt-live")]
+    Experimental {
+        factory_identity: crate::ExperimentalLiveFactoryIdentity,
+    },
+    Public {
+        session_instructions: Option<String>,
+    },
+}
+
 /// Concrete Meerkat-owned implementation of the strict experimental open
 /// authority.
 ///
@@ -286,11 +332,14 @@ pub struct ExperimentalGptLiveOpenAuthority {
     binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
     execution_identity: meerkat_core::SessionLlmIdentity,
     realm: meerkat_core::RealmId,
-    factory_identity: crate::ExperimentalLiveFactoryIdentity,
+    admission: GptLiveOpenAdmission,
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
     voice: String,
     #[cfg(feature = "test-realtime-fixtures")]
     test_endpoints: Option<(String, String)>,
+    #[cfg(feature = "test-realtime-fixtures")]
+    test_base_url: Option<String>,
+
     pending_context_recovery: Arc<
         Mutex<
             HashMap<
@@ -310,39 +359,118 @@ pub struct ExperimentalGptLiveOpenAuthority {
 }
 
 impl ExperimentalGptLiveOpenAuthority {
+    /// Compose the deprecated private-protocol authority.
+    #[cfg(feature = "experimental-gpt-live")]
     pub fn new(
         config: ExperimentalGptLiveOpenAuthorityConfig,
     ) -> Result<Self, ExperimentalGptLiveOpenAuthorityError> {
-        if config.voice.trim().is_empty() {
+        Self::validate_host_identity(
+            &config.voice,
+            &config.execution_identity,
+            &config.realm,
+            "gpt-live-1-codex",
+        )?;
+        Ok(Self::compose(
+            config.agent_factory,
+            config.config_source,
+            config.binding_authority,
+            config.execution_identity,
+            config.realm,
+            GptLiveOpenAdmission::Experimental {
+                factory_identity: config.factory_identity,
+            },
+            config.transport,
+            config.voice,
+        ))
+    }
+
+    /// Compose the public Live (`gpt-live-1`) authority.
+    pub fn new_public(
+        config: PublicGptLiveOpenAuthorityConfig,
+    ) -> Result<Self, ExperimentalGptLiveOpenAuthorityError> {
+        Self::validate_host_identity(
+            &config.voice,
+            &config.execution_identity,
+            &config.realm,
+            GPT_LIVE_PUBLIC_MODEL,
+        )?;
+        Ok(Self::compose(
+            config.agent_factory,
+            config.config_source,
+            config.binding_authority,
+            config.execution_identity,
+            config.realm,
+            GptLiveOpenAdmission::Public {
+                session_instructions: config.session_instructions,
+            },
+            config.transport,
+            config.voice,
+        ))
+    }
+
+    fn validate_host_identity(
+        voice: &str,
+        execution_identity: &meerkat_core::SessionLlmIdentity,
+        realm: &meerkat_core::RealmId,
+        model: &str,
+    ) -> Result<(), ExperimentalGptLiveOpenAuthorityError> {
+        if voice.trim().is_empty() {
             return Err(ExperimentalGptLiveOpenAuthorityError::MissingVoice);
         }
-        if config.execution_identity.provider != meerkat_core::Provider::OpenAI
-            || config.execution_identity.model != "gpt-live-1-codex"
-            || config.execution_identity.self_hosted_server_id.is_some()
-            || config.execution_identity.provider_params.is_some()
+        if execution_identity.provider != meerkat_core::Provider::OpenAI
+            || execution_identity.model != model
+            || execution_identity.self_hosted_server_id.is_some()
+            || execution_identity.provider_params.is_some()
             || !matches!(
-                config.execution_identity.auth_binding.as_ref(),
+                execution_identity.auth_binding.as_ref(),
                 Some(binding)
                     if binding.origin == meerkat_core::BindingOrigin::Configured
-                        && binding.realm == config.realm
+                        && binding.realm == *realm
             )
         {
             return Err(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity);
         }
-        Ok(Self {
-            agent_factory: config.agent_factory,
-            config_source: config.config_source,
-            binding_authority: config.binding_authority,
-            execution_identity: config.execution_identity,
-            realm: config.realm,
-            factory_identity: config.factory_identity,
-            transport: config.transport,
-            voice: config.voice,
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compose(
+        agent_factory: crate::AgentFactory,
+        config_source: Arc<dyn ExperimentalLiveCurrentConfigSource>,
+        binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
+        execution_identity: meerkat_core::SessionLlmIdentity,
+        realm: meerkat_core::RealmId,
+        admission: GptLiveOpenAdmission,
+        transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+        voice: String,
+    ) -> Self {
+        Self {
+            agent_factory,
+            config_source,
+            binding_authority,
+            execution_identity,
+            realm,
+            admission,
+            transport,
+            voice,
             #[cfg(feature = "test-realtime-fixtures")]
             test_endpoints: None,
+            #[cfg(feature = "test-realtime-fixtures")]
+            test_base_url: None,
             pending_context_recovery: Arc::new(Mutex::new(HashMap::new())),
             pending_result_recovery: Arc::new(Mutex::new(HashMap::new())),
-        })
+        }
+    }
+
+    /// Test-only public base URL injection: the real admission path runs
+    /// unchanged while the public HTTP and WebSocket destination moves to a
+    /// deterministic local server.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.test_base_url = Some(base_url.into());
+        self
     }
 
     /// Redirect only the already-admitted provider transport to local test
@@ -361,6 +489,124 @@ impl ExperimentalGptLiveOpenAuthority {
     }
 }
 
+impl ExperimentalGptLiveOpenAuthority {
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn prepare_experimental_pending(
+        &self,
+        canonical_session_id: &meerkat_core::SessionId,
+        execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+        config: &meerkat_core::Config,
+        identity: meerkat_core::SessionLlmIdentity,
+        factory_identity: &crate::ExperimentalLiveFactoryIdentity,
+    ) -> Result<ExperimentalGptLivePendingChannel, ExperimentalLiveOpenAuthorityError> {
+        let preparation = self
+            .agent_factory
+            .prepare_experimental_live_admission_for_identity(
+                config,
+                &self.realm,
+                &identity,
+                factory_identity,
+                &execution_identity.profile_id,
+            )
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        let authorization = self
+            .binding_authority
+            .authorize_binding_use(canonical_session_id, preparation.auth_binding())
+            .await?;
+        let (binding_use, auth_lease) = authorization.into_parts();
+        let admission = self
+            .agent_factory
+            .complete_experimental_live_admission(preparation, binding_use, auth_lease)
+            .await
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some((call_url, sideband_base_url)) = &self.test_endpoints {
+            return ExperimentalGptLivePendingChannel::__from_admission_with_test_endpoints(
+                &self.agent_factory,
+                admission,
+                &self.realm,
+                factory_identity,
+                canonical_session_id.clone(),
+                self.voice.clone(),
+                call_url,
+                sideband_base_url,
+            )
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+        }
+        ExperimentalGptLivePendingChannel::from_admission(
+            &self.agent_factory,
+            admission,
+            &self.realm,
+            factory_identity,
+            canonical_session_id.clone(),
+            self.voice.clone(),
+        )
+        .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)
+    }
+
+    /// Public admission: the selected profile must be the public client-context
+    /// profile, the host identity's configured binding is authorized for this
+    /// session, and the credentialed target is resolved against the catalog.
+    async fn prepare_public_pending(
+        &self,
+        canonical_session_id: &meerkat_core::SessionId,
+        execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+        config: &meerkat_core::Config,
+        identity: meerkat_core::SessionLlmIdentity,
+        session_instructions: Option<String>,
+    ) -> Result<ExperimentalGptLivePendingChannel, ExperimentalLiveOpenAuthorityError> {
+        if execution_identity.profile_id != GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID {
+            return Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+        }
+        let auth_binding = self
+            .agent_factory
+            .resolve_public_live_binding_for_identity(config, &self.realm, &identity)
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        let authorization = self
+            .binding_authority
+            .authorize_binding_use(canonical_session_id, &auth_binding)
+            .await?;
+        let (binding_use, auth_lease) = authorization.into_parts();
+        let target = self
+            .agent_factory
+            .resolve_public_live_target(config, &self.realm, &identity, binding_use, auth_lease)
+            .await
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+                GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        let session_instructions = session_instructions
+            .or_else(|| Some(crate::gpt_live_client_context_session_instructions().to_string()));
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(base_url) = &self.test_base_url {
+            return ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
+                target,
+                execution_profile,
+                canonical_session_id.clone(),
+                self.voice.clone(),
+                session_instructions,
+                base_url,
+            )
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+        }
+        ExperimentalGptLivePendingChannel::from_public_target(
+            target,
+            execution_profile,
+            canonical_session_id.clone(),
+            self.voice.clone(),
+            session_instructions,
+        )
+        .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ExperimentalGptLiveOpenAuthorityError {
     #[error("experimental GPT Live open authority requires a non-empty voice")]
@@ -374,13 +620,21 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
     fn execution_feature_capabilities(
         &self,
     ) -> Result<Vec<&'static str>, ExperimentalLiveOpenAuthorityError> {
-        self.agent_factory
-            .experimental_live_execution_feature_capabilities(
-                &self.realm,
-                &self.factory_identity,
-                crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID,
-            )
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::Unavailable)
+        match &self.admission {
+            #[cfg(feature = "experimental-gpt-live")]
+            GptLiveOpenAdmission::Experimental { factory_identity } => self
+                .agent_factory
+                .experimental_live_execution_feature_capabilities(
+                    &self.realm,
+                    factory_identity,
+                    crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID,
+                )
+                .map_err(|_| ExperimentalLiveOpenAuthorityError::Unavailable),
+            GptLiveOpenAdmission::Public { .. } => Ok(vec![
+                meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
+                meerkat_contracts::LIVE_CLIENT_CONTEXT_V1_CAPABILITY,
+            ]),
+        }
     }
 
     async fn prepare_open(
@@ -397,59 +651,31 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
             .current_config()
             .await
             .map_err(|_| ExperimentalLiveOpenAuthorityError::Unavailable)?;
-        let preparation = self
-            .agent_factory
-            .prepare_experimental_live_admission_for_identity(
-                &config,
-                &self.realm,
-                &identity,
-                &self.factory_identity,
-                &execution_identity.profile_id,
-            )
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
-        let authorization = self
-            .binding_authority
-            .authorize_binding_use(canonical_session_id, preparation.auth_binding())
-            .await?;
-        let (binding_use, auth_lease) = authorization.into_parts();
-        let admission = self
-            .agent_factory
-            .complete_experimental_live_admission(preparation, binding_use, auth_lease)
-            .await
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
-        #[cfg(feature = "test-realtime-fixtures")]
-        let pending = if let Some((call_url, sideband_base_url)) = &self.test_endpoints {
-            ExperimentalGptLivePendingChannel::__from_admission_with_test_endpoints(
-                &self.agent_factory,
-                admission,
-                &self.realm,
-                &self.factory_identity,
-                canonical_session_id.clone(),
-                self.voice.clone(),
-                call_url,
-                sideband_base_url,
-            )
-        } else {
-            ExperimentalGptLivePendingChannel::from_admission(
-                &self.agent_factory,
-                admission,
-                &self.realm,
-                &self.factory_identity,
-                canonical_session_id.clone(),
-                self.voice.clone(),
-            )
-        }
-        .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
-        #[cfg(not(feature = "test-realtime-fixtures"))]
-        let pending = ExperimentalGptLivePendingChannel::from_admission(
-            &self.agent_factory,
-            admission,
-            &self.realm,
-            &self.factory_identity,
-            canonical_session_id.clone(),
-            self.voice.clone(),
-        )
-        .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        let pending = match &self.admission {
+            #[cfg(feature = "experimental-gpt-live")]
+            GptLiveOpenAdmission::Experimental { factory_identity } => {
+                self.prepare_experimental_pending(
+                    canonical_session_id,
+                    execution_identity,
+                    &config,
+                    identity,
+                    factory_identity,
+                )
+                .await?
+            }
+            GptLiveOpenAdmission::Public {
+                session_instructions,
+            } => {
+                self.prepare_public_pending(
+                    canonical_session_id,
+                    execution_identity,
+                    &config,
+                    identity,
+                    session_instructions.clone(),
+                )
+                .await?
+            }
+        };
         Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
             pending,
             Arc::clone(&self.transport),
@@ -1172,10 +1398,9 @@ pub enum ExperimentalGptLiveControlObservation {
 
 /// OpenAI-specific broker hidden behind Meerkat's provider-neutral trait.
 struct ExperimentalGptLiveWebrtcBroker {
-    factory: GptLiveBrokerFactory,
+    factory: Arc<dyn GptLiveBrokerOpen>,
     voice: String,
     execution_mode: meerkat_core::LiveExecutionMode,
-    responses: Option<GptLiveResponsesSessionConfig>,
     session_instructions: Option<String>,
     initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
 }
@@ -1232,6 +1457,7 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
     async fn close(&self) -> Result<(), GptLiveBrokerError>;
 }
 
+#[cfg(feature = "experimental-gpt-live")]
 #[async_trait]
 impl ExperimentalGptLiveBrokerSession for GptLiveBrokerSession {
     async fn await_ready_and_seed_session_context(
@@ -1267,6 +1493,108 @@ impl ExperimentalGptLiveBrokerSession for GptLiveBrokerSession {
     }
 }
 
+#[async_trait]
+impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
+    async fn await_ready_and_seed_session_context(
+        &self,
+        commentary: Option<String>,
+    ) -> Result<(), GptLiveBrokerError> {
+        PublicLiveBrokerSession::await_ready_and_seed_session_context(self, commentary).await
+    }
+
+    async fn append_session_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_session_context(self, text).await
+    }
+
+    async fn append_delegation_context(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_delegation_context(self, delegation, text).await
+    }
+
+    async fn next_observation(
+        &self,
+    ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
+        PublicLiveBrokerSession::next_observation(self).await
+    }
+
+    async fn close(&self) -> Result<(), GptLiveBrokerError> {
+        PublicLiveBrokerSession::close(self).await
+    }
+}
+
+/// Provider factory seam for the WebRTC broker: open one provider session for
+/// a browser offer and hand back the answer SDP plus an opaque sideband.
+///
+/// Mode selection is sealed by the admitted execution profile. The Responses
+/// function bridge has no shipping provider configuration on either path and
+/// is rejected before any provider I/O.
+#[async_trait]
+trait GptLiveBrokerOpen: Send + Sync {
+    async fn open(
+        &self,
+        offer_sdp: &str,
+        voice: &str,
+        execution_mode: meerkat_core::LiveExecutionMode,
+        session_instructions: Option<String>,
+    ) -> Result<(String, Arc<dyn ExperimentalGptLiveBrokerSession>), GptLiveBrokerError>;
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+#[async_trait]
+impl GptLiveBrokerOpen for GptLiveBrokerFactory {
+    async fn open(
+        &self,
+        offer_sdp: &str,
+        voice: &str,
+        execution_mode: meerkat_core::LiveExecutionMode,
+        session_instructions: Option<String>,
+    ) -> Result<(String, Arc<dyn ExperimentalGptLiveBrokerSession>), GptLiveBrokerError> {
+        let config = GptLiveBrokerOpenConfig::new(offer_sdp, voice)?;
+        let mut config = match execution_mode {
+            meerkat_core::LiveExecutionMode::ClientContext => config.with_client_delegation(),
+            // Gate0 never promoted the raw Responses function events; no
+            // shipping constructor can populate the catalog-bound bridge.
+            meerkat_core::LiveExecutionMode::FunctionBridge => {
+                return Err(GptLiveBrokerError::InvalidResponsesProfile);
+            }
+        };
+        if let Some(instructions) = session_instructions {
+            config = config.with_session_instructions(instructions);
+        }
+        let (answer_sdp, session) = GptLiveBrokerFactory::open(self, config).await?.into_parts();
+        Ok((answer_sdp, Arc::new(session)))
+    }
+}
+
+#[async_trait]
+impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
+    async fn open(
+        &self,
+        offer_sdp: &str,
+        voice: &str,
+        execution_mode: meerkat_core::LiveExecutionMode,
+        session_instructions: Option<String>,
+    ) -> Result<(String, Arc<dyn ExperimentalGptLiveBrokerSession>), GptLiveBrokerError> {
+        if execution_mode != meerkat_core::LiveExecutionMode::ClientContext {
+            return Err(GptLiveBrokerError::InvalidResponsesProfile);
+        }
+        let mut config = PublicLiveOpenConfig::new(offer_sdp, voice)?;
+        if let Some(instructions) = session_instructions {
+            config = config.with_instructions(instructions);
+        }
+        let (answer_sdp, session) = PublicLiveBrokerFactory::open(self, config)
+            .await?
+            .into_parts();
+        Ok((answer_sdp, Arc::new(session)))
+    }
+}
+
 impl fmt::Debug for ExperimentalGptLiveWebrtcBroker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1274,7 +1602,6 @@ impl fmt::Debug for ExperimentalGptLiveWebrtcBroker {
             .field("factory", &"[OPAQUE]")
             .field("voice", &"[REDACTED]")
             .field("execution_mode", &self.execution_mode)
-            .field("responses_qualified", &self.responses.is_some())
             .field(
                 "session_instructions",
                 &self
@@ -1289,7 +1616,7 @@ impl fmt::Debug for ExperimentalGptLiveWebrtcBroker {
 impl ExperimentalGptLiveWebrtcBroker {
     /// Wrap an already admitted provider factory.
     fn new(
-        factory: GptLiveBrokerFactory,
+        factory: Arc<dyn GptLiveBrokerOpen>,
         voice: impl Into<String>,
         execution_mode: meerkat_core::LiveExecutionMode,
         session_instructions: Option<String>,
@@ -1303,33 +1630,9 @@ impl ExperimentalGptLiveWebrtcBroker {
             factory,
             voice,
             execution_mode,
-            // Gate0 has not promoted the exact raw inbound function event or
-            // its catalog-bound Responses model. No shipping constructor can
-            // populate this field in the unqualified tree.
-            responses: None,
             session_instructions,
             initial_seed,
         })
-    }
-
-    fn open_config(
-        execution_mode: meerkat_core::LiveExecutionMode,
-        responses: Option<GptLiveResponsesSessionConfig>,
-        offer_sdp: &str,
-        voice: &str,
-        session_instructions: Option<String>,
-    ) -> Result<GptLiveBrokerOpenConfig, ProviderWebrtcBrokerError> {
-        let config = GptLiveBrokerOpenConfig::new(offer_sdp, voice).map_err(map_broker_error)?;
-        let mut config = match execution_mode {
-            meerkat_core::LiveExecutionMode::ClientContext => config.with_client_delegation(),
-            meerkat_core::LiveExecutionMode::FunctionBridge => {
-                config.with_responses_session(responses.ok_or(ProviderWebrtcBrokerError::Rejected)?)
-            }
-        };
-        if let Some(instructions) = session_instructions {
-            config = config.with_session_instructions(instructions);
-        }
-        Ok(config)
     }
 }
 
@@ -1344,13 +1647,6 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
         // while no exact qualified Responses config exists. ClientContext is
         // an independent fixed provider mode and cannot acquire Responses
         // tools through this branch.
-        let config = Self::open_config(
-            self.execution_mode,
-            self.responses.clone(),
-            offer.offer_sdp(),
-            &self.voice,
-            self.session_instructions.clone(),
-        )?;
         let binding = offer.binding().clone();
         let seed = self
             .initial_seed
@@ -1358,12 +1654,20 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
             .await
             .take()
             .ok_or(ProviderWebrtcBrokerError::Rejected)?;
-        let bootstrap = self.factory.open(config).await.map_err(map_broker_error)?;
-        let (answer_sdp, session) = bootstrap.into_parts();
+        let (answer_sdp, session) = self
+            .factory
+            .open(
+                offer.offer_sdp(),
+                &self.voice,
+                self.execution_mode,
+                self.session_instructions.clone(),
+            )
+            .await
+            .map_err(map_broker_error)?;
         let (synthetic_tx, synthetic_rx) = mpsc::channel(8);
         let sideband = Arc::new(ExperimentalGptLiveSideband {
             binding,
-            session: Arc::new(session),
+            session,
             seed_custody: Mutex::new(ExperimentalGptLiveSeedCustody::Pending(Some(seed))),
             seed_changed: Notify::new(),
             correlations: Mutex::new(SidebandCorrelations::default()),
@@ -1524,27 +1828,14 @@ impl fmt::Debug for ExperimentalGptLivePendingChannel {
 }
 
 impl ExperimentalGptLivePendingChannel {
-    /// Consume one exact admitted target into provider custody without opening
-    /// any provider transport. Channel binding happens only after shared
-    /// live/open succeeds.
-    pub fn from_admission(
-        admission_owner: &crate::AgentFactory,
-        admission: crate::ExperimentalLiveAdmissionWitness,
-        realm: &meerkat_core::RealmId,
-        factory_identity: &crate::ExperimentalLiveFactoryIdentity,
+    fn from_broker_factory(
+        provider_factory: Arc<dyn GptLiveBrokerOpen>,
+        identity: meerkat_core::SessionLlmIdentity,
+        execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
         canonical_session_id: meerkat_core::SessionId,
         voice: impl Into<String>,
+        session_instructions: Option<String>,
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
-        let session_instructions = admission
-            .gpt_live_session_instructions()
-            .map(ToString::to_string);
-        let execution_profile = admission.execution_profile().clone();
-        let target = admission_owner
-            .consume_experimental_live_admission(admission, realm, factory_identity)
-            .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
-        let identity = target.identity().clone();
-        let provider_factory = GptLiveBrokerFactory::try_from_admitted_target(target)
-            .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
         let initial_seed = Arc::new(Mutex::new(None));
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
@@ -1568,9 +1859,90 @@ impl ExperimentalGptLivePendingChannel {
         })
     }
 
+    /// Take one resolved public Live target into provider custody without
+    /// opening any provider transport. Channel binding happens only after
+    /// shared live/open succeeds.
+    pub fn from_public_target(
+        target: ResolvedRealtimeTarget,
+        execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+        canonical_session_id: meerkat_core::SessionId,
+        voice: impl Into<String>,
+        session_instructions: Option<String>,
+    ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let identity = target.identity().clone();
+        let provider_factory = PublicLiveBrokerFactory::try_from_target(target)
+            .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
+        Self::from_broker_factory(
+            Arc::new(provider_factory),
+            identity,
+            execution_profile,
+            canonical_session_id,
+            voice,
+            session_instructions,
+        )
+    }
+
+    /// Same real public target, with only the provider base URL redirected to
+    /// a deterministic local test server.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[doc(hidden)]
+    pub fn __from_public_target_with_base_url(
+        target: ResolvedRealtimeTarget,
+        execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+        canonical_session_id: meerkat_core::SessionId,
+        voice: impl Into<String>,
+        session_instructions: Option<String>,
+        base_url: &str,
+    ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let identity = target.identity().clone();
+        let provider_factory =
+            PublicLiveBrokerFactory::__try_from_target_with_base_url(target, base_url)
+                .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
+        Self::from_broker_factory(
+            Arc::new(provider_factory),
+            identity,
+            execution_profile,
+            canonical_session_id,
+            voice,
+            session_instructions,
+        )
+    }
+
+    /// Consume one exact admitted target into provider custody without opening
+    /// any provider transport. Channel binding happens only after shared
+    /// live/open succeeds.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub fn from_admission(
+        admission_owner: &crate::AgentFactory,
+        admission: crate::ExperimentalLiveAdmissionWitness,
+        realm: &meerkat_core::RealmId,
+        factory_identity: &crate::ExperimentalLiveFactoryIdentity,
+        canonical_session_id: meerkat_core::SessionId,
+        voice: impl Into<String>,
+    ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let session_instructions = admission
+            .gpt_live_session_instructions()
+            .map(ToString::to_string);
+        let execution_profile = admission.execution_profile().clone();
+        let target = admission_owner
+            .consume_experimental_live_admission(admission, realm, factory_identity)
+            .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
+        let identity = target.identity().clone();
+        let provider_factory = GptLiveBrokerFactory::try_from_admitted_target(target)
+            .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
+        Self::from_broker_factory(
+            Arc::new(provider_factory),
+            identity,
+            execution_profile,
+            canonical_session_id,
+            voice,
+            session_instructions,
+        )
+    }
+
     /// Consume the same real admission while redirecting only the provider's
     /// private external endpoints to a deterministic local test server.
-    #[cfg(feature = "test-realtime-fixtures")]
+    #[cfg(all(feature = "test-realtime-fixtures", feature = "experimental-gpt-live"))]
     #[doc(hidden)]
     #[allow(
         clippy::too_many_arguments,
@@ -1600,27 +1972,14 @@ impl ExperimentalGptLivePendingChannel {
             sideband_base_url,
         )
         .map_err(|_| ExperimentalGptLiveBridgeError::TargetRejected)?;
-        let initial_seed = Arc::new(Mutex::new(None));
-        let broker = ExperimentalGptLiveWebrtcBroker::new(
-            provider_factory,
-            voice,
-            execution_profile.mode(),
-            session_instructions,
-            Arc::clone(&initial_seed),
-        )?;
-        let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(identity.clone()));
-        Ok(Self {
-            registration: RegisteredExperimentalGptLiveChannel {
-                session_id: canonical_session_id,
-                broker: Arc::new(broker),
-                adapter,
-                identity,
-                execution_profile_id: execution_profile.profile_id().to_string(),
-            },
-            initial_seed,
-            adapter_taken: AtomicBool::new(false),
+        Self::from_broker_factory(
+            Arc::new(provider_factory),
+            identity,
             execution_profile,
-        })
+            canonical_session_id,
+            voice,
+            session_instructions,
+        )
     }
 
     /// Project the exact admitted execution identity into the canonical
@@ -3245,6 +3604,11 @@ fn spawn_sideband_actors(
                     break;
                 }
             };
+            tracing::debug!(
+                observation = ?observation,
+                outcome = ?outcome,
+                "live adapter observation applied"
+            );
             if let meerkat_live::ObservationOutcome::AssistantOutputAvailable(ref output) = outcome
             {
                 let public = ExperimentalLivePublicObservation::assistant_output_available(
@@ -3998,8 +4362,7 @@ impl ExperimentalGptLiveSideband {
             }
             GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation,
-                target: meerkat_openai::gpt_live::GptLiveDelegationTarget::Client,
-                handoff: _,
+                target: meerkat_openai::gpt_live_broker::GptLiveDelegationTarget::Client,
                 turn,
                 transcript,
             } => {
@@ -4035,7 +4398,7 @@ impl ExperimentalGptLiveSideband {
                     delegation: opaque,
                 }
             }
-            GptLiveBrokerObservation::UnsupportedPrivateEvent => {
+            GptLiveBrokerObservation::UnsupportedProviderEvent => {
                 LiveSidebandObservationKind::UnsupportedProviderEvent
             }
         };
@@ -4468,7 +4831,7 @@ mod tests {
             &self,
         ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
             self.provider_reads.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(Some(GptLiveBrokerObservation::UnsupportedPrivateEvent))
+            Ok(Some(GptLiveBrokerObservation::UnsupportedProviderEvent))
         }
 
         async fn close(&self) -> Result<(), GptLiveBrokerError> {
@@ -5058,6 +5421,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
     #[tokio::test]
     async fn durable_source_unavailability_rejects_before_live_config_admission_or_binding_use() {
         let config_reads = Arc::new(AtomicUsize::new(0));
@@ -5108,6 +5472,7 @@ mod tests {
         assert_eq!(authorization_calls.load(AtomicOrdering::SeqCst), 0);
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
     #[tokio::test]
     async fn concrete_open_authority_denies_exact_binding_before_credentials_or_provider_effects() {
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
@@ -5211,6 +5576,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
     #[tokio::test]
     async fn concrete_open_authority_real_path_prepares_one_admitted_provider_without_opening_it() {
         use meerkat_core::auth::TokenStore as _;
@@ -5396,6 +5762,734 @@ mod tests {
         }
     }
 
+    // ----------------------------------------------------------------------
+    // Public GPT Live (`gpt-live-1`) open path. These tests never touch the
+    // network or real credentials: the host identity carries an inline API
+    // key binding and any provider destination is a local listener.
+    // ----------------------------------------------------------------------
+
+    fn public_live_identity(
+        binding: meerkat_core::AuthBindingRef,
+    ) -> meerkat_core::SessionLlmIdentity {
+        meerkat_core::SessionLlmIdentity {
+            model: GPT_LIVE_PUBLIC_MODEL.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(binding),
+        }
+    }
+
+    fn public_live_binding(realm: &meerkat_core::RealmId) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: realm.clone(),
+            binding: meerkat_core::BindingId::parse("openai").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        }
+    }
+
+    const PUBLIC_LIVE_FIXTURE_SECRET: &str = "sk-public-live-fixture";
+
+    /// Realm config with one plain OpenAI API backend, an inline API-key auth
+    /// profile, and the `openai` binding the public host identity selects.
+    fn public_live_realm_config(realm: &meerkat_core::RealmId) -> meerkat_core::Config {
+        let mut current_config = meerkat_core::Config::default();
+        let mut realm_config = meerkat_core::RealmConfigSection::default();
+        realm_config.backend.insert(
+            "openai_api".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            },
+        );
+        realm_config.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: meerkat_core::CredentialSourceSpec::InlineSecret {
+                    secret: PUBLIC_LIVE_FIXTURE_SECRET.to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        realm_config.binding.insert(
+            "openai".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                credential_account: None,
+                default_model: Some(GPT_LIVE_PUBLIC_MODEL.to_string()),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        current_config
+            .realm
+            .insert(realm.as_str().to_string(), realm_config);
+        current_config
+    }
+
+    fn public_live_authority_config(
+        realm: &meerkat_core::RealmId,
+        voice: &str,
+        execution_identity: meerkat_core::SessionLlmIdentity,
+        config_source: Arc<dyn ExperimentalLiveCurrentConfigSource>,
+        binding_authority: Arc<dyn ExperimentalLiveSessionBindingAuthority>,
+        transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+    ) -> PublicGptLiveOpenAuthorityConfig {
+        PublicGptLiveOpenAuthorityConfig {
+            agent_factory: crate::AgentFactory::minimal(),
+            config_source,
+            binding_authority,
+            execution_identity,
+            realm: realm.clone(),
+            transport,
+            voice: voice.to_string(),
+            session_instructions: None,
+        }
+    }
+
+    fn public_profile_override() -> meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
+        meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
+            version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+            profile_id: GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn public_open_authority_rejects_wrong_profile_and_host_identity() {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let other_realm = meerkat_core::RealmId::parse("elsewhere").expect("realm");
+        let selected_binding = public_live_binding(&realm);
+        let config_reads = Arc::new(AtomicUsize::new(0));
+        let binding_calls = Arc::new(AtomicUsize::new(0));
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let compose = |voice: &str, execution_identity: meerkat_core::SessionLlmIdentity| {
+            ExperimentalGptLiveOpenAuthority::new_public(public_live_authority_config(
+                &realm,
+                voice,
+                execution_identity,
+                Arc::new(CountingConfigSource {
+                    reads: Arc::clone(&config_reads),
+                    config: meerkat_core::Config::default(),
+                }),
+                Arc::new(NeverBindingAuthority {
+                    calls: Arc::clone(&binding_calls),
+                    expected: selected_binding.clone(),
+                }),
+                Arc::clone(&transport),
+            ))
+        };
+
+        // Host composition: blank voice, wrong catalog row, and any binding
+        // that is not a configured binding in the authority realm are
+        // rejected before an authority exists.
+        assert_eq!(
+            compose("   ", public_live_identity(selected_binding.clone())).err(),
+            Some(ExperimentalGptLiveOpenAuthorityError::MissingVoice)
+        );
+        assert_eq!(
+            compose("marin", configured_live_identity(selected_binding.clone())).err(),
+            Some(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity),
+            "the deprecated gpt-live-1-codex row is not the public model"
+        );
+        assert_eq!(
+            compose(
+                "marin",
+                public_live_identity(meerkat_core::AuthBindingRef {
+                    origin: meerkat_core::BindingOrigin::SyntheticEnvDefault,
+                    ..selected_binding.clone()
+                })
+            )
+            .err(),
+            Some(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity),
+            "a synthetic env binding is not a configured host binding"
+        );
+        assert_eq!(
+            compose(
+                "marin",
+                public_live_identity(public_live_binding(&other_realm))
+            )
+            .err(),
+            Some(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity),
+            "the configured binding must live in the authority realm"
+        );
+        assert_eq!(
+            compose(
+                "marin",
+                meerkat_core::SessionLlmIdentity {
+                    auth_binding: None,
+                    ..public_live_identity(selected_binding.clone())
+                }
+            )
+            .err(),
+            Some(ExperimentalGptLiveOpenAuthorityError::InvalidExecutionIdentity),
+            "the host identity must name its configured binding"
+        );
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 0);
+
+        // A well-formed authority still rejects a non-public profile before
+        // any binding authorization, credential, or provider effect.
+        let authority = compose("marin", public_live_identity(selected_binding.clone()))
+            .expect("public authority configuration");
+        let error = match authority
+            .prepare_open(
+                &meerkat_core::SessionId::new(),
+                &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
+                    version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+                    profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("the experimental profile must not open the public path"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(binding_calls.load(AtomicOrdering::SeqCst), 0);
+
+        // The exact public profile with no configured realm binding also
+        // fails as admission, still without asking the binding authority.
+        let error = match authority
+            .prepare_open(&meerkat_core::SessionId::new(), &public_profile_override())
+            .await
+        {
+            Ok(_) => panic!("an unconfigured realm binding must not open the public path"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(binding_calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(transport.registered_by_channel.lock().await.is_empty());
+    }
+
+    /// Bind a local listener that records every accepted connection. The
+    /// public open path must never reach it before signaling.
+    #[cfg(feature = "test-realtime-fixtures")]
+    async fn provider_io_tripwire() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tripwire listener");
+        let address = listener.local_addr().expect("tripwire address");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&hits);
+        let task = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_ok() {
+                    recorded.fetch_add(1, AtomicOrdering::SeqCst);
+                }
+            }
+        });
+        (format!("http://{address}/v1/"), hits, task)
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_open_authority_prepares_pending_channel_without_provider_io() {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let selected_binding = public_live_binding(&realm);
+        let session_id = meerkat_core::SessionId::new();
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let auth_lease = machine.generated_auth_lease_handle();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config_reads = Arc::new(AtomicUsize::new(0));
+        let binding_calls = Arc::new(AtomicUsize::new(0));
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (tripwire_base_url, provider_hits, tripwire) = provider_io_tripwire().await;
+
+        let authority = ExperimentalGptLiveOpenAuthority::new_public(public_live_authority_config(
+            &realm,
+            "marin",
+            public_live_identity(selected_binding.clone()),
+            Arc::new(CountingConfigSource {
+                reads: Arc::clone(&config_reads),
+                config: public_live_realm_config(&realm),
+            }),
+            Arc::new(ExactAllowBindingAuthority {
+                session_id: session_id.clone(),
+                expected: selected_binding,
+                calls: Arc::clone(&binding_calls),
+                auth_lease,
+                events: Arc::clone(&events),
+            }),
+            Arc::clone(&transport),
+        ))
+        .expect("public authority configuration")
+        .with_test_base_url(tripwire_base_url);
+
+        let pending = authority
+            .prepare_open(&session_id, &public_profile_override())
+            .await
+            .expect("public pending open");
+
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(binding_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(events.lock().expect("event log").as_slice(), ["authorize"]);
+
+        let profile = pending.execution_profile();
+        assert_eq!(
+            profile.profile_id(),
+            GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID
+        );
+        assert_eq!(
+            profile.mode(),
+            meerkat_core::LiveExecutionMode::ClientContext
+        );
+        assert_eq!(
+            profile.capabilities(),
+            meerkat_core::LiveExecutionCapabilities {
+                function_bridge: false,
+                client_context: true,
+            }
+        );
+        let factory = pending.session_factory();
+        assert_eq!(
+            factory.capabilities(),
+            experimental_gpt_live_realtime_capabilities()
+        );
+        assert!(factory.supports_provider(Provider::OpenAI));
+        assert!(!factory.supports_provider(Provider::Anthropic));
+        assert_eq!(
+            authority
+                .execution_feature_capabilities()
+                .expect("public capability atoms"),
+            vec![
+                meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
+                meerkat_contracts::LIVE_CLIENT_CONTEXT_V1_CAPABILITY,
+            ]
+        );
+
+        // Preparation is side-effect free: no channel custody and no provider
+        // connection until the browser offer is answered.
+        assert!(transport.registered_by_channel.lock().await.is_empty());
+        drop(pending);
+        tokio::task::yield_now().await;
+        assert_eq!(provider_hits.load(AtomicOrdering::SeqCst), 0);
+        assert!(transport.registered_by_channel.lock().await.is_empty());
+        tripwire.abort();
+    }
+
+    // Local public Live wire: `POST /v1/live/sessions` returns the WebRTC
+    // answer, `GET /v1/live/sessions/{id}/attach` is the scripted sideband.
+    #[cfg(feature = "test-realtime-fixtures")]
+    mod public_wire {
+        use std::sync::Arc;
+
+        use axum::Router;
+        use axum::body::Bytes;
+        use axum::extract::State;
+        use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::{get, post};
+        use serde_json::{Value, json};
+
+        pub(super) const USER_TRANSCRIPT: &str = "book a table";
+        pub(super) const ASSISTANT_TRANSCRIPT: &str = "one moment";
+        pub(super) const DELEGATION_ID: &str = "dlg_public";
+        pub(super) const ANSWER_SDP: &str = "v=0\r\nPUBLIC_ANSWER_SDP";
+
+        #[derive(Default)]
+        pub(super) struct Capture {
+            pub(super) create_body: Option<Value>,
+            pub(super) create_authorization: Option<String>,
+            pub(super) attach_authorization: Option<String>,
+            pub(super) client_events: Vec<Value>,
+        }
+        pub(super) type SharedCapture = Arc<std::sync::Mutex<Capture>>;
+
+        fn input_delta(text: &str) -> Value {
+            json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":0.0,"end_ms":1.0})
+        }
+
+        fn output_delta(text: &str) -> Value {
+            json!({"type":"session.output_transcript.delta","event_id":"o","delta":text,"start_ms":1.0,"end_ms":2.0})
+        }
+
+        fn delegation_created(id: &str, target: &str) -> Value {
+            json!({"type":"session.delegation.created","event_id":"d","offset_ms":1.5,
+                "delegation":{"type":"delegation","id":id,"target":target}})
+        }
+
+        async fn create_session(
+            State(capture): State<SharedCapture>,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> Response {
+            let mut capture = capture.lock().expect("capture lock");
+            capture.create_body = serde_json::from_slice(&body).ok();
+            capture.create_authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            (
+                StatusCode::CREATED,
+                [("content-type", "application/json")],
+                json!({"session":{"id":"live_fixture"},"transport":{"type":"webrtc","sdp":ANSWER_SDP}})
+                    .to_string(),
+            )
+                .into_response()
+        }
+
+        async fn attach(
+            State(capture): State<SharedCapture>,
+            headers: HeaderMap,
+            upgrade: WebSocketUpgrade,
+        ) -> Response {
+            capture.lock().expect("capture lock").attach_authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            upgrade.on_upgrade(move |socket| serve_sideband(socket, capture))
+        }
+
+        async fn send_json(socket: &mut WebSocket, value: Value) {
+            socket
+                .send(AxumMessage::Text(value.to_string().into()))
+                .await
+                .expect("fixture send");
+        }
+
+        async fn recv_json(socket: &mut WebSocket, capture: &SharedCapture) -> Value {
+            loop {
+                match socket.recv().await {
+                    Some(Ok(AxumMessage::Text(text))) => {
+                        let value: Value = serde_json::from_str(&text).expect("client event JSON");
+                        capture
+                            .lock()
+                            .expect("capture lock")
+                            .client_events
+                            .push(value.clone());
+                        return value;
+                    }
+                    Some(Ok(_)) => continue,
+                    other => panic!("sideband closed early: {other:?}"),
+                }
+            }
+        }
+
+        async fn serve_sideband(mut socket: WebSocket, capture: SharedCapture) {
+            let snapshot = json!({"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":12345.5});
+            send_json(
+                &mut socket,
+                json!({"type":"session.started","event_id":"s","session":snapshot}),
+            )
+            .await;
+            // Media reflection and a user transcript race ahead of the seed
+            // acknowledgement; the facade must preserve their order.
+            send_json(
+                &mut socket,
+                json!({"type":"session.input_audio.append","audio":"AAAA"}),
+            )
+            .await;
+            send_json(&mut socket, input_delta(USER_TRANSCRIPT)).await;
+            let seed = recv_json(&mut socket, &capture).await;
+            assert_eq!(seed["type"], "session.commentary.append");
+            assert!(seed["delegation_id"].is_null());
+            send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a1","start_ms":1.0,"end_ms":1.0})).await;
+            send_json(&mut socket, delegation_created(DELEGATION_ID, "client")).await;
+            send_json(&mut socket, output_delta(ASSISTANT_TRANSCRIPT)).await;
+            let release = recv_json(&mut socket, &capture).await;
+            assert_eq!(release["type"], "session.commentary.append");
+            assert_eq!(release["delegation_id"], DELEGATION_ID);
+            send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":2.0,"end_ms":2.0})).await;
+            let close = recv_json(&mut socket, &capture).await;
+            assert_eq!(close["type"], "session.close");
+            send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;
+            drop(socket);
+        }
+
+        pub(super) async fn local_server() -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
+            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            let app = Router::new()
+                .route("/v1/live/sessions", post(create_session))
+                .route("/v1/live/sessions/{session_id}/attach", get(attach))
+                .with_state(Arc::clone(&capture));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind public wire listener");
+            let address = listener.local_addr().expect("public wire address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve public wire");
+            });
+            (format!("http://{address}/v1/"), capture, server)
+        }
+    }
+
+    /// One resolved `gpt-live-1` target over the plain OpenAI API backend with
+    /// an inline fixture secret, exactly what `resolve_public_live_target`
+    /// hands the pending channel.
+    #[cfg(feature = "test-realtime-fixtures")]
+    fn public_fixture_target(realm: &meerkat_core::RealmId) -> ResolvedRealtimeTarget {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedBackendKind, ResolvedConnection, StaticLease,
+        };
+
+        let registry = meerkat_core::ModelRegistry::from_config(
+            &meerkat_core::Config::default(),
+            meerkat_models::canonical(),
+        )
+        .expect("canonical model registry");
+        let selected_binding = public_live_binding(realm);
+        let identity = public_live_identity(selected_binding.clone());
+        let witness = registry
+            .profile_witness_for_provider(Provider::OpenAI, &identity.model)
+            .expect("gpt-live-1 catalog witness");
+        let backend_kind = meerkat_openai::OpenAiBackendKind::OpenAiApi;
+        let connection = ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(backend_kind),
+            backend_profile: Arc::new(meerkat_core::connection::BackendProfile {
+                id: "openai_api".to_string(),
+                provider: Provider::OpenAI,
+                backend_kind: backend_kind.as_str().to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &selected_binding,
+            ),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                PUBLIC_LIVE_FIXTURE_SECRET.to_string(),
+                meerkat_core::AuthMetadata::default(),
+                None,
+                "openai:public-live-fixture",
+            )),
+        };
+        ResolvedRealtimeTarget::new(identity, witness, connection).expect("matching public target")
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_answers_offer_and_lowers_public_events_end_to_end() {
+        let (base_url, capture, server) = public_wire::local_server().await;
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let target = public_fixture_target(&realm);
+        let identity = target.identity().clone();
+        let session_id = meerkat_core::SessionId::new();
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+                GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("public client-context profile");
+        let pending = ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
+            target,
+            execution_profile,
+            session_id.clone(),
+            "marin",
+            Some("Catalog guidance.".to_string()),
+            &base_url,
+        )
+        .expect("public pending channel");
+
+        // Stage the canonical seed exactly as the shared live/open pipeline
+        // does, then answer the browser offer through the neutral broker.
+        let user = meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(
+            "Please book a table for two.",
+        ));
+        let open_config = seed_open_config(identity, vec![user.clone()]);
+        let expected_seed_cursor = open_config.canonical_message_cursor();
+        pending
+            .open_live_adapter(&open_config)
+            .await
+            .expect("public pending factory opens the deferred adapter");
+        assert!(
+            capture.lock().expect("capture lock").create_body.is_none(),
+            "seed staging must not open a provider session"
+        );
+
+        let channel_id = meerkat_live::LiveChannelId::new("public-live-end-to-end");
+        let offer = LiveWebrtcAdmittedOffer::from_machine_admission(
+            channel_id.clone(),
+            session_id.clone(),
+            Some(meerkat_live::LiveWebrtcRuntimeBinding {
+                generation: 1,
+                fence: 1,
+            }),
+            "v=0\r\nOFFER_SDP".to_string(),
+            meerkat_live::LiveWebrtcAnswerAdmissionSeal::__from_generated_admission(
+                channel_id.clone(),
+                session_id.clone(),
+            ),
+        )
+        .into_provider_offer()
+        .expect("admitted offer lowers to the provider offer");
+        let binding = offer.binding().clone();
+        let broker = Arc::clone(&pending.registration.broker);
+        let (answer_sdp, sideband, pending_bound_ready) = broker
+            .answer(offer)
+            .await
+            .expect("public broker answers the offer")
+            .into_parts();
+        assert_eq!(answer_sdp, public_wire::ANSWER_SDP);
+        {
+            let capture = capture.lock().expect("capture lock");
+            let body = capture.create_body.as_ref().expect("create body");
+            assert_eq!(body["session"]["model"], GPT_LIVE_PUBLIC_MODEL);
+            assert_eq!(body["session"]["delegation"]["type"], "client");
+            assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
+            assert_eq!(body["session"]["instructions"], "Catalog guidance.");
+            assert_eq!(body["transport"]["type"], "webrtc");
+            assert_eq!(body["transport"]["sdp"], "v=0\r\nOFFER_SDP");
+            let expected_authorization = format!("Bearer {PUBLIC_LIVE_FIXTURE_SECRET}");
+            assert_eq!(
+                capture.create_authorization.as_deref(),
+                Some(expected_authorization.as_str())
+            );
+            assert_eq!(
+                capture.attach_authorization.as_deref(),
+                Some(expected_authorization.as_str())
+            );
+            assert!(
+                capture.client_events.is_empty(),
+                "the seed waits for answer delivery"
+            );
+        }
+
+        // Answer delivery resolves the seed; SessionReady is the first
+        // observation and carries the exact staged cursor.
+        let receipt = pending_bound_ready
+            .__resolve_after_answer_delivery()
+            .await
+            .expect("seed acknowledged after answer delivery");
+        assert_eq!(
+            receipt
+                .__consume_for_generated_bind(&binding)
+                .expect("receipt binds the exact answered channel"),
+            expected_seed_cursor
+        );
+        let next = || async {
+            sideband
+                .next_observation()
+                .await
+                .expect("provider observation")
+                .expect("provider observation present")
+        };
+        let ready = next().await;
+        assert_eq!(ready.binding(), &binding);
+        assert!(matches!(
+            ready.kind(),
+            LiveSidebandObservationKind::SessionReady
+        ));
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::TurnStarted {
+                role: LiveSidebandTurnRole::User,
+                ..
+            }
+        ));
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::UserTranscriptFragment { text, .. }
+                if text == public_wire::USER_TRANSCRIPT
+        ));
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+        ));
+        let delegation = match next().await.into_kind() {
+            LiveSidebandObservationKind::DelegationRequested {
+                delegation,
+                final_transcript,
+                ..
+            } => {
+                assert_eq!(final_transcript, public_wire::USER_TRANSCRIPT);
+                delegation
+            }
+            other => panic!("expected the joined client delegation, got {other:?}"),
+        };
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::TurnStarted {
+                role: LiveSidebandTurnRole::Assistant,
+                ..
+            }
+        ));
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::AssistantTranscriptFragment { text, .. }
+                if text == public_wire::ASSISTANT_TRANSCRIPT
+        ));
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+        ));
+
+        // Releasing executor context for the delegation lowers to one
+        // delegation-scoped commentary append and its exact acknowledgement.
+        let release =
+            meerkat_live::LiveSidebandReleaseAuthority::__from_generated_result_authority(
+                binding.clone(),
+                "public-live-result".to_string(),
+                meerkat_core::LiveResultDisposition::DeferredContext,
+                "content-digest".to_string(),
+            )
+            .expect("generated release authority");
+        let command = LiveSidebandCommand::release_delegation_context(
+            release,
+            delegation,
+            "Table booked for two.",
+        )
+        .expect("release command");
+        let attempt = command.attempt();
+        assert_eq!(
+            sideband
+                .send_command(command)
+                .await
+                .expect("release delivered"),
+            LiveSidebandCommandDelivery::Accepted
+        );
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::AppendAcknowledged { attempt: acked }
+                if *acked == attempt
+        ));
+
+        sideband.close().await.expect("close requested");
+        assert!(matches!(
+            next().await.kind(),
+            LiveSidebandObservationKind::TurnFinished {
+                role: LiveSidebandTurnRole::Assistant,
+                transcript,
+                ..
+            } if transcript == public_wire::ASSISTANT_TRANSCRIPT
+        ));
+        assert!(
+            sideband
+                .next_observation()
+                .await
+                .expect("stream end")
+                .is_none()
+        );
+
+        let events = capture.lock().expect("capture lock").client_events.clone();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["type"], "session.commentary.append");
+        assert!(events[0]["delegation_id"].is_null());
+        let seed: serde_json::Value =
+            serde_json::from_str(events[0]["content"].as_str().expect("seed content"))
+                .expect("seed content is the canonical commentary JSON");
+        assert_eq!(seed, serde_json::json!({ "canonical_messages": [user] }));
+        assert_eq!(events[1]["type"], "session.commentary.append");
+        assert_eq!(events[1]["delegation_id"], public_wire::DELEGATION_ID);
+        assert_eq!(events[1]["content"], "Table booked for two.");
+        assert_eq!(events[2]["type"], "session.close");
+        server.abort();
+    }
+
     fn prepared_client_context_seed_factory() -> (
         ExperimentalGptLivePreparedOpen,
         Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
@@ -5568,38 +6662,6 @@ mod tests {
             }),
             ProviderWebrtcBrokerError::Unavailable
         );
-    }
-
-    #[test]
-    fn production_broker_config_selects_fixed_client_context_mode() {
-        let config = ExperimentalGptLiveWebrtcBroker::open_config(
-            meerkat_core::LiveExecutionMode::ClientContext,
-            None,
-            "private-offer-sdp",
-            "cedar",
-            Some("catalog instructions".to_string()),
-        )
-        .expect("client-context config is independently available");
-
-        let debug = format!("{config:?}");
-        assert!(debug.contains("Client(<platform-owned>)"));
-        assert!(!debug.contains("private-offer-sdp"));
-        assert!(!debug.contains("catalog instructions"));
-        assert!(!debug.contains(meerkat_openai::gpt_live::GPT_LIVE_RESPONSES_BRIDGE_TOOL));
-    }
-
-    #[test]
-    fn production_broker_config_keeps_unqualified_function_bridge_closed() {
-        assert!(matches!(
-            ExperimentalGptLiveWebrtcBroker::open_config(
-                meerkat_core::LiveExecutionMode::FunctionBridge,
-                None,
-                "private-offer-sdp",
-                "cedar",
-                None,
-            ),
-            Err(ProviderWebrtcBrokerError::Rejected)
-        ));
     }
 
     #[tokio::test]

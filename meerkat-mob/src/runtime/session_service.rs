@@ -18,7 +18,7 @@ use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::sync::{Mutex, OnceLock, Weak};
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 fn start_live_bridge_on_session_actor(
     accepted: Result<meerkat_session::LiveBridgeSessionOperationTerminalReceiver, SessionError>,
     max_output_bytes: usize,
@@ -916,7 +916,7 @@ pub trait MobSessionService:
     /// The provider observation is not executor authority. Only the sealed
     /// evidence returned by this method may be reconciled by the live runtime
     /// before any delegated model or tool work starts.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         _session_id: &SessionId,
@@ -930,7 +930,7 @@ pub trait MobSessionService:
 
     /// Validate the exact current durable member's bridge policy and isolated
     /// client capability before any live channel/provider open.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
         _session_id: &SessionId,
@@ -946,7 +946,7 @@ pub trait MobSessionService:
     /// machine. Callers must retain and execute this identical clone; a
     /// post-admission re-read is forbidden because full-duplex input may have
     /// advanced the actor in between.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -960,7 +960,7 @@ pub trait MobSessionService:
 
     /// Start one accepted noncommitting operation on the already-materialized
     /// durable member's session actor.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn start_live_bridge_member_operation(
         &self,
         _request: super::LiveBridgeOperationRequest,
@@ -1728,7 +1728,7 @@ where
         .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         session_id: &SessionId,
@@ -1739,7 +1739,7 @@ where
             .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
         session_id: &SessionId,
@@ -1748,7 +1748,7 @@ where
             .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn start_live_bridge_member_operation(
         &self,
         request: super::LiveBridgeOperationRequest,
@@ -1766,7 +1766,7 @@ where
         )
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -2201,7 +2201,7 @@ where
         Some(self)
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         session_id: &SessionId,
@@ -2212,7 +2212,7 @@ where
             .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
         session_id: &SessionId,
@@ -2221,7 +2221,7 @@ where
             .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn start_live_bridge_member_operation(
         &self,
         request: super::LiveBridgeOperationRequest,
@@ -2239,7 +2239,7 @@ where
         )
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -2379,12 +2379,12 @@ where
         session_id: &SessionId,
         runtime_adapter: &meerkat_runtime::MeerkatMachine,
     ) -> Result<usize, SessionError> {
-        #[cfg(not(feature = "experimental-gpt-live"))]
+        #[cfg(not(feature = "openai-live"))]
         {
             let _ = (session_id, runtime_adapter);
             return Ok(0);
         }
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         {
             // Ordinary Mob turns do not own a live-context projection. Check the
             // machine's active binding before exporting the committed session

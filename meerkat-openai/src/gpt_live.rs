@@ -25,10 +25,15 @@ use oai_rt_rs::experimental::gpt_live::{
     SidebandReceiver, SidebandSender, TransportError,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::OpenAiBackendKind;
+pub use crate::gpt_live_broker::{
+    GptLiveAppendToken, GptLiveBrokerError, GptLiveBrokerObservation, GptLiveBrokerTerminalClass,
+    GptLiveDelegationRef, GptLiveDelegationTarget, GptLiveTranscriptItemRef, GptLiveTurnRef,
+    GptLiveTurnRole,
+};
+use crate::gpt_live_broker::{protocol_error, require_context, summarize_unknown_provider_event};
 
 pub const GPT_LIVE_RESPONSES_BRIDGE_TOOL: &str = "invoke_meerkat";
 
@@ -234,219 +239,6 @@ impl GptLiveBrokerOpenConfig {
     }
 }
 
-/// Sanitized terminal classification for private broker mechanics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GptLiveBrokerTerminalClass {
-    Configuration,
-    Protocol,
-    Http,
-    WebSocket,
-    Closed,
-}
-
-/// Opaque local identity for one append attempt.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GptLiveAppendToken(u64);
-
-impl std::fmt::Debug for GptLiveAppendToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GptLiveAppendToken(<local>)")
-    }
-}
-
-/// Opaque delegation reference that can only be minted by this adapter.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct GptLiveDelegationRef(String);
-
-impl GptLiveDelegationRef {
-    /// Borrow only at the facade boundary that seals the provider-neutral
-    /// opaque delegation reference. The value must never be logged.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __opaque_provider_id(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct GptLiveTranscriptItemRef(String);
-
-impl GptLiveTranscriptItemRef {
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __opaque_provider_id(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for GptLiveTranscriptItemRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GptLiveTranscriptItemRef(<redacted>)")
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct GptLiveTurnRef(String);
-
-impl GptLiveTurnRef {
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __opaque_provider_id(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for GptLiveTurnRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GptLiveTurnRef(<redacted>)")
-    }
-}
-
-/// Opaque provider handoff identity retained only for exact client joins.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct GptLiveHandoffRef(String);
-
-impl GptLiveHandoffRef {
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __opaque_provider_id(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for GptLiveHandoffRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GptLiveHandoffRef(<redacted>)")
-    }
-}
-
-/// Qualified target carried by a joined client delegation observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GptLiveDelegationTarget {
-    Client,
-}
-
-impl std::fmt::Debug for GptLiveDelegationRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GptLiveDelegationRef(<redacted>)")
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GptLiveTurnRole {
-    User,
-    Assistant,
-    Unknown,
-}
-
-impl GptLiveTurnRole {
-    fn from_provider_role(role: &str) -> Self {
-        match role {
-            "user" => Self::User,
-            "assistant" => Self::Assistant,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/// Sanitized provider observations emitted by the private sideband adapter.
-///
-/// No provider call, session, turn, transcript-item, handoff, or delegation
-/// identifier is exposed. Text is semantic observation content, not a raw
-/// private payload.
-#[derive(Clone, PartialEq, Eq)]
-pub enum GptLiveBrokerObservation {
-    SessionReady,
-    SessionContextAppendAcknowledged {
-        token: GptLiveAppendToken,
-    },
-    UserTranscriptFragment {
-        item: GptLiveTranscriptItemRef,
-        text: String,
-    },
-    AssistantTranscriptFragment {
-        item: GptLiveTranscriptItemRef,
-        text: String,
-    },
-    TurnStarted {
-        turn: GptLiveTurnRef,
-        role: GptLiveTurnRole,
-    },
-    TurnSnapshotDelta {
-        turn: GptLiveTurnRef,
-        delta: String,
-    },
-    TurnFinished {
-        turn: GptLiveTurnRef,
-        role: GptLiveTurnRole,
-        transcript: String,
-    },
-    /// Exact client-targeted delegation joined to its final user turn.
-    ///
-    /// This is provider evidence only. It does not itself authorize executor
-    /// work or establish canonical transcript commitment.
-    ClientDelegationFinal {
-        delegation: GptLiveDelegationRef,
-        target: GptLiveDelegationTarget,
-        handoff: GptLiveHandoffRef,
-        turn: GptLiveTurnRef,
-        transcript: String,
-    },
-    DelegationActionableInputUnsupported {
-        delegation: GptLiveDelegationRef,
-    },
-    DelegationContextAppendAcknowledged {
-        token: GptLiveAppendToken,
-    },
-    UnsupportedPrivateEvent,
-}
-
-impl std::fmt::Debug for GptLiveBrokerObservation {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match self {
-            Self::SessionReady => "session_ready",
-            Self::SessionContextAppendAcknowledged { .. } => "session_context_append_acknowledged",
-            Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
-            Self::AssistantTranscriptFragment { .. } => "assistant_transcript_fragment",
-            Self::TurnStarted { .. } => "turn_started",
-            Self::TurnSnapshotDelta { .. } => "turn_snapshot_delta",
-            Self::TurnFinished { .. } => "turn_finished",
-            Self::ClientDelegationFinal { .. } => "client_delegation_final",
-            Self::DelegationActionableInputUnsupported { .. } => {
-                "delegation_actionable_input_unsupported"
-            }
-            Self::DelegationContextAppendAcknowledged { .. } => {
-                "delegation_context_append_acknowledged"
-            }
-            Self::UnsupportedPrivateEvent => "unsupported_private_event",
-        };
-        formatter
-            .debug_struct("GptLiveBrokerObservation")
-            .field("kind", &kind)
-            .field("payload", &"<redacted>")
-            .finish()
-    }
-}
-
-/// Sanitized failure surface for browser bootstrap and sideband mechanics.
-#[derive(Error)]
-pub enum GptLiveBrokerError {
-    #[error("GPT Live browser bootstrap requires a non-empty SDP offer")]
-    MissingOfferSdp,
-    #[error("GPT Live browser bootstrap requires a non-empty voice")]
-    MissingVoice,
-    #[error("GPT Live Responses bridge requires a catalogued non-realtime OpenAI model")]
-    InvalidResponsesProfile,
-    #[error("GPT Live context append requires non-empty text")]
-    MissingContext,
-    #[error("a GPT Live context append is already awaiting acknowledgement")]
-    AppendInFlight,
-    #[error("GPT Live append delivery is ambiguous and must not be retried blindly")]
-    AppendDeliveryAmbiguous { token: GptLiveAppendToken },
-    #[error("GPT Live private transport terminated")]
-    Transport { class: GptLiveBrokerTerminalClass },
-}
-
 impl From<TransportError> for GptLiveBrokerError {
     fn from(source: TransportError) -> Self {
         let class = match source {
@@ -466,26 +258,6 @@ impl From<TransportError> for GptLiveBrokerError {
             TransportError::Closed => GptLiveBrokerTerminalClass::Closed,
         };
         Self::Transport { class }
-    }
-}
-
-impl std::fmt::Debug for GptLiveBrokerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingOfferSdp => formatter.write_str("MissingOfferSdp"),
-            Self::MissingVoice => formatter.write_str("MissingVoice"),
-            Self::InvalidResponsesProfile => formatter.write_str("InvalidResponsesProfile"),
-            Self::MissingContext => formatter.write_str("MissingContext"),
-            Self::AppendInFlight => formatter.write_str("AppendInFlight"),
-            Self::AppendDeliveryAmbiguous { token } => formatter
-                .debug_struct("AppendDeliveryAmbiguous")
-                .field("token", token)
-                .finish(),
-            Self::Transport { class } => formatter
-                .debug_struct("Transport")
-                .field("class", class)
-                .finish(),
-        }
     }
 }
 
@@ -750,7 +522,6 @@ struct GptLiveBrokerSessionState {
 
 struct PendingClientDelegation {
     delegation: GptLiveDelegationRef,
-    handoff: GptLiveHandoffRef,
     turn: GptLiveTurnRef,
 }
 
@@ -792,7 +563,7 @@ impl GptLiveBrokerSession {
                         // after this exact seed resolver succeeds. Do not
                         // replay a redundant private-protocol observation.
                     }
-                    Some(GptLiveBrokerObservation::UnsupportedPrivateEvent) => {
+                    Some(GptLiveBrokerObservation::UnsupportedProviderEvent) => {
                         return Err(protocol_error());
                     }
                     Some(observation) => deferred.push_back(observation),
@@ -1031,7 +802,7 @@ impl GptLiveBrokerSessionState {
                 );
             }
             ServerEvent::Unknown(event) => {
-                let summary = summarize_unknown_private_event(&event);
+                let summary = summarize_unknown_provider_event(event.kind(), event.raw());
                 tracing::warn!(
                     provider_event_class = "unknown",
                     event_kind_sha256 = %summary.event_kind_sha256,
@@ -1042,7 +813,7 @@ impl GptLiveBrokerSessionState {
                     "experimental GPT Live received an unsupported private sideband event"
                 );
                 self.queued_observations
-                    .push_back(GptLiveBrokerObservation::UnsupportedPrivateEvent);
+                    .push_back(GptLiveBrokerObservation::UnsupportedProviderEvent);
             }
         }
         Ok(())
@@ -1072,7 +843,6 @@ impl GptLiveBrokerSessionState {
         let turn_id = item.user_bidi_turn_id;
         let pending = PendingClientDelegation {
             delegation: GptLiveDelegationRef(item.id.clone()),
-            handoff: GptLiveHandoffRef(item.handoff_id.clone()),
             turn: GptLiveTurnRef(turn_id.clone()),
         };
         self.seen_delegation_ids.insert(item.id);
@@ -1106,16 +876,9 @@ impl GptLiveBrokerSessionState {
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: pending.delegation,
                 target: GptLiveDelegationTarget::Client,
-                handoff: pending.handoff,
                 turn,
                 transcript,
             });
-    }
-}
-
-fn protocol_error() -> GptLiveBrokerError {
-    GptLiveBrokerError::Transport {
-        class: GptLiveBrokerTerminalClass::Protocol,
     }
 }
 
@@ -1171,58 +934,6 @@ fn validate_reflected_sideband_audio(
         return Err(protocol_error());
     }
     Ok(true)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UnknownPrivateEventSummary {
-    event_kind_sha256: String,
-    error_class: &'static str,
-    top_level_field_count: usize,
-    normalized_json_bytes: usize,
-    message_bytes: usize,
-}
-
-fn summarize_unknown_private_event(
-    event: &oai_rt_rs::experimental::gpt_live::UnknownEvent,
-) -> UnknownPrivateEventSummary {
-    use sha2::{Digest, Sha256};
-
-    let message = event
-        .raw()
-        .pointer("/error/message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let error_class = if message.contains("maximum")
-        || message.contains("too long")
-        || message.contains("exceed")
-    {
-        "size_limit"
-    } else if message.contains("Unknown parameter") {
-        "unknown_parameter"
-    } else if message.contains("Missing required parameter") {
-        "missing_parameter"
-    } else if message.contains("Invalid") || message.contains("invalid") {
-        "invalid_parameter"
-    } else if event.kind() == "error" {
-        "other_provider_error"
-    } else {
-        "unsupported_event"
-    };
-    UnknownPrivateEventSummary {
-        event_kind_sha256: format!("{:x}", Sha256::digest(event.kind().as_bytes())),
-        error_class,
-        top_level_field_count: event.raw().as_object().map_or(0, serde_json::Map::len),
-        normalized_json_bytes: serde_json::to_vec(event.raw()).map_or(0, |bytes| bytes.len()),
-        message_bytes: message.len(),
-    }
-}
-
-fn require_context(text: impl Into<String>) -> Result<String, GptLiveBrokerError> {
-    let text = text.into();
-    if text.trim().is_empty() {
-        return Err(GptLiveBrokerError::MissingContext);
-    }
-    Ok(text)
 }
 
 fn context_content(text: String) -> InputTextContent {
@@ -1401,7 +1112,7 @@ mod tests {
             panic!("fixture must remain unknown");
         };
 
-        let summary = summarize_unknown_private_event(&event);
+        let summary = summarize_unknown_provider_event(event.kind(), event.raw());
         assert_eq!(
             summary.event_kind_sha256,
             "f9b7098fca222c5a37d08be50e849334121e410c0c5cb8974f2be34879af92be"
@@ -1426,7 +1137,7 @@ mod tests {
             let ServerEvent::Unknown(event) = event else {
                 panic!("fixture must remain unknown");
             };
-            summarize_unknown_private_event(&event)
+            summarize_unknown_provider_event(event.kind(), event.raw())
         };
         let first = summary("private.fixture.alpha", "FIRST_PRIVATE_PAYLOAD");
         let same_kind = summary("private.fixture.alpha", "DIFFERENT_PRIVATE_PAYLOAD");
@@ -1459,7 +1170,7 @@ mod tests {
                 .expect("project unknown observation");
             assert!(matches!(
                 state.queued_observations.pop_front(),
-                Some(GptLiveBrokerObservation::UnsupportedPrivateEvent)
+                Some(GptLiveBrokerObservation::UnsupportedProviderEvent)
             ));
             assert!(state.queued_observations.is_empty());
             assert_eq!(state.pending_session_append, Some(GptLiveAppendToken(7)));
@@ -1902,11 +1613,9 @@ mod tests {
             Some(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation,
                 target: GptLiveDelegationTarget::Client,
-                handoff,
                 turn,
                 transcript,
             }) if delegation.__opaque_provider_id() == "item_EGKFFURbWV7QZwDEWG06L"
-                && handoff.__opaque_provider_id() == "handoff_1"
                 && turn.__opaque_provider_id() == turn_id
                 && transcript == "authoritative final"
         ));
@@ -2163,11 +1872,9 @@ mod tests {
             Some(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation,
                 target: GptLiveDelegationTarget::Client,
-                handoff,
                 turn,
                 transcript,
-            }) if handoff.__opaque_provider_id() == "private_handoff_id"
-                && turn.__opaque_provider_id() == "private_user_turn"
+            }) if turn.__opaque_provider_id() == "private_user_turn"
                 && transcript == "authoritative user final" =>
             {
                 delegation

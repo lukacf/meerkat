@@ -4044,7 +4044,7 @@ impl MobSessionService for MockSessionService {
         let _ = admitted.send(());
         SessionService::start_turn(self, session_id, request).await
     }
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
         _session_id: &SessionId,
@@ -4195,7 +4195,7 @@ impl MobSessionService for MockSessionService {
         })
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn start_live_bridge_member_operation(
         &self,
         request: super::LiveBridgeOperationRequest,
@@ -8558,7 +8558,7 @@ async fn create_persistent_runtime_test_mob(
     (handle, service)
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 #[tokio::test]
 async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_direct_bridge() {
     let definition = with_unique_mob_id(sample_definition(), "live-durable-source-topology");
@@ -8588,7 +8588,7 @@ async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_dir
     handle.shutdown().await.expect("shutdown test mob");
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 #[tokio::test]
 async fn live_bridge_cancellation_keeps_exact_member_incarnation_and_allows_ordinary_turn() {
     struct AdmitDispatch;

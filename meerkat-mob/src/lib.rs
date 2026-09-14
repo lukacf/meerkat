@@ -304,7 +304,7 @@ pub use runtime::{
     WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
     profile_to_wire, render_bounded_delegation_task, stored_realm_profile_to_wire,
 };
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 pub use runtime::{
     DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
     LiveBridgeAcceptedExecution, LiveBridgeExecutionSnapshot,

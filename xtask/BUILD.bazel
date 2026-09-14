@@ -93,7 +93,12 @@ rust_test(
     size = "medium",
     data = [
         "//:repo_governance_files",
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
         "//:workspace_runfiles",
+        "//meerkat-mob:cargo_manifest",
+        "//meerkat:cargo_manifest",
+        "//xtask:cargo_manifest",
         ":package_runfiles",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",

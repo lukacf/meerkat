@@ -1576,10 +1576,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct AllowLiveBridgeModelOnly;
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::ToolDispatchAdmission for AllowLiveBridgeModelOnly {
         async fn await_dispatch_admission(
@@ -1668,36 +1668,36 @@ mod tests {
         delta: &'static str,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct MidRunCancellationClient {
         calls: AtomicUsize,
         saw_member_tool: AtomicBool,
         seen_tools: Mutex<Vec<String>>,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct BlockingMemberToolDispatcher {
         started: Arc<tokio::sync::Notify>,
         dispatches: AtomicUsize,
         tools: Arc<[Arc<ToolDef>]>,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct CountingAgentSessionStore {
         saves: AtomicUsize,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct CountingSessionCheckpointer {
         checkpoints: AtomicUsize,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct CountingHookEngine {
         calls: AtomicUsize,
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     struct PolicyProbeDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
@@ -1723,7 +1723,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl LlmClient for MidRunCancellationClient {
         fn project_replay_messages(
@@ -1805,7 +1805,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::AgentToolDispatcher for BlockingMemberToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -1826,7 +1826,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::HookEngine for CountingHookEngine {
         async fn execute(
@@ -1839,7 +1839,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::AgentToolDispatcher for PolicyProbeDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -1868,7 +1868,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::AgentSessionStore for CountingAgentSessionStore {
         async fn save(
@@ -1887,7 +1887,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[async_trait]
     impl meerkat_core::SessionCheckpointer for CountingSessionCheckpointer {
         async fn checkpoint_run(
@@ -2350,7 +2350,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn build_policy_probe_factory_agent(
         temp: &TempDir,
         client: Arc<MidRunCancellationClient>,
@@ -2390,7 +2390,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn warm_policy_probe_member(agent: &mut FactoryAgent) -> Result<(), String> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         SessionAgent::run_turn_with_events(
@@ -2411,7 +2411,7 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     fn policy_probe_bridge_request(
         agent: &FactoryAgent,
         operation_id: &str,
@@ -2436,7 +2436,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn assert_live_bridge_policy_rejected_without_effects(
         agent: FactoryAgent,
         request: meerkat_session::LiveBridgeSessionOperationRequest,
@@ -2495,7 +2495,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn factory_agent_live_bridge_restores_canonical_session_after_cancellation()
     -> Result<(), String> {
@@ -2831,7 +2831,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn session_actor_runs_ordinary_turn_while_live_bridge_tool_is_in_flight()
     -> Result<(), String> {
@@ -2983,7 +2983,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn unsupported_llm_decorator_rejects_bridge_before_acceptance_without_effects()
     -> Result<(), String> {
@@ -3137,7 +3137,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn hooked_session_owned_member_rejects_live_bridge_before_all_effects()
     -> Result<(), String> {
@@ -3185,7 +3185,7 @@ mod tests {
         .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn callback_provenance_member_rejects_live_bridge_before_provider_or_dispatch()
     -> Result<(), String> {
@@ -3247,7 +3247,7 @@ mod tests {
         .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[tokio::test]
     async fn exact_non_fast_catalog_member_rejects_live_bridge_before_provider_or_dispatch()
     -> Result<(), String> {

@@ -29,7 +29,7 @@ mod stdio_json;
 #[cfg(all(
     feature = "session-store",
     feature = "live",
-    feature = "experimental-gpt-live",
+    feature = "openai-live",
     not(target_arch = "wasm32")
 ))]
 pub use crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel;
@@ -53,7 +53,7 @@ pub use live_host::{
     feature = "session-store",
     feature = "live",
     feature = "live-webrtc",
-    feature = "experimental-gpt-live",
+    feature = "openai-live",
     not(target_arch = "wasm32")
 ))]
 pub use live_host::{

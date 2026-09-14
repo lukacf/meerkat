@@ -36,6 +36,7 @@ rust_library(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -83,6 +84,7 @@ rust_library(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -138,6 +140,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -200,6 +203,7 @@ rust_binary(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -257,6 +261,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -328,6 +333,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -402,6 +408,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -474,6 +481,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -507,6 +515,8 @@ rust_test(
         "integration",
     ],
     data = [
+        ":package_runfiles",
+        "//meerkat-cli:package_runfiles",
         "//meerkat-mob-mcp:package_runfiles",
         "//meerkat-mob:package_runfiles",
         "//meerkat:package_runfiles",
@@ -563,6 +573,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -636,6 +647,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -710,6 +722,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -782,6 +795,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -855,6 +869,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -862,6 +877,7 @@ rust_test(
     ],
     srcs = [
         "tests/gpt_live_client_e2e.rs",
+        "tests/support/gpt_live_e2e.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -919,6 +935,82 @@ rust_test(
 )
 
 rust_test(
+    name = "gpt_live_public_e2e_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "gpt_live_public_e2e",
+    crate_root = "tests/gpt_live_public_e2e.rs",
+    crate_features = [
+        "experimental-gpt-live-e2e",
+        "integration-real-tests",
+        "openai-live-e2e",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/gpt_live_public_e2e.rs",
+        "tests/support/gpt_live_e2e.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_BIN_NAME": "gpt_live_public_e2e",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    tags = [
+        "e2e",
+        "integration",
+        "live",
+        "required-feature",
+    ],
+    data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+    ],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_copilot_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_providers_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+        "//tests/integration:meerkat_integration_tests_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "live_mob_tools_test",
     aliases = aliases(
         package_name = "tests/integration",
@@ -932,6 +1024,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1002,6 +1095,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1070,6 +1164,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1138,6 +1233,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1210,6 +1306,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1281,6 +1378,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1349,6 +1447,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1417,6 +1516,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1485,6 +1585,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1555,6 +1656,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1628,6 +1730,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1697,6 +1800,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1770,6 +1874,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1855,6 +1960,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [
@@ -1940,6 +2046,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live-e2e",
     ],
     edition = "2024",
     compile_data = [

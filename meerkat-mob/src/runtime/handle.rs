@@ -13985,7 +13985,7 @@ impl MemberHandle {
 
     /// Preflight the exact current durable member for experimental live bridge
     /// eligibility without opening a channel or consuming operation authority.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn validate_live_bridge_eligibility(
         &self,
     ) -> Result<(), super::LiveBridgeOperationStartError> {
@@ -14011,7 +14011,7 @@ impl MemberHandle {
     /// actor still atomically validates current roster, runtime, and canonical
     /// bridge-session ownership. Direct same-member execution must continue to
     /// use [`Self::validate_live_bridge_eligibility`].
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn validate_live_durable_source_availability(
         &self,
     ) -> Result<(), super::LiveBridgeOperationStartError> {
@@ -14035,7 +14035,7 @@ impl MemberHandle {
     /// exact durable member. The Mob actor revalidates current incarnation,
     /// fence, session binding, and canonical revision before transferring
     /// custody to the session actor.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn start_live_bridge_operation(
         &self,
         request: super::LiveBridgeOperationRequest,

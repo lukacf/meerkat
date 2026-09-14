@@ -435,7 +435,7 @@ pub enum RealtimeSessionOpenProjectionError {
 }
 
 /// Typed failure for the shared strict execution-identity open flow.
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 #[derive(Debug, thiserror::Error)]
 pub enum ExperimentalLiveChannelOpenError {
     #[error("live/open execution_identity requires transport 'webrtc'")]
@@ -460,7 +460,7 @@ pub enum ExperimentalLiveChannelOpenError {
 /// The receipt is machine-minted and may only be used to reacquire the exact
 /// current pending authority. Surfaces must not infer phase from a successful
 /// provider open or retain a parallel phase ledger.
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 pub struct ExperimentalLivePendingChannel {
     open: meerkat_contracts::LiveOpenResult,
     session_id: SessionId,
@@ -469,7 +469,7 @@ pub struct ExperimentalLivePendingChannel {
     execution_mode: meerkat_core::LiveExecutionMode,
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 impl std::fmt::Debug for ExperimentalLivePendingChannel {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -483,7 +483,7 @@ impl std::fmt::Debug for ExperimentalLivePendingChannel {
     }
 }
 
-#[cfg(feature = "experimental-gpt-live")]
+#[cfg(feature = "openai-live")]
 impl ExperimentalLivePendingChannel {
     #[must_use]
     pub fn open(&self) -> &meerkat_contracts::LiveOpenResult {
@@ -1934,7 +1934,7 @@ mod orchestrator {
         /// machine/channel/provider effect. The admitted identity and one-use
         /// factory then travel through the ordinary S5-S12 pipeline, and the
         /// opaque transport is bound before the result may be published.
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         #[allow(clippy::too_many_arguments)]
         pub async fn open_live_channel_with_execution_identity(
             &self,
@@ -2045,7 +2045,7 @@ mod orchestrator {
         /// Retire a bound experimental channel that cannot be published by
         /// its surface. Provider registration is removed before the canonical
         /// semantic close, so no answer can race a failed response handoff.
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         pub async fn cleanup_experimental_live_channel_after_publication_failure(
             &self,
             host: &LiveAdapterHost,
@@ -2179,7 +2179,7 @@ mod orchestrator {
 
         /// Recovery-only variant whose channel identity is sealed by generated
         /// ambiguity authority rather than minted by the surface.
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         #[allow(clippy::too_many_arguments)]
         pub(crate) async fn open_live_channel_from_projection_for_recovery(
             &self,
@@ -2211,7 +2211,7 @@ mod orchestrator {
         /// Result-delivery recovery variant whose channel identity is sealed
         /// by distinct generated ambiguity authority. It intentionally does
         /// not reinterpret the result as a canonical context append.
-        #[cfg(feature = "experimental-gpt-live")]
+        #[cfg(feature = "openai-live")]
         #[allow(clippy::too_many_arguments)]
         pub(crate) async fn open_live_channel_from_projection_for_result_recovery(
             &self,

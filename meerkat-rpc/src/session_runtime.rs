@@ -1153,7 +1153,7 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         session_id: &SessionId,
@@ -1169,7 +1169,7 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
         session_id: &SessionId,
@@ -4375,7 +4375,7 @@ impl SessionRuntime {
 
     /// Thin RPC composition over Meerkat's shared strict execution-identity
     /// open coordinator.
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     #[allow(clippy::too_many_arguments)]
     pub async fn open_live_channel_with_execution_identity(
         self: &Arc<Self>,
@@ -4412,7 +4412,7 @@ impl SessionRuntime {
             .await
     }
 
-    #[cfg(feature = "experimental-gpt-live")]
+    #[cfg(feature = "openai-live")]
     pub async fn cleanup_experimental_live_channel_after_publication_failure(
         &self,
         host: &meerkat_live::LiveAdapterHost,
@@ -25144,7 +25144,7 @@ mod tests {
         }))
         .expect("serialize live/open params");
 
-        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+        #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
         let experimental_live_playback_custodies =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -25157,9 +25157,9 @@ mod tests {
             runtime: &runtime,
             // The whole point of #302: no factory wired.
             session_factory: None,
-            #[cfg(feature = "experimental-gpt-live")]
+            #[cfg(feature = "openai-live")]
             experimental_live_open_authority: None,
-            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
             experimental_live_playback_custodies: &experimental_live_playback_custodies,
         };
 

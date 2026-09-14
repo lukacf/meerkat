@@ -6,9 +6,19 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveResultDeliveryState {
+macro_rules! live_delivery_states {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+live_delivery_states! { LiveResultDeliveryState {
     Authorized,
     Claimed,
     NotEnqueued,
@@ -19,21 +29,17 @@ pub enum LiveResultDeliveryState {
     RejectedAfterWrite,
     AbandonedByClose,
     AbandonedByReplacement,
-}
+}}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveContinuationBatchEligibility {
+live_delivery_states! { LiveContinuationBatchEligibility {
     PendingOutputs,
     EligibleUnclaimed,
     ClaimedByAttempt,
     Spent,
     Abandoned,
-}
+}}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveContinuationState {
+live_delivery_states! { LiveContinuationState {
     NotClaimed,
     Claimed,
     NotEnqueued,
@@ -42,11 +48,9 @@ pub enum LiveContinuationState {
     AmbiguousFenced,
     NotAttemptedMissingRequiredOutputs,
     AbandonedByClose,
-}
+}}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveContextChunkDeliveryState {
+live_delivery_states! { LiveContextChunkDeliveryState {
     NotClaimed,
     Claimed,
     NotEnqueued,
@@ -55,7 +59,7 @@ pub enum LiveContextChunkDeliveryState {
     AmbiguousUnfenced,
     AmbiguousFenced,
     AbandonedBeforeWrite,
-}
+}}
 
 /// An uncorrelated acknowledgment cannot identify a context chunk or advance
 /// its correlated-injection frontier.

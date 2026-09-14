@@ -127,9 +127,57 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "atomic_domains_test",
+    aliases = aliases(
+        package_name = "meerkat-sqlite",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "atomic_domains",
+    crate_root = "tests/atomic_domains.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/atomic_domains.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.37",
+        "CARGO_BIN_NAME": "atomic_domains",
+        "CARGO_MANIFEST_DIR": "./meerkat-sqlite",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "33554432",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-sqlite",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-sqlite:meerkat_sqlite",
+    ] + all_crate_deps(
+        package_name = "meerkat-sqlite",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
+        ":atomic_domains_test",
         ":meerkat_sqlite_unit_test",
     ],
 )

@@ -239,17 +239,11 @@ else
   bad "BuildBuddy launcher still carries stale vendored oai-rt-rs lock handling"
 fi
 
-oai_rt_rs_version="$(awk -F'"' '/^oai-rt-rs = / { print $2; exit }' Cargo.toml)"
-if [[ "${oai_rt_rs_version}" == "=0.4.1" ]] &&
-  grep -Fq 'features = ["experimental-gpt-live"]' Cargo.toml &&
-  ! grep -Fq 'oai-rt-rs = { path = ' Cargo.toml &&
-  [[ ! -e third-party/oai-rt-rs/Cargo.toml ]] &&
-  ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
-  grep -Fq 'crates__oai-rt-rs-0.4.1' MODULE.bazel.lock &&
-  ! grep -Fq 'third-party/oai-rt-rs' MODULE.bazel.lock; then
-  pass "oai-rt-rs resolves the published experimental GPT Live crate"
+if python3 scripts/check-public-live-dependency.py "${workspace_root}" &&
+  python3 scripts/test-public-live-dependency.py; then
+  pass "oai-rt-rs resolves the approved public release with explicit private-feature isolation"
 else
-  bad "oai-rt-rs is not locked to the published experimental GPT Live crate"
+  bad "oai-rt-rs public registry pin, checksum, or private-feature isolation is invalid"
 fi
 
 if grep -Fq -- '--retry 5' scripts/install-buildbuddy-cli &&

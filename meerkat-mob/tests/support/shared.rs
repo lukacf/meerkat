@@ -4699,6 +4699,7 @@ pub fn raw_open_member_live_channel_command(
             epoch,
             protocol_version: meerkat_mob::runtime::bridge_protocol::BridgeProtocolVersion::V4,
             expected_member,
+            profile: None,
             turning_mode,
             transport,
         },

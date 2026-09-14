@@ -522,18 +522,17 @@ class Mob:
         *,
         turning_mode: RealtimeTurningMode | None = None,
         transport: MobMemberLiveTransport | None = None,
+        profile_id: str | None = None,
     ) -> LiveOpenResult:
         """Open a live realtime channel on a member.
 
         The result carries the owning host's WS URL + single-use token
         VERBATIM — treat it as opaque.
         """
-        return await self._client.open_mob_member_live(
-            self.id,
-            agent_identity,
-            turning_mode=turning_mode,
-            transport=transport,
-        )
+        options: dict[str, Any] = {"turning_mode": turning_mode, "transport": transport}
+        if profile_id is not None:
+            options["profile_id"] = profile_id
+        return await self._client.open_mob_member_live(self.id, agent_identity, **options)
 
     async def member_live_close(
         self,

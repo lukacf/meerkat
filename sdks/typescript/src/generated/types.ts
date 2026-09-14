@@ -2116,6 +2116,7 @@ export interface MobHardCancelResult {
 export interface MobMemberLiveOpenParams {
   agent_identity: string;
   mob_id: string;
+  profile_id?: string;
   transport?: LiveOpenTransport | null;
   turning_mode?: RealtimeTurningMode | null;
 }
@@ -3945,7 +3946,7 @@ export type WireRenderSalience = "background" | "normal" | "important" | "urgent
 
 export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
-export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
+export type RealtimeTurningMode = "provider_managed" | "explicit_commit" | "continuous";
 
 export type RealtimeInputKind = "text" | "audio" | "video" | "image";
 
@@ -4191,6 +4192,7 @@ export interface BridgeCommandOpenMemberLiveChannel {
   command: "open_member_live_channel";
   epoch: number;
   expected_member: BridgeMemberIncarnation;
+  profile?: Record<string, unknown>;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
   transport?: LiveOpenTransport | null;
@@ -5002,6 +5004,7 @@ export interface RealtimeImageChunk {
 
 export interface LiveOpenParams {
   execution_identity?: Record<string, unknown> | null;
+  profile_id?: string;
   seed_max_chars?: number | null;
   session_id: string;
   transport?: LiveOpenTransport | null;

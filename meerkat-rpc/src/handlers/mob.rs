@@ -3272,15 +3272,40 @@ pub async fn handle_member_live_open(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
+    if let Some(profile) = params.profile_id.as_ref()
+        && let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
+            Some(profile),
+            None,
+            params.turning_mode,
+            None,
+        )
+    {
+        return RpcResponse::error(id, crate::error::INVALID_PARAMS, error.to_string());
+    }
     let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
         Ok(m) => m,
         Err(resp) => return resp,
     };
     let identity = AgentIdentity::from(params.agent_identity.as_str());
-    match state
-        .mob_member_live_open(&mob_id, identity, params.turning_mode, params.transport)
-        .await
-    {
+    let opened = match params.profile_id {
+        Some(profile) => {
+            state
+                .mob_member_live_open_with_profile(
+                    &mob_id,
+                    identity,
+                    profile,
+                    params.turning_mode,
+                    params.transport,
+                )
+                .await
+        }
+        None => {
+            state
+                .mob_member_live_open(&mob_id, identity, params.turning_mode, params.transport)
+                .await
+        }
+    };
+    match opened {
         // VERBATIM pass-through (DEC-P6B-C7/C8): the result carries the
         // owning host's WS URL + single-use token — never Debug-formatted,
         // logged, or retained here.

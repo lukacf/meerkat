@@ -38,6 +38,7 @@ pub mod event;
 pub mod event_injector;
 pub mod event_tap;
 pub mod exact_operation;
+pub mod execution_scope;
 pub mod gateway;
 pub mod generated;
 pub mod handles;

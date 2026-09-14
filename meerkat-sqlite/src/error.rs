@@ -243,6 +243,15 @@ pub enum SqliteStoreError {
     #[error("domain `{domain}` registered an invalid migration list: {detail}")]
     InvalidMigrationList { domain: String, detail: String },
 
+    #[error(
+        "co-tenant domain `{domain}` is at version {found}, requires {required}; activate the domain pair through its joint owner"
+    )]
+    CoTenantActivationRequired {
+        domain: String,
+        found: i64,
+        required: i64,
+    },
+
     /// The connection profile refused the requested open (for example a
     /// non-creating profile pointed at a missing file).
     #[error("cannot open `{path}` with profile {profile}: {detail}")]

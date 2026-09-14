@@ -188,6 +188,20 @@ pub struct MemberLiveStatus {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait MemberLiveHost: Send + Sync {
+    /// Public profile control is separately installed by the owning host.
+    /// Legacy-only hosts must not reinterpret a selector as an executor model.
+    async fn open_profile(
+        &self,
+        _session: &SessionId,
+        _profile: &meerkat_core::live_execution::profile::LiveProfileId,
+        _turning_mode: Option<RealtimeTurningMode>,
+        _transport: Option<LiveOpenTransport>,
+    ) -> Result<LiveOpenResult, MemberLiveError> {
+        Err(MemberLiveError::Unavailable {
+            reason: "public Live profile control is not installed on this host".into(),
+        })
+    }
+
     /// Run the full S1-S12 open pipeline for the member session.
     /// `turning_mode: None` ⇒ `ProviderManaged` (the pipeline owns the
     /// default, DEC-P6B-L15). Returns the owning host's `LiveOpenResult`

@@ -3370,6 +3370,26 @@ impl MobMcpState {
             .await
     }
 
+    pub async fn mob_member_live_open_with_profile(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        profile_id: meerkat_core::live_execution::profile::LiveProfileId,
+        turning_mode: Option<meerkat_contracts::wire::RealtimeTurningMode>,
+        transport: Option<meerkat_contracts::wire::LiveOpenTransport>,
+    ) -> Result<meerkat_contracts::wire::LiveOpenResult, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .member_live_open_with_profile(
+                self.console_principal.clone(),
+                identity,
+                profile_id,
+                turning_mode,
+                transport,
+            )
+            .await
+    }
+
     /// Close one NAMED live channel (close-what-you-name, DEC-P6B-C9).
     /// `Live`-gated at chokepoint (a).
     pub async fn mob_member_live_close(

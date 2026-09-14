@@ -4,6 +4,10 @@
 //! atomically with their session and input-state effects.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+pub mod live_history;
+pub mod live_read;
+#[cfg(feature = "sqlite-store")]
+mod live_schema;
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
@@ -2328,6 +2332,14 @@ pub enum FencedPreparedRuntimeSessionCommitOutcome {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeStoreError {
+    #[error(
+        "co-tenant domain '{domain}' at version {found} requires joint-owner activation to version {required}"
+    )]
+    CoTenantActivationRequired {
+        domain: String,
+        found: i64,
+        required: i64,
+    },
     /// Write failed.
     #[error("Store write failed: {0}")]
     WriteFailed(String),
@@ -7834,6 +7846,12 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Optional atomic Live read capability. Absence is explicit and cannot
+    /// be promoted into atomic admission/staging support.
+    fn live_ledger_ops(&self) -> Option<&dyn live_read::RuntimeLiveLedgerOps> {
+        None
+    }
+
     /// Required carrier for the complete store-owned session-authority seam.
     ///
     /// Decorators forward this one accessor. A fault-injection decorator may

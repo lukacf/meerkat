@@ -24,6 +24,8 @@ pub mod gpt_live_gate0;
 pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
+#[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
+pub mod public_live;
 pub(crate) mod request_support;
 mod responses_output;
 pub mod runtime;

@@ -53,6 +53,7 @@ uuid = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+toml = { workspace = true, optional = true }
 meerkat-sqlite = { workspace = true }
 meerkat-providers = { workspace = true, default-features = false, features = [
     "oauth",
@@ -219,7 +220,7 @@ skills = [
 ]
 # Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
 # helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.
-live = ["dep:meerkat-live", "meerkat-runtime/live", "meerkat-session/live"]
+live = ["dep:meerkat-live", "dep:toml", "meerkat-runtime/live", "meerkat-session/live"]
 # WebRTC live transport (phase 6b, DEC-P6B-L8): the webrtc bootstrap branch
 # of the extracted open pipeline compiles only under this feature; the
 # member host never enables it (a `transport=webrtc` request degrades typed
@@ -239,6 +240,16 @@ ignored = ["which"]  # dev-dependency used in e2e tests
 
 [lints]
 workspace = true
+
+[[test]]
+name = "public_live_activation_source"
+path = "tests/public_live_activation_source.rs"
+required-features = ["live"]
+
+[[test]]
+name = "public_live_storage_activation"
+path = "tests/public_live_storage_activation.rs"
+required-features = ["session-store"]
 
 [[example]]
 name = "simple"

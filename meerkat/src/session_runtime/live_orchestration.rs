@@ -37,6 +37,7 @@
 use meerkat_core::service::SessionError;
 use meerkat_core::types::{Message, SessionId};
 use meerkat_core::{Session, SessionLlmIdentity, SessionToolVisibilityState};
+pub use meerkat_llm_core::provider_runtime::live::open::{LiveOpenIntent, LiveOpenIntentError};
 use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 use std::num::NonZeroUsize;
 

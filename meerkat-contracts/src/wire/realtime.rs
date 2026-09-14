@@ -36,13 +36,15 @@ impl RealtimeAudioFormat {
     }
 }
 
-/// Turning mode for a provider realtime session.
+/// Turning mode for a provider session. Continuous observations have no
+/// provider-defined user turns or commits and require a public Live profile.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeTurningMode {
     ProviderManaged,
     ExplicitCommit,
+    Continuous,
 }
 
 /// Input modality kind.

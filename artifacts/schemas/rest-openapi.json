@@ -2896,7 +2896,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
             "properties": {
               "command": {
                 "const": "open_member_live_channel",
@@ -2909,6 +2908,9 @@
               },
               "expected_member": {
                 "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "profile": {
+                "$ref": "#/components/schemas/BridgeLiveProfileSelection"
               },
               "protocol_version": {
                 "$ref": "#/components/schemas/BridgeProtocolVersion"
@@ -4517,6 +4519,31 @@
             },
             "required": [
               "verb"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
             ],
             "type": "object"
           }
@@ -13998,10 +14025,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },

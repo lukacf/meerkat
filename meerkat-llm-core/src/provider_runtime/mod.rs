@@ -11,6 +11,7 @@
 pub mod binding;
 pub mod catalog;
 pub mod errors;
+pub mod live;
 pub mod registry;
 pub mod runtime;
 
@@ -25,6 +26,10 @@ pub use binding::{
 };
 pub use catalog::{ProviderRuntimeCatalog, ValidatedBinding};
 pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};
+pub use live::{LiveTargetError, ResolvedLiveExecution, ResolvedLiveTarget};
 pub use meerkat_core::AuthLease;
-pub use registry::{ExternalAuthResolverHandle, ProviderRuntimeRegistry, ResolverEnvironment};
+pub use registry::{
+    ExternalAuthResolverHandle, LiveConnectionResolutionError, ProviderRuntimeRegistry,
+    ResolvedLiveConnection, ResolverEnvironment,
+};
 pub use runtime::ProviderRuntime;

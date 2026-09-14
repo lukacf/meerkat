@@ -52,8 +52,11 @@
 //! and ledger update. The ledger table itself is not created until after that
 //! decision, so a refusal leaves both schema and ledger unchanged.
 //!
-//! Foreign domain rows (other stores co-tenanting the same file) are never
-//! read or written; the ledger keys strictly by domain name.
+//! Default single-domain migration touches only its own domain. An owner may
+//! additionally declare read-only peer-version requirements; those never
+//! authorize a peer upgrade. Explicit joint-owner activation selects its
+//! complete domain group and commits that group's migrations together.
+//! Unselected rows stay untouched; the ledger keys strictly by domain name.
 
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::collections::BTreeMap;
@@ -541,11 +544,193 @@ pub fn apply_domain_migrations(
     }
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let report = apply_domain_migrations_in_transaction(&tx, domain)?;
+    tx.commit()?;
+    Ok(report)
+}
+
+/// Activate explicitly selected co-tenant domains in one physical transaction.
+///
+/// Domain order is caller-supplied to preserve declared prerequisite edges.
+/// Every predecessor is verified before the first mutation, and each body
+/// retains the same custody checks as the single-domain path. A later refusal
+/// rolls back all earlier DDL and ledger stamps. Unselected domains are untouched.
+pub fn apply_domain_migrations_atomically(
+    conn: &mut Connection,
+    domains: &[&SchemaDomain],
+) -> Result<Vec<LedgerReport>, SqliteStoreError> {
+    apply_domain_migrations_with_requirements(conn, domains, &[])
+}
+
+/// A format floor for a co-tenant when that domain exists. Absence keeps a
+/// standalone database standalone; this declaration never installs the peer.
+#[derive(Debug, Clone, Copy)]
+pub struct CoTenantRequirement {
+    pub domain: &'static str,
+    pub minimum_version: i64,
+}
+
+pub fn preflight_co_tenant_requirements(
+    conn: &Connection,
+    requirements: &[CoTenantRequirement],
+) -> Result<(), SqliteStoreError> {
+    for requirement in requirements {
+        if requirement.domain.is_empty() || requirement.minimum_version <= 0 {
+            return Err(SqliteStoreError::InvalidMigrationList {
+                domain: requirement.domain.to_string(),
+                detail: "co-tenant requirements need a named domain and positive format version"
+                    .to_string(),
+            });
+        }
+        if let Some(found) = domain_version(conn, requirement.domain)?
+            && found < requirement.minimum_version
+        {
+            return Err(SqliteStoreError::CoTenantActivationRequired {
+                domain: requirement.domain.to_string(),
+                found,
+                required: requirement.minimum_version,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Co-tenant requirements are checked in BOTH the no-op read snapshot and
+/// the exact migration transaction, before any selected domain is changed.
+/// A joint owner lists both domains and needs no external requirement.
+pub fn apply_domain_migrations_with_requirements(
+    conn: &mut Connection,
+    domains: &[&SchemaDomain],
+    requirements: &[CoTenantRequirement],
+) -> Result<Vec<LedgerReport>, SqliteStoreError> {
+    validate_domain_group(domains)?;
+    {
+        let read = conn.transaction()?;
+        preflight_co_tenant_requirements(&read, requirements)?;
+        let mut reports = Vec::with_capacity(domains.len());
+        for domain in domains {
+            preflight_schema_eligibility(&read, domain)?;
+            if domain_version(&read, domain.name)? == Some(domain.supported_version()) {
+                reports.push(LedgerReport {
+                    from_version: domain.supported_version(),
+                    to_version: domain.supported_version(),
+                });
+            }
+        }
+        read.rollback()?;
+        if reports.len() == domains.len() {
+            return Ok(reports);
+        }
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    preflight_co_tenant_requirements(&tx, requirements)?;
+    for domain in domains {
+        preflight_schema_eligibility(&tx, domain)?;
+    }
+    let mut reports = Vec::with_capacity(domains.len());
+    for domain in domains {
+        reports.push(apply_domain_migrations_in_transaction(&tx, domain)?);
+    }
+    tx.commit()?;
+    Ok(reports)
+}
+
+fn validate_domain_group(domains: &[&SchemaDomain]) -> Result<(), SqliteStoreError> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut objects = BTreeMap::new();
+    for domain in domains {
+        domain.validate()?;
+        if !names.insert(domain.name) {
+            return Err(SqliteStoreError::InvalidMigrationList {
+                domain: domain.name.to_string(),
+                detail: "atomic activation repeats a schema domain".to_string(),
+            });
+        }
+        for object in domain.owned_objects.iter().chain(domain.retired_objects) {
+            if let Some(owner) = objects.insert(object.name, domain.name) {
+                return Err(SqliteStoreError::InvalidMigrationList {
+                    domain: domain.name.to_string(),
+                    detail: format!(
+                        "atomic activation object {} is also owned by {owner}",
+                        object.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Quiesce older store operations before activating a file's selected domains.
+/// Already-current files use the normal bounded-contention ReadOnly profile;
+/// a version change requires the exclusive maintenance fence and then uses
+/// fail-fast Maintenance access with the same atomic migration runner.
+pub fn activate_file_domains(
+    path: &std::path::Path,
+    domains: &'static [&'static SchemaDomain],
+    fence_timeout: std::time::Duration,
+) -> Result<(), SqliteStoreError> {
+    activate_file_domains_with_requirements(path, domains, &[], fence_timeout)
+}
+
+pub fn activate_file_domains_with_requirements(
+    path: &std::path::Path,
+    domains: &'static [&'static SchemaDomain],
+    requirements: &[CoTenantRequirement],
+    fence_timeout: std::time::Duration,
+) -> Result<(), SqliteStoreError> {
+    validate_domain_group(domains)?;
+    if path.try_exists()? {
+        let _guard = crate::OperationGuard::for_database(path)?;
+        let mut conn = crate::open(path, crate::ConnectionProfile::ReadOnly)?;
+        let read = conn.transaction()?;
+        preflight_co_tenant_requirements(&read, requirements)?;
+        let mut current = true;
+        for domain in domains {
+            preflight_schema_eligibility(&read, domain)?;
+            current &= domain_version(&read, domain.name)? == Some(domain.supported_version());
+        }
+        read.rollback()?;
+        if current {
+            return Ok(());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _fence = if crate::fence::process_holds_database_fence(path) {
+        None
+    } else {
+        Some(crate::ExclusiveFence::acquire(path, fence_timeout)?)
+    };
+    let profile = if path.try_exists()? {
+        crate::ConnectionProfile::Maintenance { write: true }
+    } else {
+        crate::ConnectionProfile::PRIMARY
+    };
+    let mut conn = crate::open_with_co_tenant_requirements(
+        path,
+        profile,
+        crate::OpenOptions {
+            schema_preflight: domains,
+            ..Default::default()
+        },
+        requirements,
+    )?;
+    apply_domain_migrations_with_requirements(&mut conn, domains, requirements)?;
+    Ok(())
+}
+
+fn apply_domain_migrations_in_transaction(
+    tx: &Transaction<'_>,
+    domain: &SchemaDomain,
+) -> Result<LedgerReport, SqliteStoreError> {
+    let supported = domain.supported_version();
     // Establish eligibility inside the write transaction. No ledger or
     // domain DDL has run yet.
-    let current = if ledger_table_exists(&tx)? {
-        validate_ledger_shape(&tx)?;
-        read_version(&tx, domain.name)?
+    let current = if ledger_table_exists(tx)? {
+        validate_ledger_shape(tx)?;
+        read_version(tx, domain.name)?
     } else {
         None
     };
@@ -560,20 +745,19 @@ pub fn apply_domain_migrations(
         if !domain.accepts_existing_version(found) {
             return Err(unsupported_predecessor(domain, found));
         }
-        domain.verify_predecessor(&tx, found)?;
+        domain.verify_predecessor(tx, found)?;
     } else {
-        let objects = find_owned_objects(&tx, domain)?;
+        let objects = find_owned_objects(tx, domain)?;
         if !objects.is_empty() {
             return Err(SqliteStoreError::UnledgeredDomainObjects {
                 domain: domain.name.to_string(),
                 objects,
-                bridgeable: domain.bridge_eligibility(&tx),
+                bridgeable: domain.bridge_eligibility(tx),
             });
         }
     }
     let current = current.unwrap_or(0);
     if current == supported {
-        tx.rollback()?;
         return Ok(LedgerReport {
             from_version: current,
             to_version: current,
@@ -582,14 +766,14 @@ pub fn apply_domain_migrations(
 
     // Eligibility is now pinned by the IMMEDIATE transaction. Only now may
     // the runner materialize its ledger table.
-    if !ledger_table_exists(&tx)? {
+    if !ledger_table_exists(tx)? {
         tx.execute_batch(CREATE_LEDGER_SQL)?;
-        validate_ledger_shape(&tx)?;
+        validate_ledger_shape(tx)?;
     }
 
     if current == 0 {
         tx.execute_batch(CUSTODY_SAVEPOINT_SQL)?;
-        (domain.initialize_current)(&tx).map_err(|source| SqliteStoreError::MigrationFailed {
+        (domain.initialize_current)(tx).map_err(|source| SqliteStoreError::MigrationFailed {
             domain: domain.name.to_string(),
             version: supported,
             name: "initialize-current".to_string(),
@@ -605,7 +789,7 @@ pub fn apply_domain_migrations(
     } else {
         for migration in domain.migrations.iter().filter(|m| m.version > current) {
             tx.execute_batch(CUSTODY_SAVEPOINT_SQL)?;
-            (migration.apply)(&tx).map_err(|source| SqliteStoreError::MigrationFailed {
+            (migration.apply)(tx).map_err(|source| SqliteStoreError::MigrationFailed {
                 domain: domain.name.to_string(),
                 version: migration.version,
                 name: migration.name.to_string(),
@@ -629,7 +813,7 @@ pub fn apply_domain_migrations(
             }
         }
     }
-    verify_current_schema_fingerprint(&tx, domain).map_err(|detail| {
+    verify_current_schema_fingerprint(tx, domain).map_err(|detail| {
         SqliteStoreError::SchemaFingerprintMismatch {
             domain: domain.name.to_string(),
             version: supported,
@@ -641,8 +825,7 @@ pub fn apply_domain_migrations(
          ON CONFLICT(domain) DO UPDATE SET version = excluded.version",
         rusqlite::params![domain.name, supported],
     )?;
-    verify_ledger_stamp(&tx, domain.name, supported)?;
-    tx.commit()?;
+    verify_ledger_stamp(tx, domain.name, supported)?;
 
     Ok(LedgerReport {
         from_version: current,

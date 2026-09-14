@@ -10199,6 +10199,31 @@
           }
         ]
       },
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BridgeMemberIncarnation": {
         "additionalProperties": false,
         "description": "Exact cross-host member residency addressed by one directed delivery.",
@@ -11911,10 +11936,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },
@@ -13839,7 +13865,6 @@
       },
       {
         "additionalProperties": false,
-        "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
         "properties": {
           "command": {
             "const": "open_member_live_channel",
@@ -13852,6 +13877,9 @@
           },
           "expected_member": {
             "$ref": "#/$defs/BridgeMemberIncarnation"
+          },
+          "profile": {
+            "$ref": "#/$defs/BridgeLiveProfileSelection"
           },
           "protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion"
@@ -18090,6 +18118,31 @@
   },
   "BridgeLiveOpenPayload": {
     "$defs": {
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BridgeMemberIncarnation": {
         "additionalProperties": false,
         "description": "Exact cross-host member residency addressed by one directed delivery.",
@@ -18216,17 +18269,17 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
     "properties": {
       "epoch": {
         "format": "uint64",
@@ -18235,6 +18288,9 @@
       },
       "expected_member": {
         "$ref": "#/$defs/BridgeMemberIncarnation"
+      },
+      "profile": {
+        "$ref": "#/$defs/BridgeLiveProfileSelection"
       },
       "protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion"
@@ -47883,7 +47939,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
             "properties": {
               "command": {
                 "const": "open_member_live_channel",
@@ -47896,6 +47951,9 @@
               },
               "expected_member": {
                 "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "profile": {
+                "$ref": "#/$defs/BridgeLiveProfileSelection"
               },
               "protocol_version": {
                 "$ref": "#/$defs/BridgeProtocolVersion"
@@ -49498,6 +49556,31 @@
             },
             "required": [
               "verb"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
             ],
             "type": "object"
           }
@@ -55730,10 +55813,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },
@@ -61406,7 +61490,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`\nminus `session_id` — identity addressing replaces it.",
             "properties": {
               "command": {
                 "const": "open_member_live_channel",
@@ -61419,6 +61502,9 @@
               },
               "expected_member": {
                 "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "profile": {
+                "$ref": "#/$defs/BridgeLiveProfileSelection"
               },
               "protocol_version": {
                 "$ref": "#/$defs/BridgeProtocolVersion"
@@ -62604,6 +62690,31 @@
             },
             "required": [
               "verb"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeLiveProfileSelection": {
+        "description": "Versioned profile-name content. Only the owning host resolves or activates it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "version": {
+                "const": "v1",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "profile_id"
             ],
             "type": "object"
           }
@@ -64334,10 +64445,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },
@@ -91930,10 +92042,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       },
@@ -91977,6 +92090,13 @@
           }
         ],
         "description": "Channel-scoped execution profile selection. The host owns the full\nexecution identity. This never mutates the durable session identity and\nrequires negotiated\n[`LIVE_EXECUTION_IDENTITY_V1_CAPABILITY`] support."
+      },
+      "profile_id": {
+        "description": "Public continuous profile; declaration selection is not activation.\nOmission preserves the legacy path. Explicit null is invalid.",
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._-]+$",
+        "type": "string"
       },
       "seed_max_chars": {
         "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn dialogue\nsuffix window; an existing compaction-summary head may be retained. If\nany history is omitted, the open result reports degraded continuity\nrather than pretending the bounded replay was complete.\n\nOrdered System and SystemNotice messages are excluded from this replay\nbudget and projected separately from the full active materialized\ntranscript. Optional System message identity is never provider-projected.\nCanonical multimodal identity, tombstone, and accounting state remain\noutside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
@@ -117988,10 +118108,11 @@
         "type": "string"
       },
       "RealtimeTurningMode": {
-        "description": "Turning mode for a provider realtime session.",
+        "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
         "enum": [
           "provider_managed",
-          "explicit_commit"
+          "explicit_commit",
+          "continuous"
         ],
         "type": "string"
       }
@@ -118727,10 +118848,11 @@
   },
   "RealtimeTurningMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Turning mode for a provider realtime session.",
+    "description": "Turning mode for a provider session. Continuous observations have no\nprovider-defined user turns or commits and require a public Live profile.",
     "enum": [
       "provider_managed",
-      "explicit_commit"
+      "explicit_commit",
+      "continuous"
     ],
     "title": "RealtimeTurningMode",
     "type": "string"

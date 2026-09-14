@@ -224,6 +224,16 @@ pub fn open_with(
     profile: ConnectionProfile,
     options: OpenOptions,
 ) -> Result<Connection, SqliteStoreError> {
+    open_with_co_tenant_requirements(path, profile, options, &[])
+}
+
+/// DDL-free open with explicit peer-format checks before mutating pragmas.
+pub fn open_with_co_tenant_requirements(
+    path: &Path,
+    profile: ConnectionProfile,
+    options: OpenOptions,
+    requirements: &[crate::ledger::CoTenantRequirement],
+) -> Result<Connection, SqliteStoreError> {
     let conn = match profile {
         ConnectionProfile::Primary { create: true } => {
             if let Some(parent) = path.parent() {
@@ -263,6 +273,7 @@ pub fn open_with(
     for domain in options.schema_preflight {
         crate::ledger::preflight_schema_eligibility(&conn, domain)?;
     }
+    crate::ledger::preflight_co_tenant_requirements(&conn, requirements)?;
 
     match profile.journal_policy() {
         JournalPolicy::EstablishWal => {

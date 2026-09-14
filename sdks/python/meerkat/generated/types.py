@@ -2832,6 +2832,7 @@ class MobMemberLiveOpenParams:
 `LiveOpenResult` verbatim."""
     agent_identity: str
     mob_id: str
+    profile_id: Optional[str] = None
     transport: Optional[LiveOpenTransport] = None
     turning_mode: Optional[RealtimeTurningMode] = None
 
@@ -4610,6 +4611,7 @@ Default (`None`) preserves the prior wire shape: callers that omit the
 field get `ProviderManaged`, matching the legacy behavior."""
     session_id: str
     execution_identity: Optional[dict[str, Any]] = None
+    profile_id: Optional[str] = None
     seed_max_chars: Optional[int] = None
     transport: Optional[LiveOpenTransport] = None
     turning_mode: Optional[RealtimeTurningMode] = None
@@ -6725,8 +6727,9 @@ WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 # Public runtime state projection used by RPC surfaces.
 WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
 
-# Turning mode for a provider realtime session.
-RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
+# Turning mode for a provider session. Continuous observations have no
+# provider-defined user turns or commits and require a public Live profile.
+RealtimeTurningMode = Literal['provider_managed', 'explicit_commit', 'continuous']
 
 # Input modality kind.
 RealtimeInputKind = Literal['text', 'audio', 'video'] | Literal['image']
@@ -7588,6 +7591,7 @@ class BridgeCommandOpenMemberLiveChannel(TypedDict, total=False):
     command: Required[Literal['open_member_live_channel']]
     epoch: Required[int]
     expected_member: Required[BridgeMemberIncarnation]
+    profile: NotRequired[dict[str, Any]]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
     transport: NotRequired[Optional[LiveOpenTransport]]

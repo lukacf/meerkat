@@ -20,6 +20,29 @@ use serde_json::Value;
 
 use crate::LlmError;
 
+/// Legacy realtime projections cannot represent a continuous Live stream.
+/// Call again at provider entry points because Rust callers can edit a config.
+pub fn validate_realtime_turning_mode(
+    mode: RealtimeTurningMode,
+) -> Result<(), UnsupportedRealtimeTurningMode> {
+    match mode {
+        RealtimeTurningMode::ProviderManaged | RealtimeTurningMode::ExplicitCommit => Ok(()),
+        RealtimeTurningMode::Continuous => Err(UnsupportedRealtimeTurningMode),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported_turning_mode: continuous requires a public Live profile")]
+pub struct UnsupportedRealtimeTurningMode;
+
+impl From<UnsupportedRealtimeTurningMode> for LlmError {
+    fn from(value: UnsupportedRealtimeTurningMode) -> Self {
+        Self::InvalidRequest {
+            message: value.to_string(),
+        }
+    }
+}
+
 /// Advanced/internal target for attaching to an existing provider session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealtimeExternalSessionTarget {
@@ -299,6 +322,7 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
     ) -> Result<Self, LlmError> {
+        validate_realtime_turning_mode(turning_mode)?;
         let canonical_message_cursor = seed_messages.len() as u64;
         let seed_messages =
             meerkat_core::types::materialize_latest_system_prompt_versions(&seed_messages);
@@ -325,6 +349,7 @@ impl RealtimeSessionOpenConfig {
         seed_messages: Vec<Message>,
         canonical_messages: &[Message],
     ) -> Result<Self, LlmError> {
+        validate_realtime_turning_mode(turning_mode)?;
         let seed_messages =
             meerkat_core::types::materialize_latest_system_prompt_versions(&seed_messages);
         let canonical_system_messages = Self::canonical_system_messages(canonical_messages);
@@ -568,6 +593,46 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+        }
+    }
+
+    #[test]
+    fn continuous_mode_cannot_enter_legacy_open_or_refresh_projection() {
+        assert!(
+            RealtimeSessionOpenConfig::new(
+                RealtimeTurningMode::Continuous,
+                sample_identity(),
+                vec![],
+                vec![],
+            )
+            .is_err()
+        );
+        assert!(
+            RealtimeSessionOpenConfig::for_open_from_messages(
+                RealtimeTurningMode::Continuous,
+                sample_identity(),
+                vec![],
+                vec![],
+                &[],
+            )
+            .is_err()
+        );
+        assert!(
+            RealtimeSessionOpenConfig::for_refresh_from_messages(
+                RealtimeTurningMode::Continuous,
+                sample_identity(),
+                vec![],
+                &[],
+            )
+            .is_err()
+        );
+        for mode in [
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ] {
+            assert!(
+                RealtimeSessionOpenConfig::new(mode, sample_identity(), vec![], vec![]).is_ok()
+            );
         }
     }
 

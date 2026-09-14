@@ -1027,6 +1027,53 @@ pub(crate) async fn handle_live_open_routed(
         Ok(p) => p,
         Err(resp) => return resp.into(),
     };
+    if let Some(profile) = parsed.profile_id.as_ref() {
+        if let Err(error) = meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
+            Some(profile),
+            parsed.execution_identity.as_ref(),
+            parsed.turning_mode,
+            parsed.seed_max_chars,
+        ) {
+            return RpcResponse::error(id, error::INVALID_PARAMS, error.to_string()).into();
+        }
+        let session_id = match SessionId::parse(&parsed.session_id) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid session_id: {error}"),
+                )
+                .into();
+            }
+        };
+        return match runtime
+            .runtime_adapter()
+            .open_live_profile(&session_id, profile, parsed.turning_mode, parsed.transport)
+            .await
+        {
+            Ok(opened) => match serde_json::to_value(opened) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize LiveOpenResult: {error}"),
+                ),
+            },
+            Err(error) => {
+                let code = if matches!(
+                    error,
+                    meerkat_runtime::member_live::MemberLiveError::Internal { .. }
+                ) {
+                    error::INTERNAL_ERROR
+                } else {
+                    meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+                };
+                RpcResponse::error(id, code, error.to_string())
+            }
+        }
+        .into();
+    }
     #[cfg(not(feature = "experimental-gpt-live"))]
     if parsed.execution_identity.is_some() {
         return RpcResponse::error(
@@ -2286,6 +2333,7 @@ mod tests {
     fn live_open_params_roundtrip() {
         let v = LiveOpenParams {
             session_id: "sess-123".into(),
+            profile_id: None,
             turning_mode: None,
             transport: None,
             execution_identity: None,
@@ -2300,6 +2348,7 @@ mod tests {
         // commit_input path is reachable.
         let v = LiveOpenParams {
             session_id: "sess-123".into(),
+            profile_id: None,
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
             transport: None,
             execution_identity: None,

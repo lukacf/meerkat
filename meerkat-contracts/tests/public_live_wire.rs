@@ -10,9 +10,83 @@ use meerkat_core::live_execution::LiveChannelId;
 use meerkat_core::live_observation::{
     LiveObservationSeq, LiveTranscriptDirection, LiveTranscriptObservation, LiveTranscriptRange,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn versioned_member_profile_selection_carries_only_an_owner_resolved_name() -> TestResult {
+    use meerkat_contracts::wire::supervisor_bridge::BridgeLiveProfileSelection;
+    let value = json!({"version":"v1","profile_id":"voice"});
+    let selection: BridgeLiveProfileSelection = serde_json::from_value(value.clone())?;
+    assert_eq!(selection.profile_id().as_str(), "voice");
+    assert_eq!(serde_json::to_value(selection)?, value);
+    for field in ["auth_binding", "api_key", "grant", "executor", "run_id"] {
+        let mut altered = value.clone();
+        altered[field] = json!("must-not-cross");
+        assert!(serde_json::from_value::<BridgeLiveProfileSelection>(altered).is_err());
+    }
+    for invalid in [
+        json!({"version":"v2","profile_id":"voice"}),
+        json!({"version":"v1","profile_id":null}),
+    ] {
+        assert!(serde_json::from_value::<BridgeLiveProfileSelection>(invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn public_profile_selector_is_explicit_and_never_null_or_inline_authority() -> TestResult {
+    use meerkat_contracts::LiveOpenParams;
+    let omitted: LiveOpenParams = serde_json::from_value(json!({"session_id":"session"}))?;
+    assert!(omitted.profile_id.is_none());
+    let value =
+        json!({"session_id":"session","profile_id":"voice.profile-1","turning_mode":"continuous"});
+    let selected: LiveOpenParams = serde_json::from_value(value.clone())?;
+    assert_eq!(
+        selected.profile_id.as_ref().ok_or("profile")?.as_str(),
+        "voice.profile-1"
+    );
+    assert_eq!(serde_json::to_value(selected)?, value);
+    for selector in [
+        Value::Null,
+        json!(""),
+        json!("bad/profile"),
+        json!("x".repeat(129)),
+        json!({"profile_id":"voice","grant":"forged"}),
+    ] {
+        assert!(
+            serde_json::from_value::<LiveOpenParams>(
+                json!({"session_id":"session","profile_id":selector})
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn continuous_turning_mode_has_distinct_wire_identity_without_changing_legacy_values() -> TestResult
+{
+    use meerkat_contracts::RealtimeTurningMode;
+    for (mode, json) in [
+        (RealtimeTurningMode::ProviderManaged, "\"provider_managed\""),
+        (RealtimeTurningMode::ExplicitCommit, "\"explicit_commit\""),
+        (RealtimeTurningMode::Continuous, "\"continuous\""),
+    ] {
+        assert_eq!(serde_json::to_string(&mode)?, json);
+        assert_eq!(serde_json::from_str::<RealtimeTurningMode>(json)?, mode);
+    }
+    for invalid in [
+        "null",
+        "\"Continuous\"",
+        "\"user_final\"",
+        "{\"continuous\":true}",
+    ] {
+        assert!(serde_json::from_str::<RealtimeTurningMode>(invalid).is_err());
+    }
+    Ok(())
+}
 
 fn record(
     sequence: u64,

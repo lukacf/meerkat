@@ -559,6 +559,7 @@ export interface ConnectOptions {
 
 /** Literal-safe options for opening a live channel on a mob member. */
 export interface MobMemberLiveOpenOptions {
+  profileId?: RpcMobMemberLiveOpenParams["profile_id"];
   turningMode?: RpcMobMemberLiveOpenParams["turning_mode"];
   transport?: RpcMobMemberLiveOpenParams["transport"];
 }
@@ -2739,6 +2740,7 @@ export class MeerkatClient {
     const result = await this.request("mob/member_live_open", {
       mob_id: mobId,
       agent_identity: agentIdentity,
+      ...(opts?.profileId !== undefined ? { profile_id: opts.profileId } : {}),
       ...(opts?.turningMode !== undefined ? { turning_mode: opts.turningMode } : {}),
       ...(opts?.transport !== undefined ? { transport: opts.transport } : {}),
     });

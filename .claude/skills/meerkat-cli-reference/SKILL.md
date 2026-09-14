@@ -306,7 +306,7 @@ rkat mob bind-host <mob_id> --descriptor <FILE>
 rkat mob revoke-host <mob_id> <host_id>
 rkat mob hosts <mob_id> [--json]
 rkat mob route-installs <mob_id>
-rkat mob live open <mob_id> <agent_identity> [--turning-mode provider-managed|explicit-commit] [--transport websocket|webrtc]
+rkat mob live open <mob_id> <agent_identity> [--profile <id>] [--turning-mode provider-managed|explicit-commit|continuous] [--transport websocket|webrtc]
 rkat mob live status <mob_id> <agent_identity> [--channel-id <id>]
 rkat mob live control <mob_id> <agent_identity> <channel_id> <commit-input|interrupt|refresh|truncate> [truncate fields]
 rkat mob live close <mob_id> <agent_identity> <channel_id>
@@ -329,6 +329,11 @@ the current member-live family rejects WebRTC for both local and placed
 members; use `websocket`. Generic JSON-RPC `live/*` can negotiate WebRTC only
 for a controller-local session. It cannot proxy a placed member's remote
 session through the controller.
+
+`--profile` selects a public Live profile on the owning host, not the member's
+executor profile and not an activation grant. A selected public profile accepts
+omitted or `continuous` turning mode only. Legacy-only hosts fail closed; omission
+of `--profile` preserves the legacy default and behavior.
 
 Packing with `--sign` embeds the signer identity and public key but does not
 install that signer in a trust store. For a locally signed pack whose signer is

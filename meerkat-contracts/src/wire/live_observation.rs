@@ -231,6 +231,15 @@ pub enum LiveObservationEncodingError {
 pub struct LiveObservationWireCodecV1;
 
 impl LiveObservationWireCodecV1 {
+    /// Serialize an independent Live ledger record with the same bounded
+    /// encoding used for observation admission, page replies and cursors.
+    /// Domain validation and durable acceptance remain the ledger owner's job.
+    pub fn encode_ledger_record(
+        value: &impl Serialize,
+    ) -> Result<Vec<u8>, LiveObservationEncodingError> {
+        encode_bounded(value, LIVE_OBSERVATION_REPLY_MAX_BYTES)
+    }
+
     pub fn check_record_fit(
         record: LiveObservationRecord,
     ) -> Result<LiveObservationWireFit, LiveObservationEncodingError> {

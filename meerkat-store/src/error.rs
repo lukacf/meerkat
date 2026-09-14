@@ -113,6 +113,22 @@ pub enum StoreError {
         supported: i64,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "co-tenant runtime schema {found} does not meet session component requirement {required}"
+    )]
+    RuntimeComponentSchemaIncompatible { found: i64, required: i64 },
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "co-tenant domain '{domain}' at version {found} requires joint-owner activation to version {required}"
+    )]
+    CoTenantActivationRequired {
+        domain: String,
+        found: i64,
+        required: i64,
+    },
+
     /// The file has no ledger row for a schema domain but already contains
     /// objects owned by that domain. This is not a fresh domain and cannot be
     /// authenticated as the released predecessor, so normal opens refuse it.
@@ -191,6 +207,9 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
     fn from(err: meerkat_sqlite::SqliteStoreError) -> Self {
         use meerkat_sqlite::SqliteStoreError as E;
         match err {
+            E::CoTenantActivationRequired { domain, found, required } => {
+                StoreError::CoTenantActivationRequired { domain, found, required }
+            }
             E::Io(io) => StoreError::Io(io),
             // Route through the rusqlite classifier so shared-mechanics
             // failures carry the same transient/corrupt typing as direct

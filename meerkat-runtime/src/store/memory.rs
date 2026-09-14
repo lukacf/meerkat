@@ -40,6 +40,11 @@ use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
 
+mod live_composite {
+    use super::*;
+    include!("memory_live_composite.rs");
+}
+
 /// Receipt key: (runtime_id, run_id, sequence).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ReceiptKey {
@@ -73,6 +78,18 @@ type InputStateBatchCasTestBlock = (
 /// Inner state protected by the mutex.
 #[derive(Debug, Default)]
 struct Inner {
+    live_sources: HashMap<
+        meerkat_core::SessionId,
+        HashMap<
+            meerkat_core::live_execution::request::LiveSourceKey,
+            crate::live_ledger::source::LiveSourceRow,
+        >,
+    >,
+    live_heads: HashMap<meerkat_core::SessionId, crate::live_ledger::write::StoredLiveLedgerCommit>,
+    live_records: HashMap<
+        meerkat_core::SessionId,
+        BTreeMap<u64, crate::live_ledger::record::StoredLiveLedgerEvent>,
+    >,
     /// runtime_id → (input_id → StoredInputState). IndexMap for deterministic iteration order.
     input_states: HashMap<String, IndexMap<InputId, StoredInputState>>,
     /// Runtime id → canonical owners of unfinished terminal work.
@@ -2235,6 +2252,9 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
+    fn live_ledger_ops(&self) -> Option<&dyn super::live_read::RuntimeLiveLedgerOps> {
+        Some(self)
+    }
     fn session_authority_ops(&self) -> &dyn super::RuntimeSessionAuthorityOps {
         self
     }

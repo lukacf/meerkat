@@ -804,8 +804,31 @@ pub struct MemberEventCursor {
     pub seq: u64,
 }
 
-/// Open a live channel on a remote member (V4). Mirrors `LiveOpenParams`
-/// minus `session_id` — identity addressing replaces it.
+/// Versioned profile-name content. Only the owning host resolves or activates it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "version", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BridgeLiveProfileSelection {
+    V1 {
+        #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1, max = 128), extend("pattern" = "^[A-Za-z0-9._-]+$")))]
+        profile_id: meerkat_core::live_execution::profile::LiveProfileId,
+    },
+}
+
+impl BridgeLiveProfileSelection {
+    pub fn profile_id(&self) -> &meerkat_core::live_execution::profile::LiveProfileId {
+        match self {
+            Self::V1 { profile_id } => profile_id,
+        }
+    }
+}
+
+fn deserialize_live_profile_selection<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BridgeLiveProfileSelection>, D::Error> {
+    BridgeLiveProfileSelection::deserialize(deserializer).map(Some)
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -814,6 +837,13 @@ pub struct BridgeLiveOpenPayload {
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
     pub expected_member: BridgeMemberIncarnation,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_live_profile_selection"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "BridgeLiveProfileSelection"))]
+    pub profile: Option<BridgeLiveProfileSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turning_mode: Option<RealtimeTurningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5767,6 +5797,7 @@ mod tests {
                 epoch: 9,
                 protocol_version: v4(),
                 expected_member: sample_member_incarnation(),
+                profile: None,
                 turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
                 transport: Some(LiveOpenTransport::Websocket),
             }),

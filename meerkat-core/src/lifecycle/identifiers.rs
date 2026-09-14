@@ -82,7 +82,8 @@ impl std::fmt::Display for WaitRequestId {
 /// Core passes this through in `contributing_input_ids` on receipts and events
 /// but NEVER interprets it. The runtime layer creates and manages these.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct InputId(pub Uuid);
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InputId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
 
 impl InputId {
     /// Create a new input ID using UUID v7 (time-ordered).

@@ -8199,6 +8199,22 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
     }
 
+    /// Delegate profile resolution/opening to the installed owning host. A
+    /// profile name never substitutes for an activation or a realtime model.
+    pub async fn open_live_profile(
+        &self,
+        session: &SessionId,
+        profile: &meerkat_core::live_execution::profile::LiveProfileId,
+        turning_mode: Option<meerkat_contracts::RealtimeTurningMode>,
+        transport: Option<meerkat_contracts::LiveOpenTransport>,
+    ) -> Result<meerkat_contracts::LiveOpenResult, crate::member_live::MemberLiveError> {
+        let host = self
+            .member_live_host()
+            .ok_or(crate::member_live::MemberLiveError::TransportUnavailable)?;
+        host.open_profile(session, profile, turning_mode, transport)
+            .await
+    }
+
     /// Resolve the injected member live host, if composed.
     pub(crate) fn member_live_host(&self) -> Option<Arc<dyn crate::member_live::MemberLiveHost>> {
         self.member_live_host

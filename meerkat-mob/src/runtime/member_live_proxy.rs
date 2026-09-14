@@ -63,6 +63,7 @@ pub(crate) async fn open_remote_member_live_channel(
     bridge: &Arc<MobSupervisorBridge>,
     peer: &TrustedPeerDescriptor,
     expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+    profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
     turning_mode: Option<RealtimeTurningMode>,
     transport: Option<LiveOpenTransport>,
 ) -> Result<LiveOpenResult, MobError> {
@@ -73,6 +74,11 @@ pub(crate) async fn open_remote_member_live_channel(
         epoch: authority.epoch,
         protocol_version: BridgeProtocolVersion::V4,
         expected_member,
+        profile: profile_id.map(|profile_id| {
+            meerkat_contracts::wire::supervisor_bridge::BridgeLiveProfileSelection::V1 {
+                profile_id,
+            }
+        }),
         turning_mode,
         transport,
     });
@@ -199,6 +205,7 @@ mod tests {
             turning_mode: None,
             transport: Some(LiveOpenTransport::Websocket),
             expected_member: BridgeMemberIncarnation::default(),
+            profile: None,
         })
     }
 

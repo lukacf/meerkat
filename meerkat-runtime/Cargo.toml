@@ -22,6 +22,7 @@ meerkat-machine-schema = { workspace = true }
 meerkat-contracts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -53,6 +54,7 @@ sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meer
 test-support = []
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 # Path-only self-dependency (no version, stripped at publish): this crate's
 # own integration tests need the test-support hooks without relying on
 # feature unification from sibling crates in the same build graph.

@@ -3602,6 +3602,13 @@ pub struct WireScopeDeniedDetail {
 pub struct MobMemberLiveOpenParams {
     pub mob_id: String,
     pub agent_identity: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::live::deserialize_public_live_profile"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1, max = 128), extend("pattern" = "^[A-Za-z0-9._-]+$")))]
+    pub profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turning_mode: Option<super::realtime::RealtimeTurningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

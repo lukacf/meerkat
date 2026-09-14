@@ -25118,6 +25118,67 @@ mod tests {
     /// `INTERNAL_ERROR` and the response carries no `result` (no `channel_id`,
     /// no transport bootstrap), proving no channel was registered or opened.
     #[tokio::test]
+    async fn public_live_profile_selection_fails_closed_without_falling_into_legacy_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("text executor");
+        let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+        #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+        let experimental_live_playback_custodies =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        for (selection, expected_code) in [
+            (
+                serde_json::json!({"profile_id":"voice"}),
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            ),
+            (
+                serde_json::json!({"profile_id":null}),
+                error::INVALID_PARAMS,
+            ),
+            (
+                serde_json::json!({"profile_id":"voice","turning_mode":"provider_managed"}),
+                error::INVALID_PARAMS,
+            ),
+            (
+                serde_json::json!({"profile_id":"voice","seed_max_chars":0}),
+                error::INVALID_PARAMS,
+            ),
+            (
+                serde_json::json!({"profile_id":"voice","execution_identity":{"version":"v1","profile_id":"private"}}),
+                error::INVALID_PARAMS,
+            ),
+        ] {
+            let mut params = selection;
+            params["session_id"] = serde_json::json!(session_id.to_string());
+            let raw = serde_json::value::to_raw_value(&params).expect("params");
+            let ctx = crate::handlers::live::LiveOpenHandlerContext {
+                host: &host,
+                live_ws: None,
+                live_ws_base_url: None,
+                #[cfg(feature = "live-webrtc")]
+                live_webrtc: None,
+                runtime: &runtime,
+                session_factory: None,
+                #[cfg(feature = "experimental-gpt-live")]
+                experimental_live_open_authority: None,
+                #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+                experimental_live_playback_custodies: &experimental_live_playback_custodies,
+            };
+            let response = crate::handlers::live::handle_live_open(None, Some(&raw), ctx).await;
+            assert_eq!(
+                response.error.expect("fail-closed error").code,
+                expected_code
+            );
+            assert!(response.result.is_none());
+            assert!(host.active_channels().await.is_empty());
+            assert!(runtime.staged_sessions.contains(&session_id).await);
+        }
+    }
+
+    #[tokio::test]
     async fn live_open_without_session_factory_fails_closed_and_opens_no_channel() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);

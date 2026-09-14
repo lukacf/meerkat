@@ -170,6 +170,15 @@ where
 #[serde(deny_unknown_fields)]
 pub struct LiveOpenParams {
     pub session_id: String,
+    /// Public continuous profile; declaration selection is not activation.
+    /// Omission preserves the legacy path. Explicit null is invalid.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_public_live_profile"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "String", length(min = 1, max = 128), extend("pattern" = "^[A-Za-z0-9._-]+$")))]
+    pub profile_id: Option<meerkat_core::live_execution::profile::LiveProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turning_mode: Option<RealtimeTurningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +209,12 @@ pub struct LiveOpenParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub seed_max_chars: Option<usize>,
+}
+
+pub(super) fn deserialize_public_live_profile<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<meerkat_core::live_execution::profile::LiveProfileId>, D::Error> {
+    meerkat_core::live_execution::profile::LiveProfileId::deserialize(deserializer).map(Some)
 }
 
 /// Transport requested by `live/open`.
@@ -2270,6 +2285,7 @@ mod tests {
     fn live_open_params_round_trip() {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: None,
             transport: None,
             execution_identity: None,
@@ -2295,6 +2311,7 @@ mod tests {
         // commit_input path is reachable.
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
             transport: None,
             execution_identity: None,
@@ -2310,6 +2327,7 @@ mod tests {
     fn live_open_params_provider_managed_explicit_round_trip() {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: Some(RealtimeTurningMode::ProviderManaged),
             transport: None,
             execution_identity: None,
@@ -2325,6 +2343,7 @@ mod tests {
     fn live_open_params_webrtc_transport_round_trip() {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: None,
             transport: Some(LiveOpenTransport::Webrtc),
             execution_identity: None,
@@ -2340,6 +2359,7 @@ mod tests {
     fn live_open_params_seed_max_chars_round_trip() {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: None,
             transport: None,
             execution_identity: None,
@@ -2355,6 +2375,7 @@ mod tests {
     fn live_open_params_zero_seed_budget_round_trips_for_server_validation() {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
+            profile_id: None,
             turning_mode: None,
             transport: None,
             execution_identity: None,

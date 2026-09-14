@@ -17,6 +17,8 @@ mod mcp;
     feature = "rpc-surface"
 ))]
 mod mob_host;
+#[cfg(all(test, feature = "mob"))]
+mod public_live_contract;
 mod shutdown_signal;
 #[cfg(feature = "comms")]
 mod stdin_events;
@@ -3332,7 +3334,10 @@ enum MobLiveCommands {
         mob_id: String,
         /// Agent identity of the member
         agent_identity: String,
-        /// Turning mode (omitted = the owning host's provider-managed default)
+        /// Public Live profile on the owning host; this is not an executor profile or a grant
+        #[arg(long, value_parser = |value: &str| meerkat_core::live_execution::profile::LiveProfileId::parse(value))]
+        profile: Option<meerkat_core::live_execution::profile::LiveProfileId>,
+        /// Turning mode (omitted defaults are owned by the selected profile/host)
         #[arg(long, value_enum)]
         turning_mode: Option<CliRealtimeTurningMode>,
         /// Requested live transport
@@ -3388,6 +3393,7 @@ enum MobLiveCommands {
 enum CliRealtimeTurningMode {
     ProviderManaged,
     ExplicitCommit,
+    Continuous,
 }
 
 #[cfg(feature = "mob")]
@@ -3399,6 +3405,9 @@ impl CliRealtimeTurningMode {
             }
             Self::ExplicitCommit => {
                 meerkat_mob::runtime::bridge_protocol::RealtimeTurningMode::ExplicitCommit
+            }
+            Self::Continuous => {
+                meerkat_mob::runtime::bridge_protocol::RealtimeTurningMode::Continuous
             }
         }
     }
@@ -15150,18 +15159,39 @@ async fn handle_mob_live_command(
         MobLiveCommands::Open {
             mob_id,
             agent_identity,
+            profile,
             turning_mode,
             transport,
         } => {
-            let result = state
-                .mob_member_live_open(
-                    &meerkat_mob::MobId::from(mob_id),
-                    meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
-                    turning_mode.map(CliRealtimeTurningMode::into_wire),
-                    transport.map(CliLiveOpenTransport::into_wire),
-                )
-                .await
-                .map_err(mob_anyhow)?;
+            let turning_mode = turning_mode.map(CliRealtimeTurningMode::into_wire);
+            let transport = transport.map(CliLiveOpenTransport::into_wire);
+            let mob_id = meerkat_mob::MobId::from(mob_id);
+            let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+            let result = match profile {
+                Some(profile) => {
+                    meerkat::session_runtime::live_orchestration::LiveOpenIntent::select(
+                        Some(&profile),
+                        None,
+                        turning_mode,
+                        None,
+                    )?;
+                    state
+                        .mob_member_live_open_with_profile(
+                            &mob_id,
+                            identity,
+                            profile,
+                            turning_mode,
+                            transport,
+                        )
+                        .await
+                }
+                None => {
+                    state
+                        .mob_member_live_open(&mob_id, identity, turning_mode, transport)
+                        .await
+                }
+            }
+            .map_err(mob_anyhow)?;
             let (stdout_doc, stderr_note) = render_live_open_streams(&result, &agent_identity)?;
             println!("{stdout_doc}");
             eprintln!("{stderr_note}");

@@ -1275,6 +1275,7 @@ pub(crate) fn open_disk_store_set(
             })
         }
         RealmBackend::Sqlite => {
+            prepare_sqlite_runtime_components(&paths.sessions_sqlite_path)?;
             let sqlite_store = Arc::new(SqliteSessionStore::open(
                 paths.sessions_sqlite_path.clone(),
             )?);
@@ -1321,6 +1322,23 @@ pub(crate) fn open_disk_store_set(
             })
         }
     }
+}
+
+/// Publish neither half of the co-tenant pair before both format barriers
+/// commit. Already-current opens remain read-only and need no exclusive fence.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn prepare_sqlite_runtime_components(path: &Path) -> Result<(), PersistenceError> {
+    const DOMAINS: &[&meerkat_sqlite::SchemaDomain] = &[
+        &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+        &meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN,
+    ];
+    meerkat_sqlite::activate_file_domains(
+        path,
+        DOMAINS,
+        meerkat_core::time_compat::Duration::from_secs(10),
+    )
+    .map_err(StoreError::from)?;
+    Ok(())
 }
 
 #[cfg(all(test, feature = "session-store"))]

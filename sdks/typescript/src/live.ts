@@ -53,6 +53,8 @@ export type LiveOpenTransport = NonNullable<LiveOpenParams["transport"]>;
 
 /** Options controlling how the live channel is opened. */
 export interface LiveChannelOptions {
+  /** Public profile selection is not a grant; the owning host must activate it. */
+  readonly profileId?: string;
   /**
    * Turning mode for the channel. `"provider_managed"` lets the provider's
    * VAD decide when to commit; `"explicit_commit"` requires the caller to
@@ -80,6 +82,7 @@ export interface LiveChannelOptions {
 export class LiveChannel {
   readonly client: MeerkatClient;
   readonly sessionId: string;
+  readonly profileId?: string;
   readonly turningMode?: RealtimeTurningMode;
   readonly transport?: LiveOpenTransport;
   readonly seedMaxChars?: number;
@@ -94,6 +97,7 @@ export class LiveChannel {
   ) {
     this.client = client;
     this.sessionId = sessionId;
+    this.profileId = options?.profileId;
     this.turningMode = options?.turningMode;
     this.transport = options?.transport;
     this.seedMaxChars = options?.seedMaxChars;
@@ -128,6 +132,9 @@ export class LiveChannel {
     const params: LiveOpenParams = {
       session_id: this.sessionId,
     };
+    if (this.profileId != null) {
+      params.profile_id = this.profileId;
+    }
     if (this.turningMode != null) {
       params.turning_mode = this.turningMode;
     }

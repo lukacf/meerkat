@@ -137,3 +137,28 @@ mod tests {
         assert!(!finished.load(Ordering::SeqCst));
     }
 }
+
+/// Build a future inside this function's own monomorphized frame and box it.
+///
+/// At opt-level 0 every local in every branch of a function gets its own
+/// stack slot, so an `async fn` that constructs and awaits many callee
+/// futures inline reserves the SUM of all their construction temporaries and
+/// inline states on entry, even though one branch runs at a time. Moving the
+/// construction into a `#[inline(never)]` helper and boxing the result leaves
+/// only a pointer in the caller's frame and state machine. Unlike
+/// [`relieve_caller_stack`] this spawns nothing: cancellation and completion
+/// semantics are exactly those of the inline `.await`.
+///
+/// Same idiom as `meerkat_mob::runtime::actor::boxed_arm_future`; measured on
+/// the RPC router dispatch, which reserved 13.4 MiB of debug frame for 163
+/// inline arms (101 KiB in release).
+#[inline(never)]
+pub fn box_in_own_frame<'a, T, F, Fut>(
+    make: F,
+) -> std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T> + Send + 'a,
+{
+    Box::pin(make())
+}

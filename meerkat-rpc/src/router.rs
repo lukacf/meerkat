@@ -1282,28 +1282,7 @@ pub struct MethodRouter {
     live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
-/// Build one dispatch arm's handler future inside its own monomorphized
-/// frame and box it.
-///
-/// A debug build reserves a stack slot for every local in every match arm of
-/// `dispatch_routed_with_request_context` and never reuses them, so
-/// constructing every handler future inline reserved the SUM of all arms on
-/// entry: 13.4 MiB of frame for one function at opt-level 0 (101 KiB in
-/// release), which is what forced 32 MiB worker stacks and the workspace
-/// `RUST_MIN_STACK` test workaround. Taking a thunk moves construction here,
-/// so the dispatch frame holds only the small closures and the peak becomes
-/// the largest single arm instead of their sum. Same idiom as
-/// `meerkat_mob::runtime::actor::boxed_arm_future`.
-#[inline(never)]
-fn routed_arm<'a, T, F, Fut>(
-    make: F,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'a,
-{
-    Box::pin(make())
-}
+use meerkat_runtime::stack_relief::box_in_own_frame as routed_arm;
 
 impl MethodRouter {
     /// Create a new method router.
@@ -3768,19 +3747,29 @@ impl MethodRouter {
             Ok(sid) => sid,
             Err(resp) => return resp,
         };
-        match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
+        // Owned once: the boxed handler futures borrow it across their awaits.
+        #[cfg(feature = "mob")]
+        let bridge_session_id = session_id.to_string();
+        match routed_arm(|| self.resolve_session_owner(&session_id)).await {
+            Some(SessionOwner::Runtime) => match routed_arm(|| {
+                self.runtime.archive_session(&session_id)
+            })
+            .await
+            {
                 Ok(()) => {
                     // Clean up session-owned mobs (implicit + explicit).
                     #[cfg(feature = "mob")]
-                    if let Err(error) = self
-                        .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await
+                    if let Err(error) = routed_arm(|| {
+                        self.mob_state
+                            .destroy_bridge_session_mobs(&bridge_session_id)
+                    })
+                    .await
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
-                    if let Err(error) = self.runtime_adapter.unregister_session(&session_id).await {
+                    if let Err(error) =
+                        routed_arm(|| self.runtime_adapter.unregister_session(&session_id)).await
+                    {
                         return RpcResponse::error(
                             id,
                             error::INTERNAL_ERROR,
@@ -3794,16 +3783,18 @@ impl MethodRouter {
                 Err(rpc_err) => {
                     #[cfg(feature = "mob")]
                     {
-                        let retained_cleanup = self
-                            .mob_state
-                            .has_bridge_session_scoped_mobs(&session_id.to_string())
-                            .await;
+                        let retained_cleanup = routed_arm(|| {
+                            self.mob_state
+                                .has_bridge_session_scoped_mobs(&bridge_session_id)
+                        })
+                        .await;
                         if rpc_err.code == error::SESSION_NOT_FOUND
                             && retained_cleanup
-                            && let Err(error) = self
-                                .mob_state
-                                .destroy_bridge_session_mobs(&session_id.to_string())
-                                .await
+                            && let Err(error) = routed_arm(|| {
+                                self.mob_state
+                                    .destroy_bridge_session_mobs(&bridge_session_id)
+                            })
+                            .await
                         {
                             return mob_destroy_cleanup_error_response(id, error);
                         }
@@ -3818,24 +3809,27 @@ impl MethodRouter {
                 }
             },
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => match self
-                .mob_state
-                .archive_mob_owned_bridge_session_with_cleanup(
-                    &session_id,
-                    "mob cleanup during archive incomplete",
-                )
-                .await
+            Some(SessionOwner::Mob) => match routed_arm(|| {
+                self.mob_state
+                    .archive_mob_owned_bridge_session_with_cleanup(
+                        &session_id,
+                        "mob cleanup during archive incomplete",
+                    )
+            })
+            .await
             {
                 Ok(true) => RpcResponse::success(id, json!({"archived": true})),
                 Ok(false) => {
-                    if self
-                        .mob_state
-                        .has_bridge_session_scoped_mobs(&session_id.to_string())
+                    if routed_arm(|| {
+                        self.mob_state
+                            .has_bridge_session_scoped_mobs(&bridge_session_id)
+                    })
+                    .await
+                        && let Err(error) = routed_arm(|| {
+                            self.mob_state
+                                .destroy_bridge_session_mobs(&bridge_session_id)
+                        })
                         .await
-                        && let Err(error) = self
-                            .mob_state
-                            .destroy_bridge_session_mobs(&session_id.to_string())
-                            .await
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
@@ -3849,14 +3843,16 @@ impl MethodRouter {
             },
             None => {
                 #[cfg(feature = "mob")]
-                if self
-                    .mob_state
-                    .has_bridge_session_scoped_mobs(&session_id.to_string())
+                if routed_arm(|| {
+                    self.mob_state
+                        .has_bridge_session_scoped_mobs(&bridge_session_id)
+                })
+                .await
+                    && let Err(error) = routed_arm(|| {
+                        self.mob_state
+                            .destroy_bridge_session_mobs(&bridge_session_id)
+                    })
                     .await
-                    && let Err(error) = self
-                        .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await
                 {
                     return mob_destroy_cleanup_error_response(id, error);
                 }

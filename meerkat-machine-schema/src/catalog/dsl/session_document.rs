@@ -246,6 +246,7 @@ pub enum LiveAssistantPlaybackTerminalDisposition {
     Unmeasured,
     PlaybackComplete,
     TruncateToReportedPrefix,
+    CallerConfirmedSnapshot,
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +716,12 @@ machine! {
             ResolveRealtimeAssistantTurnInterrupted {
                 response_id_valid: bool,
             },
+            ResolveRealtimeAssistantPlaybackSnapshot {
+                target_matches: bool,
+                snapshot_present: bool,
+                response_discarded: bool,
+                item_materialized: bool,
+            },
             ResolveRealtimeMaterializeCandidate {
                 item_materialized: bool,
                 predecessor_materialized: bool,
@@ -800,6 +807,19 @@ machine! {
                 response_id: String,
                 item_id: String,
                 content_index: u64,
+            },
+            ObserveLiveAssistantPlaybackSnapshot {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                snapshot_chars: u64,
+                snapshot_digest: String,
+                canonical_chars: u64,
+                canonical_digest: String,
+                prefix_matches_snapshot: bool,
             },
             ObserveLiveAssistantPlaybackFinal {
                 session_id: SessionId,
@@ -2814,6 +2834,28 @@ machine! {
             }
         }
 
+        transition ResolveRealtimeAssistantPlaybackSnapshot {
+            on input ResolveRealtimeAssistantPlaybackSnapshot {
+                target_matches, snapshot_present, response_discarded, item_materialized
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && target_matches && snapshot_present
+                && response_discarded == false && item_materialized == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true, observe_skipped: false,
+                write_user_segment: false, append_assistant_segment: false,
+                replace_assistant_segment: true, promote_lane: true,
+                mark_item_ready: true, record_delta_id: false,
+                remove_completion: false, record_completion: true,
+                discard_response: false, discard_response_by_lane: false,
+                mark_response_ready: false, materialize_ready_items: true
+            }
+        }
+
         transition ResolveRealtimeAssistantTurnInterruptedInvalid {
             on input ResolveRealtimeAssistantTurnInterrupted { response_id_valid }
             guard {
@@ -3355,6 +3397,43 @@ machine! {
         // Final text and playback terminality are independent observations.
         // The first fact is retained by generated authority; observing the
         // second performs the one-use join and consumes the target.
+        transition ObserveLiveAssistantPlaybackSnapshot {
+            on input ObserveLiveAssistantPlaybackSnapshot {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, snapshot_chars, snapshot_digest,
+                canonical_chars, canonical_digest, prefix_matches_snapshot
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && snapshot_chars > 0 && snapshot_digest != ""
+                && prefix_matches_snapshot && canonical_chars <= snapshot_chars
+                && canonical_digest != ""
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id) == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id) == Some(content_index)
+                && !self.session_live_assistant_terminal_observation.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_assistant_final_chars.remove(session_id);
+                self.session_live_assistant_final_digest.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id, channel_id: channel_id,
+                interaction_id: interaction_id, response_id: response_id,
+                item_id: item_id, content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,
+                canonical_chars: Some(canonical_chars),
+                canonical_text_digest: Some(canonical_digest),
+                biological_hearing_claimed: false
+            }
+        }
+
         transition ObserveLiveAssistantPlaybackFinalPendingTerminal {
             on input ObserveLiveAssistantPlaybackFinal {
                 session_id, channel_id, interaction_id, response_id, item_id,

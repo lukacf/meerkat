@@ -209,6 +209,8 @@ pub enum LiveAssistantPlaybackTerminalDisposition {
     PlaybackComplete,
     #[serde(rename = "TruncateToReportedPrefix")]
     TruncateToReportedPrefix,
+    #[serde(rename = "CallerConfirmedSnapshot")]
+    CallerConfirmedSnapshot,
 }
 impl LiveAssistantPlaybackTerminalDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -216,6 +218,7 @@ impl LiveAssistantPlaybackTerminalDisposition {
             Self::Unmeasured => "Unmeasured",
             Self::PlaybackComplete => "PlaybackComplete",
             Self::TruncateToReportedPrefix => "TruncateToReportedPrefix",
+            Self::CallerConfirmedSnapshot => "CallerConfirmedSnapshot",
         }
     }
 }
@@ -226,6 +229,7 @@ impl std::convert::TryFrom<&str> for LiveAssistantPlaybackTerminalDisposition {
             "Unmeasured" => Ok(Self::Unmeasured),
             "PlaybackComplete" => Ok(Self::PlaybackComplete),
             "TruncateToReportedPrefix" => Ok(Self::TruncateToReportedPrefix),
+            "CallerConfirmedSnapshot" => Ok(Self::CallerConfirmedSnapshot),
             other => Err(format!(
                 "invalid LiveAssistantPlaybackTerminalDisposition value `{other}`"
             )),
@@ -2098,6 +2102,13 @@ pub mod inputs {
         pub response_id_valid: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeAssistantPlaybackSnapshot {
+        pub target_matches: bool,
+        pub snapshot_present: bool,
+        pub response_discarded: bool,
+        pub item_materialized: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeMaterializeCandidate {
         pub item_materialized: bool,
         pub predecessor_materialized: bool,
@@ -2191,6 +2202,20 @@ pub mod inputs {
         pub response_id: String,
         pub item_id: String,
         pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveLiveAssistantPlaybackSnapshot {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub snapshot_chars: u64,
+        pub snapshot_digest: String,
+        pub canonical_chars: u64,
+        pub canonical_digest: String,
+        pub prefix_matches_snapshot: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveAssistantPlaybackFinal {
@@ -2364,6 +2389,7 @@ pub enum Input {
     ResolveRealtimeAssistantTextReplacement(inputs::ResolveRealtimeAssistantTextReplacement),
     ResolveRealtimeAssistantTurnCompleted(inputs::ResolveRealtimeAssistantTurnCompleted),
     ResolveRealtimeAssistantTurnInterrupted(inputs::ResolveRealtimeAssistantTurnInterrupted),
+    ResolveRealtimeAssistantPlaybackSnapshot(inputs::ResolveRealtimeAssistantPlaybackSnapshot),
     ResolveRealtimeMaterializeCandidate(inputs::ResolveRealtimeMaterializeCandidate),
     RestoreRealtimeTranscriptState(inputs::RestoreRealtimeTranscriptState),
     AdmitLiveInteractionTranscript(inputs::AdmitLiveInteractionTranscript),
@@ -2373,6 +2399,7 @@ pub enum Input {
     AdmitLiveAssistantPlaybackTarget(inputs::AdmitLiveAssistantPlaybackTarget),
     RecoverLiveAssistantPlaybackTarget(inputs::RecoverLiveAssistantPlaybackTarget),
     ResolveLiveAssistantPlaybackOnChannelClose(inputs::ResolveLiveAssistantPlaybackOnChannelClose),
+    ObserveLiveAssistantPlaybackSnapshot(inputs::ObserveLiveAssistantPlaybackSnapshot),
     ObserveLiveAssistantPlaybackFinal(inputs::ObserveLiveAssistantPlaybackFinal),
     RecoverLiveAssistantPlaybackFinal(inputs::RecoverLiveAssistantPlaybackFinal),
     ObserveLiveAssistantPlaybackTerminal(inputs::ObserveLiveAssistantPlaybackTerminal),
@@ -2435,6 +2462,9 @@ impl Input {
             Self::ResolveRealtimeAssistantTurnInterrupted(_) => {
                 InputKind::ResolveRealtimeAssistantTurnInterrupted
             }
+            Self::ResolveRealtimeAssistantPlaybackSnapshot(_) => {
+                InputKind::ResolveRealtimeAssistantPlaybackSnapshot
+            }
             Self::ResolveRealtimeMaterializeCandidate(_) => {
                 InputKind::ResolveRealtimeMaterializeCandidate
             }
@@ -2457,6 +2487,9 @@ impl Input {
             }
             Self::ResolveLiveAssistantPlaybackOnChannelClose(_) => {
                 InputKind::ResolveLiveAssistantPlaybackOnChannelClose
+            }
+            Self::ObserveLiveAssistantPlaybackSnapshot(_) => {
+                InputKind::ObserveLiveAssistantPlaybackSnapshot
             }
             Self::ObserveLiveAssistantPlaybackFinal(_) => {
                 InputKind::ObserveLiveAssistantPlaybackFinal
@@ -2517,6 +2550,7 @@ pub enum InputKind {
     ResolveRealtimeAssistantTextReplacement,
     ResolveRealtimeAssistantTurnCompleted,
     ResolveRealtimeAssistantTurnInterrupted,
+    ResolveRealtimeAssistantPlaybackSnapshot,
     ResolveRealtimeMaterializeCandidate,
     RestoreRealtimeTranscriptState,
     AdmitLiveInteractionTranscript,
@@ -2526,6 +2560,7 @@ pub enum InputKind {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
+    ObserveLiveAssistantPlaybackSnapshot,
     ObserveLiveAssistantPlaybackFinal,
     RecoverLiveAssistantPlaybackFinal,
     ObserveLiveAssistantPlaybackTerminal,
@@ -2945,6 +2980,7 @@ pub enum TransitionId {
     ResolveRealtimeAssistantTurnCompletedDiscard,
     ResolveRealtimeAssistantTurnCompletedToolUse,
     ResolveRealtimeAssistantTurnCompletedRecord,
+    ResolveRealtimeAssistantPlaybackSnapshot,
     ResolveRealtimeAssistantTurnInterruptedInvalid,
     ResolveRealtimeAssistantTurnInterruptedValid,
     ResolveRealtimeMaterializeAlreadyDone,
@@ -2962,6 +2998,7 @@ pub enum TransitionId {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
+    ObserveLiveAssistantPlaybackSnapshot,
     ObserveLiveAssistantPlaybackFinalPendingTerminal,
     RecoverLiveAssistantPlaybackFinal,
     ObserveLiveAssistantPlaybackTerminalPendingFinal,

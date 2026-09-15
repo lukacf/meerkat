@@ -30,8 +30,49 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behavior-only: public GPT Live no longer synthesizes assistant completion
+  after 1.5 seconds without transcript output or a fixed delegation-readout
+  grace period. A quiet stream is not provider completion or playback evidence.
+- `LiveAssistantPlaybackEvidence`, `LiveAssistantPlaybackTruncationDisposition`,
+  and `RealtimeTranscriptEvent` gain snapshot-playback variants. Update exhaustive
+  matches; internal playback-authority events remain rejected at the public
+  wire-input boundary.
+- `GptLiveBrokerObservation` gains `SessionContextAppendRejected` and
+  `DelegationContextAppendRejected`; `LiveSidebandObservationKind` gains
+  `AppendRejected`. An explicit failed append is not an acknowledgement or
+  permission to retry blindly.
+- `ExperimentalLiveReplacementRequired::{CanonicalContext, DelegationResult}`
+  gain `pending_receipt`, also available through `pending_receipt()`, so a
+  replacement's playback owner can register against its generated staging
+  custody before answering the WebRTC offer.
+
 ### Fixed
 
+- Public GPT Live preserves one assistant output identity across long pauses
+  and delayed delegated-result readouts instead of rejecting the continuation
+  as an unsolicited new turn.
+- Public GPT Live open/reopen sends canonical dialogue through native startup
+  `session.input`, preserving user/assistant roles instead of putting serialized
+  history into a limited, speech-prompting commentary append. Oversize startup
+  history is rejected rather than silently trimmed.
+- Public Live admission logs identify the failing stage and typed underlying
+  cause without exposing credential or provider payloads.
+- Cold mob restoration re-establishes the generated runtime placement needed
+  for Live execution after rebuilding the member session, including turn-driven
+  members. Missing or conflicting bindings fail explicitly instead of exposing
+  a restored-but-unusable member.
+- Caller-confirmed Live playback commits an observed transcript snapshot
+  without waiting for a provider turn-final event. Later output continues
+  through a new playback segment under the same interaction.
+- Live close drains provider observations and canonical projection before
+  teardown. A bare transport EOF is not confirmed provider closure; exact
+  pending-append rejections remain explicit while the close tail drains.
+  Closing during an ordinary active tool turn reports busy for retry instead
+  of waiting indefinitely or fabricating tool completion.
+- Ambiguous Live-context recovery admits the replacement execution profile
+  and retains the staging receipt needed to register its playback owner.
 - Release crate publication now waits for the moment crates.io names in its
   429 response (burst of new versions exhausted, refill about one per
   minute) and allows 12 attempts instead of five 15-second retries, which

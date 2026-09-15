@@ -541,7 +541,7 @@ not proxy a placed member's host-local session in multi-host v1, and
 
 `gpt-live-1` is OpenAI's continuous voice model on the public Live API. It is a
 different protocol from Realtime: audio runs continuously with provider-owned
-turn detection, and the voice model does not run tools. Instead the session is
+speech scheduling, and the voice model does not run tools. Instead the session is
 started with a *client delegation*: when the voice model decides a request
 needs tools, files, or reasoning, Meerkat runs the work through the channel's
 ordinary durable executor and returns the result as commentary that the voice
@@ -588,6 +588,71 @@ alternation and joins each delegation to the open or most recent user turn,
 frozen to the transcript prefix observed before the delegation offset; the
 resulting delegated transcript is a Meerkat-derived fact. Transcript
 boundaries never prove playback completed.
+
+Missing transcript events do not establish silence or completion. In particular,
+Meerkat does not finish assistant output after a quiet interval or after a
+delegation-result acknowledgement: a delayed readout retains its output identity.
+Applications must keep transcript grouping, playback evidence, and backend task
+completion separate; see [OpenAI's session guidance](https://developers.openai.com/api/docs/guides/live-conversations).
+
+On open and reopen, the selected canonical dialogue is supplied in native
+`session.input` at provider session creation. User text and visible assistant
+text retain their order and roles; executor System rows, SystemNotice rows, tool
+calls, and raw tool results are not voice-session instructions or dialogue.
+History is not injected as a speech-prompting `session.commentary.append`.
+The provider allows up to 128 startup messages and 8,192 combined tokens.
+Meerkat does not silently trim the selected seed to fit: select a bounded history
+window at the shared open-projection seam, or resolve an oversize-seed rejection
+before retrying. The canonical session history itself is unchanged.
+
+Public admission diagnostics include the failing stage and typed cause (for
+example, `missing_default_binding`, `lease_absent`, or
+`openai-live-openai-api-backend`) without logging credentials, provider payloads,
+or connection URLs. These diagnostics do not change admission policy.
+
+For public Live, `live/playback_complete` is an explicit caller-confirmed
+snapshot cut: it commits the transcript prefix observed at that ordered
+checkpoint, without waiting for the next user turn or a close. It does not
+claim that the provider finished its turn or that a person heard the text.
+Later continuation remains in the same interaction and provider group but
+receives a fresh one-use playback output handle after the cut settles. A late
+group final cannot replay a committed prefix or extend an earlier playback
+report to cover later text. Callers may await playback completion and then
+close sequentially.
+
+Explicit `live/truncate` prefixes use the same ordered snapshot checkpoint and
+must match its exact prefix; they do not wait for a provider final. Omitting a
+prefix remains unmeasured. Every terminal kind, including unmeasured and legacy
+complete/prefix reports, records exact settlement facts before its target is
+retired. Internal retry after a lost projection receipt reuses those facts,
+never a new caller report, changed accounting, or an expanded prefix.
+
+Closing drains provider observations, canonical transcript projection, and the
+bound control consumer before channel terminality and resource retirement.
+Already-admitted output publications retain access to their lifecycle custody
+during drain; terminal close takes its exclusive lifecycle lease afterward.
+Failed projection or publication retains the exact observation and completed
+steps. Retrying close resumes those steps without re-admitting output or
+duplicating already committed transcript text.
+Exactly correlated pending-append errors during close become
+`InterruptedByClose`: completion failed, but partial provider consumption is
+unknown. They are neither acknowledgements nor proof of zero consumption;
+generated authority permits no retry or automatic replacement. They do not
+prevent draining the subsequent close confirmation.
+An independently reported playback completion can join a final transcript
+that arrives during close; closing itself never proves playback or hearing.
+Output without playback evidence remains explicitly unmeasured.
+
+A provider/drain failure retains the exact channel custody and returns an
+error, rather than reporting a successful close. Retry the same channel after
+the blocking work or transport condition settles; a timeout does not cancel
+or repeat an in-flight provider close. An ordinary session turn
+holding pending tools may return a busy close-settlement error; closing a live
+channel does not authorize cancellation or fabricate those tools' results.
+
+Ambiguous-delivery replacement bootstraps retain their machine-issued
+`pending_receipt`. Register the replacement playback owner with that receipt
+before answering its offer, just as for an initial strict open.
 
 The private ChatGPT-brokered path (`experimental-gpt-live`, `gpt-live-1-codex`)
 is deprecated and will be removed after the public path has shipped for at

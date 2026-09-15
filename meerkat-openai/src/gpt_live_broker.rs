@@ -115,6 +115,10 @@ pub enum GptLiveBrokerObservation {
     SessionContextAppendAcknowledged {
         token: GptLiveAppendToken,
     },
+    /// Closing interrupted the append. This does not prove zero consumption.
+    SessionContextAppendRejected {
+        token: GptLiveAppendToken,
+    },
     UserTranscriptFragment {
         item: GptLiveTranscriptItemRef,
         text: String,
@@ -153,6 +157,10 @@ pub enum GptLiveBrokerObservation {
     DelegationContextAppendAcknowledged {
         token: GptLiveAppendToken,
     },
+    /// Closing interrupted the append. This does not authorize replay.
+    DelegationContextAppendRejected {
+        token: GptLiveAppendToken,
+    },
     UnsupportedProviderEvent,
 }
 
@@ -161,6 +169,7 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
         let kind = match self {
             Self::SessionReady => "session_ready",
             Self::SessionContextAppendAcknowledged { .. } => "session_context_append_acknowledged",
+            Self::SessionContextAppendRejected { .. } => "session_context_append_rejected",
             Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
             Self::AssistantTranscriptFragment { .. } => "assistant_transcript_fragment",
             Self::TurnStarted { .. } => "turn_started",
@@ -173,6 +182,7 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
             Self::DelegationContextAppendAcknowledged { .. } => {
                 "delegation_context_append_acknowledged"
             }
+            Self::DelegationContextAppendRejected { .. } => "delegation_context_append_rejected",
             Self::UnsupportedProviderEvent => "unsupported_provider_event",
         };
         formatter

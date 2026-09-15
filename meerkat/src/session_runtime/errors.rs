@@ -330,8 +330,8 @@ pub enum LiveChannelVerbError {
     /// The generated close result omitted the host commit handoff.
     #[error("live close authority omitted host commit handoff")]
     CommitOmitted,
-    /// The host close commit failed after generated authority.
-    #[error("live close host commit failed after generated authority: {message}")]
+    /// Close preparation, playback settlement, or host commit failed.
+    #[error("live close settlement failed: {message}")]
     HostCommit { message: String },
     /// A generated authority emitted a malformed/mismatched result;
     /// `message` is the frozen handler string.

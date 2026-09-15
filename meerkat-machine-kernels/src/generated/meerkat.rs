@@ -3757,6 +3757,8 @@ pub enum LiveContextAppendObservation {
     Rejected,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
+    #[serde(rename = "InterruptedByClose")]
+    InterruptedByClose,
 }
 impl LiveContextAppendObservation {
     pub fn as_str(&self) -> &'static str {
@@ -3764,6 +3766,7 @@ impl LiveContextAppendObservation {
             Self::Delivered => "Delivered",
             Self::Rejected => "Rejected",
             Self::Ambiguous => "Ambiguous",
+            Self::InterruptedByClose => "InterruptedByClose",
         }
     }
 }
@@ -3774,6 +3777,7 @@ impl std::convert::TryFrom<&str> for LiveContextAppendObservation {
             "Delivered" => Ok(Self::Delivered),
             "Rejected" => Ok(Self::Rejected),
             "Ambiguous" => Ok(Self::Ambiguous),
+            "InterruptedByClose" => Ok(Self::InterruptedByClose),
             other => Err(format!(
                 "invalid LiveContextAppendObservation value `{other}`"
             )),
@@ -4043,6 +4047,8 @@ pub enum LiveDelegationResultDeliveryObservation {
     Rejected,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
+    #[serde(rename = "InterruptedByClose")]
+    InterruptedByClose,
 }
 impl LiveDelegationResultDeliveryObservation {
     pub fn as_str(&self) -> &'static str {
@@ -4050,6 +4056,7 @@ impl LiveDelegationResultDeliveryObservation {
             Self::Delivered => "Delivered",
             Self::Rejected => "Rejected",
             Self::Ambiguous => "Ambiguous",
+            Self::InterruptedByClose => "InterruptedByClose",
         }
     }
 }
@@ -4060,6 +4067,7 @@ impl std::convert::TryFrom<&str> for LiveDelegationResultDeliveryObservation {
             "Delivered" => Ok(Self::Delivered),
             "Rejected" => Ok(Self::Rejected),
             "Ambiguous" => Ok(Self::Ambiguous),
+            "InterruptedByClose" => Ok(Self::InterruptedByClose),
             other => Err(format!(
                 "invalid LiveDelegationResultDeliveryObservation value `{other}`"
             )),
@@ -4151,6 +4159,8 @@ pub enum LiveDelegationResultSpeechDisposition {
     SuppressedByNewerUserTurn,
     #[serde(rename = "NotDelivered")]
     NotDelivered,
+    #[serde(rename = "Unmeasured")]
+    Unmeasured,
 }
 impl LiveDelegationResultSpeechDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -4158,6 +4168,7 @@ impl LiveDelegationResultSpeechDisposition {
             Self::Eligible => "Eligible",
             Self::SuppressedByNewerUserTurn => "SuppressedByNewerUserTurn",
             Self::NotDelivered => "NotDelivered",
+            Self::Unmeasured => "Unmeasured",
         }
     }
 }
@@ -4168,6 +4179,7 @@ impl std::convert::TryFrom<&str> for LiveDelegationResultSpeechDisposition {
             "Eligible" => Ok(Self::Eligible),
             "SuppressedByNewerUserTurn" => Ok(Self::SuppressedByNewerUserTurn),
             "NotDelivered" => Ok(Self::NotDelivered),
+            "Unmeasured" => Ok(Self::Unmeasured),
             other => Err(format!(
                 "invalid LiveDelegationResultSpeechDisposition value `{other}`"
             )),
@@ -12780,6 +12792,7 @@ pub struct State {
     pub live_awaiting_assistant_interaction_by_channel: std::collections::BTreeMap<String, String>,
     pub live_assistant_interaction_by_turn: std::collections::BTreeMap<String, String>,
     pub live_assistant_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
+    pub live_assistant_playback_segment_by_turn: std::collections::BTreeMap<String, u64>,
     pub live_abandoned_interactions: std::collections::BTreeSet<String>,
     pub live_delegation_interaction_by_channel: std::collections::BTreeMap<String, String>,
     pub live_delegation_operation_by_channel: std::collections::BTreeMap<String, OperationId>,
@@ -14358,6 +14371,16 @@ pub mod inputs {
         pub assistant_turn_ref: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdvanceLiveAssistantPlaybackSegment {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub assistant_turn_ref: String,
+        pub interaction_id: String,
+        pub previous_segment: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitLiveInteraction {
         pub session_id: String,
         pub channel_id: String,
@@ -15572,6 +15595,7 @@ pub enum Input {
     RevokeLiveChannelCloseCustody(inputs::RevokeLiveChannelCloseCustody),
     ObserveLiveProviderTurnStarted(inputs::ObserveLiveProviderTurnStarted),
     ObserveLiveAssistantTurnStarted(inputs::ObserveLiveAssistantTurnStarted),
+    AdvanceLiveAssistantPlaybackSegment(inputs::AdvanceLiveAssistantPlaybackSegment),
     AdmitLiveInteraction(inputs::AdmitLiveInteraction),
     AdmitLiveDelegation(inputs::AdmitLiveDelegation),
     AdmitLiveInteractionDelegation(inputs::AdmitLiveInteractionDelegation),
@@ -16019,6 +16043,9 @@ impl Input {
             Self::RevokeLiveChannelCloseCustody(_) => InputKind::RevokeLiveChannelCloseCustody,
             Self::ObserveLiveProviderTurnStarted(_) => InputKind::ObserveLiveProviderTurnStarted,
             Self::ObserveLiveAssistantTurnStarted(_) => InputKind::ObserveLiveAssistantTurnStarted,
+            Self::AdvanceLiveAssistantPlaybackSegment(_) => {
+                InputKind::AdvanceLiveAssistantPlaybackSegment
+            }
             Self::AdmitLiveInteraction(_) => InputKind::AdmitLiveInteraction,
             Self::AdmitLiveDelegation(_) => InputKind::AdmitLiveDelegation,
             Self::AdmitLiveInteractionDelegation(_) => InputKind::AdmitLiveInteractionDelegation,
@@ -16475,6 +16502,7 @@ pub enum InputKind {
     RevokeLiveChannelCloseCustody,
     ObserveLiveProviderTurnStarted,
     ObserveLiveAssistantTurnStarted,
+    AdvanceLiveAssistantPlaybackSegment,
     AdmitLiveInteraction,
     AdmitLiveDelegation,
     AdmitLiveInteractionDelegation,
@@ -17526,6 +17554,13 @@ pub mod effects {
         pub assistant_turn_ref: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackSegmentAdvanced {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub assistant_turn_ref: String,
+        pub segment: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveProviderTurnFinished {
         pub channel_id: String,
         pub interaction_id: String,
@@ -18261,6 +18296,7 @@ pub enum Effect {
     LiveInteractionCompleted(effects::LiveInteractionCompleted),
     LiveProviderTurnStarted(effects::LiveProviderTurnStarted),
     LiveAssistantTurnStarted(effects::LiveAssistantTurnStarted),
+    LiveAssistantPlaybackSegmentAdvanced(effects::LiveAssistantPlaybackSegmentAdvanced),
     LiveProviderTurnFinished(effects::LiveProviderTurnFinished),
     LiveConsequentialEffectAuthorized(effects::LiveConsequentialEffectAuthorized),
     LiveDelegationResultReleaseAuthorized(effects::LiveDelegationResultReleaseAuthorized),
@@ -18498,6 +18534,7 @@ pub enum EffectKind {
     LiveInteractionCompleted,
     LiveProviderTurnStarted,
     LiveAssistantTurnStarted,
+    LiveAssistantPlaybackSegmentAdvanced,
     LiveProviderTurnFinished,
     LiveConsequentialEffectAuthorized,
     LiveDelegationResultReleaseAuthorized,
@@ -20304,6 +20341,12 @@ pub enum TransitionId {
     ObserveLiveAssistantTurnStartedIdle,
     ObserveLiveAssistantTurnStartedAttached,
     ObserveLiveAssistantTurnStartedRunning,
+    AdvanceLiveAssistantPlaybackSegmentIdle,
+    AdvanceLiveAssistantPlaybackSegmentAttached,
+    AdvanceLiveAssistantPlaybackSegmentRunning,
+    ReplayLiveAssistantPlaybackSegmentIdle,
+    ReplayLiveAssistantPlaybackSegmentAttached,
+    ReplayLiveAssistantPlaybackSegmentRunning,
     AdmitLiveInteractionIdle,
     AdmitLiveInteractionAttached,
     AdmitLiveInteractionRunning,
@@ -20533,6 +20576,9 @@ pub enum TransitionId {
     BindLiveContextRecoveryChannelIdle,
     BindLiveContextRecoveryChannelAttached,
     BindLiveContextRecoveryChannelRunning,
+    ResolveLiveContextAppendInterruptedByCloseIdle,
+    ResolveLiveContextAppendInterruptedByCloseAttached,
+    ResolveLiveContextAppendInterruptedByCloseRunning,
     ResolveLiveContextAppendRejectedIdle,
     ResolveLiveContextAppendRejectedAttached,
     ResolveLiveContextAppendRejectedRunning,
@@ -21625,6 +21671,7 @@ pub fn initial_state() -> State {
         live_awaiting_assistant_interaction_by_channel: Default::default(),
         live_assistant_interaction_by_turn: Default::default(),
         live_assistant_turn_channel_by_ref: Default::default(),
+        live_assistant_playback_segment_by_turn: Default::default(),
         live_abandoned_interactions: Default::default(),
         live_delegation_interaction_by_channel: Default::default(),
         live_delegation_operation_by_channel: Default::default(),

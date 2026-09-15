@@ -74,6 +74,7 @@ mod live_context_mirror_tests {
         appends: std::sync::Mutex<Vec<crate::live_execution::LiveContextAppendAuthority>>,
         recoveries: std::sync::Mutex<Vec<(String, String, u64)>>,
         fail_recovery: std::sync::atomic::AtomicBool,
+        interrupt_on_close: bool,
     }
 
     #[async_trait::async_trait]
@@ -133,7 +134,11 @@ mod live_context_mirror_tests {
                 .push(authority.clone());
             Ok((
                 authority,
-                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
+                if self.interrupt_on_close {
+                    meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+                } else {
+                    meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+                },
             ))
         }
 
@@ -2168,6 +2173,7 @@ mod live_context_mirror_tests {
             binding: binding.clone(),
             interaction_id: meerkat_core::InteractionId::new(),
             assistant_turn_ref: assistant_turn_ref.to_string(),
+            playback_segment: 0,
             output_id: output_id.to_string(),
             target: Arc::new(std::sync::Mutex::new(Some((
                 "response".to_string(),
@@ -2592,6 +2598,52 @@ mod live_context_mirror_tests {
                 .get(channel_id.as_str()),
             Some(&2),
             "provider acknowledgement advances from seed K to the exact suffix boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_interrupted_delivery_neither_retries_nor_opens_replacement() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(AmbiguousMirrorHost {
+            interrupt_on_close: true,
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("append whose partial consumption is unknown"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal canonical boundary");
+        machine
+            .enqueue_committed_parent_session_boundary(
+                &session_id,
+                &committed,
+                "close-interrupted-store-authority",
+            )
+            .await
+            .expect("record interrupted delivery without automatic recovery");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("drain does not retry");
+        assert_eq!(host.appends.lock().expect("append records").len(), 1);
+        assert!(host.recoveries.lock().expect("recovery records").is_empty());
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("generated state");
+        assert_eq!(
+            state
+                .live_context_cursor_by_channel
+                .get(channel_id.as_str()),
+            Some(&0)
+        );
+        assert!(
+            state
+                .live_context_recovery_replacement_by_channel
+                .is_empty()
         );
     }
 
@@ -3213,17 +3265,34 @@ impl MeerkatMachine {
             }
         })?;
         let runtime_id = state.active_runtime_id.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                %session_id,
+                stage = "live_execution_staging",
+                cause = "missing_runtime_identity",
+                "Live runtime placement unavailable"
+            );
             RuntimeDriverError::ValidationFailed {
                 reason: "experimental live staging has no active runtime identity".to_string(),
             }
         })?;
-        let fence =
-            state
-                .active_fence_token
-                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
-                    reason: "experimental live staging has no active runtime fence".to_string(),
-                })?;
+        let fence = state.active_fence_token.ok_or_else(|| {
+            tracing::warn!(
+                %session_id,
+                stage = "live_execution_staging",
+                cause = "missing_runtime_fence",
+                "Live runtime placement unavailable"
+            );
+            RuntimeDriverError::ValidationFailed {
+                reason: "experimental live staging has no active runtime fence".to_string(),
+            }
+        })?;
         let generation = state.active_runtime_generation.ok_or_else(|| {
+            tracing::warn!(
+                %session_id,
+                stage = "live_execution_staging",
+                cause = "missing_runtime_generation",
+                "Live runtime placement unavailable"
+            );
             RuntimeDriverError::ValidationFailed {
                 reason: "experimental live staging has no active runtime generation".to_string(),
             }
@@ -5501,6 +5570,7 @@ impl MeerkatMachine {
             binding: runtime_binding,
             interaction_id,
             assistant_turn_ref,
+            playback_segment: 0,
             output_id: uuid::Uuid::new_v4().to_string(),
             target: Arc::new(std::sync::Mutex::new(None)),
             terminal_reserved: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -5542,6 +5612,120 @@ impl MeerkatMachine {
                 assistant_turn_ref.to_string(),
             ))
             .cloned()
+    }
+
+    /// Read exact retained output identity for internal projection retry. This
+    /// never reserves or restores the spent public output permission.
+    #[cfg(feature = "live")]
+    pub fn live_assistant_output_handle_for_target(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<LiveAssistantOutputHandle> {
+        self.live_assistant_output_by_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .find(|handle| {
+                handle.binding().session_id() == session_id
+                    && handle.binding().channel_id() == channel_id
+                    && handle.__target().is_some_and(|(response, item, index)| {
+                        response == response_id && item == item_id && index == content_index
+                    })
+            })
+            .cloned()
+    }
+
+    /// Advance only a session-sealed snapshot cut; provider grouping and the
+    /// original foreground interaction remain unchanged.
+    #[cfg(feature = "live")]
+    pub async fn advance_live_assistant_playback_segment(
+        &self,
+        receipt: &meerkat_core::LiveAssistantPlaybackTruncationEvidence,
+    ) -> Result<LiveAssistantOutputHandle, RuntimeDriverError> {
+        if receipt.disposition()
+            != meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "playback continuation requires a committed snapshot cut".to_string(),
+            });
+        }
+        let previous = self
+            .live_assistant_output_handle_for_target(
+                receipt.session_id(),
+                receipt.channel_id(),
+                receipt.response_id(),
+                receipt.item_id(),
+                receipt.content_index(),
+            )
+            .filter(|handle| handle.interaction_id() == receipt.interaction_id())
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "snapshot cut has no exact output custody".to_string(),
+            })?;
+        let binding = previous.binding();
+        let (_, effects) = self.apply_session_dsl_input(
+            receipt.session_id(),
+            crate::meerkat_machine::dsl::MeerkatMachineInput::AdvanceLiveAssistantPlaybackSegment {
+                channel_id: receipt.channel_id().to_string(),
+                runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(binding.runtime_id()),
+                fence_token: crate::meerkat_machine::dsl::FenceToken(binding.fence_token()),
+                generation: crate::meerkat_machine::dsl::Generation(binding.generation()),
+                assistant_turn_ref: previous.__assistant_turn_ref().to_string(),
+                interaction_id: receipt.interaction_id().to_string(),
+                previous_segment: previous.__playback_segment(),
+            },
+            "AdvanceLiveAssistantPlaybackSegment",
+        ).await.map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        let segment = effects.as_slice().iter().find_map(|effect| {
+            if let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveAssistantPlaybackSegmentAdvanced {
+                channel_id, interaction_id, assistant_turn_ref, segment,
+            } = effect
+                && channel_id == receipt.channel_id().as_str()
+                && interaction_id == &receipt.interaction_id().to_string()
+                && assistant_turn_ref == previous.__assistant_turn_ref()
+            {
+                Some(*segment)
+            } else { None }
+        }).ok_or_else(|| RuntimeDriverError::Internal(
+            "playback segment advance emitted no exact authority".to_string(),
+        ))?;
+        if let Some(current) = self.live_assistant_output_handle_for_turn(
+            receipt.session_id(),
+            receipt.channel_id(),
+            previous.__assistant_turn_ref(),
+        ) && current.__playback_segment() == segment
+        {
+            return Ok(current);
+        }
+        let next = LiveAssistantOutputHandle {
+            binding: previous.binding().clone(),
+            interaction_id: previous.interaction_id(),
+            assistant_turn_ref: previous.__assistant_turn_ref().to_string(),
+            playback_segment: segment,
+            output_id: uuid::Uuid::new_v4().to_string(),
+            target: Arc::new(std::sync::Mutex::new(None)),
+            terminal_reserved: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            terminal_consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        self.live_assistant_output_by_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                (
+                    receipt.session_id().clone(),
+                    receipt.channel_id().clone(),
+                    next.__assistant_turn_ref().to_string(),
+                ),
+                next.clone(),
+            );
+        self.live_assistant_output_by_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(next.output_id().to_string(), next.clone());
+        Ok(next)
     }
 
     #[cfg(feature = "live")]
@@ -5634,15 +5818,37 @@ impl MeerkatMachine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&output_id);
-        self.live_assistant_output_by_turn
+        let mut by_turn = self
+            .live_assistant_output_by_turn
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(
-                session_id,
-                channel_id,
-                handle.__assistant_turn_ref().to_string(),
-            ));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (
+            session_id,
+            channel_id,
+            handle.__assistant_turn_ref().to_string(),
+        );
+        if by_turn
+            .get(&key)
+            .is_some_and(|current| current.output_id() == output_id)
+        {
+            by_turn.remove(&key);
+        }
         Ok(handle)
+    }
+
+    /// Accepted but unsettled reports cannot be issued again by the caller.
+    /// Retain their exact target so the projection owner can retry its receipt.
+    #[cfg(feature = "live")]
+    pub fn retain_live_assistant_output_terminal(
+        &self,
+        reservation: LiveAssistantOutputTerminalReservation,
+    ) -> Result<(), RuntimeDriverError> {
+        reservation
+            .commit()
+            .map(|_| ())
+            .map_err(|error| RuntimeDriverError::ValidationFailed {
+                reason: error.to_string(),
+            })
     }
 
     #[cfg(feature = "live")]
@@ -5676,6 +5882,10 @@ impl MeerkatMachine {
         for output_id in retired_ids {
             by_id.remove(&output_id);
         }
+        by_id.retain(|_, handle| {
+            handle.binding().session_id() != session_id
+                || handle.binding().channel_id() != channel_id
+        });
     }
 
     /// Complete only the exact typed provider turn previously joined to its
@@ -7218,7 +7428,7 @@ impl MeerkatMachine {
                         .remove(&key);
                 }
                 crate::live_execution::LiveContextAppendResolution::Resolved(receipt) => {
-                    if receipt.outcome() == meerkat_core::LiveAppendDeliveryOutcome::Rejected {
+                    if receipt.retry_allowed() {
                         let retry = self
                             .enqueue_live_context_row(&binding, queued.row().clone())
                             .await?;
@@ -7227,6 +7437,12 @@ impl MeerkatMachine {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .insert(key, retry);
+                    } else {
+                        self.shared
+                            .live_context_queued_rows
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&key);
                     }
                     return Ok(());
                 }
@@ -7476,6 +7692,9 @@ impl MeerkatMachine {
             }
             meerkat_core::LiveAppendDeliveryOutcome::Ambiguous => {
                 crate::meerkat_machine::dsl::LiveContextAppendObservation::Ambiguous
+            }
+            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose => {
+                crate::meerkat_machine::dsl::LiveContextAppendObservation::InterruptedByClose
             }
         };
         let replacement_channel_id =
@@ -8105,6 +8324,9 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::Ambiguous => {
                     crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous
                 }
+                crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::InterruptedByClose => {
+                    crate::live_execution::LiveDelegationResultDeliveryObservation::InterruptedByClose
+                }
             };
             if committed_observation != observation {
                 return Err(RuntimeDriverError::ValidationFailed {
@@ -8117,6 +8339,9 @@ impl MeerkatMachine {
                 != crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous
             {
                 let speech_disposition = if committed_observation
+                    == crate::live_execution::LiveDelegationResultDeliveryObservation::InterruptedByClose {
+                    crate::live_execution::LiveDelegationResultSpeechDisposition::Unmeasured
+                } else if committed_observation
                     != crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered
                 {
                     crate::live_execution::LiveDelegationResultSpeechDisposition::NotDelivered
@@ -8244,6 +8469,9 @@ impl MeerkatMachine {
             }
             crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous => {
                 crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::Ambiguous
+            }
+            crate::live_execution::LiveDelegationResultDeliveryObservation::InterruptedByClose => {
+                crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::InterruptedByClose
             }
         };
         let replacement_channel_id = matches!(

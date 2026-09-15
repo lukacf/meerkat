@@ -215,6 +215,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_awaiting_assistant_interaction_by_channel`: `Map<String, String>`
 - `live_assistant_interaction_by_turn`: `Map<String, String>`
 - `live_assistant_turn_channel_by_ref`: `Map<String, String>`
+- `live_assistant_playback_segment_by_turn`: `Map<String, u64>`
 - `live_abandoned_interactions`: `Set<String>`
 - `live_delegation_interaction_by_channel`: `Map<String, String>`
 - `live_delegation_operation_by_channel`: `Map<String, OperationId>`
@@ -659,6 +660,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RevokeLiveChannelCloseCustody`(session_id: String, channel_id: String, pending_receipt: Option<String>, activation_receipt: Option<String>)
 - `ObserveLiveProviderTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, provider_turn_ref: String)
 - `ObserveLiveAssistantTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String)
+- `AdvanceLiveAssistantPlaybackSegment`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String, interaction_id: String, previous_segment: u64)
 - `AdmitLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
 - `AdmitLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
 - `AdmitLiveInteractionDelegation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
@@ -960,6 +962,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveInteractionCompleted`(channel_id: String, interaction_id: String)
 - `LiveProviderTurnStarted`(channel_id: String, interaction_id: String, provider_turn_ref: String)
 - `LiveAssistantTurnStarted`(channel_id: String, interaction_id: String, assistant_turn_ref: String)
+- `LiveAssistantPlaybackSegmentAdvanced`(channel_id: String, interaction_id: String, assistant_turn_ref: String, segment: u64)
 - `LiveProviderTurnFinished`(channel_id: String, interaction_id: String, provider_turn_ref: String)
 - `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
 - `LiveDelegationResultReleaseAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, disposition: LiveDelegationResultDisposition)
@@ -14352,6 +14355,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveAssistantTurnStarted`
 - To: `Running`
 
+### `AdvanceLiveAssistantPlaybackSegmentIdle`
+- From: `Idle`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Idle`
+
+### `AdvanceLiveAssistantPlaybackSegmentAttached`
+- From: `Attached`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Attached`
+
+### `AdvanceLiveAssistantPlaybackSegmentRunning`
+- From: `Running`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Running`
+
+### `ReplayLiveAssistantPlaybackSegmentIdle`
+- From: `Idle`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Idle`
+
+### `ReplayLiveAssistantPlaybackSegmentAttached`
+- From: `Attached`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Attached`
+
+### `ReplayLiveAssistantPlaybackSegmentRunning`
+- From: `Running`
+- On: `AdvanceLiveAssistantPlaybackSegment`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, interaction_id, previous_segment)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackSegmentAdvanced`
+- To: `Running`
+
 ### `AdmitLiveInteractionIdle`
 - From: `Idle`
 - On: `AdmitLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id)
@@ -15602,7 +15653,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
 - Guards:
-  - `non_ambiguous_observation`
+  - `observation_without_replacement`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -15614,7 +15665,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
 - Guards:
-  - `non_ambiguous_observation`
+  - `observation_without_replacement`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -15626,7 +15677,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
 - Guards:
-  - `non_ambiguous_observation`
+  - `observation_without_replacement`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
@@ -16934,6 +16985,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `replacement_experimental_stage_matches`
   - `answer_observation_sequence_advances`
 - Emits: `LiveContextRecoveryChannelBound`
+- To: `Running`
+
+### `ResolveLiveContextAppendInterruptedByCloseIdle`
+- From: `Idle`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - ``
+- Emits: `LiveContextAppendResolved`
+- To: `Idle`
+
+### `ResolveLiveContextAppendInterruptedByCloseAttached`
+- From: `Attached`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - ``
+- Emits: `LiveContextAppendResolved`
+- To: `Attached`
+
+### `ResolveLiveContextAppendInterruptedByCloseRunning`
+- From: `Running`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - ``
+- Emits: `LiveContextAppendResolved`
 - To: `Running`
 
 ### `ResolveLiveContextAppendRejectedIdle`

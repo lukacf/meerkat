@@ -6234,7 +6234,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         channel_id: meerkat_core::LiveChannelId,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        // A live close cannot wait behind an arbitrary ordinary tool turn:
+        // that turn may itself be awaiting the caller closing this channel.
+        // Refuse before queuing any actor mutation, retaining custody for retry.
+        let turn_finalization_guard = self
+            .turn_finalization_gate_for_session(id)
+            .await
+            .try_lock_owned()
+            .map_err(|_| SessionError::Busy { id: id.clone() })?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await?;
         let receipt = self
             .inner
             .resolve_live_assistant_playback_on_channel_close(id, channel_id)
@@ -6312,6 +6322,50 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(error);
         }
         Ok(receipt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "live")]
+    pub async fn observe_live_assistant_playback_terminal_with_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<crate::LiveAssistantPlaybackObservationResult, SessionError> {
+        let outcome = self
+            .observe_live_assistant_playback_terminal(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                stop_reason,
+                usage,
+            )
+            .await?;
+        if let crate::LiveAssistantPlaybackObservationResult::Resolved(receipt) = &outcome
+            && receipt.disposition()
+                == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
+        {
+            machine
+                .advance_live_assistant_playback_segment(receipt)
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        error.to_string(),
+                    ))
+                })?;
+        }
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8763,6 +8817,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<SessionMutationGuard, SessionError> {
         let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        self.realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await
+    }
+
+    async fn realtime_transcript_mutation_guard_with_turn_boundary(
+        &self,
+        id: &SessionId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<SessionMutationGuard, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
         match self.live_session_authority(id).await? {
@@ -12693,6 +12756,41 @@ mod tests {
         envelope: meerkat_core::event::EventEnvelope<AgentEvent>,
     ) -> QueuedLosslessEvent {
         QueuedLosslessEvent::new(Arc::new(envelope), Arc::new(AtomicUsize::new(0)))
+    }
+
+    #[tokio::test]
+    async fn live_close_refuses_busy_turn_boundary_and_can_retry() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let session_id = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session")
+            .session_id;
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let channel = meerkat_core::LiveChannelId::new("pending-tool-close");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            service.resolve_live_assistant_playback_on_channel_close(&session_id, channel.clone()),
+        )
+        .await
+        .expect("close must not wait for a pending turn's durable boundary");
+        assert!(matches!(result, Err(SessionError::Busy { .. })));
+        drop(boundary);
+        assert!(
+            service
+                .resolve_live_assistant_playback_on_channel_close(&session_id, channel)
+                .await
+                .expect("retry after the turn settles")
+                .is_none()
+        );
     }
 
     #[tokio::test]

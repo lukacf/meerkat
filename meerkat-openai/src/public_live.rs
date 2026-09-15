@@ -14,18 +14,16 @@
 //! outside this module.
 
 use std::collections::{HashSet, VecDeque};
-use std::time::Duration;
-
-use tokio::time::Instant;
 
 use meerkat_core::model_profile::catalog::ModelReleaseStage;
+use meerkat_core::types::Message;
 use meerkat_llm_core::provider_runtime::errors::ProviderClientError;
 use meerkat_llm_core::provider_runtime::{NormalizedBackendKind, ResolvedRealtimeTarget};
 use oai_rt_rs::live::{
     AudioConfig, AudioOutput, ClientEvent, ClientOptions, Command, CreateRequest, Delegation,
-    DelegationConfig, DelegationTarget, DelegationType, Error as LiveError, Field, LiveClient,
-    LiveReceiver, LiveSender, Nullable, ServerEvent, ServerFrame, SessionConfig, Voice,
-    WebRtcTransport,
+    DelegationConfig, DelegationTarget, DelegationType, Error as LiveError, Field, InitialItem,
+    InitialRole, InitialText, InitialTextType, LiveClient, LiveReceiver, LiveSender, MessageType,
+    Nullable, ServerEvent, ServerFrame, SessionConfig, Voice, WebRtcTransport,
 };
 use tokio::sync::Mutex;
 
@@ -47,6 +45,7 @@ pub struct PublicLiveOpenConfig {
     offer_sdp: String,
     voice: String,
     instructions: Option<String>,
+    input: Vec<InitialItem>,
 }
 
 impl PublicLiveOpenConfig {
@@ -81,6 +80,7 @@ impl PublicLiveOpenConfig {
             offer_sdp,
             voice,
             instructions: None,
+            input: Vec::new(),
         })
     }
 
@@ -89,6 +89,48 @@ impl PublicLiveOpenConfig {
     #[must_use]
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = Some(instructions.into());
+        self
+    }
+
+    /// Replay the selected canonical dialogue as startup history, not as a
+    /// speech-prompting commentary append. Executor instructions and tool
+    /// mechanics do not belong to the tool-less voice model's conversation.
+    ///
+    /// No history is truncated here. The provider's startup limits are
+    /// validated by the protocol client and provider; oversize seeds reject
+    /// channel creation rather than silently losing canonical context.
+    #[must_use]
+    pub fn with_history(mut self, messages: &[Message]) -> Self {
+        self.input = messages
+            .iter()
+            .filter_map(|message| {
+                let (role, text_type, text) = match message {
+                    Message::User(user) => (
+                        InitialRole::User,
+                        InitialTextType::InputText,
+                        user.text_content(),
+                    ),
+                    Message::BlockAssistant(assistant) => (
+                        InitialRole::Assistant,
+                        InitialTextType::OutputText,
+                        assistant.to_string(),
+                    ),
+                    Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => {
+                        return None;
+                    }
+                };
+                (!text.is_empty()).then_some(InitialItem {
+                    role,
+                    content: vec![InitialText {
+                        text,
+                        text_type: Some(text_type),
+                    }],
+                    id: Field::Absent,
+                    status: Field::Absent,
+                    item_type: Some(MessageType::Message),
+                })
+            })
+            .collect();
         self
     }
 }
@@ -103,6 +145,7 @@ impl std::fmt::Debug for PublicLiveOpenConfig {
                 "instructions",
                 &self.instructions.as_ref().map(|_| "<catalog-bound>"),
             )
+            .field("history_messages", &self.input.len())
             .finish()
     }
 }
@@ -270,7 +313,7 @@ impl PublicLiveBrokerFactory {
             }),
             client: None,
             delegation: Field::Value(DelegationConfig::Client),
-            input: None,
+            input: (!config.input.is_empty()).then(|| config.input.clone()),
             instructions: config
                 .instructions
                 .clone()
@@ -457,36 +500,22 @@ impl PublicLiveBrokerSession {
     ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
         let mut receiver = self.receiver.lock().await;
         loop {
-            let quiet_deadline = {
+            {
                 let mut state = self.state.lock().await;
                 if let Some(observation) = state.queued_observations.pop_front() {
                     tracing::debug!(?observation, "public Live lowered a sideband observation");
                     return Ok(Some(observation));
                 }
-                state.assistant_quiet_deadline()
-            };
-            let next = match quiet_deadline {
-                Some(deadline) => {
-                    match tokio::time::timeout_at(deadline, receiver.next_event()).await {
-                        Ok(next) => next,
-                        Err(_) => {
-                            // The provider has no assistant completion event. A
-                            // quiet output stream is the boundary of the spoken
-                            // assistant turn; a later output starts a new turn.
-                            tracing::debug!(
-                                "public Live assistant output went quiet; finishing the turn"
-                            );
-                            self.state.lock().await.finish_open_turn();
-                            continue;
-                        }
-                    }
-                }
-                None => receiver.next_event().await,
-            };
+            }
+            // Missing transcript events are neither silence nor completion.
+            // Keep the same output identity across pauses, including while a
+            // delegation result is being injected into the provider context.
+            let next = receiver.next_event().await;
             let Some(frame) = next.map_err(map_live_error)? else {
-                self.state.lock().await.finish_open_turn();
-                if let Some(observation) = self.state.lock().await.queued_observations.pop_front() {
-                    return Ok(Some(observation));
+                if !self.state.lock().await.closed_observed {
+                    return Err(GptLiveBrokerError::Transport {
+                        class: GptLiveBrokerTerminalClass::WebSocket,
+                    });
                 }
                 return Ok(None);
             };
@@ -495,12 +524,20 @@ impl PublicLiveBrokerSession {
     }
 
     /// Request `session.close` through the sideband without exposing its
-    /// wire identity. The terminal `session.closed` event ends the stream.
+    /// wire identity. Successful repeated requests are idempotent. Continue
+    /// draining observations: only `session.closed`, not this send or a bare
+    /// transport EOF, confirms physical closure.
     pub async fn close(&self) -> Result<(), GptLiveBrokerError> {
+        let mut state = self.state.lock().await;
+        if state.close_requested || state.closed_observed {
+            return Ok(());
+        }
         self.sender
             .send(ClientEvent::new(Command::Close))
             .await
-            .map_err(map_live_error)
+            .map_err(map_live_error)?;
+        state.close_requested = true;
+        Ok(())
     }
 }
 
@@ -521,10 +558,6 @@ struct OpenTurn {
     /// Transcript deltas with their session-relative start offsets, so a
     /// delegation can freeze exactly the prefix observed before its offset.
     segments: Vec<TranscriptSegment>,
-    /// Last output transcript delta for an assistant turn; the turn finishes
-    /// once the transcript has been quiet for
-    /// [`SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD`].
-    last_output_activity: Instant,
 }
 
 struct TranscriptSegment {
@@ -554,9 +587,8 @@ struct SessionState {
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
     reflected_output_audio_frames: u64,
-    /// Client delegations joined but not yet answered with an acknowledged
-    /// result append.
-    outstanding_delegations: usize,
+    close_requested: bool,
+    closed_observed: bool,
 }
 
 impl Default for SessionState {
@@ -572,7 +604,8 @@ impl Default for SessionState {
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
             reflected_output_audio_frames: 0,
-            outstanding_delegations: 0,
+            close_requested: false,
+            closed_observed: false,
         }
     }
 }
@@ -580,16 +613,6 @@ impl Default for SessionState {
 impl SessionState {
     const MAX_DELEGATION_IDENTITIES: usize = 4096;
     const MAX_PENDING_APPENDS: usize = 64;
-    /// The public API emits no assistant completion event. Once the output
-    /// transcript has been quiet this long, the open assistant turn is
-    /// finished so playback settlement and canonical history do not wait for
-    /// the next speaker change.
-    const ASSISTANT_OUTPUT_QUIET_PERIOD: Duration = Duration::from_millis(1500);
-    /// After a delegation result is acknowledged the voice model needs a
-    /// moment before its readout deltas arrive. The open assistant turn is
-    /// held that long so the readout continues the same spoken turn instead
-    /// of starting one the runtime has no awaiting interaction for.
-    const RESULT_READOUT_GRACE: Duration = Duration::from_millis(2500);
 
     fn reserve_append(
         &mut self,
@@ -620,6 +643,7 @@ impl SessionState {
             ServerEvent::Closed { .. } => {
                 // The SDK ends the stream after the terminal event; flush the
                 // open turn so its final transcript is not lost.
+                self.closed_observed = true;
                 self.finish_open_turn();
             }
             ServerEvent::CommentaryAppended { .. } => {
@@ -631,15 +655,6 @@ impl SessionState {
                         }
                     }
                     PendingAppendLane::Delegation => {
-                        self.outstanding_delegations =
-                            self.outstanding_delegations.saturating_sub(1);
-                        if let Some(open) = self
-                            .open_turn
-                            .as_mut()
-                            .filter(|open| open.role == GptLiveTurnRole::Assistant)
-                        {
-                            open.last_output_activity = Instant::now() + Self::RESULT_READOUT_GRACE;
-                        }
                         GptLiveBrokerObservation::DelegationContextAppendAcknowledged {
                             token: pending.token,
                         }
@@ -673,10 +688,8 @@ impl SessionState {
             // signalling, and informational notices carry no conversational,
             // transcript, delegation, or effect authority.
             ServerEvent::OutputAudioDelta { .. } => {
-                // Reflected output media is not a transcript and is not turn
-                // activity: the sideband can carry output audio frames while
-                // the model is not speaking, so only transcript deltas keep an
-                // assistant turn open.
+                // Reflected media is not evidence of transcript or playback
+                // completion; frames may also represent silence.
                 self.reflected_output_audio_frames =
                     self.reflected_output_audio_frames.saturating_add(1);
                 if self.reflected_output_audio_frames.is_multiple_of(50) {
@@ -702,16 +715,23 @@ impl SessionState {
                     .push_back(GptLiveBrokerObservation::UnsupportedProviderEvent);
             }
             ServerEvent::Error { error, .. } => {
-                // A rejected append can never be acknowledged; drop its
-                // reservation so later acknowledgements stay aligned.
+                if let (Some(inner), Some(outer)) =
+                    (error.client_event_id.as_deref(), client_event_id.as_deref())
+                    && inner != outer
+                {
+                    return Err(protocol_error());
+                }
                 let rejected = error
                     .client_event_id
                     .as_deref()
                     .or(client_event_id.as_deref());
-                if let Some(rejected) = rejected {
-                    self.pending_appends
-                        .retain(|pending| pending_event_id(pending.token) != rejected);
-                }
+                let pending = rejected
+                    .and_then(|id| {
+                        self.pending_appends
+                            .iter()
+                            .position(|pending| pending_event_id(pending.token) == id)
+                    })
+                    .and_then(|index| self.pending_appends.remove(index));
                 let summary = summarize_unknown_provider_event("error", &raw);
                 tracing::warn!(
                     provider_event_class = "error",
@@ -721,6 +741,26 @@ impl SessionState {
                     message_bytes = summary.message_bytes,
                     "public Live reported a provider error on the sideband"
                 );
+                // Closing rejects in-flight context injections. Preserve their
+                // exact failed delivery, but keep draining the final transcript
+                // and session.closed. An unrelated error remains fatal.
+                if self.close_requested
+                    && let Some(pending) = pending
+                {
+                    self.queued_observations.push_back(match pending.lane {
+                        PendingAppendLane::Session => {
+                            GptLiveBrokerObservation::SessionContextAppendRejected {
+                                token: pending.token,
+                            }
+                        }
+                        PendingAppendLane::Delegation => {
+                            GptLiveBrokerObservation::DelegationContextAppendRejected {
+                                token: pending.token,
+                            }
+                        }
+                    });
+                    return Ok(());
+                }
                 self.queued_observations
                     .push_back(GptLiveBrokerObservation::UnsupportedProviderEvent);
             }
@@ -766,37 +806,8 @@ impl SessionState {
             .ok_or_else(protocol_error)
     }
 
-    /// Deadline after which an open assistant turn is treated as spoken to
-    /// completion because the provider stopped producing output for it.
-    fn assistant_quiet_deadline(&self) -> Option<Instant> {
-        // While a client delegation is outstanding the assistant's spoken
-        // acknowledgment and the later result readout are one turn, exactly
-        // as the provider-native turn behaves: finishing early would leave the
-        // readout without an awaiting interaction.
-        if self.outstanding_delegations > 0 {
-            return None;
-        }
-        self.open_turn
-            .as_ref()
-            .filter(|open| open.role == GptLiveTurnRole::Assistant)
-            .map(|open| open.last_output_activity + Self::ASSISTANT_OUTPUT_QUIET_PERIOD)
-    }
-
-    fn note_output_activity(&mut self) {
-        if let Some(open) = self
-            .open_turn
-            .as_mut()
-            .filter(|open| open.role == GptLiveTurnRole::Assistant)
-        {
-            open.last_output_activity = Instant::now();
-        }
-    }
-
     fn record_transcript_delta(&mut self, role: GptLiveTurnRole, start_ms: f64, delta: String) {
         let turn = self.ensure_open_turn(role);
-        if role == GptLiveTurnRole::Assistant {
-            self.note_output_activity();
-        }
         self.next_transcript_item = self.next_transcript_item.saturating_add(1);
         let item = GptLiveTranscriptItemRef(format!(
             "{}:{}",
@@ -849,7 +860,6 @@ impl SessionState {
             provider_ref: turn.0.clone(),
             role,
             segments: Vec::new(),
-            last_output_activity: Instant::now(),
         });
         turn
     }
@@ -943,7 +953,6 @@ impl SessionState {
                 (self.mint_turn(GptLiveTurnRole::User), transcript)
             }
         };
-        self.outstanding_delegations = self.outstanding_delegations.saturating_add(1);
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: reference,
@@ -1168,6 +1177,74 @@ mod tests {
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("OFFER") && !rendered.contains("marin"));
         assert!(!rendered.contains("Keep answers short"));
+    }
+
+    #[test]
+    fn startup_history_preserves_dialogue_roles_without_executor_authority() {
+        use meerkat_core::types::{
+            AssistantBlock, BlockAssistantMessage, StopReason, SystemMessage, ToolResult,
+            UserMessage,
+        };
+
+        let history = vec![
+            Message::System(SystemMessage::new("private executor instructions")),
+            Message::User(UserMessage::text("Remember  the table.\n")),
+            Message::tool_results(vec![ToolResult::new(
+                "private-call".to_string(),
+                "private tool output".to_string(),
+                false,
+            )]),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "Booked for two.".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ];
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&history);
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(
+            encoded["input"],
+            json!([
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "Remember  the table.\n"}
+                ]},
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "Booked for two."}
+                ]}
+            ])
+        );
+        assert!(!encoded.to_string().contains("private"));
+        assert!(!format!("{config:?}").contains("Remember"));
+    }
+
+    #[test]
+    fn startup_history_does_not_silently_trim_over_limit_dialogue() {
+        let messages = (0..129)
+            .map(|index| Message::User(meerkat_core::types::UserMessage::text(index.to_string())))
+            .collect::<Vec<_>>();
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let allowed = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&messages[..128]);
+        assert!(factory.session_config(&allowed).validate().is_ok());
+        let oversize = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&messages);
+        assert!(factory.session_config(&oversize).validate().is_err());
+        assert_eq!(oversize.input.len(), 129);
     }
 
     #[test]
@@ -1501,6 +1578,78 @@ mod tests {
     }
 
     #[test]
+    fn close_rejections_preserve_exact_append_failures_and_terminal_tail() {
+        let mut state = SessionState::default();
+        let session = state.reserve_append(PendingAppendLane::Session).unwrap();
+        let delegation = state.reserve_append(PendingAppendLane::Delegation).unwrap();
+        state
+            .apply_frame(frame(output_delta("final reply")))
+            .unwrap();
+        drain(&mut state);
+        state.close_requested = true;
+        for token in [delegation, session] {
+            state
+                .apply_frame(frame(json!({"type":"error","event_id":"e","error":{
+                    "type":"invalid_request_error","code":null,"message":"PRIVATE_ERROR_PAYLOAD",
+                    "client_event_id":pending_event_id(token)
+                }})))
+                .unwrap();
+        }
+        state
+            .apply_frame(frame(
+                json!({"type":"session.closed","event_id":"c","session":{
+            "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
+        },"reason":"close_requested","usage":{"seconds":1.0}}),
+            ))
+            .unwrap();
+        let observations = drain(&mut state);
+        assert!(matches!(
+            observations.as_slice(),
+            [
+                GptLiveBrokerObservation::DelegationContextAppendRejected { token: rejected_delegation },
+                GptLiveBrokerObservation::SessionContextAppendRejected { token: rejected_session },
+                GptLiveBrokerObservation::TurnFinished { transcript, .. },
+            ] if *rejected_delegation == delegation && *rejected_session == session
+                && transcript == "final reply"
+        ));
+        assert!(state.pending_appends.is_empty());
+        assert!(state.closed_observed);
+        assert!(!format!("{observations:?}").contains("PRIVATE_ERROR_PAYLOAD"));
+    }
+
+    #[test]
+    fn close_does_not_launder_unknown_or_conflicting_append_errors() {
+        let mut state = SessionState::default();
+        let pending = state.reserve_append(PendingAppendLane::Session).unwrap();
+        state.close_requested = true;
+        for reference in [None, Some("unrelated"), Some("meerkat-append-999")] {
+            let mut event = json!({"type":"error","event_id":"e","error":{
+                "type":"invalid_request_error","code":null,"message":"rejected"
+            }});
+            if let Some(reference) = reference {
+                event["error"]["client_event_id"] = json!(reference);
+            }
+            state.apply_frame(frame(event)).unwrap();
+            assert!(matches!(
+                drain(&mut state).as_slice(),
+                [GptLiveBrokerObservation::UnsupportedProviderEvent]
+            ));
+            assert_eq!(state.pending_appends.len(), 1);
+        }
+        assert_protocol_error(
+            state
+                .apply_frame(frame(json!({
+                    "type":"error","event_id":"e","client_event_id":"unrelated","error":{
+                        "type":"invalid_request_error","code":null,"message":"rejected",
+                        "client_event_id":pending_event_id(pending)
+                    }
+                })))
+                .unwrap_err(),
+        );
+        assert_eq!(state.pending_appends.len(), 1);
+    }
+
+    #[test]
     fn media_telemetry_and_readiness_frames_carry_no_observation() {
         let mut state = SessionState::default();
         for value in [
@@ -1737,12 +1886,19 @@ mod tests {
             Some(GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: acked }) if acked == token
         ));
         session.close().await.expect("close requested");
-        // The assistant turn finishes exactly once (by output quiet period or
-        // by the terminal event), then the stream ends.
+        session
+            .close()
+            .await
+            .expect("duplicate request is idempotent");
+        // The terminal event flushes the assistant transcript exactly once.
         let mut finished = Vec::new();
         while let Some(observation) = session.next_observation().await.unwrap() {
             finished.push(observation);
         }
+        session
+            .close()
+            .await
+            .expect("confirmed close is idempotent");
         assert!(matches!(
             finished.as_slice(),
             [GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, transcript, .. }]
@@ -1762,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_delegation_holds_the_assistant_turn_open_until_the_result_is_acknowledged() {
+    fn delegation_acknowledgement_does_not_finish_assistant_output() {
         let mut state = SessionState::default();
         state
             .apply_frame(frame(input_delta("book a table")))
@@ -1773,39 +1929,52 @@ mod tests {
         state
             .apply_frame(frame(output_delta("one moment")))
             .unwrap();
+        let original_turn = state.open_turn.as_ref().unwrap().provider_ref.clone();
         drain(&mut state);
-        assert!(
-            state.assistant_quiet_deadline().is_none(),
-            "no quiet boundary while the delegation is outstanding"
-        );
         let token = state.reserve_append(PendingAppendLane::Delegation).unwrap();
         state
             .apply_frame(frame(ack(Some(&pending_event_id(token)))))
             .unwrap();
-        let deadline = state
-            .assistant_quiet_deadline()
-            .expect("quiet boundary resumes once the result is acknowledged");
-        assert!(
-            deadline >= Instant::now() + SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD,
-            "the readout gets a grace window after the acknowledgement"
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: acknowledged }]
+                if *acknowledged == token
+        ));
+        state.apply_frame(frame(output_delta(", booked"))).unwrap();
+        assert_eq!(
+            state.open_turn.as_ref().unwrap().provider_ref,
+            original_turn
         );
-        assert_eq!(state.outstanding_delegations, 0);
+        assert_eq!(
+            join_segments(&state.open_turn.as_ref().unwrap().segments),
+            "one moment, booked"
+        );
     }
 
     #[tokio::test]
-    async fn assistant_turn_finishes_after_quiet_output_period() {
+    async fn long_pause_and_delayed_delegation_readout_preserve_output_identity() {
         let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
-        async fn quiet_after_output(mut socket: WebSocket, _capture: SharedCapture) {
+        async fn quiet_after_output(mut socket: WebSocket, capture: SharedCapture) {
             let snapshot = json!({"id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0});
             send_json(
                 &mut socket,
                 json!({"type":"session.started","event_id":"s","session":snapshot}),
             )
             .await;
-            send_json(&mut socket, output_delta("all done")).await;
+            send_json(&mut socket, input_delta("book a table")).await;
+            send_json(&mut socket, delegation_created("dlg_pause", "client")).await;
+            send_json(&mut socket, output_delta("one moment")).await;
             send_json(&mut socket, json!({"type":"session.output_audio.delta","delta":"AAAA","start_ms":1.0,"end_ms":2.0})).await;
-            // No further output: the provider never announces completion.
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let result = recv_json(&mut socket, &capture).await;
+            send_json(&mut socket, ack(result["event_id"].as_str())).await;
+            // Exceed both the old quiet timeout and its result-readout grace.
+            tokio::time::sleep(std::time::Duration::from_millis(4500)).await;
+            send_json(&mut socket, output_delta(", booked")).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1750)).await;
+            send_json(&mut socket, output_delta(" for two")).await;
+            let close = recv_json(&mut socket, &capture).await;
+            assert_eq!(close["type"], "session.close");
+            send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":6.5}})).await;
         }
         async fn attach_quiet(
             State(capture): State<SharedCapture>,
@@ -1832,15 +2001,33 @@ mod tests {
             .await
             .expect("bootstrap")
             .into_parts();
-        let started = std::time::Instant::now();
+        let delegation = loop {
+            if let Some(GptLiveBrokerObservation::ClientDelegationFinal { delegation, .. }) =
+                session.next_observation().await.unwrap()
+            {
+                break delegation;
+            }
+        };
         let mut observations = Vec::new();
+        for _ in 0..3 {
+            observations.push(session.next_observation().await.unwrap().unwrap());
+        }
+        let token = session
+            .append_delegation_context(&delegation, "Booked.")
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.next_observation().await.unwrap(),
+            Some(GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: acknowledged })
+                if acknowledged == token
+        ));
         for _ in 0..4 {
             let observation = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
                 session.next_observation(),
             )
             .await
-            .expect("quiet period must finish the assistant turn")
+            .expect("provider continuation arrives")
             .unwrap()
             .expect("stream stays open");
             observations.push(observation);
@@ -1849,16 +2036,84 @@ mod tests {
             observations.as_slice(),
             [
                 GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::Assistant, turn: started_turn },
-                GptLiveBrokerObservation::AssistantTranscriptFragment { .. },
-                GptLiveBrokerObservation::TurnSnapshotDelta { .. },
-                GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, turn: finished_turn, transcript },
-            ] if started_turn == finished_turn && transcript == "all done"
+                GptLiveBrokerObservation::AssistantTranscriptFragment { text: first, .. },
+                GptLiveBrokerObservation::TurnSnapshotDelta { turn: first_turn, .. },
+                GptLiveBrokerObservation::AssistantTranscriptFragment { text: second, .. },
+                GptLiveBrokerObservation::TurnSnapshotDelta { turn: second_turn, .. },
+                GptLiveBrokerObservation::AssistantTranscriptFragment { text: third, .. },
+                GptLiveBrokerObservation::TurnSnapshotDelta { turn: third_turn, .. },
+            ] if started_turn == first_turn && started_turn == second_turn && started_turn == third_turn
+                && first == "one moment" && second == ", booked" && third == " for two"
         ));
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= SessionState::ASSISTANT_OUTPUT_QUIET_PERIOD
-                && elapsed < std::time::Duration::from_secs(5),
-            "assistant turn finished after {elapsed:?}"
+        session.close().await.unwrap();
+        assert!(matches!(
+            session.next_observation().await.unwrap(),
+            Some(GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::Assistant, transcript, .. })
+                if transcript == "one moment, booked for two"
+        ));
+        assert!(session.next_observation().await.unwrap().is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_eof_without_session_closed_never_finishes_output() {
+        async fn attach_unconfirmed(upgrade: WebSocketUpgrade) -> Response {
+            upgrade.on_upgrade(|mut socket| async move {
+                send_json(
+                    &mut socket,
+                    json!({"type":"session.started","event_id":"s","session":{
+                        "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
+                    }}),
+                )
+                .await;
+                send_json(&mut socket, output_delta("unfinished")).await;
+                socket.send(AxumMessage::Close(None)).await.unwrap();
+            })
+        }
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route(
+                "/v1/live/sessions/{session_id}/attach",
+                get(attach_unconfirmed),
+            )
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .unwrap();
+        let (_, session) = factory
+            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+            .await
+            .unwrap()
+            .into_parts();
+        for _ in 0..3 {
+            let observation = session.next_observation().await.unwrap().unwrap();
+            assert!(!matches!(
+                observation,
+                GptLiveBrokerObservation::TurnFinished { .. }
+            ));
+        }
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                session.next_observation()
+            )
+            .await
+            .expect("closed socket is observed"),
+            Err(GptLiveBrokerError::Transport { .. })
+        ));
+        let state = session.state.lock().await;
+        assert!(!state.closed_observed);
+        assert_eq!(
+            join_segments(&state.open_turn.as_ref().unwrap().segments),
+            "unfinished"
         );
         server.abort();
     }

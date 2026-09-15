@@ -330,6 +330,12 @@ pub struct SessionRealtimeTranscriptState {
     /// consumes this one-use target before canonical assistant materialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assistant_playback_target: Option<LiveAssistantPlaybackTarget>,
+    #[serde(
+        default,
+        rename = "assistant_playback_snapshots",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    assistant_playback_settlements: BTreeMap<String, PlaybackSettlementReceipt>,
     /// Session-scoped idempotency bindings for committed non-text user input.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     user_content_identities: BTreeMap<String, RealtimeUserContentIdentity>,
@@ -341,6 +347,36 @@ pub struct SessionRealtimeTranscriptState {
     /// commit and durable object are not yet known to be jointly committed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_user_content_blob: Option<PendingRealtimeUserContentBlob>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PlaybackSettlementReceipt {
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    content_index: u32,
+    #[serde(flatten)]
+    settlement: crate::LiveAssistantPlaybackSettlement,
+}
+
+pub fn playback_settlement(
+    state: &SessionRealtimeTranscriptState,
+    channel_id: &str,
+    interaction_id: crate::InteractionId,
+    response_id: &str,
+    item_id: &str,
+    content_index: u32,
+) -> Option<crate::LiveAssistantPlaybackSettlement> {
+    state
+        .assistant_playback_settlements
+        .get(item_id)
+        .filter(|receipt| {
+            receipt.channel_id == channel_id
+                && receipt.interaction_id == interaction_id
+                && receipt.response_id == response_id
+                && receipt.content_index == content_index
+        })
+        .map(|receipt| receipt.settlement.clone())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -828,11 +864,70 @@ pub fn apply_realtime_transcript_event(
             item_id,
             content_index,
         )?,
+        RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            settlement,
+        } => {
+            if let Some(prior) = state.assistant_playback_settlements.get(&item_id) {
+                if prior.channel_id != channel_id
+                    || prior.interaction_id != interaction_id
+                    || prior.response_id != response_id
+                    || prior.content_index != content_index
+                    || prior.settlement != *settlement
+                {
+                    return Err(RealtimeTranscriptShellError {
+                        op: "playback_settlement_conflict",
+                    });
+                }
+                return Ok(RealtimeTranscriptApplyCommit::default());
+            }
+            apply_assistant_playback_target_resolved(
+                state,
+                channel_id.clone(),
+                interaction_id,
+                response_id.clone(),
+                item_id.clone(),
+                content_index,
+            )?;
+            state.assistant_playback_settlements.insert(
+                item_id,
+                PlaybackSettlementReceipt {
+                    channel_id,
+                    interaction_id,
+                    response_id,
+                    content_index,
+                    settlement: *settlement,
+                },
+            );
+            RealtimeTranscriptApplyCommit::default()
+        }
         RealtimeTranscriptEvent::AssistantTurnCompleted {
             response_id,
             stop_reason,
             usage,
         } => apply_assistant_turn_completed(state, response_id, stop_reason, usage)?,
+        RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            text,
+            evidence,
+        } => apply_assistant_playback_snapshot(
+            state,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            text,
+            evidence,
+        )?,
         RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id } => {
             apply_assistant_turn_interrupted(state, response_id)?
         }
@@ -1293,6 +1388,7 @@ pub fn reconcile_realtime_transcript_state_after_rewrite(
     state.first_seen_order = rebuilt_order;
     state.seen_delta_ids.clear();
     state.assistant_completions.clear();
+    state.assistant_playback_settlements.clear();
     state.discarded_assistant_response_ids.clear();
     state.user_content_identities = retained_identities;
     restore_realtime_transcript_state(state)
@@ -1624,6 +1720,101 @@ fn apply_assistant_text_replacement(
         }
     }
     finish_realtime_event(state, decision)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "exact playback identity and evidence match the persisted event"
+)]
+fn apply_assistant_playback_snapshot(
+    state: &mut SessionRealtimeTranscriptState,
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+    text: String,
+    evidence: crate::LiveAssistantPlaybackEvidence,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    if evidence.snapshot_cut().is_none_or(|(snapshot, canonical)| {
+        snapshot.is_empty() || !snapshot.starts_with(canonical) || canonical != text
+    }) {
+        return Err(RealtimeTranscriptShellError {
+            op: "playback_snapshot_evidence_mismatch",
+        });
+    }
+    let target_matches = state
+        .assistant_playback_target
+        .as_ref()
+        .is_some_and(|target| {
+            target.channel_id() == channel_id
+                && target.interaction_id() == interaction_id
+                && target.response_id() == response_id
+                && target.item_id() == item_id
+                && target.content_index() == content_index
+        });
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_assistant_playback_snapshot(
+            target_matches,
+            true,
+            state
+                .discarded_assistant_response_ids
+                .contains(&response_id),
+            state
+                .items
+                .get(&item_id)
+                .is_some_and(|item| item.materialized),
+        )
+    })?;
+    if decision.observe_item {
+        let item = observe_realtime_item(
+            state,
+            item_id.clone(),
+            None,
+            RealtimeTranscriptRole::Assistant,
+            Some(response_id.clone()),
+        )
+        .ok_or(RealtimeTranscriptShellError {
+            op: "playback_snapshot_item_missing",
+        })?;
+        if decision.promote_lane {
+            item.lane = TranscriptLane::Spoken;
+        }
+        if decision.replace_assistant_segment {
+            item.content_segments.insert(content_index, text);
+        }
+        if decision.mark_item_ready {
+            item.ready = true;
+        }
+    }
+    if decision.record_completion {
+        // Materialization belongs to this local segment, not a provider-final
+        // event: no final-content marker or measured usage is installed.
+        state.assistant_completions.insert(
+            response_id.clone(),
+            RealtimeAssistantCompletion {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                usage_consumed: false,
+            },
+        );
+    }
+    let commit = finish_realtime_event(state, decision)?;
+    state.assistant_playback_settlements.insert(
+        item_id,
+        PlaybackSettlementReceipt {
+            channel_id,
+            interaction_id,
+            response_id,
+            content_index,
+            settlement: crate::LiveAssistantPlaybackSettlement {
+                evidence,
+                authoritative_final: None,
+                completion: None,
+            },
+        },
+    );
+    Ok(commit)
 }
 
 fn apply_assistant_turn_completed(

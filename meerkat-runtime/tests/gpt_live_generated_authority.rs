@@ -710,6 +710,7 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
     for observation in [
         mm::LiveDelegationResultDeliveryObservation::Delivered,
         mm::LiveDelegationResultDeliveryObservation::Rejected,
+        mm::LiveDelegationResultDeliveryObservation::InterruptedByClose,
     ] {
         let mut authority = opened_authority();
         bind_experimental(&mut authority, 0);
@@ -766,6 +767,20 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
             },
         )
         .expect("delivered and provider-rejected observations are generated terminals");
+        if observation == mm::LiveDelegationResultDeliveryObservation::InterruptedByClose {
+            assert!(
+                resolved.effects().iter().any(|effect| matches!(
+                    effect,
+                    mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
+                        speech_disposition: mm::LiveDelegationResultSpeechDisposition::Unmeasured,
+                        retry_allowed: false,
+                        recovery_required: false,
+                        ..
+                    }
+                )),
+                "close interruption must not claim no partial readout or authorize reopening"
+            );
+        }
         assert!(resolved.effects().iter().any(|effect| matches!(
             effect,
             mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
@@ -2154,6 +2169,64 @@ fn context_resolution_without_pre_send_authority_is_rejected() {
             },
         )
         .is_err()
+    );
+}
+
+#[test]
+fn close_interrupted_context_spends_attempt_without_retry_or_replacement() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    enqueue_mirror_row(&mut authority, "context-interrupted", 1);
+    let request = mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+        channel_id: CHANNEL.to_string(),
+        runtime_id: runtime_id(),
+        fence_token: fence(),
+        generation: generation(),
+        append_id: "context-interrupted".to_string(),
+        previous_cursor: 0,
+        next_cursor: 1,
+    };
+    apply(&mut authority, request.clone()).expect("pre-send authority");
+    let interrupted = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveContextAppend {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "context-interrupted".to_string(),
+            previous_cursor: 0,
+            next_cursor: 1,
+            replacement_channel_id: String::new(),
+            observation: mm::LiveContextAppendObservation::InterruptedByClose,
+        },
+    )
+    .expect("interrupted append settles without claiming zero consumption");
+    assert!(interrupted.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveContextAppendResolved {
+            cursor: 0,
+            observation: mm::LiveContextAppendObservation::InterruptedByClose,
+            retry_allowed: false,
+            ..
+        }
+    )));
+    assert!(
+        !interrupted.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveContextAmbiguityRecoveryAuthorized { .. }
+        )),
+        "an explicit close cannot trigger automatic replacement"
+    );
+    assert!(
+        authority
+            .state()
+            .live_context_ambiguous_no_retry
+            .contains("context-interrupted")
+    );
+    assert!(
+        apply(&mut authority, request).is_err(),
+        "interrupted attempt is permanently spent"
     );
 }
 

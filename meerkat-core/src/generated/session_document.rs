@@ -130,6 +130,7 @@ pub enum LiveAssistantPlaybackTerminalDisposition {
     Unmeasured,
     PlaybackComplete,
     TruncateToReportedPrefix,
+    CallerConfirmedSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -397,6 +398,12 @@ pub enum SessionDocumentInput {
     ResolveRealtimeAssistantTurnInterrupted {
         response_id_valid: bool,
     },
+    ResolveRealtimeAssistantPlaybackSnapshot {
+        target_matches: bool,
+        snapshot_present: bool,
+        response_discarded: bool,
+        item_materialized: bool,
+    },
     ResolveRealtimeMaterializeCandidate {
         item_materialized: bool,
         predecessor_materialized: bool,
@@ -482,6 +489,19 @@ pub enum SessionDocumentInput {
         response_id: String,
         item_id: String,
         content_index: u64,
+    },
+    ObserveLiveAssistantPlaybackSnapshot {
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        snapshot_chars: u64,
+        snapshot_digest: String,
+        canonical_chars: u64,
+        canonical_digest: String,
+        prefix_matches_snapshot: bool,
     },
     ObserveLiveAssistantPlaybackFinal {
         session_id: SessionDocumentKey,
@@ -926,6 +946,7 @@ enum SessionDocumentTransition {
     ResolveRealtimeAssistantTurnCompletedDiscard,
     ResolveRealtimeAssistantTurnCompletedToolUse,
     ResolveRealtimeAssistantTurnCompletedRecord,
+    ResolveRealtimeAssistantPlaybackSnapshot,
     ResolveRealtimeAssistantTurnInterruptedInvalid,
     ResolveRealtimeAssistantTurnInterruptedValid,
     ResolveRealtimeMaterializeAlreadyDone,
@@ -943,6 +964,7 @@ enum SessionDocumentTransition {
     AdmitLiveAssistantPlaybackTarget,
     RecoverLiveAssistantPlaybackTarget,
     ResolveLiveAssistantPlaybackOnChannelClose,
+    ObserveLiveAssistantPlaybackSnapshot,
     ObserveLiveAssistantPlaybackFinalPendingTerminal,
     RecoverLiveAssistantPlaybackFinal,
     ObserveLiveAssistantPlaybackTerminalPendingFinal,
@@ -2799,6 +2821,52 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveRealtimeAssistantPlaybackSnapshot {
+                target_matches,
+                snapshot_present,
+                response_discarded,
+                item_materialized,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((target_matches)
+                        && (snapshot_present)
+                        && (response_discarded == false)
+                        && (item_materialized == false))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRealtimeAssistantPlaybackSnapshot);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeAssistantPlaybackSnapshot")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeAssistantPlaybackSnapshot => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeTranscriptEventResolved {
+                                observe_item: true,
+                                observe_skipped: false,
+                                write_user_segment: false,
+                                append_assistant_segment: false,
+                                replace_assistant_segment: true,
+                                promote_lane: true,
+                                mark_item_ready: true,
+                                record_delta_id: false,
+                                remove_completion: false,
+                                record_completion: true,
+                                discard_response: false,
+                                discard_response_by_lane: false,
+                                mark_response_ready: false,
+                                materialize_ready_items: true,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRealtimeAssistantPlaybackSnapshot_transition",
+                    }),
+                }
+            }
             SessionDocumentInput::ResolveRealtimeMaterializeCandidate {
                 item_materialized,
                 predecessor_materialized,
@@ -3513,6 +3581,112 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
                         op: "ResolveLiveAssistantPlaybackOnChannelClose_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ObserveLiveAssistantPlaybackSnapshot {
+                session_id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                snapshot_chars,
+                snapshot_digest,
+                canonical_chars,
+                canonical_digest,
+                prefix_matches_snapshot,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((snapshot_chars > 0)
+                        && (snapshot_digest.clone() != "".to_string())
+                        && (prefix_matches_snapshot)
+                        && (canonical_chars <= snapshot_chars)
+                        && (canonical_digest.clone() != "".to_string())
+                        && (if self.state.session_live_channel_id.contains_key(&session_id) {
+                            Some(self.session_live_channel_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(channel_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_interaction_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_interaction_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(interaction_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_response_id
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_response_id_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(response_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_item_id
+                            .contains_key(&session_id)
+                        {
+                            Some(self.session_live_assistant_playback_item_id_value(&session_id)?)
+                        } else {
+                            None
+                        } == Some(item_id.clone()))
+                        && (if self
+                            .state
+                            .session_live_assistant_playback_content_index
+                            .contains_key(&session_id)
+                        {
+                            Some(
+                                self.session_live_assistant_playback_content_index_value(
+                                    &session_id,
+                                )?,
+                            )
+                        } else {
+                            None
+                        } == Some(content_index))
+                        && (!(self
+                            .state
+                            .session_live_assistant_terminal_observation
+                            .contains_key(&session_id))))
+                {
+                    matches.push(SessionDocumentTransition::ObserveLiveAssistantPlaybackSnapshot);
+                }
+                let transition =
+                    Self::single_transition(matches, "ObserveLiveAssistantPlaybackSnapshot")?;
+                match transition {
+                    SessionDocumentTransition::ObserveLiveAssistantPlaybackSnapshot => {
+                        self.state
+                            .session_live_assistant_playback_response_id
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_playback_item_id
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_playback_content_index
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_final_chars
+                            .remove(&session_id);
+                        self.state
+                            .session_live_assistant_final_digest
+                            .remove(&session_id);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,  canonical_chars: Some(canonical_chars),  canonical_text_digest: Some(canonical_digest.clone()),  biological_hearing_claimed: false, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ObserveLiveAssistantPlaybackSnapshot_transition",
                     }),
                 }
             }
@@ -5541,6 +5715,23 @@ impl SessionDocumentMachineAuthority {
         )
     }
 
+    pub fn resolve_realtime_assistant_playback_snapshot(
+        &mut self,
+        target_matches: bool,
+        snapshot_present: bool,
+        response_discarded: bool,
+        item_materialized: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::ResolveRealtimeAssistantPlaybackSnapshot {
+                target_matches,
+                snapshot_present,
+                response_discarded,
+                item_materialized,
+            },
+        )
+    }
+
     pub fn resolve_realtime_materialize_candidate(
         &mut self,
         item_materialized: bool,
@@ -5740,6 +5931,35 @@ impl SessionDocumentMachineAuthority {
                 content_index,
             },
         )
+    }
+
+    pub fn observe_live_assistant_playback_snapshot(
+        &mut self,
+        session_id: SessionDocumentKey,
+        channel_id: String,
+        interaction_id: String,
+        response_id: String,
+        item_id: String,
+        content_index: u64,
+        snapshot_chars: u64,
+        snapshot_digest: String,
+        canonical_chars: u64,
+        canonical_digest: String,
+        prefix_matches_snapshot: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ObserveLiveAssistantPlaybackSnapshot {
+            session_id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            snapshot_chars,
+            snapshot_digest,
+            canonical_chars,
+            canonical_digest,
+            prefix_matches_snapshot,
+        })
     }
 
     pub fn observe_live_assistant_playback_final(

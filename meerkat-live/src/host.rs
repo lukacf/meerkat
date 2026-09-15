@@ -1763,6 +1763,8 @@ struct HostInner {
     by_session: HashMap<SessionId, LiveChannelId>,
     #[cfg(feature = "test-support")]
     fail_next_command_receipt: HashSet<LiveChannelId>,
+    #[cfg(feature = "test-support")]
+    fail_next_projection: HashMap<LiveChannelId, bool>,
 }
 
 impl LiveAdapterHost {
@@ -1781,6 +1783,8 @@ impl LiveAdapterHost {
                 by_session: HashMap::new(),
                 #[cfg(feature = "test-support")]
                 fail_next_command_receipt: HashSet::new(),
+                #[cfg(feature = "test-support")]
+                fail_next_projection: HashMap::new(),
             }),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
@@ -2348,6 +2352,20 @@ impl LiveAdapterHost {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __fail_next_projection_for_test(
+        &self,
+        channel_id: LiveChannelId,
+        after_commit: bool,
+    ) {
+        self.inner
+            .lock()
+            .await
+            .fail_next_projection
+            .insert(channel_id, after_commit);
+    }
+
     /// Project an adapter observation into canonical Meerkat semantic state.
     ///
     /// This is the heart of the projection contract (A1–A6, A10, A14):
@@ -2362,6 +2380,19 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         observation: &LiveAdapterObservation,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
+        #[cfg(feature = "test-support")]
+        let injected_failure = self
+            .inner
+            .lock()
+            .await
+            .fail_next_projection
+            .remove(channel_id);
+        #[cfg(feature = "test-support")]
+        if injected_failure == Some(false) {
+            return Err(LiveAdapterHostError::ProjectionError(
+                LiveProjectionError::Rejected("injected pre-commit failure".to_string()),
+            ));
+        }
         if Self::observation_requires_generated_close(observation)
             && !self.generated_close_has_committed(channel_id).await?
         {
@@ -2779,6 +2810,14 @@ impl LiveAdapterHost {
             // any mismatch here is a bug in classification, not a runtime
             // condition we should panic on.)
             _ => Ok(ObservationOutcome::Noop),
+        };
+        #[cfg(feature = "test-support")]
+        let result = if result.is_ok() && injected_failure == Some(true) {
+            Err(LiveAdapterHostError::ProjectionError(
+                LiveProjectionError::Rejected("injected post-commit receipt failure".to_string()),
+            ))
+        } else {
+            result
         };
         self.settle_playback_terminal_observation(channel_id, observation, &result)
             .await;

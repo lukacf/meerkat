@@ -4474,6 +4474,7 @@ impl Session {
             if existing.response_id() == response_id {
                 return Ok(existing);
             }
+
             return Err(crate::error::AgentError::ConfigError(
                 "live assistant playback target response identity mismatch".to_string(),
             ));
@@ -4499,6 +4500,24 @@ impl Session {
                     .to_string(),
             )
         })
+    }
+
+    pub fn live_assistant_playback_settlement(
+        &self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<crate::LiveAssistantPlaybackSettlement> {
+        realtime_transcript_revision::playback_settlement(
+            self.realtime_transcript.state(),
+            channel_id.as_str(),
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        )
     }
 
     /// Consume the exact one-use assistant playback target after generated

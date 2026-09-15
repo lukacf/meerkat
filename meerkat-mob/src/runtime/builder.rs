@@ -2014,6 +2014,34 @@ pub(super) fn apply_seeded_member_session_binding(
     )
 }
 
+async fn resolve_seeded_member_runtime_restoration(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    runtime_adapter: &RuntimeAdapterOption,
+) -> Result<(), MobError> {
+    let transition = apply_seeded_mob_signal_transition(
+        authority,
+        mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+        },
+        "resume_resolve_member_materialization",
+    )?;
+    #[cfg(feature = "runtime-adapter")]
+    if let Some(adapter) = runtime_adapter.as_ref() {
+        let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
+        for effect in transition.effects().iter().cloned() {
+            if let Some(effect) = super::composition::MobSeamEffect::routed(effect) {
+                super::composition::dispatch_routed_effect(&binding, effect)
+                    .await
+                    .map_err(super::composition::dispatch_refusal_to_mob_error)?;
+            }
+        }
+    }
+    #[cfg(not(feature = "runtime-adapter"))]
+    let _ = (transition, runtime_adapter);
+    Ok(())
+}
+
 pub(super) async fn latest_persisted_session_for_member(
     session_service: &dyn MobSessionService,
     listed_sessions: &[meerkat_core::service::SessionSummary],
@@ -7413,6 +7441,16 @@ impl MobBuilder {
             // wire tool dispatchers for recreated sessions to the final actor channel.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
             let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
+            // Restored bindings can emit RuntimeBound before the actor starts.
+            // Route those observations to its final queue, not a dead prior
+            // actor when the host is reusing the same runtime adapter.
+            #[cfg(feature = "runtime-adapter")]
+            if let Some(adapter) = runtime_adapter.as_ref() {
+                super::composition::attach_signal_dispatcher_to_runtime_adapter(
+                    adapter,
+                    command_tx.clone(),
+                );
+            }
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
@@ -8634,6 +8672,40 @@ impl MobBuilder {
                             continue;
                         }
                     };
+                // A cold durable restore is the same missing-live
+                // materialization handoff as post-discard revival. Local
+                // preparation restores the actor, not the member placement;
+                // only the generated success effect may rebind that tuple.
+                let authorize_restoration = apply_seeded_member_addressability(
+                    &mut provision_authority,
+                    &entry.agent_identity,
+                    &entry.agent_runtime_id,
+                    entry.fence_token,
+                    &entry.role,
+                    entry.runtime_mode,
+                    profile.external_addressable,
+                    "resume_recovered_member_addressability",
+                )
+                .and_then(|()| {
+                    apply_seeded_mob_signal(
+                        &mut provision_authority,
+                        mob_dsl::MobMachineSignal::ClassifyMemberLiveMaterialization {
+                            agent_identity: dsl_identity.clone(),
+                            observation:
+                                mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
+                            reason: "cold resume is restoring the durable member session".to_string(),
+                        },
+                        "resume_classify_member_materialization",
+                    )
+                });
+                if let Err(error) = authorize_restoration {
+                    record_restore_failure(
+                        bridge_session_id.clone(),
+                        format!("MobMachine refused durable member restoration: {error}"),
+                    )
+                    .await;
+                    continue;
+                }
                 match provisioner
                     .provision_member(super::provisioner::ProvisionMemberRequest {
                         create_session: req,
@@ -8663,23 +8735,6 @@ impl MobBuilder {
                                 ))
                             })?;
                         *dsl_authority = provision_authority;
-                        if let Err(error) = apply_seeded_member_addressability(
-                            dsl_authority,
-                            &entry.agent_identity,
-                            &entry.agent_runtime_id,
-                            entry.fence_token,
-                            &entry.role,
-                            entry.runtime_mode,
-                            profile.external_addressable,
-                            "resume_recovered_member_addressability",
-                        ) {
-                            record_restore_failure(bridge_session_id.clone(), format!(
-                                "MobMachine rejected recovered member addressability for '{}': {error}",
-                                entry.agent_identity
-                            ))
-                            .await;
-                            continue;
-                        }
                         if let Err(error) = apply_seeded_member_session_binding(
                             dsl_authority,
                             &entry.agent_identity,
@@ -8690,6 +8745,20 @@ impl MobBuilder {
                             record_restore_failure(bridge_session_id.clone(), format!(
                                 "MobMachine rejected recovered bridge session '{created_bridge_session_id}': {error}"
                             ))
+                            .await;
+                            continue;
+                        }
+                        if let Err(error) = resolve_seeded_member_runtime_restoration(
+                            dsl_authority,
+                            &entry.agent_identity,
+                            runtime_adapter,
+                        )
+                        .await
+                        {
+                            record_restore_failure(
+                                bridge_session_id.clone(),
+                                format!("failed to restore member runtime binding: {error}"),
+                            )
                             .await;
                             continue;
                         }
@@ -9880,6 +9949,129 @@ mod tests {
     };
     use chrono::Utc;
     use meerkat_core::time_compat::UNIX_EPOCH;
+
+    #[cfg(feature = "runtime-adapter")]
+    mod cold_runtime_restoration {
+        use super::*;
+
+        fn authorized_revival(
+            session_id: &meerkat_core::SessionId,
+        ) -> (mob_dsl::MobMachineAuthority, AgentIdentity) {
+            let identity = AgentIdentity::from("cold-member");
+            let runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), Generation::new(0));
+            let mut authority = mob_dsl::MobMachineAuthority::new();
+            apply_seeded_member_addressability(
+                &mut authority,
+                &identity,
+                &runtime_id,
+                crate::ids::FenceToken::new(7),
+                &ProfileName::from("worker"),
+                crate::MobRuntimeMode::TurnDriven,
+                false,
+                "test_recover_member",
+            )
+            .expect("recover member");
+            apply_seeded_member_session_binding(
+                &mut authority,
+                &identity,
+                &runtime_id,
+                session_id,
+                "test_recover_member_session",
+            )
+            .expect("recover session binding");
+            apply_seeded_mob_signal(
+                &mut authority,
+                mob_dsl::MobMachineSignal::ClassifyMemberLiveMaterialization {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+                    observation:
+                        mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
+                    reason: "cold durable member".to_string(),
+                },
+                "test_classify_cold_member",
+            )
+            .expect("authorize revival");
+            (authority, identity)
+        }
+
+        #[tokio::test]
+        async fn missing_registration_refuses_without_creating_runtime_authority() {
+            let session_id = meerkat_core::SessionId::new();
+            let (mut authority, identity) = authorized_revival(&session_id);
+            let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let error = resolve_seeded_member_runtime_restoration(
+                &mut authority,
+                &identity,
+                &Some(runtime.clone()),
+            )
+            .await
+            .expect_err("restoration must not synthesize missing local resources");
+            assert!(error.to_string().contains("refused routed input"));
+            assert!(
+                runtime
+                    .live_webrtc_runtime_binding(&session_id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                runtime
+                    .current_executor_attachment_witness(&session_id)
+                    .await
+                    .is_none(),
+                "placement recovery is not an alternate executor attachment owner"
+            );
+        }
+
+        #[tokio::test]
+        async fn conflicting_binding_refuses_without_replacing_current_incarnation() {
+            let session_id = meerkat_core::SessionId::new();
+            let (mut authority, identity) = authorized_revival(&session_id);
+            let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            runtime
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bind a different session-owned incarnation");
+            let before = runtime
+                .live_webrtc_runtime_binding(&session_id)
+                .await
+                .expect("current binding")
+                .expect("current tuple");
+            let error = resolve_seeded_member_runtime_restoration(
+                &mut authority,
+                &identity,
+                &Some(runtime.clone()),
+            )
+            .await
+            .expect_err("restoration must not overwrite a conflicting placement");
+            assert!(error.to_string().contains("refused routed input"));
+            let after = runtime
+                .live_webrtc_runtime_binding(&session_id)
+                .await
+                .expect("binding after refusal")
+                .expect("original tuple survives");
+            assert_eq!(after.generation, before.generation);
+            assert_eq!(after.fence, before.fence);
+        }
+
+        #[tokio::test]
+        async fn unclassified_restoration_refuses_without_binding() {
+            let session_id = meerkat_core::SessionId::new();
+            let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+            let mut authority = mob_dsl::MobMachineAuthority::new();
+            resolve_seeded_member_runtime_restoration(
+                &mut authority,
+                &AgentIdentity::from("unknown"),
+                &Some(runtime.clone()),
+            )
+            .await
+            .expect_err("a successful actor build cannot mint mob revival authority");
+            assert!(
+                runtime
+                    .live_webrtc_runtime_binding(&session_id)
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     fn member_session_metadata(
         mob_id: &str,

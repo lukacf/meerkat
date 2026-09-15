@@ -47936,6 +47936,7 @@ fn assistant_output_handle_is_exact_channel_scoped_and_two_phase_one_use() {
         binding: binding.clone(),
         interaction_id,
         assistant_turn_ref: "assistant-turn-one".to_string(),
+        playback_segment: 0,
         output_id: "opaque-output-one".to_string(),
         target: Arc::new(StdMutex::new(None)),
         terminal_reserved: Arc::new(AtomicBool::new(false)),

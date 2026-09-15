@@ -1791,6 +1791,8 @@ impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
             }
             RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
+            | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { .. }
+            | RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. } => {
                 Err(WireConversionError::InternalRealtimePlaybackAuthority)
             }

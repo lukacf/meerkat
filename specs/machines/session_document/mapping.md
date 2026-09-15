@@ -178,6 +178,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRealtimeAssistantTurnCompletedRecord`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `ResolveRealtimeAssistantPlaybackSnapshot`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRealtimeAssistantTurnInterruptedInvalid`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`
@@ -227,6 +230,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveAssistantPlaybackOnChannelClose`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantPlaybackSnapshot`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveLiveAssistantPlaybackFinalPendingTerminal`

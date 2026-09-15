@@ -909,6 +909,11 @@ pub enum LiveSidebandObservationKind {
     AppendAcknowledged {
         attempt: LiveSidebandAppendAttempt,
     },
+    /// The provider failed this exact pending append while closing. Partial
+    /// consumption remains unknown: this is neither an ACK nor retry permission.
+    AppendRejected {
+        attempt: LiveSidebandAppendAttempt,
+    },
     AppendDeliveryAmbiguousTerminal {
         attempt: LiveSidebandAppendAttempt,
     },
@@ -929,6 +934,7 @@ impl fmt::Debug for LiveSidebandObservationKind {
                 "delegation_actionable_input_unsupported"
             }
             Self::AppendAcknowledged { .. } => "append_acknowledged",
+            Self::AppendRejected { .. } => "append_rejected",
             Self::AppendDeliveryAmbiguousTerminal { .. } => "append_delivery_ambiguous_terminal",
             Self::UnsupportedProviderEvent => "unsupported_provider_event",
         };

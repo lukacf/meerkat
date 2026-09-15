@@ -549,25 +549,43 @@ pub enum FinalLiveUserTranscriptDisposition {
     Missing,
 }
 
-/// Typed playback-prefix observation for an interrupted live assistant turn.
+/// Typed playback-path evidence for one exact live assistant output.
 ///
 /// A reported prefix is evidence about the playback path only. `Unmeasured`
-/// means no prefix evidence was available. Neither variant asserts delivery to
-/// a person or biological hearing.
+/// means no prefix evidence was available. A caller-confirmed snapshot joins
+/// that report to adapter-observed text without asserting a provider final.
+/// No variant asserts delivery to a person or biological hearing.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveAssistantPlaybackEvidence {
     PlaybackComplete,
     ReportedPrefix(String),
+    /// Caller playback report joined to an exact observed transcript snapshot.
+    /// This is a local output cut, not provider-final or hearing evidence.
+    CallerConfirmedSnapshot(String),
+    /// Explicit playback prefix validated against an ordered candidate snapshot.
+    CallerConfirmedPrefix {
+        snapshot: String,
+        prefix: String,
+    },
     Unmeasured,
 }
 
 impl LiveAssistantPlaybackEvidence {
+    pub fn snapshot_cut(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::CallerConfirmedSnapshot(snapshot) => Some((snapshot, snapshot)),
+            Self::CallerConfirmedPrefix { snapshot, prefix } => Some((snapshot, prefix)),
+            _ => None,
+        }
+    }
     #[must_use]
     pub fn reported_prefix(&self) -> Option<&str> {
         match self {
-            Self::ReportedPrefix(prefix) => Some(prefix),
-            Self::PlaybackComplete | Self::Unmeasured => None,
+            Self::ReportedPrefix(prefix) | Self::CallerConfirmedPrefix { prefix, .. } => {
+                Some(prefix)
+            }
+            Self::PlaybackComplete | Self::CallerConfirmedSnapshot(_) | Self::Unmeasured => None,
         }
     }
 }
@@ -577,7 +595,19 @@ impl LiveAssistantPlaybackEvidence {
 pub enum LiveAssistantPlaybackTruncationDisposition {
     PlaybackComplete,
     CommittedReportedPrefix,
+    CommittedSnapshot,
     Unmeasured,
+}
+
+/// Durable recovery facts for an already-settled playback report. This is not
+/// caller authority; the session owner reclassifies it before issuing a receipt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveAssistantPlaybackSettlement {
+    pub evidence: LiveAssistantPlaybackEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoritative_final: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<(crate::StopReason, crate::TurnUsage)>,
 }
 
 /// Sealed evidence that SessionDocument authority classified one exact live
@@ -890,6 +920,19 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
             LiveAssistantPlaybackEvidence::Unmeasured,
             None,
         ) => (LiveAssistantPlaybackTruncationDisposition::Unmeasured, None),
+        (
+            LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,
+            evidence,
+            Some(chars),
+        ) if evidence.snapshot_cut().is_some_and(|(snapshot, text)| {
+            snapshot.starts_with(text) && *chars == text.chars().count() as u64
+        }) =>
+        {
+            (
+                LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot,
+                Some(*chars),
+            )
+        }
         _ => {
             return Err(LiveAssistantPlaybackTruncationError::Transition(
                 "terminal effect and playback evidence had inconsistent shape".to_string(),
@@ -998,8 +1041,13 @@ impl LiveContextCursor {
 #[serde(rename_all = "snake_case")]
 pub enum LiveAppendDeliveryOutcome {
     Acknowledged,
+    /// Definitive refusal before delivery; unlike a close interruption this
+    /// may admit a fresh retry through generated authority.
     Rejected,
     Ambiguous,
+    /// The provider failed the append while closing. Partial consumption is
+    /// unknown; this permits neither replay nor automatic replacement.
+    InterruptedByClose,
 }
 
 /// Evidence that the exact append attempt may have reached the provider and
@@ -1067,11 +1115,13 @@ impl LiveAppendDeliveryReceipt {
 
     #[must_use]
     pub fn ambiguous_no_retry_evidence(&self) -> Option<AmbiguousDeliveryNoRetryEvidence> {
-        matches!(self.outcome, LiveAppendDeliveryOutcome::Ambiguous).then(|| {
-            AmbiguousDeliveryNoRetryEvidence {
-                channel_id: self.channel_id.clone(),
-                cursor: self.cursor.clone(),
-            }
+        matches!(
+            self.outcome,
+            LiveAppendDeliveryOutcome::Ambiguous | LiveAppendDeliveryOutcome::InterruptedByClose
+        )
+        .then(|| AmbiguousDeliveryNoRetryEvidence {
+            channel_id: self.channel_id.clone(),
+            cursor: self.cursor.clone(),
         })
     }
 }
@@ -1151,6 +1201,17 @@ mod tests {
         assert!(!evidence.permits_same_append_retry());
         assert_eq!(evidence.channel_id().as_str(), "channel-a");
         assert_eq!(evidence.cursor(), &cursor);
+        let interrupted = LiveAppendDeliveryReceipt::new(
+            LiveChannelId::new("channel-a"),
+            cursor.clone(),
+            LiveAppendDeliveryOutcome::InterruptedByClose,
+        );
+        assert!(
+            !interrupted
+                .ambiguous_no_retry_evidence()
+                .expect("close interruption preserves partial-consumption uncertainty")
+                .permits_same_append_retry()
+        );
 
         let acknowledged = LiveAppendDeliveryReceipt::new(
             LiveChannelId::new("channel-a"),

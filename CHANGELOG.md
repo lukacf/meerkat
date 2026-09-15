@@ -30,6 +30,14 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release crate publication now waits for the moment crates.io names in its
+  429 response (burst of new versions exhausted, refill about one per
+  minute) and allows 12 attempts instead of five 15-second retries, which
+  gave up after 35 of 43 crates on the 0.8.38 tag run and needed a manual
+  package-recovery dispatch.
+
 ## [0.8.38] - 2026-09-14
 
 ### Breaking

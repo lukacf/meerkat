@@ -53,10 +53,14 @@ publish_one() {
       echo "  ${crate}: upload mode skips cargo's duplicate verifier; release validation already packaged and linked these crates"
     fi
 
+    # crates.io allows a burst of new versions of existing crates and then
+    # refills about one per minute; a 43-crate release exhausts the burst.
+    # The 429 body names the moment the next publish is accepted, so wait for
+    # exactly that instead of retrying blind.
     local attempt=1
-    local max_attempts="${MEERKAT_CRATE_PUBLISH_ATTEMPTS:-5}"
+    local max_attempts="${MEERKAT_CRATE_PUBLISH_ATTEMPTS:-12}"
     if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || ((max_attempts < 1)); then
-      max_attempts=5
+      max_attempts=12
     fi
 
     set +e
@@ -78,8 +82,19 @@ publish_one() {
         break
       fi
 
-      echo "  ${crate}: crates.io rate limited publish attempt ${attempt}/${max_attempts}; retrying in 15s" >&2
-      sleep 15
+      local wait_seconds=60
+      local retry_after
+      retry_after="$(sed -n 's/.*try again after \([^,]*, [0-9]* [A-Za-z]* [0-9]* [0-9:]* GMT\).*/\1/p' "$output_file" | head -n1)"
+      if [[ -n "$retry_after" ]]; then
+        local retry_epoch now_epoch
+        retry_epoch="$(date -u -d "$retry_after" +%s 2>/dev/null || echo "")"
+        now_epoch="$(date -u +%s)"
+        if [[ -n "$retry_epoch" ]] && ((retry_epoch > now_epoch)); then
+          wait_seconds=$((retry_epoch - now_epoch + 2))
+        fi
+      fi
+      echo "  ${crate}: crates.io rate limited publish attempt ${attempt}/${max_attempts}; retrying in ${wait_seconds}s" >&2
+      sleep "$wait_seconds"
       attempt=$((attempt + 1))
     done
     set -e

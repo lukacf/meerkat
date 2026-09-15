@@ -716,6 +716,7 @@ semver-breaks:
 semver-breaks-selftest:
 	@echo "$(GREEN)Self-testing the semver-breaks gates...$(NC)"
 	@$(PYTHON) scripts/test_check_semver_breaks.py
+	@$(PYTHON) scripts/test_semver_changed_crates.py
 	@$(PYTHON) scripts/test_verify_semver_recovery_evidence.py
 
 # Full pre-release checklist

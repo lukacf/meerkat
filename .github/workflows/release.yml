@@ -446,10 +446,12 @@ jobs:
       github.event.inputs.publish_web_sdk_only != 'true' &&
       github.event.inputs.publish_release_assets_only != 'true'
     runs-on: ubuntu-latest
-    # The 83-minute measurement belongs before the tag. Tag-triggered releases
-    # consume exact-tree evidence from Release semver readiness. Manual recovery
-    # may still run or verify an explicit historical measurement.
-    timeout-minutes: 330
+    # The measurement belongs before the tag. Tag-triggered releases consume
+    # exact-tree evidence from Release semver readiness. Manual recovery may
+    # still run or verify an explicit historical measurement; the measurement
+    # itself is a minutes-scale JSON comparison, so anything near this budget
+    # is a regression.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -1335,6 +1337,66 @@ jobs:
           release_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
           github_token: ${{ github.token }}
           tap_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  # The next release's semver gate compares each changed crate against the
+  # rustdoc JSON of this release instead of rebuilding this workspace on a
+  # hosted runner. Generated on the release tag with the pinned rustc; the
+  # manifest records that rustc so a consumer on another compiler falls back
+  # to rebuilding rather than reading an incompatible format.
+  publish_semver_baseline:
+    name: Publish semver baseline rustdoc
+    if: >-
+      always() &&
+      needs.publish_github_release.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_assets_only == 'true'))
+    needs: [publish_github_release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+
+      - uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-semver-rustdoc
+
+      - name: Generate rustdoc JSON for every publishable library crate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          out="${RUNNER_TEMP}/semver-rustdoc"
+          scripts/semver-rustdoc-json.sh --source-root . --out "${out}"
+          manifest_version="$(jq -r .version "${out}/manifest.json")"
+          if [[ "${manifest_version}" != "${version}" ]]; then
+            echo "::error::manifest version ${manifest_version} does not match release ${RELEASE_TAG}"
+            exit 1
+          fi
+          # rustdoc JSON compresses about 50:1; pay for the high level once here
+          # so every later measurement downloads a few megabytes.
+          tar -I 'zstd -19 -T0' -cf "${RUNNER_TEMP}/semver-rustdoc-${version}.tar.zst" -C "${out}" .
+          ls -la "${RUNNER_TEMP}/semver-rustdoc-${version}.tar.zst"
+
+      - name: Attach baseline rustdoc to the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber \
+            "${RUNNER_TEMP}/semver-rustdoc-${RELEASE_TAG#v}.tar.zst"
 
   # Registry publishing runs automatically on tag pushes alongside binary
   # builds. For recovery (e.g. npm was down during the tag-triggered run),

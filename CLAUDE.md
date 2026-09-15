@@ -362,6 +362,7 @@ The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on
 | `build_web_sdk_package` | Tags or package/Web recovery without a reused artifact | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags or manual asset recovery | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes or repairs the GitHub Release |
 | `update_homebrew` | After GitHub release or asset recovery | Updates the Homebrew tap formula |
+| `publish_semver_baseline` | After GitHub release or asset recovery | Generates rustdoc JSON for every publishable library crate on the release tag and attaches `semver-rustdoc-<version>.tar.zst`, the baseline the next release's semver gate compares against |
 | `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 43 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual package/Web recovery | Publishes `@rkat/web` → npm |
 

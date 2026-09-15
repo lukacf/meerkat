@@ -267,6 +267,8 @@ STRUCTURAL_EXTRACTORS = {
         _symbols_enum_no_repr_variant_discriminant_changed
     ),
     "enum_struct_variant_field_added": _symbols_enum_struct_variant_field_added,
+    # Same message shape as the added case, read off the 0.8.38 report.
+    "enum_struct_variant_field_missing": _symbols_enum_struct_variant_field_added,
     "enum_variant_added": _symbols_enum_variant_added,
     "enum_variant_missing": _symbols_enum_variant_missing,
     "derive_trait_impl_removed": _symbols_derive_trait_impl_removed,
@@ -554,11 +556,36 @@ def classify_crates(repo_root: pathlib.Path, release_crates: list[str]) -> Crate
     return scope
 
 
-def check_measured(parsed: ReportParse, tool_exit_code: int, scope: CrateScope | None) -> list[str]:
-    """Fail closed when the report is not evidence about the whole release."""
-    errors: list[str] = []
+def check_measured(
+    parsed: ReportParse,
+    tool_exit_code: int,
+    scope: CrateScope | None,
+    unchanged: list[str] | None = None,
+    tool_skipped: bool = False,
+) -> list[str]:
+    """Fail closed when the report is not evidence about the whole release.
 
-    if parsed.summary_lines == 0 and not parsed.finished_crates:
+    `unchanged` names publishable crates whose source directory and declared
+    dependency specs are identical to the published baseline tag (see
+    `semver_changed_crates.py`); they count as reached without a rebuild
+    because cargo-semver-checks reports on a crate's own items, which cannot
+    differ when nothing it is built from differs. `tool_skipped` is only legal
+    when that set covers every checkable crate.
+    """
+    errors: list[str] = []
+    unchanged = unchanged or []
+
+    if tool_skipped:
+        if parsed.findings or parsed.finished_crates or parsed.summary_lines:
+            errors.append(
+                "the tool was reported as skipped but the report contains findings "
+                "or per-crate results: driver and report disagree"
+            )
+        if tool_exit_code != 0:
+            errors.append(
+                f"the tool was reported as skipped but its exit code is {tool_exit_code}"
+            )
+    elif parsed.summary_lines == 0 and not parsed.finished_crates:
         errors.append(
             "the cargo-semver-checks report contains no Summary/Finished line: "
             "the run did not complete, so it is not evidence of anything"
@@ -584,13 +611,20 @@ def check_measured(parsed: ReportParse, tool_exit_code: int, scope: CrateScope |
                 "manifest, so the gate cannot tell whether they were checked: "
                 + ", ".join(scope.missing_manifest)
             )
-        covered = set(parsed.finished_crates)
+        covered = set(parsed.finished_crates) | set(unchanged)
         missing = [crate for crate in scope.checkable if crate not in covered]
         if missing:
             errors.append(
                 "the report never reached these publishable crates (no `Finished` "
-                "line): " + ", ".join(missing)
+                "line and not baseline-identical): " + ", ".join(missing)
             )
+        if tool_skipped:
+            measured_needed = [crate for crate in scope.checkable if crate not in set(unchanged)]
+            if measured_needed:
+                errors.append(
+                    "the tool was skipped although these crates differ from the "
+                    "baseline: " + ", ".join(measured_needed)
+                )
 
     return errors
 
@@ -680,6 +714,25 @@ def main() -> int:
         help="crate this release publishes; repeatable. Those with a non-proc-macro "
         "lib target must appear in the report.",
     )
+    parser.add_argument(
+        "--unchanged-crate",
+        action="append",
+        default=[],
+        help="publishable crate proven identical (source and dependency specs) to the "
+        "baseline tag by scripts/semver_changed_crates.py; counts as reached.",
+    )
+    parser.add_argument(
+        "--first-publish-crate",
+        action="append",
+        default=[],
+        help="publishable crate with no baseline release; excluded from measurement.",
+    )
+    parser.add_argument("--baseline-tag", help="baseline release tag used for the comparison")
+    parser.add_argument(
+        "--tool-skipped",
+        action="store_true",
+        help="cargo-semver-checks was not run because every checkable crate is baseline-identical",
+    )
     args = parser.parse_args()
 
     if args.version:
@@ -696,12 +749,18 @@ def main() -> int:
             print("error: --release-crate requires --repo-root", file=sys.stderr)
             return 2
         scope = classify_crates(args.repo_root, args.release_crate)
+        if scope is not None and args.first_publish_crate:
+            scope.checkable = [
+                crate for crate in scope.checkable if crate not in set(args.first_publish_crate)
+            ]
 
     report_text = args.report.read_text(encoding="utf-8", errors="replace")
     parsed = parse_report(report_text)
     sections = parse_changelog(args.changelog.read_text(encoding="utf-8"))
 
-    errors = check_measured(parsed, args.tool_exit_code, scope)
+    errors = check_measured(
+        parsed, args.tool_exit_code, scope, args.unchanged_crate, args.tool_skipped
+    )
     errors.extend(check_stamped(sections, version))
 
     section = pending_section(sections)
@@ -744,6 +803,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if args.unchanged_crate:
+        baseline = args.baseline_tag or "the baseline release"
+        print(
+            f"semver-breaks: {len(args.unchanged_crate)} crate(s) identical to {baseline} "
+            "(source and dependency specs) were not rebuilt: "
+            + ", ".join(args.unchanged_crate)
+        )
+    if args.first_publish_crate:
+        print(
+            "semver-breaks: first publication has no registry baseline: "
+            + ", ".join(args.first_publish_crate)
+        )
 
     if not parsed.findings:
         print(

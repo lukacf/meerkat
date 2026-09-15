@@ -87,6 +87,14 @@ class ReportParsingTests(unittest.TestCase):
             {"constructible_struct_adds_field", "derive_trait_impl_removed"},
         )
 
+    def test_enum_struct_variant_field_missing_is_structural(self) -> None:
+        symbols, structural = gate.extract_symbols(
+            "enum_struct_variant_field_missing",
+            "field handoff of variant GptLiveBrokerObservation::ClientDelegationFinal",
+        )
+        self.assertTrue(structural)
+        self.assertEqual(symbols, ("handoff", "GptLiveBrokerObservation", "ClientDelegationFinal"))
+
     def test_strips_location_suffix(self) -> None:
         self.assertEqual(
             gate.strip_location("field MaintenanceBridgeReport.refused in /repo/a.rs:435"),
@@ -862,6 +870,45 @@ class ChangelogStampTests(unittest.TestCase):
         result, _ = self.stamp(self.pending + missing, "0.8.24", name="missing-link")
         self.assertEqual(result.returncode, 1)
         self.assertIn("previous release comparison reference", result.stderr)
+
+
+class BaselineIdenticalCrates(unittest.TestCase):
+    """Crates proven identical to the baseline count as reached without a rebuild."""
+
+    def scope(self, names: list[str]) -> gate.CrateScope:
+        scope = gate.CrateScope()
+        scope.checkable = list(names)
+        return scope
+
+    def test_unchanged_crates_satisfy_coverage(self) -> None:
+        parsed = gate.parse_report(CLEAN_REPORT)
+        scope = self.scope(parsed.finished_crates + ["meerkat-unchanged"])
+        self.assertEqual(
+            gate.check_measured(parsed, 0, scope),
+            [
+                "the report never reached these publishable crates (no `Finished` "
+                "line and not baseline-identical): meerkat-unchanged"
+            ],
+        )
+        self.assertEqual(gate.check_measured(parsed, 0, scope, ["meerkat-unchanged"]), [])
+
+    def test_skipped_tool_requires_every_crate_to_be_identical(self) -> None:
+        parsed = gate.parse_report("")
+        scope = self.scope(["meerkat-a", "meerkat-b"])
+        errors = gate.check_measured(parsed, 0, scope, ["meerkat-a"], tool_skipped=True)
+        self.assertTrue(any("meerkat-b" in error for error in errors))
+        self.assertEqual(
+            gate.check_measured(parsed, 0, scope, ["meerkat-a", "meerkat-b"], tool_skipped=True),
+            [],
+        )
+
+    def test_skipped_tool_with_results_or_failure_disagrees(self) -> None:
+        parsed = gate.parse_report(CLEAN_REPORT)
+        scope = self.scope(parsed.finished_crates)
+        errors = gate.check_measured(parsed, 0, scope, parsed.finished_crates, tool_skipped=True)
+        self.assertTrue(any("driver and report disagree" in error for error in errors))
+        errors = gate.check_measured(gate.parse_report(""), 101, self.scope([]), [], tool_skipped=True)
+        self.assertTrue(any("exit code is 101" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -72,13 +72,30 @@ package smoke tests.
 ## Declared Breaks (`semver-breaks`)
 
 0.x patch releases may break public API; every break must be declared. The
-`semver-breaks` gate runs cargo-semver-checks over the publishable workspace
-against the published crates.io baselines and fails the release unless all
-three hold:
+`semver-breaks` gate runs cargo-semver-checks against the published crates.io
+baseline and fails the release unless all three hold:
 
-1. **Measured.** The run reached every crate the release publishes, and its
-   exit code agrees with its content. A run that died halfway, or failed for a
-   reason other than a detected break, is a failure rather than a pass.
+1. **Measured.** Every crate the release publishes was either rebuilt and
+   compared, or proven identical to the baseline release. Only crates whose
+   source directory or declared dependency specs differ from the baseline tag
+   are rebuilt (`scripts/semver_changed_crates.py` classifies them; generated
+   Bazel files and test, bench, example and doc trees do not count). Neither
+   side is built inside cargo-semver-checks: the baseline is the rustdoc JSON
+   the release workflow attached to the baseline's GitHub release
+   (`semver-rustdoc-<version>.tar.zst`), the candidate is generated once for
+   every publishable library crate by the same `scripts/semver-rustdoc-json.sh`
+   on the pinned rustc, and the tool compares the two files per crate
+   (`--baseline-rustdoc`, `--current-rustdoc`). One cargo invocation documents
+   all library crates on each side so workspace feature unification is
+   identical across releases. Only if the asset is missing or was built by a
+   different rustc is the baseline tag checked out and the generator run
+   there. A release measurement is therefore a minutes-scale job. Identical
+   crates are recorded as
+   reached by equivalence because cargo-semver-checks reports on a crate's
+   own items, which cannot differ when nothing it is built from differs. The
+   tool's exit code must agree with its report; a run that died halfway, or
+   failed for a reason other than a detected break, is a failure rather than
+   a pass.
 2. **Named.** Every finding the tool reports is named in the pending release
    section's `### Breaking` body, at the granularity of the finding. A type
    gaining a field and the same type losing a derive are two findings; naming

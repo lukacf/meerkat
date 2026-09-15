@@ -12,8 +12,10 @@ naming the changed signatures.
 
 **What the `semver-breaks` gate actually enforces**, so this file does not
 claim more than it measures: it runs cargo-semver-checks over the publishable
-workspace against the published baselines, and it fails the release unless
-(1) every crate the release publishes was reached by the run, (2) every break
+crates whose source or declared dependency specs differ from the published
+baseline tag (crates proven identical to the baseline are recorded as reached
+by equivalence, since the tool reports on a crate's own items), and it fails
+the release unless (1) every crate the release publishes was reached, (2) every break
 the tool reports is NAMED in the pending section's `### Breaking` body at the
 granularity of the individual finding, and (3) that pending section is stamped
 `## [VERSION] - DATE` against the version being released. "Named" means the
@@ -92,6 +94,18 @@ them.
 
 ### Fixed
 
+- Release semver readiness now measures only the publishable crates whose
+  source or declared dependency specs differ from the published baseline tag
+  (`scripts/semver_changed_crates.py`); baseline-identical crates are recorded
+  as reached by equivalence. Neither side is built inside cargo-semver-checks
+  any more: the baseline is the rustdoc JSON the release workflow attaches to
+  the baseline's GitHub release (`semver-rustdoc-<version>.tar.zst`, new
+  `publish_semver_baseline` job), the candidate is generated once for every
+  publishable library crate by the same `scripts/semver-rustdoc-json.sh`, and
+  the tool compares JSON to JSON (`--baseline-rustdoc`, `--current-rustdoc`).
+  The baseline is regenerated from a checkout of its tag only when the asset
+  is missing or was built by a different rustc. The measurement drops from
+  hours to minutes, and its job budget is 45 minutes instead of 330.
 - CI: the GitHub-hosted Mob unit-test archive lane and the push-to-terminal
   gate budget now leave room for release commits, which invalidate every
   compiled workspace crate and previously cancelled CI on the release SHA.

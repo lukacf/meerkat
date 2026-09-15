@@ -165,7 +165,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -266,7 +266,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -367,7 +367,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -477,7 +477,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -587,7 +587,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -697,7 +697,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -795,7 +795,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -896,7 +896,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1006,7 +1006,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1104,7 +1104,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1204,7 +1204,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1312,7 +1312,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1412,7 +1412,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1510,7 +1510,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1608,7 +1608,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1709,7 +1709,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1818,7 +1818,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1919,7 +1919,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2028,7 +2028,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2129,7 +2129,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2238,7 +2238,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2339,7 +2339,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2448,7 +2448,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2551,7 +2551,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2662,7 +2662,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2769,7 +2769,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2884,7 +2884,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -2987,7 +2987,7 @@ rust_test(
         "//meerkat-cli:rkat",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -3098,7 +3098,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(
@@ -3209,7 +3209,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
     },
     proc_macro_deps = all_crate_deps(

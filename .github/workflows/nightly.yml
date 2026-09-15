@@ -138,6 +138,41 @@ jobs:
       - name: Surface modularity tests
         run: make test-surface-modularity
 
+  release-stack-budget:
+    name: Release worker-stack budget (rkat-rpc dispatch path)
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-release-stack
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      # Release codegen colours stack slots, so this measures the property
+      # the shipped binaries actually have. It lives on the nightly, not the
+      # release path: a release build of meerkat-rpc's tests is minutes of
+      # runner time that would land on every tag otherwise.
+      - name: RPC router tests on a 1 MiB release stack
+        run: make stack-budget-release
+
   e2e-system:
     name: System e2e lane
     runs-on: ubuntu-latest

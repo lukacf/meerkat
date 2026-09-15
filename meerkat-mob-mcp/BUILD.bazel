@@ -163,7 +163,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mob-mcp",
@@ -269,7 +269,7 @@ rust_test(
         "//meerkat-mob:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mob-mcp",

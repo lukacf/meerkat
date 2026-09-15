@@ -158,7 +158,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mcp-server",
@@ -273,7 +273,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -345,7 +345,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -417,7 +417,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -491,7 +491,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -561,7 +561,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -631,7 +631,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -701,7 +701,7 @@ rust_test(
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(

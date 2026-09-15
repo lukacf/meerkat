@@ -277,7 +277,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -348,7 +348,7 @@ rust_test(
         "//tests/integration:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -416,7 +416,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -486,7 +486,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -556,7 +556,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -626,7 +626,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -702,7 +702,7 @@ rust_test(
         "//meerkat:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -770,7 +770,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -838,7 +838,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -906,7 +906,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -973,7 +973,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1041,7 +1041,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1108,7 +1108,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1181,7 +1181,7 @@ rust_test(
         "//meerkat-runtime:cargo_manifest",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1251,7 +1251,7 @@ rust_test(
         "//meerkat-mob:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1319,7 +1319,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1387,7 +1387,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1455,7 +1455,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1527,7 +1527,7 @@ rust_test(
         "//meerkat:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1595,7 +1595,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1663,7 +1663,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1733,7 +1733,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1804,7 +1804,7 @@ rust_test(
         "//meerkat:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1875,7 +1875,7 @@ rust_test(
         "//meerkat:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1943,7 +1943,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2013,7 +2013,7 @@ rust_test(
         "//meerkat-core:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2081,7 +2081,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2149,7 +2149,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2219,7 +2219,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2290,7 +2290,7 @@ rust_test(
         "//meerkat-comms:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2361,7 +2361,7 @@ rust_test(
         "//meerkat-comms:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2431,7 +2431,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2501,7 +2501,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2569,7 +2569,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",

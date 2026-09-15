@@ -73,6 +73,19 @@ them.
   of waiting indefinitely or fabricating tool completion.
 - Ambiguous Live-context recovery admits the replacement execution profile
   and retains the staging receipt needed to register its playback owner.
+- Debug worker-stack usage on the RPC dispatch path dropped from 24 MiB to
+  4 MiB. `MethodRouter::dispatch_routed_with_request_context` reserved
+  13.4 MiB of opt-level-0 frame by constructing all 163 handler futures
+  inline (101 KiB in release); every arm now goes through an
+  `#[inline(never)]` thunk that builds and boxes the future in its own frame
+  (`meerkat_runtime::stack_relief::box_in_own_frame`), and the same is done
+  for the machine control-command executor, the session archive handler and
+  the unregister teardown saga. The workspace test `RUST_MIN_STACK` drops
+  from 32 MiB to 8 MiB, a new in-tree canary
+  (`rpc_dispatch_path_fits_debug_worker_stack_budget`) pins the 4 MiB debug
+  budget, and the nightly `make stack-budget-release` runs the router harness
+  on 1 MiB release stacks. Release behavior is unchanged; the shipped
+  `rkat-rpc` worker stack is still 32 MiB pending a documented budget.
 - Release crate publication now waits for the moment crates.io names in its
   429 response (burst of new versions exhausted, refill about one per
   minute) and allows 12 attempts instead of five 15-second retries, which

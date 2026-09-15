@@ -117,7 +117,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "test-fixtures/surface-build-fixtures",

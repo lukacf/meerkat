@@ -1282,6 +1282,8 @@ pub struct MethodRouter {
     live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
+use meerkat_runtime::stack_relief::box_in_own_frame as routed_arm;
+
 impl MethodRouter {
     /// Create a new method router.
     ///
@@ -2077,413 +2079,580 @@ impl MethodRouter {
                 self.skill_runtime.is_some(),
             ),
             "help/ask" => {
-                Box::pin(handlers::help::handle_ask(
-                    id,
-                    params,
-                    self.runtime.clone(),
-                    &self.notification_sink,
-                    &self.runtime_adapter,
-                    request_context.clone(),
-                ))
+                routed_arm(|| {
+                    handlers::help::handle_ask(
+                        id,
+                        params,
+                        self.runtime.clone(),
+                        &self.notification_sink,
+                        &self.runtime_adapter,
+                        request_context.clone(),
+                    )
+                })
                 .await
             }
             "session/create" => {
-                Box::pin(handlers::session::handle_create(
-                    id,
-                    params,
-                    self.runtime.clone(),
-                    &self.notification_sink,
-                    &self.runtime_adapter,
-                    request_context.clone(),
-                ))
+                routed_arm(|| {
+                    handlers::session::handle_create(
+                        id,
+                        params,
+                        self.runtime.clone(),
+                        &self.notification_sink,
+                        &self.runtime_adapter,
+                        request_context.clone(),
+                    )
+                })
                 .await
             }
-            "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
-            "session/read" => self.handle_session_read(id, params).await,
-            "session/history" => self.handle_session_history(id, params).await,
+            "session/list" => {
+                routed_arm(|| handlers::session::handle_list(id, params, &self.runtime)).await
+            }
+            "session/read" => routed_arm(|| self.handle_session_read(id, params)).await,
+            "session/history" => routed_arm(|| self.handle_session_history(id, params)).await,
             "session/export_atif" => {
-                handlers::session::handle_export_atif(id, params, &self.runtime).await
+                routed_arm(|| handlers::session::handle_export_atif(id, params, &self.runtime))
+                    .await
             }
             "session/transcript_revision" => {
-                self.handle_session_transcript_revision(id, params).await
+                routed_arm(|| self.handle_session_transcript_revision(id, params)).await
             }
             "session/transcript_revisions" => {
-                self.handle_session_transcript_revisions(id, params).await
+                routed_arm(|| self.handle_session_transcript_revisions(id, params)).await
             }
             "session/rewrite_transcript" => {
-                self.handle_session_rewrite_transcript(id, params).await
+                routed_arm(|| self.handle_session_rewrite_transcript(id, params)).await
             }
             "session/update_system_prompt" => {
-                self.handle_session_update_system_prompt(id, params).await
+                routed_arm(|| self.handle_session_update_system_prompt(id, params)).await
             }
             "session/activate_instruction" => {
-                Box::pin(self.handle_session_activate_instruction(id, params)).await
+                routed_arm(|| self.handle_session_activate_instruction(id, params)).await
             }
             "session/instruction_activations" => {
-                Box::pin(self.handle_session_instruction_activations(id, params)).await
+                routed_arm(|| self.handle_session_instruction_activations(id, params)).await
             }
             "session/restore_transcript_revision" => {
-                self.handle_session_restore_transcript_revision(id, params)
-                    .await
+                routed_arm(|| self.handle_session_restore_transcript_revision(id, params)).await
             }
-            "session/fork_at" => self.handle_session_fork_at(id, params).await,
-            "session/fork_replace" => self.handle_session_fork_replace(id, params).await,
-            "blob/get" => self.handle_blob_get(id, params).await,
-            "artifact/list" => self.handle_artifact_list(id, params).await,
-            "artifact/get" => self.handle_artifact_get(id, params).await,
-            "artifact/download" => self.handle_artifact_download(id, params).await,
-            "session/archive" => self.handle_session_archive(id, params).await,
+            "session/fork_at" => routed_arm(|| self.handle_session_fork_at(id, params)).await,
+            "session/fork_replace" => {
+                routed_arm(|| self.handle_session_fork_replace(id, params)).await
+            }
+            "blob/get" => routed_arm(|| self.handle_blob_get(id, params)).await,
+            "artifact/list" => routed_arm(|| self.handle_artifact_list(id, params)).await,
+            "artifact/get" => routed_arm(|| self.handle_artifact_get(id, params)).await,
+            "artifact/download" => routed_arm(|| self.handle_artifact_download(id, params)).await,
+            "session/archive" => routed_arm(|| self.handle_session_archive(id, params)).await,
             "session/external_event" => {
-                handlers::event::handle_external_event(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::event::handle_external_event(id, params, self.runtime.clone())
+                })
+                .await
             }
             "session/peer_response_terminal" => {
-                handlers::event::handle_peer_response_terminal(id, params, self.runtime.clone())
-                    .await
+                routed_arm(|| {
+                    handlers::event::handle_peer_response_terminal(id, params, self.runtime.clone())
+                })
+                .await
             }
             "events/latest_cursor" => {
-                handlers::event::handle_events_latest_cursor(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::event::handle_events_latest_cursor(id, params, self.runtime.clone())
+                })
+                .await
             }
             "events/list_since" => {
-                handlers::event::handle_events_list_since(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::event::handle_events_list_since(id, params, self.runtime.clone())
+                })
+                .await
             }
             "events/snapshot" => {
-                handlers::event::handle_events_snapshot(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::event::handle_events_snapshot(id, params, self.runtime.clone())
+                })
+                .await
             }
-            "session/inject_context" => self.handle_session_inject_context(id, params).await,
-            "session/input_status" => self.handle_session_input_state(id, params).await,
-            "session/stream_open" => self.handle_session_stream_open(id, params).await,
-            "session/stream_close" => self.handle_session_stream_close(id, params).await,
-            "jobs/get" => handlers::jobs::handle_get(id, params, &self.runtime).await,
-            "jobs/list" => handlers::jobs::handle_list(id, params, &self.runtime).await,
-            "jobs/cancel" => handlers::jobs::handle_cancel(id, params, &self.runtime).await,
-            "jobs/progress" => handlers::jobs::handle_get_progress(id, params, &self.runtime).await,
-            "jobs/result" => handlers::jobs::handle_result(id, params, &self.runtime).await,
-            "jobs/artifacts" => handlers::jobs::handle_artifacts(id, params, &self.runtime).await,
-            "jobs/retry" => handlers::jobs::handle_retry(id, params, &self.runtime).await,
-            "jobs/health" => handlers::jobs::handle_health(id, &self.runtime).await,
+            "session/inject_context" => {
+                routed_arm(|| self.handle_session_inject_context(id, params)).await
+            }
+            "session/input_status" => {
+                routed_arm(|| self.handle_session_input_state(id, params)).await
+            }
+            "session/stream_open" => {
+                routed_arm(|| self.handle_session_stream_open(id, params)).await
+            }
+            "session/stream_close" => {
+                routed_arm(|| self.handle_session_stream_close(id, params)).await
+            }
+            "jobs/get" => {
+                routed_arm(|| handlers::jobs::handle_get(id, params, &self.runtime)).await
+            }
+            "jobs/list" => {
+                routed_arm(|| handlers::jobs::handle_list(id, params, &self.runtime)).await
+            }
+            "jobs/cancel" => {
+                routed_arm(|| handlers::jobs::handle_cancel(id, params, &self.runtime)).await
+            }
+            "jobs/progress" => {
+                routed_arm(|| handlers::jobs::handle_get_progress(id, params, &self.runtime)).await
+            }
+            "jobs/result" => {
+                routed_arm(|| handlers::jobs::handle_result(id, params, &self.runtime)).await
+            }
+            "jobs/artifacts" => {
+                routed_arm(|| handlers::jobs::handle_artifacts(id, params, &self.runtime)).await
+            }
+            "jobs/retry" => {
+                routed_arm(|| handlers::jobs::handle_retry(id, params, &self.runtime)).await
+            }
+            "jobs/health" => routed_arm(|| handlers::jobs::handle_health(id, &self.runtime)).await,
             "monitors/start" => {
-                handlers::jobs::handle_monitor_start(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_monitor_start(id, params, &self.runtime)).await
             }
-            "jobs/subscribe" => handlers::jobs::handle_subscribe(id, params, &self.runtime).await,
+            "jobs/subscribe" => {
+                routed_arm(|| handlers::jobs::handle_subscribe(id, params, &self.runtime)).await
+            }
             "jobs/unsubscribe" => {
-                handlers::jobs::handle_unsubscribe(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_unsubscribe(id, params, &self.runtime)).await
             }
             "mobkit/jobs/heartbeat" => {
-                handlers::jobs::handle_heartbeat(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_heartbeat(id, params, &self.runtime)).await
             }
             "mobkit/jobs/progress" => {
-                handlers::jobs::handle_progress(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_progress(id, params, &self.runtime)).await
             }
             "mobkit/jobs/checkpoint" => {
-                handlers::jobs::handle_checkpoint(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_checkpoint(id, params, &self.runtime)).await
             }
             "mobkit/jobs/complete" => {
-                handlers::jobs::handle_complete(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_complete(id, params, &self.runtime)).await
             }
-            "mobkit/jobs/fail" => handlers::jobs::handle_fail(id, params, &self.runtime).await,
+            "mobkit/jobs/fail" => {
+                routed_arm(|| handlers::jobs::handle_fail(id, params, &self.runtime)).await
+            }
             "mobkit/jobs/cancel_ack" => {
-                handlers::jobs::handle_cancel_ack(id, params, &self.runtime).await
+                routed_arm(|| handlers::jobs::handle_cancel_ack(id, params, &self.runtime)).await
             }
             "schedule/create" => {
-                handlers::schedule::handle_create(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_create(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/get" => {
-                handlers::schedule::handle_get(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_get(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/list" => {
-                handlers::schedule::handle_list(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_list(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/update" => {
-                handlers::schedule::handle_update(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_update(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/pause" => {
-                handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_pause(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/resume" => {
-                handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_resume(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/delete" => {
-                handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_delete(id, params, self.runtime.clone()))
+                    .await
             }
             "schedule/occurrences" => {
-                handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::schedule::handle_occurrences(id, params, self.runtime.clone())
+                })
+                .await
             }
-            "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            "schedule/tools" => routed_arm(|| handlers::schedule::handle_tools(id)).await,
             "schedule/call" => {
-                handlers::schedule::handle_call(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::schedule::handle_call(id, params, self.runtime.clone()))
+                    .await
             }
             "workgraph/get" => {
-                handlers::workgraph::handle_get(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::workgraph::handle_get(id, params, self.runtime.clone()))
+                    .await
             }
             "workgraph/goal/status" => {
-                handlers::workgraph::handle_goal_status(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::workgraph::handle_goal_status(id, params, self.runtime.clone())
+                })
+                .await
             }
             "workgraph/attention/list" => {
-                handlers::workgraph::handle_attention_list(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::workgraph::handle_attention_list(id, params, self.runtime.clone())
+                })
+                .await
             }
             "workgraph/list" => {
-                handlers::workgraph::handle_list(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::workgraph::handle_list(id, params, self.runtime.clone()))
+                    .await
             }
             "workgraph/ready" => {
-                handlers::workgraph::handle_ready(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::workgraph::handle_ready(id, params, self.runtime.clone()))
+                    .await
             }
             "workgraph/snapshot" => {
-                handlers::workgraph::handle_snapshot(id, params, self.runtime.clone()).await
+                routed_arm(|| {
+                    handlers::workgraph::handle_snapshot(id, params, self.runtime.clone())
+                })
+                .await
             }
             "workgraph/events" => {
-                handlers::workgraph::handle_events(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::workgraph::handle_events(id, params, self.runtime.clone()))
+                    .await
             }
             "turn/start" => {
-                handlers::turn::handle_start(
-                    id,
-                    params,
-                    self.runtime.clone(),
-                    &self.notification_sink,
-                    &self.runtime_adapter,
-                    request_context.clone(),
-                )
+                routed_arm(|| {
+                    handlers::turn::handle_start(
+                        id,
+                        params,
+                        self.runtime.clone(),
+                        &self.notification_sink,
+                        &self.runtime_adapter,
+                        request_context.clone(),
+                    )
+                })
                 .await
             }
             "turn/interrupt" => {
                 #[cfg(feature = "mob")]
                 {
-                    handlers::turn::handle_interrupt(id, params, &self.runtime, &self.mob_state)
-                        .await
+                    routed_arm(|| {
+                        handlers::turn::handle_interrupt(id, params, &self.runtime, &self.mob_state)
+                    })
+                    .await
                 }
                 #[cfg(not(feature = "mob"))]
                 {
-                    handlers::turn::handle_interrupt(id, params, &self.runtime).await
+                    routed_arm(|| handlers::turn::handle_interrupt(id, params, &self.runtime)).await
                 }
             }
             #[cfg(feature = "mob")]
-            "mob/create" => handlers::mob::handle_create(id, params, &self.mob_state).await,
+            "mob/create" => {
+                routed_arm(|| handlers::mob::handle_create(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
-            "mob/list" => handlers::mob::handle_list(id, &self.mob_state).await,
+            "mob/list" => routed_arm(|| handlers::mob::handle_list(id, &self.mob_state)).await,
             #[cfg(feature = "mob")]
-            "mob/status" => handlers::mob::handle_status(id, params, &self.mob_state).await,
+            "mob/status" => {
+                routed_arm(|| handlers::mob::handle_status(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
-            "mob/lifecycle" => handlers::mob::handle_lifecycle(id, params, &self.mob_state).await,
+            "mob/lifecycle" => {
+                routed_arm(|| handlers::mob::handle_lifecycle(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
-            "mob/spawn" => handlers::mob::handle_spawn(id, params, &self.mob_state).await,
+            "mob/spawn" => {
+                routed_arm(|| handlers::mob::handle_spawn(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
-            "mob/spawn_many" => handlers::mob::handle_spawn_many(id, params, &self.mob_state).await,
+            "mob/spawn_many" => {
+                routed_arm(|| handlers::mob::handle_spawn_many(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/ensure_member" => {
-                handlers::mob::handle_ensure_member(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_ensure_member(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
-            "mob/reconcile" => handlers::mob::handle_reconcile(id, params, &self.mob_state).await,
+            "mob/reconcile" => {
+                routed_arm(|| handlers::mob::handle_reconcile(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/list_members_matching" => {
-                handlers::mob::handle_list_members_matching(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/member_tool_declaration" => {
-                handlers::mob::handle_member_tool_declaration(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/apply_member_tool_declaration" => {
-                handlers::mob::handle_apply_member_tool_declaration(id, params, &self.mob_state)
-                    .await
-            }
-            #[cfg(feature = "mob")]
-            "mob/adopt_member_identity_declaration" => {
-                handlers::mob::handle_adopt_member_identity_declaration(id, params, &self.mob_state)
-                    .await
-            }
-            #[cfg(feature = "mob")]
-            "mob/resolve_identity_convergence_block" => {
-                handlers::mob::handle_resolve_identity_convergence_block(
-                    id,
-                    params,
-                    &self.mob_state,
-                )
+                routed_arm(|| {
+                    handlers::mob::handle_list_members_matching(id, params, &self.mob_state)
+                })
                 .await
             }
             #[cfg(feature = "mob")]
-            "mob/retire" => handlers::mob::handle_retire(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/respawn" => handlers::mob::handle_respawn(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/wire" => handlers::mob::handle_wire(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/wire_members_batch" => {
-                handlers::mob::handle_wire_members_batch(id, params, &self.mob_state).await
+            "mob/members" => {
+                routed_arm(|| handlers::mob::handle_members(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
-            "mob/unwire" => handlers::mob::handle_unwire(id, params, &self.mob_state).await,
+            "mob/member_tool_declaration" => {
+                routed_arm(|| {
+                    handlers::mob::handle_member_tool_declaration(id, params, &self.mob_state)
+                })
+                .await
+            }
             #[cfg(feature = "mob")]
-            "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
+            "mob/apply_member_tool_declaration" => {
+                routed_arm(|| {
+                    handlers::mob::handle_apply_member_tool_declaration(id, params, &self.mob_state)
+                })
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adopt_member_identity_declaration" => {
+                routed_arm(|| {
+                    handlers::mob::handle_adopt_member_identity_declaration(
+                        id,
+                        params,
+                        &self.mob_state,
+                    )
+                })
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/resolve_identity_convergence_block" => {
+                routed_arm(|| {
+                    handlers::mob::handle_resolve_identity_convergence_block(
+                        id,
+                        params,
+                        &self.mob_state,
+                    )
+                })
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/retire" => {
+                routed_arm(|| handlers::mob::handle_retire(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/respawn" => {
+                routed_arm(|| handlers::mob::handle_respawn(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/wire" => {
+                routed_arm(|| handlers::mob::handle_wire(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/wire_members_batch" => {
+                routed_arm(|| handlers::mob::handle_wire_members_batch(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/unwire" => {
+                routed_arm(|| handlers::mob::handle_unwire(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/events" => {
+                routed_arm(|| handlers::mob::handle_events(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/turn_start" => {
-                handlers::mob::handle_mob_turn_start(
-                    id,
-                    params,
-                    &self.mob_state,
-                    self.runtime.clone(),
-                    &self.notification_sink,
-                    &self.runtime_adapter,
-                    request_context.clone(),
-                )
+                routed_arm(|| {
+                    handlers::mob::handle_mob_turn_start(
+                        id,
+                        params,
+                        &self.mob_state,
+                        self.runtime.clone(),
+                        &self.notification_sink,
+                        &self.runtime_adapter,
+                        request_context.clone(),
+                    )
+                })
                 .await
             }
             #[cfg(feature = "mob")]
             "mob/member_send" => {
-                handlers::mob::handle_member_send(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_member_send(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/ingress_interaction" => {
-                handlers::mob::handle_ingress_interaction(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/append_system_context" => {
-                handlers::mob::handle_append_system_context(
-                    id,
-                    params,
-                    &self.mob_state,
-                    &self.runtime,
-                )
+                routed_arm(|| {
+                    handlers::mob::handle_ingress_interaction(id, params, &self.mob_state)
+                })
                 .await
             }
             #[cfg(feature = "mob")]
-            "mob/flows" => handlers::mob::handle_flows(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/flow_run" => handlers::mob::handle_flow_run(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/run" => handlers::mob::handle_run(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/flow_status" => {
-                handlers::mob::handle_flow_status(id, params, &self.mob_state).await
+            "mob/append_system_context" => {
+                routed_arm(|| {
+                    handlers::mob::handle_append_system_context(
+                        id,
+                        params,
+                        &self.mob_state,
+                        &self.runtime,
+                    )
+                })
+                .await
             }
             #[cfg(feature = "mob")]
-            "mob/run_result" => handlers::mob::handle_run_result(id, params, &self.mob_state).await,
+            "mob/flows" => {
+                routed_arm(|| handlers::mob::handle_flows(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flow_run" => {
+                routed_arm(|| handlers::mob::handle_flow_run(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/run" => {
+                routed_arm(|| handlers::mob::handle_run(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flow_status" => {
+                routed_arm(|| handlers::mob::handle_flow_status(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/run_result" => {
+                routed_arm(|| handlers::mob::handle_run_result(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/flow_cancel" => {
-                handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_flow_cancel(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/spawn_helper" => {
-                handlers::mob::handle_spawn_helper(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_spawn_helper(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/fork_helper" => {
-                handlers::mob::handle_fork_helper(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_fork_helper(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/force_cancel" => {
-                handlers::mob::handle_force_cancel(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_force_cancel(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/member_status" => {
-                handlers::mob::handle_member_status(id, params, &self.mob_state, &self.runtime)
+                routed_arm(|| {
+                    handlers::mob::handle_member_status(id, params, &self.mob_state, &self.runtime)
+                })
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/snapshot" => {
+                routed_arm(|| handlers::mob::handle_snapshot(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/destroy" => {
+                routed_arm(|| handlers::mob::handle_destroy(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/rotate_supervisor" => {
+                routed_arm(|| handlers::mob::handle_rotate_supervisor(id, params, &self.mob_state))
                     .await
             }
             #[cfg(feature = "mob")]
-            "mob/snapshot" => handlers::mob::handle_snapshot(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/destroy" => handlers::mob::handle_destroy(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
-            "mob/rotate_supervisor" => {
-                handlers::mob::handle_rotate_supervisor(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
             "mob/submit_work" => {
-                handlers::mob::handle_submit_work(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_submit_work(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/conclude_objective" => {
-                handlers::mob::handle_conclude_objective(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_conclude_objective(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/cancel_work" => {
-                handlers::mob::handle_cancel_work(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_cancel_work(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/cancel_all_work" => {
-                handlers::mob::handle_cancel_all_work(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_cancel_all_work(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/wait_kickoff" => {
-                handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_wait_kickoff(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
-            "mob/wait_ready" => handlers::mob::handle_wait_ready(id, params, &self.mob_state).await,
+            "mob/wait_ready" => {
+                routed_arm(|| handlers::mob::handle_wait_ready(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/profile/create" => {
-                handlers::mob::handle_profile_create(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_profile_create(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/profile/get" => {
-                handlers::mob::handle_profile_get(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_profile_get(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
-            "mob/profile/list" => handlers::mob::handle_profile_list(id, &self.mob_state).await,
+            "mob/profile/list" => {
+                routed_arm(|| handlers::mob::handle_profile_list(id, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/profile/update" => {
-                handlers::mob::handle_profile_update(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_profile_update(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/profile/delete" => {
-                handlers::mob::handle_profile_delete(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_profile_delete(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
-            "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
+            "mob/stream_open" => routed_arm(|| self.handle_mob_stream_open(id, params)).await,
             #[cfg(feature = "mob")]
-            "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
+            "mob/stream_close" => routed_arm(|| self.handle_mob_stream_close(id, params)).await,
             #[cfg(feature = "mob")]
             "mob/grant_scopes" => {
-                handlers::mob::handle_grant_scopes(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_grant_scopes(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/revoke_scopes" => {
-                handlers::mob::handle_revoke_scopes(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_revoke_scopes(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
-            "mob/grants" => handlers::mob::handle_grants(id, params, &self.mob_state).await,
+            "mob/grants" => {
+                routed_arm(|| handlers::mob::handle_grants(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/member_history" => {
-                handlers::mob::handle_member_history(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_member_history(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
-            "mob/hosts" => handlers::mob::handle_hosts(id, params, &self.mob_state).await,
+            "mob/hosts" => {
+                routed_arm(|| handlers::mob::handle_hosts(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/route_installs" => {
-                handlers::mob::handle_route_installs(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_route_installs(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
-            "mob/bind_host" => handlers::mob::handle_bind_host(id, params, &self.mob_state).await,
+            "mob/bind_host" => {
+                routed_arm(|| handlers::mob::handle_bind_host(id, params, &self.mob_state)).await
+            }
             #[cfg(feature = "mob")]
             "mob/revoke_host" => {
-                handlers::mob::handle_revoke_host(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_revoke_host(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/hard_cancel_member" => {
-                handlers::mob::handle_hard_cancel_member(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_hard_cancel_member(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/member_live_open" => {
-                handlers::mob::handle_member_live_open(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_member_live_open(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/member_live_close" => {
-                handlers::mob::handle_member_live_close(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_member_live_close(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/member_live_status" => {
-                handlers::mob::handle_member_live_status(id, params, &self.mob_state).await
+                routed_arm(|| handlers::mob::handle_member_live_status(id, params, &self.mob_state))
+                    .await
             }
             #[cfg(feature = "mob")]
             "mob/member_live_control" => {
-                handlers::mob::handle_member_live_control(id, params, &self.mob_state).await
+                routed_arm(|| {
+                    handlers::mob::handle_member_live_control(id, params, &self.mob_state)
+                })
+                .await
             }
             #[cfg(feature = "comms")]
-            "comms/send" => self.handle_comms_send(id, params).await,
+            "comms/send" => routed_arm(|| self.handle_comms_send(id, params)).await,
             #[cfg(feature = "comms")]
-            "comms/peers" => self.handle_comms_peers(id, params).await,
-            "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
-            "tools/register" => self.handle_tools_register(id, params).await,
+            "comms/peers" => routed_arm(|| self.handle_comms_peers(id, params)).await,
+            "skills/list" => {
+                routed_arm(|| handlers::skills::handle_list(id, &self.skill_runtime)).await
+            }
+            "tools/register" => routed_arm(|| self.handle_tools_register(id, params)).await,
             "skills/inspect" => {
                 // Post-wave-a dogma: the shell-side skill inspection path was
                 // retired; callers consult canonical skill registry surfaces.
@@ -2496,21 +2665,23 @@ impl MethodRouter {
             }
             // Compose the realm chain so a capability gated on an inherited config
             // field reports the same status as the other surfaces.
-            "capabilities/get" => match self.runtime.effective_config().await {
+            "capabilities/get" => match routed_arm(|| self.runtime.effective_config()).await {
                 Ok(config) => handlers::capabilities::handle_get(id, &config),
                 Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             "runtime/host_info" => {
-                handlers::runtime_host::handle_info(
-                    id,
-                    &self.runtime,
-                    &self.config_store,
-                    // Runtime-backed only: every session runs the v9 runtime.
-                    true,
-                    self.live_enabled(),
-                    self.live_webrtc_enabled(),
-                    self.skill_runtime.is_some(),
-                )
+                routed_arm(|| {
+                    handlers::runtime_host::handle_info(
+                        id,
+                        &self.runtime,
+                        &self.config_store,
+                        // Runtime-backed only: every session runs the v9 runtime.
+                        true,
+                        self.live_enabled(),
+                        self.live_webrtc_enabled(),
+                        self.skill_runtime.is_some(),
+                    )
+                })
                 .await
             }
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
@@ -2522,108 +2693,148 @@ impl MethodRouter {
                 self.live_webrtc_enabled(),
                 self.skill_runtime.is_some(),
             ),
-            "runtime/health" => handlers::runtime_host::handle_health(id, &self.runtime).await,
+            "runtime/health" => {
+                routed_arm(|| handlers::runtime_host::handle_health(id, &self.runtime)).await
+            }
             "approval/request" => {
-                handlers::approval::handle_request(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::approval::handle_request(id, params, self.runtime.clone()))
+                    .await
             }
             "approval/list" => {
-                handlers::approval::handle_list(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::approval::handle_list(id, params, self.runtime.clone()))
+                    .await
             }
             "approval/get" => {
-                handlers::approval::handle_get(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::approval::handle_get(id, params, self.runtime.clone()))
+                    .await
             }
             "approval/decide" => {
-                handlers::approval::handle_decide(id, params, self.runtime.clone()).await
+                routed_arm(|| handlers::approval::handle_decide(id, params, self.runtime.clone()))
+                    .await
             }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted
             // alias / per-provider default is listed identically to the other
             // surfaces and matches what a session build resolves.
-            "models/catalog" => match self.runtime.effective_config().await {
+            "models/catalog" => match routed_arm(|| self.runtime.effective_config()).await {
                 Ok(config) => handlers::models::handle_catalog(id, &config),
                 Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             // Auth + realm methods (Phase 4d).
             "auth/profile/list" => {
-                handlers::auth::handle_auth_profile_list(id, params, &self.runtime).await
-            }
-            "auth/profile/get" => {
-                handlers::auth::handle_auth_profile_get(id, params, &self.runtime).await
-            }
-            "auth/profile/create" => {
-                handlers::auth::handle_auth_profile_create(id, params, &self.runtime).await
-            }
-            "auth/profile/delete" => {
-                handlers::auth::handle_auth_profile_delete(id, params, &self.runtime).await
-            }
-            "auth/login/start" => {
-                handlers::auth::handle_auth_login_start(id, params, &self.runtime).await
-            }
-            "auth/login/complete" => {
-                handlers::auth::handle_auth_login_complete(id, params, &self.runtime).await
-            }
-            "auth/login/device_start" => {
-                handlers::auth::handle_auth_login_device_start(id, params, &self.runtime).await
-            }
-            "auth/login/device_complete" => {
-                handlers::auth::handle_auth_login_device_complete(id, params, &self.runtime).await
-            }
-            "auth/login/provision_api_key" => {
-                handlers::auth::handle_auth_login_provision_api_key(id, params, &self.runtime).await
-            }
-            "auth/status/get" => {
-                handlers::auth::handle_auth_status_get(id, params, &self.runtime).await
-            }
-            "auth/logout" => handlers::auth::handle_auth_logout(id, params, &self.runtime).await,
-            "realm/list" => handlers::auth::handle_realm_list(id, &self.runtime).await,
-            "realm/get" => handlers::auth::handle_realm_get(id, params, &self.runtime).await,
-            "config/get" => {
-                handlers::config::handle_get(id, &self.config_store, self.runtime.config_runtime())
+                routed_arm(|| handlers::auth::handle_auth_profile_list(id, params, &self.runtime))
                     .await
             }
+            "auth/profile/get" => {
+                routed_arm(|| handlers::auth::handle_auth_profile_get(id, params, &self.runtime))
+                    .await
+            }
+            "auth/profile/create" => {
+                routed_arm(|| handlers::auth::handle_auth_profile_create(id, params, &self.runtime))
+                    .await
+            }
+            "auth/profile/delete" => {
+                routed_arm(|| handlers::auth::handle_auth_profile_delete(id, params, &self.runtime))
+                    .await
+            }
+            "auth/login/start" => {
+                routed_arm(|| handlers::auth::handle_auth_login_start(id, params, &self.runtime))
+                    .await
+            }
+            "auth/login/complete" => {
+                routed_arm(|| handlers::auth::handle_auth_login_complete(id, params, &self.runtime))
+                    .await
+            }
+            "auth/login/device_start" => {
+                routed_arm(|| {
+                    handlers::auth::handle_auth_login_device_start(id, params, &self.runtime)
+                })
+                .await
+            }
+            "auth/login/device_complete" => {
+                routed_arm(|| {
+                    handlers::auth::handle_auth_login_device_complete(id, params, &self.runtime)
+                })
+                .await
+            }
+            "auth/login/provision_api_key" => {
+                routed_arm(|| {
+                    handlers::auth::handle_auth_login_provision_api_key(id, params, &self.runtime)
+                })
+                .await
+            }
+            "auth/status/get" => {
+                routed_arm(|| handlers::auth::handle_auth_status_get(id, params, &self.runtime))
+                    .await
+            }
+            "auth/logout" => {
+                routed_arm(|| handlers::auth::handle_auth_logout(id, params, &self.runtime)).await
+            }
+            "realm/list" => {
+                routed_arm(|| handlers::auth::handle_realm_list(id, &self.runtime)).await
+            }
+            "realm/get" => {
+                routed_arm(|| handlers::auth::handle_realm_get(id, params, &self.runtime)).await
+            }
+            "config/get" => {
+                routed_arm(|| {
+                    handlers::config::handle_get(
+                        id,
+                        &self.config_store,
+                        self.runtime.config_runtime(),
+                    )
+                })
+                .await
+            }
             "config/set" => {
-                handlers::config::handle_set(
-                    id,
-                    params,
-                    &self.runtime,
-                    &self.config_store,
-                    self.runtime.config_runtime(),
-                )
+                routed_arm(|| {
+                    handlers::config::handle_set(
+                        id,
+                        params,
+                        &self.runtime,
+                        &self.config_store,
+                        self.runtime.config_runtime(),
+                    )
+                })
                 .await
             }
             "config/patch" => {
-                handlers::config::handle_patch(
-                    id,
-                    params,
-                    &self.runtime,
-                    &self.config_store,
-                    self.runtime.config_runtime(),
-                )
+                routed_arm(|| {
+                    handlers::config::handle_patch(
+                        id,
+                        params,
+                        &self.runtime,
+                        &self.config_store,
+                        self.runtime.config_runtime(),
+                    )
+                })
                 .await
             }
             // live/* is registered when at least one live transport is
             // configured. The handler owns transport selection; provider
             // setup remains shared.
             "live/open" if self.live_enabled() => {
-                let result = handlers::live::handle_live_open_routed(
-                    id,
-                    params,
-                    handlers::live::LiveOpenHandlerContext {
-                        host: &self.live_adapter_host,
-                        live_ws: self.live_ws_state.as_deref(),
-                        live_ws_base_url: self.live_ws_base_url.as_deref(),
-                        #[cfg(feature = "live-webrtc")]
-                        live_webrtc: self.live_webrtc_state.as_deref(),
-                        runtime: &self.runtime,
-                        session_factory: self.live_session_factory.as_ref().map(Arc::as_ref),
-                        #[cfg(feature = "openai-live")]
-                        experimental_live_open_authority: self
-                            .experimental_live_open_authority
-                            .as_ref(),
-                        #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
-                        experimental_live_playback_custodies: &self
-                            .experimental_live_playback_custodies,
-                    },
-                )
+                let result = routed_arm(|| {
+                    handlers::live::handle_live_open_routed(
+                        id,
+                        params,
+                        handlers::live::LiveOpenHandlerContext {
+                            host: &self.live_adapter_host,
+                            live_ws: self.live_ws_state.as_deref(),
+                            live_ws_base_url: self.live_ws_base_url.as_deref(),
+                            #[cfg(feature = "live-webrtc")]
+                            live_webrtc: self.live_webrtc_state.as_deref(),
+                            runtime: &self.runtime,
+                            session_factory: self.live_session_factory.as_ref().map(Arc::as_ref),
+                            #[cfg(feature = "openai-live")]
+                            experimental_live_open_authority: self
+                                .experimental_live_open_authority
+                                .as_ref(),
+                            #[cfg(all(feature = "openai-live", feature = "live-webrtc"))]
+                            experimental_live_playback_custodies: &self
+                                .experimental_live_playback_custodies,
+                        },
+                    )
+                })
                 .await;
                 #[cfg(feature = "openai-live")]
                 {
@@ -2651,22 +2862,24 @@ impl MethodRouter {
             "live/webrtc/answer" if self.live_webrtc_answer_transport.is_some() => {
                 if let Some(answer_transport) = self.live_webrtc_answer_transport.as_ref() {
                     return Some(RoutedRpcResponse::with_live_webrtc_answer(
-                        handlers::live::handle_live_webrtc_answer(
-                            id,
-                            params,
-                            answer_transport,
-                            &self.runtime,
-                            #[cfg(feature = "openai-live")]
-                            self.experimental_live_open_authority.as_deref(),
-                            #[cfg(feature = "openai-live")]
-                            self.experimental_live_bound_channel_activator(),
-                            #[cfg(feature = "openai-live")]
-                            self.experimental_live_public_observation_publisher.clone(),
-                            #[cfg(feature = "openai-live")]
-                            &self.live_adapter_host,
-                            #[cfg(feature = "openai-live")]
-                            &self.experimental_live_playback_custodies,
-                        )
+                        routed_arm(|| {
+                            handlers::live::handle_live_webrtc_answer(
+                                id,
+                                params,
+                                answer_transport,
+                                &self.runtime,
+                                #[cfg(feature = "openai-live")]
+                                self.experimental_live_open_authority.as_deref(),
+                                #[cfg(feature = "openai-live")]
+                                self.experimental_live_bound_channel_activator(),
+                                #[cfg(feature = "openai-live")]
+                                self.experimental_live_public_observation_publisher.clone(),
+                                #[cfg(feature = "openai-live")]
+                                &self.live_adapter_host,
+                                #[cfg(feature = "openai-live")]
+                                &self.experimental_live_playback_custodies,
+                            )
+                        })
                         .await,
                     ));
                 }
@@ -2677,25 +2890,29 @@ impl MethodRouter {
                 )
             }
             "live/status" if self.live_enabled() => {
-                handlers::live::handle_live_status(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                )
+                routed_arm(|| {
+                    handlers::live::handle_live_status(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                    )
+                })
                 .await
             }
             "live/close" if self.live_enabled() => {
-                handlers::live::handle_live_close(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                    #[cfg(feature = "live-webrtc")]
-                    self.live_webrtc_answer_transport.as_deref(),
-                    #[cfg(feature = "openai-live")]
-                    self.experimental_live_open_authority.as_deref(),
-                )
+                routed_arm(|| {
+                    handlers::live::handle_live_close(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                        #[cfg(feature = "live-webrtc")]
+                        self.live_webrtc_answer_transport.as_deref(),
+                        #[cfg(feature = "openai-live")]
+                        self.experimental_live_open_authority.as_deref(),
+                    )
+                })
                 .await
             }
             // P1#5: push a fresh projection snapshot into an already-open
@@ -2703,33 +2920,39 @@ impl MethodRouter {
             // after a session edit, etc.). Same gating as the other live/*
             // arms — without a live transport the router has no live state.
             "live/refresh" if self.live_enabled() => {
-                handlers::live::handle_live_refresh(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                )
+                routed_arm(|| {
+                    handlers::live::handle_live_refresh(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                    )
+                })
                 .await
             }
             "live/send_input" if self.live_enabled() => {
-                handlers::live::handle_live_send_input(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                )
+                routed_arm(|| {
+                    handlers::live::handle_live_send_input(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                    )
+                })
                 .await
             }
             // I50: surface the buffered-input commit verb. Same gating as the
             // other live/* arms — without --live-ws the router has no
             // transport state and the method falls through to METHOD_NOT_FOUND.
             "live/commit_input" if self.live_enabled() => {
-                handlers::live::handle_live_commit_input(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                )
+                routed_arm(|| {
+                    handlers::live::handle_live_commit_input(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        &self.runtime,
+                    )
+                })
                 .await
             }
             // A7: explicit barge-in surface. Without these arms callers can
@@ -2739,65 +2962,79 @@ impl MethodRouter {
             "live/interrupt" if self.live_enabled() => {
                 #[cfg(feature = "live-webrtc")]
                 {
-                    handlers::live::handle_live_interrupt(
-                        id,
-                        params,
-                        &self.live_adapter_host,
-                        &self.runtime,
-                        self.live_webrtc_state.as_deref(),
-                    )
+                    routed_arm(|| {
+                        handlers::live::handle_live_interrupt(
+                            id,
+                            params,
+                            &self.live_adapter_host,
+                            &self.runtime,
+                            self.live_webrtc_state.as_deref(),
+                        )
+                    })
                     .await
                 }
                 #[cfg(not(feature = "live-webrtc"))]
                 {
-                    handlers::live::handle_live_interrupt(
-                        id,
-                        params,
-                        &self.live_adapter_host,
-                        &self.runtime,
-                    )
+                    routed_arm(|| {
+                        handlers::live::handle_live_interrupt(
+                            id,
+                            params,
+                            &self.live_adapter_host,
+                            &self.runtime,
+                        )
+                    })
                     .await
                 }
             }
             "live/truncate" if self.live_enabled() => {
                 #[cfg(feature = "live-webrtc")]
                 {
-                    handlers::live::handle_live_truncate(
-                        id,
-                        params,
-                        &self.live_adapter_host,
-                        &self.runtime,
-                        self.live_webrtc_state.as_deref(),
-                    )
+                    routed_arm(|| {
+                        handlers::live::handle_live_truncate(
+                            id,
+                            params,
+                            &self.live_adapter_host,
+                            &self.runtime,
+                            self.live_webrtc_state.as_deref(),
+                        )
+                    })
                     .await
                 }
                 #[cfg(not(feature = "live-webrtc"))]
                 {
-                    handlers::live::handle_live_truncate(
+                    routed_arm(|| {
+                        handlers::live::handle_live_truncate(
+                            id,
+                            params,
+                            &self.live_adapter_host,
+                            &self.runtime,
+                        )
+                    })
+                    .await
+                }
+            }
+            "live/playback_complete" if self.live_enabled() => {
+                routed_arm(|| {
+                    handlers::live::handle_live_playback_complete(
                         id,
                         params,
                         &self.live_adapter_host,
                         &self.runtime,
                     )
-                    .await
-                }
-            }
-            "live/playback_complete" if self.live_enabled() => {
-                handlers::live::handle_live_playback_complete(
-                    id,
-                    params,
-                    &self.live_adapter_host,
-                    &self.runtime,
-                )
+                })
                 .await
             }
             // A7: no `live/playback_cursor` arm — playback is a client-side
             // fact (jitter buffers, end-of-stream silence trim). Clients
             // track the cursor locally and pass `audio_played_ms` into
             // `live/truncate`. See the doc-comment in `handlers/live.rs`.
-            "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
-            "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
-            "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            "mcp/add" => routed_arm(|| handlers::mcp::handle_add(id, params, &self.runtime)).await,
+            "mcp/remove" => {
+                routed_arm(|| handlers::mcp::handle_remove(id, params, &self.runtime)).await
+            }
+            "mcp/reload" => {
+                routed_arm(|| handlers::mcp::handle_reload(id, params, &self.runtime)).await
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -3510,19 +3747,29 @@ impl MethodRouter {
             Ok(sid) => sid,
             Err(resp) => return resp,
         };
-        match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
+        // Owned once: the boxed handler futures borrow it across their awaits.
+        #[cfg(feature = "mob")]
+        let bridge_session_id = session_id.to_string();
+        match routed_arm(|| self.resolve_session_owner(&session_id)).await {
+            Some(SessionOwner::Runtime) => match routed_arm(|| {
+                self.runtime.archive_session(&session_id)
+            })
+            .await
+            {
                 Ok(()) => {
                     // Clean up session-owned mobs (implicit + explicit).
                     #[cfg(feature = "mob")]
-                    if let Err(error) = self
-                        .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await
+                    if let Err(error) = routed_arm(|| {
+                        self.mob_state
+                            .destroy_bridge_session_mobs(&bridge_session_id)
+                    })
+                    .await
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
-                    if let Err(error) = self.runtime_adapter.unregister_session(&session_id).await {
+                    if let Err(error) =
+                        routed_arm(|| self.runtime_adapter.unregister_session(&session_id)).await
+                    {
                         return RpcResponse::error(
                             id,
                             error::INTERNAL_ERROR,
@@ -3536,16 +3783,18 @@ impl MethodRouter {
                 Err(rpc_err) => {
                     #[cfg(feature = "mob")]
                     {
-                        let retained_cleanup = self
-                            .mob_state
-                            .has_bridge_session_scoped_mobs(&session_id.to_string())
-                            .await;
+                        let retained_cleanup = routed_arm(|| {
+                            self.mob_state
+                                .has_bridge_session_scoped_mobs(&bridge_session_id)
+                        })
+                        .await;
                         if rpc_err.code == error::SESSION_NOT_FOUND
                             && retained_cleanup
-                            && let Err(error) = self
-                                .mob_state
-                                .destroy_bridge_session_mobs(&session_id.to_string())
-                                .await
+                            && let Err(error) = routed_arm(|| {
+                                self.mob_state
+                                    .destroy_bridge_session_mobs(&bridge_session_id)
+                            })
+                            .await
                         {
                             return mob_destroy_cleanup_error_response(id, error);
                         }
@@ -3560,24 +3809,27 @@ impl MethodRouter {
                 }
             },
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => match self
-                .mob_state
-                .archive_mob_owned_bridge_session_with_cleanup(
-                    &session_id,
-                    "mob cleanup during archive incomplete",
-                )
-                .await
+            Some(SessionOwner::Mob) => match routed_arm(|| {
+                self.mob_state
+                    .archive_mob_owned_bridge_session_with_cleanup(
+                        &session_id,
+                        "mob cleanup during archive incomplete",
+                    )
+            })
+            .await
             {
                 Ok(true) => RpcResponse::success(id, json!({"archived": true})),
                 Ok(false) => {
-                    if self
-                        .mob_state
-                        .has_bridge_session_scoped_mobs(&session_id.to_string())
+                    if routed_arm(|| {
+                        self.mob_state
+                            .has_bridge_session_scoped_mobs(&bridge_session_id)
+                    })
+                    .await
+                        && let Err(error) = routed_arm(|| {
+                            self.mob_state
+                                .destroy_bridge_session_mobs(&bridge_session_id)
+                        })
                         .await
-                        && let Err(error) = self
-                            .mob_state
-                            .destroy_bridge_session_mobs(&session_id.to_string())
-                            .await
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
@@ -3591,14 +3843,16 @@ impl MethodRouter {
             },
             None => {
                 #[cfg(feature = "mob")]
-                if self
-                    .mob_state
-                    .has_bridge_session_scoped_mobs(&session_id.to_string())
+                if routed_arm(|| {
+                    self.mob_state
+                        .has_bridge_session_scoped_mobs(&bridge_session_id)
+                })
+                .await
+                    && let Err(error) = routed_arm(|| {
+                        self.mob_state
+                            .destroy_bridge_session_mobs(&bridge_session_id)
+                    })
                     .await
-                    && let Err(error) = self
-                        .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await
                 {
                     return mob_destroy_cleanup_error_response(id, error);
                 }
@@ -11750,6 +12004,67 @@ mod tests {
             text.contains("Hello from mock"),
             "Expected mock text in turn, got: {text}"
         );
+    }
+
+    // Debug worker-stack canary for the RPC dispatch path.
+    //
+    // At opt-level 0 LLVM does not colour stack slots, so every local in
+    // every branch of a function gets its own slot and a frame is the SUM of
+    // its branches. That is the shape that reached 24 MiB on this harness
+    // (13.4 MiB of it in `dispatch_routed_with_request_context` alone) and
+    // forced 32 MiB worker stacks plus a workspace-wide `RUST_MIN_STACK`.
+    // After the per-arm frames (`routed_arm`, `box_in_own_frame`) the same
+    // path fits well under this budget; release needs under 1 MiB.
+    //
+    // The canary runs the real router through session/create, turn/start,
+    // and session/archive on ONE thread with a literal stack budget, using a
+    // current-thread runtime so no other stack is involved. It is measured at
+    // opt-level 0 on purpose: it fails on exactly the debug frame bloat that
+    // release hides, before a release measurement ever sees it. Never
+    // re-ignore it, raise the opt-level, or relax the budget; move
+    // construction into its own frame instead (see
+    // `meerkat_runtime::stack_relief`).
+    const DEBUG_DISPATCH_STACK_BUDGET: usize = 4 * 1024 * 1024;
+
+    #[test]
+    fn rpc_dispatch_path_fits_debug_worker_stack_budget() {
+        std::thread::Builder::new()
+            .name("rpc-dispatch-stack-canary".to_string())
+            .stack_size(DEBUG_DISPATCH_STACK_BUDGET)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("canary runtime should build");
+                runtime.block_on(async {
+                    let (router, _notif_rx) = test_router().await;
+                    let create_req =
+                        make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+                    let create_resp = router.dispatch(create_req).await.unwrap();
+                    let session_id = result_value(&create_resp)["session_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    let turn_req = make_request(
+                        "turn/start",
+                        serde_json::json!({"session_id": session_id, "prompt": "Follow up"}),
+                    );
+                    let turn_resp = router.dispatch(turn_req).await.unwrap();
+                    assert_eq!(
+                        result_value(&turn_resp)["session_id"].as_str().unwrap(),
+                        session_id
+                    );
+                    let archive_req = make_request(
+                        "session/archive",
+                        serde_json::json!({"session_id": session_id}),
+                    );
+                    let archive_resp = router.dispatch(archive_req).await.unwrap();
+                    assert_eq!(result_value(&archive_resp)["archived"], true);
+                });
+            })
+            .expect("canary thread should spawn")
+            .join()
+            .expect("the RPC dispatch path must fit the debug worker-stack budget");
     }
 
     #[tokio::test]

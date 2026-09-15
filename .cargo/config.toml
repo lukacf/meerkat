@@ -1,13 +1,18 @@
 # Meerkat cargo configuration
 
-# Test-only stack size bump for generated machine authority and the layered
-# realtime/session RPC harnesses. The all-feature debug graph aborts at 16 MiB
-# in multiple router tests and the same exact tests pass at 32 MiB, so current
-# evidence brackets the high-water between those values without attributing it
-# to a specific frame. This is a release-safety workaround, not a root-cause
-# fix; profile and reduce the generated apply/async future peak separately.
+# Test-thread stack size for the debug (opt-level 0) test graph.
+#
+# At opt-level 0 LLVM does not colour stack slots, so a function's frame is
+# the SUM of its branches' locals. The RPC router harness needed 24 MiB until
+# its dispatch match, the machine control executor, the session archive
+# handler and the unregister saga built their branches in their own frames
+# (`meerkat_runtime::stack_relief::box_in_own_frame`); it now fits 4 MiB, and
+# `rpc_dispatch_path_fits_debug_worker_stack_budget` pins that. 8 MiB keeps a
+# 2x margin for the rest of the workspace's debug tests. The remaining gap to
+# Rust's 2 MiB default is the turn/start path through the agent run loop;
+# close that (see issue #301) before deleting this block.
 [env]
-RUST_MIN_STACK = "33554432"
+RUST_MIN_STACK = "8388608"
 
 [alias]
 # Machine-authority workflow entrypoint

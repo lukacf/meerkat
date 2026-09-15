@@ -2053,7 +2053,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2193,7 +2193,7 @@ rust_test(
         "@rules_rust//rust/toolchain:current_rustc_lib_files",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2295,7 +2295,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2397,7 +2397,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2499,7 +2499,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2603,7 +2603,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2705,7 +2705,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2825,7 +2825,7 @@ rust_test(
         "//meerkat:cargo_manifest",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -2927,7 +2927,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3031,7 +3031,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3135,7 +3135,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3241,7 +3241,7 @@ rust_test(
         "//meerkat-tools:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3343,7 +3343,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3447,7 +3447,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3552,7 +3552,7 @@ rust_test(
         "//:workspace_metadata",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3654,7 +3654,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3755,7 +3755,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3857,7 +3857,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -3962,7 +3962,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4069,7 +4069,7 @@ rust_test(
         "//:workspace_metadata",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4170,7 +4170,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4271,7 +4271,7 @@ rust_test(
     ],
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4373,7 +4373,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4475,7 +4475,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4579,7 +4579,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4685,7 +4685,7 @@ rust_test(
         "//meerkat-core:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4787,7 +4787,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4890,7 +4890,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -4992,7 +4992,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5094,7 +5094,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5197,7 +5197,7 @@ rust_test(
         "//meerkat-rpc:package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5299,7 +5299,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5401,7 +5401,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5503,7 +5503,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5605,7 +5605,7 @@ rust_test(
     size = "small",
     data = [],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5711,7 +5711,7 @@ rust_test(
         "//:workspace_metadata",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
@@ -5815,7 +5815,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",

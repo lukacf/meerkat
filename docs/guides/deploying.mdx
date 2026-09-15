@@ -247,6 +247,32 @@ package pin goes through `--config`; repeat the flag with
   builds only; no reduced binaries are published (see the note under
   [Homebrew Tap](/guides/cd-and-distribution#homebrew-tap)).
 
+## Worker Stack Budget
+
+Every host binary (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) runs its Tokio
+workers, blocking threads, and its own main future on one documented stack
+budget: 8 MiB per thread, the constant
+`meerkat_runtime::host_stack::HOST_WORKER_STACK_BUDGET`. The main future runs
+on a budgeted thread as well, so the platform main thread (1 MiB on Windows)
+never bounds a host.
+
+The number is measured, not guessed. On the RPC router harness (session
+create, turn start, session archive through the real method router) a release
+build fits 1 MiB and overflows at 512 KiB; a debug build, which the e2e lanes
+run, fits 4 MiB and overflows at 3 MiB because opt-level 0 gives every branch
+of a function its own stack slots. 8 MiB is twice the debug figure and eight
+times the release one. It is virtual address space per thread; pages are
+committed only when touched. Two gates hold the figures: a debug canary in the
+meerkat-rpc unit lane at 4 MiB and the nightly `make stack-budget-release` at
+1 MiB in release.
+
+`RKAT_WORKER_STACK_BYTES=<bytes>` overrides the budget for stack-overflow
+diagnosis. Sweeping it distinguishes a bounded large frame (fails below one
+value, passes above) from unbounded recursion (fails at every value). Values
+below 65536 or that are not a byte count are refused with exit code 2 rather
+than guessed at. `rkat-rpc` still honours its older `RKAT_RPC_WORKER_STACK_BYTES`
+when the shared variable is unset.
+
 ## Containerizing The Binaries
 
 A Rust binary built for a `*-unknown-linux-gnu` target links the builder's

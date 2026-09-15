@@ -142,48 +142,36 @@ impl From<RealmBackendArg> for RealmBackend {
     }
 }
 
-/// Worker stack size, overridable for stack-overflow diagnosis.
-///
-/// `RKAT_RPC_WORKER_STACK_BYTES` exists so an overflow can be measured rather
-/// than merely reproduced. Sweeping the value distinguishes a bounded large
-/// future from unbounded recursion or accumulation. This follows the existing
-/// `RKAT_RPC_TRACE_FILE` diagnostic-helper convention.
-const DEFAULT_WORKER_STACK_BYTES: usize = 32 * 1024 * 1024;
-
-fn worker_stack_bytes() -> usize {
-    match std::env::var("RKAT_RPC_WORKER_STACK_BYTES") {
-        Ok(raw) => match raw.trim().parse::<usize>() {
-            Ok(bytes) if bytes >= 64 * 1024 => bytes,
-            _ => {
-                eprintln!(
-                    "RKAT_RPC_WORKER_STACK_BYTES={raw:?} is not a byte count >= 65536; \
-                     refusing to guess. Unset it to use the {DEFAULT_WORKER_STACK_BYTES} default."
-                );
-                std::process::exit(2);
-            }
-        },
-        Err(_) => DEFAULT_WORKER_STACK_BYTES,
-    }
-}
+/// `RKAT_RPC_WORKER_STACK_BYTES` predates the shared `RKAT_WORKER_STACK_BYTES`
+/// and is still honoured (after it) so existing diagnosis recipes keep working.
+const LEGACY_WORKER_STACK_ENV: &str = "RKAT_RPC_WORKER_STACK_BYTES";
 
 fn main() -> ExitCode {
-    let stack_bytes = worker_stack_bytes();
-    if stack_bytes != DEFAULT_WORKER_STACK_BYTES {
-        eprintln!("rkat-rpc: worker stack overridden to {stack_bytes} bytes");
-    }
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(stack_bytes)
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(err) => return report_fatal_error(BINARY_NAME, &err),
+    // One documented worker-stack budget for every host binary; the main
+    // future runs on a budgeted thread too, not the platform main thread.
+    let budget = match meerkat_runtime::host_stack::HostStackBudget::from_env(&[
+        meerkat_runtime::host_stack::HOST_WORKER_STACK_ENV,
+        LEGACY_WORKER_STACK_ENV,
+    ]) {
+        Ok(budget) => budget,
+        Err(err) => {
+            eprintln!("{BINARY_NAME}: {err}");
+            return ExitCode::from(2);
+        }
     };
     // Render the Display chain, not `Result`'s Debug: a storage refusal's
     // remedy sentence lives only in Display.
-    match runtime.block_on(async_main()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => report_fatal_error(BINARY_NAME, err.as_ref()),
+    match budget.run(BINARY_NAME, || async {
+        match async_main().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => report_fatal_error(BINARY_NAME, err.as_ref()),
+        }
+    }) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{BINARY_NAME}: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

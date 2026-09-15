@@ -62,13 +62,22 @@ impl From<RealmBackendArg> for RealmBackend {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    // Render the Display chain, not `Result`'s Debug: a storage refusal's
-    // remedy sentence lives only in Display.
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => report_fatal_error("rkat-rest", err.as_ref()),
+fn main() -> ExitCode {
+    // One documented worker-stack budget for every host binary; the main
+    // future runs on a budgeted thread too, not the platform main thread.
+    match meerkat_runtime::host_stack::run_host("rkat-rest", || async {
+        // Render the Display chain, not `Result`'s Debug: a storage refusal's
+        // remedy sentence lives only in Display.
+        match run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => report_fatal_error("rkat-rest", err.as_ref()),
+        }
+    }) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("rkat-rest: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

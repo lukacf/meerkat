@@ -175,7 +175,7 @@ rust_test(
         ":package_runfiles",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -311,7 +311,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -392,7 +392,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -472,7 +472,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -557,7 +557,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -642,7 +642,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -727,7 +727,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -809,7 +809,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -890,7 +890,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -971,7 +971,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -1052,7 +1052,7 @@ rust_test(
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {
-        "RUST_MIN_STACK": "33554432",
+        "RUST_MIN_STACK": "8388608",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
     proc_macro_deps = all_crate_deps(

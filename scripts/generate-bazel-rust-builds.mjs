@@ -1653,7 +1653,7 @@ for (const pkg of localPackages.values()) {
       if (needsPackageRunfiles(target) || extraData.includes(currentPackageRunfiles) || usesTrybuild) {
         data.unshift(":package_runfiles");
       }
-      const env = [`        "RUST_MIN_STACK": "33554432",`];
+      const env = [`        "RUST_MIN_STACK": "8388608",`];
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);
@@ -1888,7 +1888,7 @@ for (const pkg of localPackages.values()) {
         ":package_runfiles",
         ...workspaceDataLabels(target).filter((label) => label !== currentPackageRunfiles),
       ];
-      const unitEnv = [`        "RUST_MIN_STACK": "33554432",`];
+      const unitEnv = [`        "RUST_MIN_STACK": "8388608",`];
       const unitSize = key === "meerkat-mob" ? "large" : key === "xtask" ? "medium" : "small";
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";

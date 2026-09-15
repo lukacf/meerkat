@@ -12006,6 +12006,67 @@ mod tests {
         );
     }
 
+    // Debug worker-stack canary for the RPC dispatch path.
+    //
+    // At opt-level 0 LLVM does not colour stack slots, so every local in
+    // every branch of a function gets its own slot and a frame is the SUM of
+    // its branches. That is the shape that reached 24 MiB on this harness
+    // (13.4 MiB of it in `dispatch_routed_with_request_context` alone) and
+    // forced 32 MiB worker stacks plus a workspace-wide `RUST_MIN_STACK`.
+    // After the per-arm frames (`routed_arm`, `box_in_own_frame`) the same
+    // path fits well under this budget; release needs under 1 MiB.
+    //
+    // The canary runs the real router through session/create, turn/start,
+    // and session/archive on ONE thread with a literal stack budget, using a
+    // current-thread runtime so no other stack is involved. It is measured at
+    // opt-level 0 on purpose: it fails on exactly the debug frame bloat that
+    // release hides, before a release measurement ever sees it. Never
+    // re-ignore it, raise the opt-level, or relax the budget; move
+    // construction into its own frame instead (see
+    // `meerkat_runtime::stack_relief`).
+    const DEBUG_DISPATCH_STACK_BUDGET: usize = 4 * 1024 * 1024;
+
+    #[test]
+    fn rpc_dispatch_path_fits_debug_worker_stack_budget() {
+        std::thread::Builder::new()
+            .name("rpc-dispatch-stack-canary".to_string())
+            .stack_size(DEBUG_DISPATCH_STACK_BUDGET)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("canary runtime should build");
+                runtime.block_on(async {
+                    let (router, _notif_rx) = test_router().await;
+                    let create_req =
+                        make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+                    let create_resp = router.dispatch(create_req).await.unwrap();
+                    let session_id = result_value(&create_resp)["session_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    let turn_req = make_request(
+                        "turn/start",
+                        serde_json::json!({"session_id": session_id, "prompt": "Follow up"}),
+                    );
+                    let turn_resp = router.dispatch(turn_req).await.unwrap();
+                    assert_eq!(
+                        result_value(&turn_resp)["session_id"].as_str().unwrap(),
+                        session_id
+                    );
+                    let archive_req = make_request(
+                        "session/archive",
+                        serde_json::json!({"session_id": session_id}),
+                    );
+                    let archive_resp = router.dispatch(archive_req).await.unwrap();
+                    assert_eq!(result_value(&archive_resp)["archived"], true);
+                });
+            })
+            .expect("canary thread should spawn")
+            .join()
+            .expect("the RPC dispatch path must fit the debug worker-stack budget");
+    }
+
     #[tokio::test]
     async fn turn_start_returns_request_cancelled_when_pre_cancelled() {
         let (router, _notif_rx) = test_router().await;

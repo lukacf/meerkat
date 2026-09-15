@@ -8685,8 +8685,8 @@ impl MeerkatMachine {
         // Phase 3: drop the mutation gate so the in-flight run and the runtime
         // loop can re-acquire it to commit and exit. Phase 4: await quiescence.
         drop(gate_guard);
+        #[cfg(feature = "live")]
         crate::stack_relief::box_in_own_frame(|| {
-            #[cfg(feature = "live")]
             self.prove_member_live_absence_while_lease_held(session_id, &live_lifecycle_lease)
         })
         .await

@@ -1201,7 +1201,7 @@ mod tests {
             crate::Provider::OpenAI
         }
         fn model(&self) -> &'static str {
-            "gpt-5.5"
+            "test-observation-summary"
         }
     }
 
@@ -1250,7 +1250,8 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 3,
                     provider_accounting: Some(crate::ProviderTokenAccounting::openai(
-                        "gpt-5.5", 10,
+                        "test-observation-summary",
+                        10,
                     )),
                     ..Usage::default()
                 },
@@ -1260,7 +1261,7 @@ mod tests {
             crate::Provider::OpenAI
         }
         fn model(&self) -> &'static str {
-            "gpt-5.5"
+            "test-observation-summary"
         }
     }
 

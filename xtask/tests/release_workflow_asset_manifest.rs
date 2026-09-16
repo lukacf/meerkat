@@ -54,8 +54,8 @@ fn release_workflows_use_the_repository_pinned_rust_toolchain() {
         release
             .matches("uses: ./.github/actions/setup-rust-ci")
             .count(),
-        5,
-        "all five Rust-using release jobs must use the pinned setup action"
+        6,
+        "all six Rust-using release jobs, including the semver gate, must use the pinned setup action"
     );
 
     let semver_path = release_path.with_file_name("release-semver-readiness.yml");

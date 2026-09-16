@@ -5670,7 +5670,12 @@ mod tests {
         );
 
         let helper_bridge_session_id = handle
-            .resolve_bridge_session_id(&execution.spawn().agent_identity)
+            .resolve_bridge_session_id(
+                &execution
+                    .spawn()
+                    .expect("owned helper spawn")
+                    .agent_identity,
+            )
             .await
             .expect("helper bridge session id");
         let helper_comms = service

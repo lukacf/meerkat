@@ -5710,6 +5710,7 @@ async fn resolve_failed_batch_backlog(
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     input_ids: &[InputId],
+    cancelled_run_id: Option<&RunId>,
     handoff: &mut RuntimeLoopTerminalHandoff,
     turn_finalization_guard: Option<
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
@@ -5735,7 +5736,8 @@ async fn resolve_failed_batch_backlog(
             // terminalizes it as MaxAttemptsExhausted.
             return FailedBatchBacklogOutcome::ContinueProcessing;
         }
-        d.defer_queued_inputs_behind_backlog(input_ids).err()
+        d.defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
+            .err()
     };
     let Some(err) = defer_error else {
         return FailedBatchBacklogOutcome::ContinueProcessing;
@@ -6318,6 +6320,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            None,
                             handoff,
                             turn_finalization_guard,
                         )
@@ -6463,6 +6466,7 @@ async fn process_queue(
                         completions,
                         executor,
                         &input_ids,
+                        None,
                         handoff,
                         turn_finalization_guard,
                     )
@@ -7244,6 +7248,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            cancelled.then_some(&run_id),
                             handoff,
                             turn_finalization_guard,
                         )

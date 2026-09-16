@@ -918,6 +918,9 @@ pub enum WireAssistantBlock {
 #[non_exhaustive]
 pub enum WireTranscriptSource {
     Spoken,
+    /// Canonical assistant speech observation, without measured playback,
+    /// hearing, or provider-final utterance evidence.
+    SpokenUnmeasured,
     /// R7-4 (P3 dogma): explicit fail-loud variant for unknown core
     /// variants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;
     /// when a future variant lands without an explicit arm in the wire
@@ -939,6 +942,7 @@ impl From<TranscriptSource> for WireTranscriptSource {
     fn from(value: TranscriptSource) -> Self {
         match value {
             TranscriptSource::Spoken => Self::Spoken,
+            TranscriptSource::SpokenUnmeasured => Self::SpokenUnmeasured,
             // Core enum is `#[non_exhaustive]`. R7-4 (P3 dogma): surface
             // unknown variants explicitly via `Unknown { debug }` rather
             // than silently coercing to `Spoken`. **When a new core
@@ -956,6 +960,7 @@ impl TryFrom<WireTranscriptSource> for TranscriptSource {
     fn try_from(value: WireTranscriptSource) -> Result<Self, Self::Error> {
         match value {
             WireTranscriptSource::Spoken => Ok(Self::Spoken),
+            WireTranscriptSource::SpokenUnmeasured => Ok(Self::SpokenUnmeasured),
             WireTranscriptSource::Unknown { debug } => {
                 Err(crate::wire::error::WireConversionError::TranscriptSource { debug })
             }
@@ -2976,6 +2981,15 @@ mod tests {
         assert!(matches!(wire, WireTranscriptSource::Spoken));
         let back = TranscriptSource::try_from(wire).unwrap();
         assert!(matches!(back, TranscriptSource::Spoken));
+        let wire: WireTranscriptSource = TranscriptSource::SpokenUnmeasured.into();
+        assert!(matches!(wire, WireTranscriptSource::SpokenUnmeasured));
+        let encoded = serde_json::to_string(&wire).unwrap();
+        assert!(encoded.contains("spoken_unmeasured"));
+        let back = TranscriptSource::try_from(
+            serde_json::from_str::<WireTranscriptSource>(&encoded).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(back, TranscriptSource::SpokenUnmeasured));
     }
 
     /// R7-5 (P3 dogma): the reverse `WireAssistantBlock::Unknown -> core`

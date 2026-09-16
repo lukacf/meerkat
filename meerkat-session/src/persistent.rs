@@ -6071,29 +6071,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let committed_projection = if outcome.materialized_messages.is_empty() {
             None
         } else {
-            let session = self.inner.export_session(id).await?;
-            let authority = self
-                .observe_persisted_session_authority(id)
-                .await?
-                .ok_or_else(|| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "realtime transcript commit returned no store authority for session {id}"
-                    )))
-                })?;
-            let token = match &authority {
-                RuntimeSessionAuthority::WholeBlob(authority) => {
-                    authority.blob_sha256().to_string()
-                }
-                RuntimeSessionAuthority::HeadCanonical(authority) => {
-                    authority.committed_head_token().to_string()
-                }
-            };
-            let committed = BoundSessionCommit::sealed(Arc::new(session)).map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to seal committed realtime transcript projection for session {id}: {error}"
-                )))
-            })?;
-            Some((committed, token))
+            Some(self.committed_realtime_projection_guarded(id).await?)
         };
         drop(mutation_guard);
         if let Some((committed, token)) = committed_projection {
@@ -6103,6 +6081,34 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(runtime_driver_error_to_session_error)?;
         }
         Ok(outcome)
+    }
+
+    #[cfg(feature = "live")]
+    async fn committed_realtime_projection_guarded(
+        &self,
+        id: &SessionId,
+    ) -> Result<(BoundSessionCommit, String), SessionError> {
+        let session = self.inner.export_session(id).await?;
+        let authority = self
+            .observe_persisted_session_authority(id)
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "realtime transcript commit returned no store authority for session {id}"
+                )))
+            })?;
+        let token = match &authority {
+            RuntimeSessionAuthority::WholeBlob(authority) => authority.blob_sha256().to_string(),
+            RuntimeSessionAuthority::HeadCanonical(authority) => {
+                authority.committed_head_token().to_string()
+            }
+        };
+        let committed = BoundSessionCommit::sealed(Arc::new(session)).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to seal committed realtime transcript projection for session {id}: {error}"
+            )))
+        })?;
+        Ok((committed, token))
     }
 
     async fn append_realtime_transcript_event_guarded(
@@ -6339,7 +6345,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         stop_reason: meerkat_core::StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<crate::LiveAssistantPlaybackObservationResult, SessionError> {
+        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
         let outcome = self
+            .inner
             .observe_live_assistant_playback_terminal(
                 id,
                 channel_id,
@@ -6352,9 +6360,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 usage,
             )
             .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        let committed_projection = if matches!(&outcome,
+            crate::LiveAssistantPlaybackObservationResult::Resolved(receipt)
+                if receipt.continues_provider_group()
+        ) {
+            Some(self.committed_realtime_projection_guarded(id).await?)
+        } else {
+            None
+        };
+        drop(mutation_guard);
+        if let Some((committed, token)) = committed_projection {
+            machine
+                .enqueue_committed_live_transcript_boundary(id, &committed, &token)
+                .await
+                .map_err(runtime_driver_error_to_session_error)?;
+        }
         if let crate::LiveAssistantPlaybackObservationResult::Resolved(receipt) = &outcome
-            && receipt.disposition()
-                == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
+            && receipt.continues_provider_group()
         {
             machine
                 .advance_live_assistant_playback_segment(receipt)
@@ -9498,7 +9524,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         run_id: RunId,
-        req: StartTurnRequest,
+        mut req: StartTurnRequest,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
         admission: crate::ephemeral::RuntimeContextAdmissionGuard,
@@ -9509,7 +9535,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
         ),
     > {
-        Self::require_runtime_execution_kind_stamp(&req).map_err(|error| (error, None))?;
+        Self::bind_runtime_turn_identity(&mut req, &run_id).map_err(|error| (error, None))?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self
@@ -9590,12 +9616,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         run_id: RunId,
-        req: StartTurnRequest,
+        mut req: StartTurnRequest,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
         admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        Self::require_runtime_execution_kind_stamp(&req)?;
+        Self::bind_runtime_turn_identity(&mut req, &run_id)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
@@ -9669,6 +9695,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
             }
         }
+    }
+
+    fn bind_runtime_turn_identity(
+        req: &mut StartTurnRequest,
+        run_id: &RunId,
+    ) -> Result<(), SessionError> {
+        Self::require_runtime_execution_kind_stamp(req)?;
+        let metadata = req.runtime.turn_metadata.as_mut().ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(
+                "runtime turn lost its required metadata".into(),
+            ))
+        })?;
+        // Enrich an identity the caller already requested; anonymous custom
+        // SessionAgent implementations need not support this optional carrier.
+        if metadata.transcript_identity.is_empty() {
+            return Ok(());
+        }
+        if metadata
+            .transcript_identity
+            .run_id
+            .as_ref()
+            .is_some_and(|id| id != run_id)
+        {
+            return Err(SessionError::Agent(AgentError::ConfigError(
+                "runtime transcript identity conflicts with the admitted run".into(),
+            )));
+        }
+        metadata.transcript_identity.run_id = Some(run_id.clone());
+        Ok(())
     }
 
     fn require_runtime_execution_kind_stamp(req: &StartTurnRequest) -> Result<(), SessionError> {
@@ -17407,6 +17462,79 @@ mod tests {
                 injector,
             })
         }
+    }
+
+    #[test]
+    fn runtime_turn_identity_preserves_interaction_and_rejects_a_conflicting_run() {
+        let interaction = meerkat_core::InteractionId::new();
+        let run_id = RunId::new();
+        let mut request = StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: ContentInput::Text(String::new()),
+            system_prompt: None,
+            event_tx: None,
+            runtime: Default::default(),
+        };
+        assert!(
+            PersistentSessionService::<DummyBuilder>::bind_runtime_turn_identity(
+                &mut request,
+                &run_id,
+            )
+            .is_err()
+        );
+        request.runtime.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            },
+        );
+        PersistentSessionService::<DummyBuilder>::bind_runtime_turn_identity(&mut request, &run_id)
+            .expect("anonymous custom agents keep their original contract");
+        assert!(
+            request
+                .runtime
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .transcript_identity
+                .is_empty()
+        );
+        request
+            .runtime
+            .turn_metadata
+            .as_mut()
+            .unwrap()
+            .transcript_identity
+            .interaction_id = Some(interaction);
+        PersistentSessionService::<DummyBuilder>::bind_runtime_turn_identity(&mut request, &run_id)
+            .expect("runtime binds its own exact run");
+        let expected = request
+            .runtime
+            .turn_metadata
+            .as_ref()
+            .unwrap()
+            .transcript_identity
+            .clone();
+        assert_eq!(expected.run_id, Some(run_id.clone()));
+        assert_eq!(expected.interaction_id, Some(interaction));
+        PersistentSessionService::<DummyBuilder>::bind_runtime_turn_identity(&mut request, &run_id)
+            .expect("same run binding is idempotent");
+        assert!(
+            PersistentSessionService::<DummyBuilder>::bind_runtime_turn_identity(
+                &mut request,
+                &RunId::new(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            request
+                .runtime
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .transcript_identity,
+            expected
+        );
     }
 
     struct DummyBuilder;

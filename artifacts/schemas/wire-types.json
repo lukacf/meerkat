@@ -29039,6 +29039,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -41480,6 +41493,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -59619,6 +59645,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -75443,6 +75482,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -104009,6 +104061,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -128082,6 +128147,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -128818,6 +128896,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -139319,6 +139410,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -146656,6 +146760,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -153367,6 +153484,19 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
             "properties": {
               "debug": {
@@ -155397,6 +155527,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -158304,6 +158447,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation, without measured playback,\nhearing, or provider-final utterance evidence.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },

@@ -288,8 +288,8 @@ fn project_anthropic_assistant_blocks(
                 // surface them as plain text so the assistant history is
                 // visible to the model.
                 AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
-                AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
-                    text: text.clone(),
+                AssistantBlock::Transcript { text, source, .. } => Some(AssistantBlock::Text {
+                    text: source.text_for_model(text).into_owned(),
                     meta: None,
                 }),
                 AssistantBlock::Reasoning { meta, .. } => match meta.as_deref() {
@@ -4866,11 +4866,18 @@ mod tests {
             vec![
                 Message::User(UserMessage::text("listen")),
                 Message::BlockAssistant(BlockAssistantMessage::new(
-                    vec![AssistantBlock::Transcript {
-                        text: "spoken replay".to_string(),
-                        source: meerkat_core::TranscriptSource::Spoken,
-                        meta: None,
-                    }],
+                    vec![
+                        AssistantBlock::Transcript {
+                            text: "spoken replay".to_string(),
+                            source: meerkat_core::TranscriptSource::Spoken,
+                            meta: None,
+                        },
+                        AssistantBlock::Transcript {
+                            text: "voice-only discussion".to_string(),
+                            source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                            meta: None,
+                        },
+                    ],
                     StopReason::EndTurn,
                 )),
                 Message::User(UserMessage::text("continue")),
@@ -4890,6 +4897,9 @@ mod tests {
             assistant["content"][0],
             serde_json::json!({"type": "text", "text": "spoken replay"})
         );
+        let observed = assistant["content"][1]["text"].as_str().unwrap();
+        assert!(observed.contains("voice-only discussion") && observed.contains("UNMEASURED"));
+        assert!(observed.contains("Not proof"));
         server.abort();
     }
 

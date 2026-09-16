@@ -24,6 +24,8 @@ pub mod errors;
 pub mod instruction_activation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod live_orchestration;
+#[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
+pub mod live_summary;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod llm_reconfigure;
 #[cfg(all(

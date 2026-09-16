@@ -4211,6 +4211,58 @@ impl std::fmt::Display for LiveDelegationResultSpeechDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveDelegationWorkerOwnership {
+    #[default]
+    #[serde(rename = "OwnedMember")]
+    OwnedMember,
+    #[serde(rename = "ExistingMember")]
+    ExistingMember,
+}
+impl LiveDelegationWorkerOwnership {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OwnedMember => "OwnedMember",
+            Self::ExistingMember => "ExistingMember",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveDelegationWorkerOwnership {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OwnedMember" => Ok(Self::OwnedMember),
+            "ExistingMember" => Ok(Self::ExistingMember),
+            other => Err(format!(
+                "invalid LiveDelegationWorkerOwnership value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveDelegationWorkerOwnership {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveDelegationWorkerOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerPhase {
     #[default]
     #[serde(rename = "StartAuthorized")]
@@ -12803,6 +12855,7 @@ pub struct State {
         std::collections::BTreeMap<OperationId, LiveDelegationReconciliation>,
     pub live_delegation_worker_identity_by_operation:
         std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_existing_member_operations: std::collections::BTreeSet<OperationId>,
     pub live_delegation_worker_phase_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationWorkerPhase>,
     pub live_delegation_cancellation_reason_by_operation:
@@ -13986,6 +14039,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeferInputBehindBacklog {
         pub input_id: String,
+        pub cancelled_run_id: Option<RunId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageForRun {
@@ -14438,6 +14492,7 @@ pub mod inputs {
         pub operation_id: OperationId,
         pub provider_turn_correlation: String,
         pub worker_identity: String,
+        pub worker_ownership: LiveDelegationWorkerOwnership,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveLiveDelegationWorkerStart {
@@ -17464,6 +17519,7 @@ pub mod effects {
         pub interaction_id: String,
         pub operation_id: OperationId,
         pub worker_identity: String,
+        pub worker_ownership: LiveDelegationWorkerOwnership,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationWorkerStartResolved {
@@ -20021,6 +20077,11 @@ pub enum TransitionId {
     DeferInputBehindBacklogAlreadyResolvedRunning,
     DeferInputBehindBacklogAlreadyResolvedRetired,
     DeferInputBehindBacklogAlreadyResolvedStopped,
+    DeferInputBehindBacklogAlreadyArchivedIdle,
+    DeferInputBehindBacklogAlreadyArchivedAttached,
+    DeferInputBehindBacklogAlreadyArchivedRunning,
+    DeferInputBehindBacklogAlreadyArchivedRetired,
+    DeferInputBehindBacklogAlreadyArchivedStopped,
     StageForRunIdle,
     StageForRunAttached,
     StageForRunRunning,
@@ -21680,6 +21741,7 @@ pub fn initial_state() -> State {
         live_delegation_provider_turn_by_operation: Default::default(),
         live_delegation_reconciliation_by_operation: Default::default(),
         live_delegation_worker_identity_by_operation: Default::default(),
+        live_delegation_existing_member_operations: Default::default(),
         live_delegation_worker_phase_by_operation: Default::default(),
         live_delegation_cancellation_reason_by_operation: Default::default(),
         live_delegation_worker_terminal_by_operation: Default::default(),

@@ -885,6 +885,14 @@ pub fn apply_realtime_transcript_event(
                 }
                 return Ok(RealtimeTranscriptApplyCommit::default());
             }
+            if matches!(
+                &settlement.evidence,
+                crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+            ) {
+                return Err(RealtimeTranscriptShellError {
+                    op: "unmeasured_snapshot_requires_canonical_commit",
+                });
+            }
             apply_assistant_playback_target_resolved(
                 state,
                 channel_id.clone(),
@@ -927,6 +935,26 @@ pub fn apply_realtime_transcript_event(
             content_index,
             text,
             evidence,
+            TranscriptLane::Spoken,
+        )?,
+        RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            text,
+            evidence,
+        } => apply_assistant_playback_snapshot(
+            state,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            text,
+            evidence,
+            TranscriptLane::SpokenUnmeasured,
         )?,
         RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id } => {
             apply_assistant_turn_interrupted(state, response_id)?
@@ -1735,10 +1763,23 @@ fn apply_assistant_playback_snapshot(
     content_index: u32,
     text: String,
     evidence: crate::LiveAssistantPlaybackEvidence,
+    requested_lane: TranscriptLane,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
-    if evidence.snapshot_cut().is_none_or(|(snapshot, canonical)| {
-        snapshot.is_empty() || !snapshot.starts_with(canonical) || canonical != text
-    }) {
+    let evidence_matches = match (&evidence, requested_lane) {
+        (
+            crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(snapshot),
+            TranscriptLane::SpokenUnmeasured,
+        ) => !snapshot.is_empty() && snapshot == &text,
+        (_, TranscriptLane::Spoken) => {
+            evidence
+                .snapshot_cut()
+                .is_some_and(|(snapshot, canonical)| {
+                    !snapshot.is_empty() && snapshot.starts_with(canonical) && canonical == text
+                })
+        }
+        _ => false,
+    };
+    if !evidence_matches {
         return Err(RealtimeTranscriptShellError {
             op: "playback_snapshot_evidence_mismatch",
         });
@@ -1753,20 +1794,40 @@ fn apply_assistant_playback_snapshot(
                 && target.item_id() == item_id
                 && target.content_index() == content_index
         });
-    let decision = resolve_realtime_event(|authority| {
-        authority.resolve_realtime_assistant_playback_snapshot(
-            target_matches,
-            true,
-            state
-                .discarded_assistant_response_ids
-                .contains(&response_id),
-            state
-                .items
-                .get(&item_id)
-                .is_some_and(|item| item.materialized),
-        )
-    })?;
-    if decision.observe_item {
+    let mut authority = document_authority();
+    let effects = authority.resolve_realtime_assistant_playback_snapshot(
+        target_matches,
+        true,
+        state
+            .discarded_assistant_response_ids
+            .contains(&response_id),
+        state
+            .items
+            .get(&item_id)
+            .is_some_and(|item| item.materialized),
+        lane_kind(requested_lane),
+    )?;
+    let lane = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RealtimeAssistantSnapshotMaterializationAuthorized { lane } => {
+                Some(lane)
+            }
+            _ => None,
+        })
+        .ok_or(RealtimeTranscriptShellError {
+            op: "snapshot_materialization_authority_missing",
+        })?;
+    let lane = match lane {
+        RealtimeTranscriptLaneKind::Spoken => TranscriptLane::Spoken,
+        RealtimeTranscriptLaneKind::SpokenUnmeasured => TranscriptLane::SpokenUnmeasured,
+        RealtimeTranscriptLaneKind::Display => {
+            return Err(RealtimeTranscriptShellError {
+                op: "snapshot_lane_authority_invalid",
+            });
+        }
+    };
+    {
         let item = observe_realtime_item(
             state,
             item_id.clone(),
@@ -1777,17 +1838,14 @@ fn apply_assistant_playback_snapshot(
         .ok_or(RealtimeTranscriptShellError {
             op: "playback_snapshot_item_missing",
         })?;
-        if decision.promote_lane {
-            item.lane = TranscriptLane::Spoken;
-        }
-        if decision.replace_assistant_segment {
-            item.content_segments.insert(content_index, text);
-        }
-        if decision.mark_item_ready {
-            item.ready = true;
+        item.lane = lane;
+        item.content_segments.insert(content_index, text);
+        item.ready = true;
+        if lane == TranscriptLane::SpokenUnmeasured {
+            item.final_content_indices.remove(&content_index);
         }
     }
-    if decision.record_completion {
+    {
         // Materialization belongs to this local segment, not a provider-final
         // event: no final-content marker or measured usage is installed.
         state.assistant_completions.insert(
@@ -1799,7 +1857,7 @@ fn apply_assistant_playback_snapshot(
             },
         );
     }
-    let commit = finish_realtime_event(state, decision)?;
+    let commit = materialize_realtime_transcript_ready_items(state)?;
     state.assistant_playback_settlements.insert(
         item_id,
         PlaybackSettlementReceipt {
@@ -2145,6 +2203,11 @@ fn materialize_realtime_transcript_ready_items(
                             source: TranscriptSource::Spoken,
                             meta: None,
                         },
+                        TranscriptLane::SpokenUnmeasured => AssistantBlock::Transcript {
+                            text: text.clone(),
+                            source: TranscriptSource::SpokenUnmeasured,
+                            meta: None,
+                        },
                     };
                     if pending_response_id.is_none() {
                         pending_response_id = Some(response_id.clone());
@@ -2418,6 +2481,7 @@ fn lane_kind(lane: TranscriptLane) -> RealtimeTranscriptLaneKind {
     match lane {
         TranscriptLane::Display => RealtimeTranscriptLaneKind::Display,
         TranscriptLane::Spoken => RealtimeTranscriptLaneKind::Spoken,
+        TranscriptLane::SpokenUnmeasured => RealtimeTranscriptLaneKind::SpokenUnmeasured,
     }
 }
 

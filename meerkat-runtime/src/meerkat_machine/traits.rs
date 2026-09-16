@@ -137,10 +137,16 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             sessions.get(session_id).map(|entry| entry.driver.clone())
         };
         if let Some(driver) = driver {
-            return driver
-                .lock()
-                .await
-                .exact_input_terminal_completion_outcome(input_id);
+            let driver = driver.lock().await;
+            if driver.as_driver().stored_input_state(input_id).is_some() {
+                return driver.exact_input_terminal_completion_outcome(input_id);
+            }
+            // Completed inputs leave the hot machine after their durable
+            // terminal receipt commits. An attached session must read that
+            // receipt from its store just as an unregistered session does.
+            if self.store.is_none() {
+                return Ok(None);
+            }
         }
 
         let Some(store) = self.store.as_ref() else {

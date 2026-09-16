@@ -53,6 +53,7 @@ pub enum TranscriptLane {
     #[default]
     Display,
     Spoken,
+    SpokenUnmeasured,
 }
 
 /// Durable identity binding for one committed non-text user input.
@@ -289,6 +290,18 @@ pub enum RealtimeTranscriptEvent {
     /// continue; this does not record a provider turn-final observation.
     #[cfg_attr(feature = "schema", schemars(skip))]
     AssistantPlaybackSnapshotCommitted {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        text: String,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+    },
+    /// Canonical observed assistant text, explicitly unmeasured. This records
+    /// a snapshot, not an AssistantTurnCompleted or a played/heard prefix.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    AssistantUnmeasuredSnapshotCommitted {
         channel_id: String,
         interaction_id: crate::InteractionId,
         response_id: String,

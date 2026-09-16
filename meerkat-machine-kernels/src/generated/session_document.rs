@@ -819,12 +819,15 @@ pub enum RealtimeTranscriptLaneKind {
     Display,
     #[serde(rename = "Spoken")]
     Spoken,
+    #[serde(rename = "SpokenUnmeasured")]
+    SpokenUnmeasured,
 }
 impl RealtimeTranscriptLaneKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::Spoken => "Spoken",
+            Self::SpokenUnmeasured => "SpokenUnmeasured",
         }
     }
 }
@@ -834,6 +837,7 @@ impl std::convert::TryFrom<&str> for RealtimeTranscriptLaneKind {
         match value {
             "Display" => Ok(Self::Display),
             "Spoken" => Ok(Self::Spoken),
+            "SpokenUnmeasured" => Ok(Self::SpokenUnmeasured),
             other => Err(format!(
                 "invalid RealtimeTranscriptLaneKind value `{other}`"
             )),
@@ -2107,6 +2111,7 @@ pub mod inputs {
         pub snapshot_present: bool,
         pub response_discarded: bool,
         pub item_materialized: bool,
+        pub requested_lane: RealtimeTranscriptLaneKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeMaterializeCandidate {
@@ -2216,6 +2221,7 @@ pub mod inputs {
         pub canonical_chars: u64,
         pub canonical_digest: String,
         pub prefix_matches_snapshot: bool,
+        pub observation_only: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveAssistantPlaybackFinal {
@@ -2587,6 +2593,10 @@ pub mod effects {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeAssistantSnapshotMaterializationAuthorized {
+        pub lane: RealtimeTranscriptLaneKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionFirstTurnPhaseResolved {
         pub phase: SessionFirstTurnPhase,
         pub was_pending: bool,
@@ -2752,6 +2762,8 @@ pub mod effects {
         pub canonical_chars: Option<u64>,
         pub canonical_text_digest: Option<String>,
         pub biological_hearing_claimed: bool,
+        pub continues_provider_group: bool,
+        pub observed_snapshot_digest: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextCommittedRowClassified {
@@ -2833,6 +2845,9 @@ pub mod effects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    RealtimeAssistantSnapshotMaterializationAuthorized(
+        effects::RealtimeAssistantSnapshotMaterializationAuthorized,
+    ),
     SessionFirstTurnPhaseResolved(effects::SessionFirstTurnPhaseResolved),
     SessionFirstTurnOverridesResolved(effects::SessionFirstTurnOverridesResolved),
     SessionInitialPromptStageResolved(effects::SessionInitialPromptStageResolved),
@@ -2880,6 +2895,7 @@ pub enum Effect {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    RealtimeAssistantSnapshotMaterializationAuthorized,
     SessionFirstTurnPhaseResolved,
     SessionFirstTurnOverridesResolved,
     SessionInitialPromptStageResolved,

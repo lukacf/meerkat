@@ -45,7 +45,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRealtimeAssistantTextReplacement`(response_id_valid: Bool, response_discarded: Bool, item_materialized: Bool, item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind, response_completed: Bool, text_after_replace_present: Bool)
 - `ResolveRealtimeAssistantTurnCompleted`(response_id_valid: Bool, response_discarded: Bool, stop_reason: RealtimeTranscriptStopReasonKind)
 - `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid: Bool)
-- `ResolveRealtimeAssistantPlaybackSnapshot`(target_matches: Bool, snapshot_present: Bool, response_discarded: Bool, item_materialized: Bool)
+- `ResolveRealtimeAssistantPlaybackSnapshot`(target_matches: Bool, snapshot_present: Bool, response_discarded: Bool, item_materialized: Bool, requested_lane: RealtimeTranscriptLaneKind)
 - `ResolveRealtimeMaterializeCandidate`(item_materialized: Bool, predecessor_materialized: Bool, item_skipped: Bool, item_ready: Bool, item_text_present: Bool, role: RealtimeTranscriptRoleKind, response_id_present: Bool, completion_present: Bool, completion_usage_consumed: Bool)
 - `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_materialized_predecessor_references_exist: Bool, no_self_predecessor_references: Bool, causal_graph_acyclic: Bool, all_materialized_items_have_materialized_ancestry: Bool, all_identity_fields_valid: Bool, all_user_content_identity_keys_match: Bool, all_user_content_identity_fields_valid: Bool, all_user_content_identity_item_ids_unique: Bool, all_user_content_identities_reference_materialized_user_items: Bool, all_user_content_tombstones_valid: Bool, user_content_identities_and_tombstones_disjoint: Bool, pending_user_content_blob_fields_valid: Bool, pending_user_content_blob_uncommitted: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
 - `AdmitLiveInteractionTranscript`(session_id: SessionId, channel_id: String, interaction_id: String)
@@ -55,7 +55,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitLiveAssistantPlaybackTarget`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
 - `RecoverLiveAssistantPlaybackTarget`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
 - `ResolveLiveAssistantPlaybackOnChannelClose`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
-- `ObserveLiveAssistantPlaybackSnapshot`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, snapshot_chars: u64, snapshot_digest: String, canonical_chars: u64, canonical_digest: String, prefix_matches_snapshot: Bool)
+- `ObserveLiveAssistantPlaybackSnapshot`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, snapshot_chars: u64, snapshot_digest: String, canonical_chars: u64, canonical_digest: String, prefix_matches_snapshot: Bool, observation_only: Bool)
 - `ObserveLiveAssistantPlaybackFinal`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, authoritative_assistant_chars: u64, authoritative_text_digest: String, pending_terminal_observation: LiveAssistantPlaybackTerminalObservation, pending_reported_prefix_chars: u64, pending_reported_prefix_digest: String, reported_prefix_matches_authoritative: Bool)
 - `RecoverLiveAssistantPlaybackFinal`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, authoritative_assistant_chars: u64, authoritative_text_digest: String)
 - `ObserveLiveAssistantPlaybackTerminal`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, observation: LiveAssistantPlaybackTerminalObservation, reported_prefix_chars: u64, reported_prefix_digest: String, authoritative_assistant_chars: u64, authoritative_text_digest: String, authoritative_assistant_final: Bool, reported_prefix_matches_authoritative: Bool)
@@ -80,6 +80,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 
 ## Effects
+- `RealtimeAssistantSnapshotMaterializationAuthorized`(lane: RealtimeTranscriptLaneKind)
 - `SessionFirstTurnPhaseResolved`(phase: SessionFirstTurnPhase, was_pending: Bool)
 - `SessionFirstTurnOverridesResolved`(allowed: Bool)
 - `SessionInitialPromptStageResolved`(decision: SessionInitialPromptStageDecision)
@@ -103,7 +104,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveAssistantPlaybackFinalRecovered`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, authoritative_assistant_chars: u64, authoritative_text_digest: String)
 - `LiveAssistantPlaybackTerminalObserved`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, observation: LiveAssistantPlaybackTerminalObservation, reported_prefix_chars: u64, reported_prefix_digest: String)
 - `LiveAssistantPlaybackTerminalRecovered`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, observation: LiveAssistantPlaybackTerminalObservation, reported_prefix_chars: u64, reported_prefix_digest: String)
-- `LiveAssistantPlaybackTerminalResolved`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, disposition: LiveAssistantPlaybackTerminalDisposition, canonical_chars: Option<u64>, canonical_text_digest: Option<String>, biological_hearing_claimed: Bool)
+- `LiveAssistantPlaybackTerminalResolved`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, disposition: LiveAssistantPlaybackTerminalDisposition, canonical_chars: Option<u64>, canonical_text_digest: Option<String>, biological_hearing_claimed: Bool, continues_provider_group: Bool, observed_snapshot_digest: Option<String>)
 - `LiveContextCommittedRowClassified`(session_id: SessionId, canonical_row_sequence: u64, row_kind: LiveContextCommittedRowKind, provenance: LiveContextCommittedTextProvenance, disposition: LiveContextCommittedRowDisposition, content_digest: String, store_commit_authority: String)
 - `SessionMetadataPersistAuthorized`
 - `SessionBuildStatePersistAuthorized`
@@ -571,10 +572,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveRealtimeAssistantPlaybackSnapshot`
 - From: `Ready`
-- On: `ResolveRealtimeAssistantPlaybackSnapshot`(target_matches, snapshot_present, response_discarded, item_materialized)
+- On: `ResolveRealtimeAssistantPlaybackSnapshot`(target_matches, snapshot_present, response_discarded, item_materialized, requested_lane)
 - Guards:
   - ``
-- Emits: `RealtimeTranscriptEventResolved`
+- Emits: `RealtimeAssistantSnapshotMaterializationAuthorized`
 - To: `Ready`
 
 ### `ResolveRealtimeAssistantTurnInterruptedInvalid`
@@ -715,7 +716,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveLiveAssistantPlaybackSnapshot`
 - From: `Ready`
-- On: `ObserveLiveAssistantPlaybackSnapshot`(session_id, channel_id, interaction_id, response_id, item_id, content_index, snapshot_chars, snapshot_digest, canonical_chars, canonical_digest, prefix_matches_snapshot)
+- On: `ObserveLiveAssistantPlaybackSnapshot`(session_id, channel_id, interaction_id, response_id, item_id, content_index, snapshot_chars, snapshot_digest, canonical_chars, canonical_digest, prefix_matches_snapshot, observation_only)
 - Guards:
   - ``
 - Emits: `LiveAssistantPlaybackTerminalResolved`

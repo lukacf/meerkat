@@ -2049,6 +2049,7 @@ struct AutonomousDispatchMaterial {
     completion_tx: Option<super::handle::ExactTurnCompletionSender>,
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    content_attribution: crate::mob_machine::WorkContentAttribution,
 }
 
 /// One member turn admission owned by that member's admission lane.
@@ -2521,6 +2522,9 @@ impl DetachedMemberReadinessContext {
         handling_mode: meerkat_core::types::HandlingMode,
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<bool, MobError> {
+        if ack_mode == crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted {
+            return Ok(true);
+        }
         if handling_mode != meerkat_core::types::HandlingMode::Steer
             || ack_mode != crate::mob_machine::SubmitWorkAckMode::IngressAccepted
         {
@@ -2595,6 +2599,7 @@ impl DetachedMemberReadinessContext {
             completion_tx,
             llm_identity_applied_tx,
             ack_mode,
+            content_attribution,
         } = material;
         let render_metadata = turn_metadata
             .as_ref()
@@ -2608,7 +2613,7 @@ impl DetachedMemberReadinessContext {
             )
             .await?
         {
-            let req = meerkat_core::service::StartTurnRequest {
+            let mut req = meerkat_core::service::StartTurnRequest {
                 // The admission barrier is steer-only; steer dispatch with
                 // injected context was rejected before the mode fork, so this
                 // carrier is invariantly empty here.
@@ -2622,6 +2627,7 @@ impl DetachedMemberReadinessContext {
                     external_delivery_identity.as_ref(),
                 ),
             };
+            lower_work_content_attribution(&mut req, content_attribution);
             return if let Some(completion_tx) = completion_tx {
                 self.provisioner
                     .admit_tracked_turn(&member_ref, req, completion_tx, llm_identity_applied_tx)
@@ -2816,6 +2822,7 @@ struct SubmitWorkDispatchRequest {
     bounded_result_spec: Option<super::handle::BoundedResultSpec>,
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    content_attribution: crate::mob_machine::WorkContentAttribution,
     operation_id: Option<meerkat_core::ops::OperationId>,
     /// Present only for a placed TurnCompleted dispatch. Its durable Record
     /// already exists; dispatch may realize but must never mint custody.
@@ -2878,7 +2885,31 @@ fn submit_work_runtime_semantics(
                 correlation_id: identity.correlation_id.clone(),
             })
         }
+
         None => semantics,
+    }
+}
+
+/// Realize declared work authorship through the runtime-authored append
+/// carrier. Empty prompt plus a typed append does not synthesize a user row.
+fn lower_work_content_attribution(
+    request: &mut meerkat_core::service::StartTurnRequest,
+    attribution: crate::mob_machine::WorkContentAttribution,
+) {
+    use meerkat_core::lifecycle::run_primitive::{
+        ConversationAppend, ConversationAppendRole, CoreRenderable,
+    };
+    if attribution == crate::mob_machine::WorkContentAttribution::InjectedExecutionContext {
+        let content =
+            match std::mem::replace(&mut request.prompt, ContentInput::Text(String::new())) {
+                ContentInput::Text(text) => CoreRenderable::Text { text },
+                ContentInput::Blocks(blocks) => CoreRenderable::Blocks { blocks },
+            };
+        request.runtime.typed_turn_appends.push(ConversationAppend {
+            role: ConversationAppendRole::InjectedContext,
+            content,
+            identity: None,
+        });
     }
 }
 
@@ -2947,6 +2978,7 @@ fn unsupported_turn_metadata_fields(
     fields
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_member_turn_carriers(
     entry: &RosterEntry,
     remotely_hosted: bool,
@@ -2955,6 +2987,7 @@ fn validate_member_turn_carriers(
     turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     has_event_sender: bool,
     has_completion_sender: bool,
+    ack_mode: crate::mob_machine::SubmitWorkAckMode,
 ) -> Result<(), MobError> {
     let peer_only = remotely_hosted
         || matches!(
@@ -2965,6 +2998,19 @@ fn validate_member_turn_carriers(
             }
         );
     let autonomous = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+    let exact_runtime_input = ack_mode == crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted;
+    if exact_runtime_input
+        && (peer_only
+            || !matches!(&entry.member_ref, crate::event::MemberRef::Session { .. })
+            || !has_external_delivery_identity
+            || !has_completion_sender
+            || handling_mode != meerkat_core::types::HandlingMode::Queue)
+    {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: "exact runtime input admission requires a local queued member turn with stable delivery and completion custody".to_string(),
+        });
+    }
 
     if has_external_delivery_identity && !remotely_hosted && peer_only {
         return Err(MobError::UnsupportedForMode {
@@ -2985,7 +3031,9 @@ fn validate_member_turn_carriers(
             .to_string(),
         });
     }
-    if has_completion_sender && ((!remotely_hosted && peer_only) || autonomous) {
+    if has_completion_sender
+        && ((!remotely_hosted && peer_only) || (autonomous && !exact_runtime_input))
+    {
         return Err(MobError::UnsupportedForMode {
             mode: entry.runtime_mode,
             reason: if peer_only {
@@ -3024,7 +3072,7 @@ fn validate_member_turn_carriers(
         unsupported_turn_metadata_fields(metadata, handling_mode, false, true, true)
     } else if peer_only {
         unsupported_turn_metadata_fields(metadata, handling_mode, false, false, true)
-    } else if autonomous {
+    } else if autonomous && !exact_runtime_input {
         unsupported_turn_metadata_fields(metadata, handling_mode, true, true, false)
     } else {
         Vec::new()
@@ -49616,7 +49664,18 @@ impl MobActor {
             bounded_result_spec,
             llm_identity_applied_tx,
             mut ack_mode,
+            content_attribution,
         } = *payload;
+        if content_attribution
+            == crate::mob_machine::WorkContentAttribution::InjectedExecutionContext
+            && (origin != WorkOrigin::Internal
+                || ack_mode != crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted)
+        {
+            return Err(MobError::Internal(
+                "execution-context work requires internal exact runtime-input admission"
+                    .to_string(),
+            ));
+        }
         tracing::debug!(
             agent_identity = %runtime_id.identity,
             runtime_id = %runtime_id,
@@ -49732,6 +49791,7 @@ impl MobActor {
                             bounded_result_spec,
                             llm_identity_applied_tx,
                             ack_mode,
+                            content_attribution,
                         }),
                     });
                 }
@@ -49816,6 +49876,14 @@ impl MobActor {
         let turn_metadata = submit_work_turn_metadata(turn_metadata, interaction_id, objective_id)?;
         let remotely_hosted =
             super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity);
+        if remotely_hosted && ack_mode == crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "exact live delegation input requires a local runtime-backed member"
+                    .to_string(),
+            });
+        }
         if remotely_hosted && bounded_result_spec.is_some() {
             if completion_tx.is_none() {
                 return Err(MobError::Internal(
@@ -49845,6 +49913,7 @@ impl MobActor {
             turn_metadata.as_ref(),
             event_tx.is_some(),
             completion_tx.is_some(),
+            ack_mode,
         )?;
         #[cfg(feature = "runtime-adapter")]
         let local_external_identity_supported = self.runtime_adapter.is_some();
@@ -50113,6 +50182,7 @@ impl MobActor {
                     bounded_result_spec,
                     llm_identity_applied_tx,
                     ack_mode,
+                    content_attribution,
                     operation_id: None,
                     placed_completion_obligation: placed_completion_obligation.clone(),
                     placed_completion_context,
@@ -50707,6 +50777,7 @@ impl MobActor {
             bounded_result_spec,
             llm_identity_applied_tx,
             ack_mode,
+            content_attribution,
             operation_id,
             placed_completion_obligation,
             placed_completion_context,
@@ -50780,6 +50851,11 @@ impl MobActor {
                     .0
                     .to_string(),
             ),
+            (Some(_), crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted) => {
+                return Err(MobError::Internal(
+                    "local exact input admission reached a placed member".to_string(),
+                ));
+            }
             (None, _) => None,
         };
         if let Some(obligation) = placed_completion_obligation.as_ref()
@@ -50827,7 +50903,7 @@ impl MobActor {
         if placed_identity.is_some() {
             let turn_metadata =
                 submit_work_turn_metadata(turn_metadata, effective_interaction_id, objective_id)?;
-            let req = meerkat_core::service::StartTurnRequest {
+            let mut req = meerkat_core::service::StartTurnRequest {
                 injected_context,
                 prompt: content,
                 system_prompt,
@@ -50838,8 +50914,10 @@ impl MobActor {
                     external_delivery_identity.as_ref(),
                 ),
             };
+            lower_work_content_attribution(&mut req, content_attribution);
             return match ack_mode {
-                crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
+                crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+                | crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted => {
                     Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                         operation_id,
                         agent_identity: entry.agent_identity.clone(),
@@ -50912,6 +50990,7 @@ impl MobActor {
                         completion_tx,
                         llm_identity_applied_tx,
                         ack_mode,
+                        content_attribution,
                     }),
                 })
             }
@@ -50951,7 +51030,7 @@ impl MobActor {
                     member_ref = ?machine_member_ref,
                     "dispatch_member_turn_after_machine_admission building turn request"
                 );
-                let req = meerkat_core::service::StartTurnRequest {
+                let mut req = meerkat_core::service::StartTurnRequest {
                     // Turn-driven work requests carry no typed_turn_appends;
                     // the injected-context field is the single lowering
                     // carrier here. Runtime-backed members re-lower it into
@@ -50968,13 +51047,15 @@ impl MobActor {
                         external_delivery_identity.as_ref(),
                     ),
                 };
+                lower_work_content_attribution(&mut req, content_attribution);
                 tracing::debug!(
                     agent_identity = %entry.agent_identity,
                     ack_mode = ?ack_mode,
                     "dispatch_member_turn_after_machine_admission built turn request"
                 );
                 match ack_mode {
-                    crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
+                    crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+                    | crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted => {
                         tracing::debug!(
                             agent_identity = %entry.agent_identity,
                             "dispatch_member_turn_after_machine_admission boxing turn admission request"
@@ -56252,6 +56333,7 @@ mod routed_effect_containment_tests {
                 bounded_result_spec: None,
                 llm_identity_applied_tx: None,
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+                content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
             })
         };
         let (reply_tx, reply_rx) = oneshot::channel();

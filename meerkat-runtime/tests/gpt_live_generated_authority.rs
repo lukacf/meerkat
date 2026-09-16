@@ -166,6 +166,65 @@ fn confirm_delegation_transcript(authority: &mut mm::MeerkatMachineAuthority) {
 }
 
 fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthority) {
+    prepare_confirmed_completed_worker_with_ownership(
+        authority,
+        mm::LiveDelegationWorkerOwnership::OwnedMember,
+    );
+}
+
+#[test]
+fn existing_member_custody_survives_generated_retirement_and_recovery() {
+    let mut authority = opened_authority();
+    bind_and_admit(&mut authority);
+    prepare_confirmed_completed_worker_with_ownership(
+        &mut authority,
+        mm::LiveDelegationWorkerOwnership::ExistingMember,
+    );
+    let mut recovered = mm::MeerkatMachineAuthority::recover_from_state(authority.state().clone())
+        .expect("restore generated member custody");
+    assert!(
+        recovered
+            .state()
+            .live_delegation_existing_member_operations
+            .contains(&operation_id())
+    );
+    assert!(
+        recovered
+            .state()
+            .live_delegation_result_eligible_operations
+            .contains(&operation_id())
+    );
+    assert_eq!(
+        recovered
+            .state()
+            .live_delegation_worker_phase_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationWorkerPhase::Retired)
+    );
+    assert!(
+        apply(
+            &mut recovered,
+            mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: operation_id(),
+                provider_turn_correlation: PROVIDER_TURN.to_string(),
+                worker_identity: WORKER.to_string(),
+                worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
+            }
+        )
+        .is_err(),
+        "a restarted host cannot change borrowed custody into ownership"
+    );
+}
+
+fn prepare_confirmed_completed_worker_with_ownership(
+    authority: &mut mm::MeerkatMachineAuthority,
+    worker_ownership: mm::LiveDelegationWorkerOwnership,
+) {
     confirm_delegation_transcript(authority);
     apply(
         authority,
@@ -178,6 +237,7 @@ fn prepare_confirmed_completed_worker(authority: &mut mm::MeerkatMachineAuthorit
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership,
         },
     )
     .expect("exact worker start is authorized");
@@ -833,6 +893,7 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
         },
     )
     .expect("old worker start is authorized");
@@ -1426,6 +1487,7 @@ fn terminal_worker_supersession_requires_no_cancellation_and_allows_fresh_atomic
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
         },
     )
     .expect("worker start authority");
@@ -1545,6 +1607,7 @@ fn running_worker_supersession_authorizes_cancellation_and_suppresses_late_termi
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
         },
     )
     .expect("worker start authority");
@@ -1691,6 +1754,7 @@ fn completed_turn_pending_worker_can_be_superseded_without_abandoning_new_active
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
         },
     )
     .expect("worker start authority");
@@ -1862,6 +1926,7 @@ fn failed_start_retirement_clears_the_active_channel_fail_closed() {
             operation_id: operation_id(),
             provider_turn_correlation: PROVIDER_TURN.to_string(),
             worker_identity: WORKER.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
         },
     )
     .expect("worker start authority");

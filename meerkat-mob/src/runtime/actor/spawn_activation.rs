@@ -2919,6 +2919,7 @@ impl MobActor {
                     bounded_result_spec: None,
                     llm_identity_applied_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+                    content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
                     placed_completion_context: None,

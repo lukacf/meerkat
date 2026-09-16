@@ -172,7 +172,9 @@ pub use experimental_live_admission::{
 #[doc(hidden)]
 pub mod experimental_gpt_live;
 #[cfg(all(not(target_arch = "wasm32"), feature = "openai-live"))]
-pub use experimental_gpt_live::{GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL};
+pub use experimental_gpt_live::{
+    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, PublicGptLivePlaybackPolicy,
+};
 /// Platform-owned voice guidance for GPT Live client-context profiles.
 #[cfg(all(not(target_arch = "wasm32"), feature = "openai-live"))]
 pub(crate) fn gpt_live_client_context_session_instructions() -> &'static str {

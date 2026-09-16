@@ -1,8 +1,8 @@
 //! Reusable execution composition for one synchronous delegated helper turn.
 //!
-//! This module owns the mechanical spawn -> optional parent wiring -> exact
-//! work admission -> terminal wait -> retirement sequence. Canonical member,
-//! work, and terminal state remain owned by the existing MobMachine and exact
+//! This module owns member construction or borrowing, optional parent wiring,
+//! exact work admission, terminal observation, and custody release. Canonical
+//! member, work, and terminal state remain owned by MobMachine and the exact
 //! turn authorities reached through [`MobHandle`].
 
 use std::sync::Arc;
@@ -37,6 +37,14 @@ pub fn render_bounded_delegation_task(task: &str) -> String {
     format!("{task}\n\n{BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1}")
 }
 
+#[cfg(feature = "runtime-adapter")]
+pub(super) fn render_live_delegation_execution_context(task: &str) -> String {
+    format!(
+        "Live delegation execution context: execute this already committed voice request \
+         (not a new user utterance).\n\n{task}"
+    )
+}
+
 /// Canonical context source for one delegated worker.
 ///
 /// `DurableFork` persists a real transcript fork through
@@ -52,6 +60,8 @@ pub enum DelegationExecutionSource {
         source_identity: AgentIdentity,
         message_count: Option<usize>,
     },
+    /// Execute one exact turn without taking ownership of the member lifecycle.
+    ExistingMember,
 }
 
 /// Mob-owned construction options for one delegated helper member.
@@ -169,6 +179,14 @@ impl DelegationExecutionRequest {
         self
     }
 
+    /// Execute on `identity` itself. Requires a live admission whose generated
+    /// custody is `ExistingMember`; member construction overrides are rejected.
+    #[must_use]
+    pub fn with_existing_member(mut self) -> Self {
+        self.source = DelegationExecutionSource::ExistingMember;
+        self
+    }
+
     #[must_use]
     pub fn source(&self) -> &DelegationExecutionSource {
         &self.source
@@ -192,6 +210,7 @@ impl DelegationExecutionRequest {
 #[derive(Clone)]
 pub struct LiveDelegationTerminalEvidence {
     operation: meerkat_core::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
+    worker_ownership: meerkat_runtime::live_execution::LiveDelegationWorkerOwnership,
 }
 
 impl std::fmt::Debug for LiveDelegationTerminalEvidence {
@@ -227,7 +246,7 @@ pub enum DelegationTurnTerminal {
 /// Worker terminal evidence retained until generated retirement authority.
 #[derive(Debug)]
 pub struct DelegationTerminalizedExecution {
-    spawn: SpawnResult,
+    spawn: Option<SpawnResult>,
     wired: bool,
     identity: AgentIdentity,
     terminal: DelegationTurnTerminal,
@@ -236,8 +255,8 @@ pub struct DelegationTerminalizedExecution {
 
 impl DelegationTerminalizedExecution {
     #[must_use]
-    pub fn spawn(&self) -> &SpawnResult {
-        &self.spawn
+    pub fn spawn(&self) -> Option<&SpawnResult> {
+        self.spawn.as_ref()
     }
 
     #[must_use]
@@ -266,12 +285,24 @@ impl DelegationTerminalizedExecution {
 #[must_use = "started delegations must be awaited, cancelled, or deliberately detached"]
 pub struct DelegationExecutionHandle {
     service: DelegationExecutionService,
-    spawn: SpawnResult,
+    spawn: Option<SpawnResult>,
     wired: bool,
     identity: AgentIdentity,
     result_spec: BoundedResultSpec,
     turn_handle: WorkTurnHandle,
     live_admission: Option<meerkat_runtime::live_execution::LiveDelegationExecutionAdmission>,
+    cancellation_target: DelegationCancellationTarget,
+}
+
+#[derive(Clone)]
+enum DelegationCancellationTarget {
+    OwnedMember,
+    #[cfg(feature = "runtime-adapter")]
+    ExistingInput {
+        runtime: Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: meerkat_core::SessionId,
+        delivery_identity: MobDeliveryIdentity,
+    },
 }
 
 /// Cloneable exact-worker cancellation endpoint retained while another task
@@ -281,6 +312,7 @@ pub struct DelegationCancellationHandle {
     service: DelegationExecutionService,
     identity: AgentIdentity,
     live_admission: meerkat_runtime::live_execution::LiveDelegationExecutionAdmission,
+    target: DelegationCancellationTarget,
 }
 
 impl DelegationCancellationHandle {
@@ -296,6 +328,55 @@ impl DelegationCancellationHandle {
             return Err(MobError::Internal(
                 "live cancellation authority does not match the exact worker binding".to_string(),
             ));
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let DelegationCancellationTarget::OwnedMember = &self.target;
+        #[cfg(feature = "runtime-adapter")]
+        match &self.target {
+            DelegationCancellationTarget::OwnedMember => {}
+            #[cfg(feature = "runtime-adapter")]
+            DelegationCancellationTarget::ExistingInput {
+                runtime,
+                session_id,
+                delivery_identity,
+            } => {
+                use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+                let stored = runtime
+                    .input_state_by_idempotency_key(session_id, &delivery_identity.idempotency_key)
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?
+                    .ok_or_else(|| {
+                        MobError::Internal(
+                            "accepted live delegation lost its exact input custody".to_string(),
+                        )
+                    })?;
+                if stored.seed.terminal_outcome.is_some() {
+                    return Ok(meerkat_runtime::live_execution::LiveDelegationCancellationOutcome::AlreadyTerminal);
+                }
+                let present = runtime
+                    .cancel_input_if_present(
+                        session_id,
+                        &stored.state.input_id,
+                        "live delegation cancelled",
+                    )
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?;
+                if present {
+                    return Ok(meerkat_runtime::live_execution::LiveDelegationCancellationOutcome::Cancelled);
+                }
+                // Terminal archival can win between the durable identity lookup
+                // and the exact-input cancel. Re-read that same identity only.
+                let terminal = runtime
+                    .input_state_by_idempotency_key(session_id, &delivery_identity.idempotency_key)
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?
+                    .is_some_and(|row| row.seed.terminal_outcome.is_some());
+                return Ok(if terminal {
+                    meerkat_runtime::live_execution::LiveDelegationCancellationOutcome::AlreadyTerminal
+                } else {
+                    meerkat_runtime::live_execution::LiveDelegationCancellationOutcome::Failed
+                });
+            }
         }
         if self
             .service
@@ -328,8 +409,8 @@ impl DelegationCancellationHandle {
 
 impl DelegationExecutionHandle {
     #[must_use]
-    pub fn spawn(&self) -> &SpawnResult {
-        &self.spawn
+    pub fn spawn(&self) -> Option<&SpawnResult> {
+        self.spawn.as_ref()
     }
 
     #[must_use]
@@ -357,6 +438,7 @@ impl DelegationExecutionHandle {
                 service: self.service.clone(),
                 identity: self.identity.clone(),
                 live_admission: live_admission.clone(),
+                target: self.cancellation_target.clone(),
             })
     }
 
@@ -384,6 +466,7 @@ impl DelegationExecutionHandle {
             result_spec,
             turn_handle,
             live_admission,
+            cancellation_target: _,
         } = self;
         let terminal = match turn_handle.wait_bounded(result_spec).await {
             Ok(turn) => DelegationTurnTerminal::Completed(turn),
@@ -396,6 +479,7 @@ impl DelegationExecutionHandle {
             terminal,
             live: live_admission.map(|admission| LiveDelegationTerminalEvidence {
                 operation: admission.operation().clone(),
+                worker_ownership: admission.worker_ownership(),
             }),
         }
     }
@@ -450,6 +534,10 @@ impl DelegationExecutionOutcome {
 pub enum DelegationExecutionError {
     #[error("live delegation requires explicit generated lifecycle realization")]
     LiveLifecycleRequired,
+    #[error(
+        "existing-member delegation requires exact runtime-backed live admission without member construction overrides"
+    )]
+    ExistingMemberAdmissionRequired,
     #[error("delegated helper spawn failed: {0}")]
     Spawn(#[source] MobError),
     #[error("delegated helper work admission failed: {error}")]
@@ -496,6 +584,15 @@ impl DelegationExecutionService {
             delivery_identity,
             live_admission,
         } = request;
+
+        let existing_member = matches!(source, DelegationExecutionSource::ExistingMember);
+        if live_admission.as_ref().is_some_and(|admission| {
+            (admission.worker_ownership()
+                == meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember)
+                != existing_member
+        }) {
+            return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+        }
 
         if let Some(admission) = live_admission.as_ref()
             && admission.worker_identity() != identity.as_str()
@@ -565,12 +662,96 @@ impl DelegationExecutionService {
                     .map(|(_, interaction_id)| *interaction_id)
             });
 
+        if existing_member {
+            #[cfg(not(feature = "runtime-adapter"))]
+            return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+            #[cfg(feature = "runtime-adapter")]
+            {
+                let admission = live_admission
+                    .ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
+                admission
+                    .require_released_execution()
+                    .map_err(|_| DelegationExecutionError::ExistingMemberAdmissionRequired)?;
+                if parent.is_some()
+                    || member.placement.is_some()
+                    || member.additional_instructions.is_some()
+                    || member.inherited_tool_filter.is_some()
+                    || member.override_profile.is_some()
+                    || member.tool_access_policy.is_some()
+                    || member.objective_id.is_some()
+                {
+                    return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+                }
+                let runtime = self
+                    .handle
+                    .runtime_adapter
+                    .clone()
+                    .ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
+                let (runtime_id, fence_token) = self
+                    .handle
+                    .resolve_submit_work_runtime_binding(
+                        &identity,
+                        WorkOrigin::Internal,
+                        "existing live delegation",
+                    )
+                    .await
+                    .map_err(DelegationExecutionError::Spawn)?;
+                let session_id = self
+                    .handle
+                    .resolve_bridge_session_id(&identity)
+                    .await
+                    .ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
+                if &session_id != admission.session_id() {
+                    return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+                }
+                let delivery_identity = exact_delivery_identity
+                    .ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
+                let work = WorkSpec::new(
+                    render_live_delegation_execution_context(&task),
+                    WorkOrigin::Internal,
+                )
+                .with_interaction_id(admission.interaction_id());
+                let turn_handle = self
+                    .handle
+                    .start_runtime_work_with_delivery_identity_bounded(
+                        runtime_id,
+                        fence_token,
+                        work,
+                        delivery_identity.clone(),
+                        result_spec.clone(),
+                        crate::mob_machine::WorkContentAttribution::InjectedExecutionContext,
+                    )
+                    .await
+                    .map_err(|error| DelegationExecutionError::WorkAdmission {
+                        error,
+                        retirement_error: None,
+                    })?;
+                return Ok(DelegationExecutionHandle {
+                    service: self.clone(),
+                    spawn: None,
+                    wired: false,
+                    identity,
+                    result_spec,
+                    turn_handle,
+                    live_admission: Some(admission),
+                    cancellation_target: DelegationCancellationTarget::ExistingInput {
+                        runtime,
+                        session_id,
+                        delivery_identity,
+                    },
+                });
+            }
+        }
+
         tracing::debug!(
             delegated_identity = %identity,
             durable_fork = matches!(&source, DelegationExecutionSource::DurableFork { .. }),
             "delegation service resolving member role"
         );
         let role = match &source {
+            DelegationExecutionSource::ExistingMember => {
+                return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+            }
             DelegationExecutionSource::Fresh => ProfileName::from("delegate"),
             DelegationExecutionSource::DurableFork {
                 source_identity, ..
@@ -606,6 +787,9 @@ impl DelegationExecutionService {
             .map(meerkat_runtime::live_execution::LiveDelegationExecutionAdmission::tool_dispatch_admission);
 
         let spawn = match source {
+            DelegationExecutionSource::ExistingMember => {
+                return Err(DelegationExecutionError::ExistingMemberAdmissionRequired);
+            }
             DelegationExecutionSource::Fresh => self
                 .handle
                 .spawn_spec(spec)
@@ -697,12 +881,13 @@ impl DelegationExecutionService {
         };
         Ok(DelegationExecutionHandle {
             service: self.clone(),
-            spawn,
+            spawn: Some(spawn),
             wired,
             identity,
             result_spec,
             turn_handle,
             live_admission,
+            cancellation_target: DelegationCancellationTarget::OwnedMember,
         })
     }
 
@@ -720,7 +905,8 @@ impl DelegationExecutionService {
         self.handle.retire(terminal.identity.clone()).await
     }
 
-    /// Retire an exact terminal live worker under generated retirement authority.
+    /// Release an exact terminal worker under generated retirement authority.
+    /// Existing-member executions release only turn custody, never the member.
     pub async fn retire_live_terminalized(
         &self,
         terminal: &DelegationTerminalizedExecution,
@@ -737,6 +923,11 @@ impl DelegationExecutionService {
             return Err(MobError::Internal(
                 "live retirement authority does not match the exact terminal worker".to_string(),
             ));
+        }
+        if evidence.worker_ownership
+            == meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember
+        {
+            return Ok(());
         }
         self.handle.retire(terminal.identity.clone()).await
     }
@@ -756,6 +947,11 @@ impl DelegationExecutionService {
                 "live failed-start retirement authority does not match the exact worker binding"
                     .to_string(),
             ));
+        }
+        if admission.worker_ownership()
+            == meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember
+        {
+            return Ok(());
         }
         let identity = AgentIdentity::from(admission.worker_identity());
         if self.handle.get_member(&identity).await?.is_none() {
@@ -790,6 +986,7 @@ impl DelegationExecutionService {
             terminal,
             live,
         } = terminal;
+        let spawn = spawn.ok_or(DelegationExecutionError::ExistingMemberAdmissionRequired)?;
         match terminal {
             DelegationTurnTerminal::Completed(turn) => Ok(DelegationExecutionOutcome {
                 spawn,

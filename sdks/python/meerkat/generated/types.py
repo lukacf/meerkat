@@ -6872,11 +6872,14 @@ WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted
 class WireTranscriptSourceSpoken(TypedDict, total=False):
     kind: Required[Literal['spoken']]
 
+class WireTranscriptSourceSpokenUnmeasured(TypedDict, total=False):
+    kind: Required[Literal['spoken_unmeasured']]
+
 class WireTranscriptSourceUnknown(TypedDict, total=False):
     debug: Required[str]
     kind: Required[Literal['unknown']]
 
-WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
+WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceSpokenUnmeasured | WireTranscriptSourceUnknown
 
 # Transcript block inside a block-assistant message.
 #

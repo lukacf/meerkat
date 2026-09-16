@@ -402,6 +402,7 @@ pub(super) struct SubmitWorkPayload {
     /// Executor-bound acknowledgement for a host-requested LLM identity.
     pub llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    pub content_attribution: crate::mob_machine::WorkContentAttribution,
 }
 
 // ---------------------------------------------------------------------------

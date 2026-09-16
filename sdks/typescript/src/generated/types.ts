@@ -6032,12 +6032,16 @@ export interface WireTranscriptSourceSpoken {
   kind: "spoken";
 }
 
+export interface WireTranscriptSourceSpokenUnmeasured {
+  kind: "spoken_unmeasured";
+}
+
 export interface WireTranscriptSourceUnknown {
   debug: string;
   kind: "unknown";
 }
 
-export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown;
+export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceSpokenUnmeasured | WireTranscriptSourceUnknown;
 
 export interface WireAssistantBlockText {
   block_type: "text";

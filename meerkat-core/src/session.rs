@@ -3531,6 +3531,14 @@ impl Session {
         messages: Vec<Message>,
         authority: &crate::agent::compact::ValidatedCompactionRewrite,
     ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError> {
+        let observations =
+            crate::agent::compact::CompactionObservationSource::from_session(self)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if !authority.authorizes_observations(&observations) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction witness does not cover the current voice observations".into(),
+            ));
+        }
         // Authority first. The parent side binds against the session
         // accumulator (O(delta), byte-identical to
         // `transcript_messages_digest(self.messages())`); the rebuilt side

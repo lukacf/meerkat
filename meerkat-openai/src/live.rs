@@ -4582,6 +4582,7 @@ fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
     match event {
         RealtimeTranscriptEvent::UserTranscriptFinal { text, .. }
         | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { text, .. }
+        | RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptTruncated { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptFinalText { text, .. } => text.len(),
         RealtimeTranscriptEvent::UserContentFinal { content, .. } => {

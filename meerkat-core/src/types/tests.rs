@@ -1458,6 +1458,20 @@ mod ordered_transcript_types {
     }
 
     #[test]
+    fn transcript_model_text_preserves_unmeasured_provenance_without_changing_ordinary_text() {
+        let ordinary = TranscriptSource::Spoken.text_for_model("original speech");
+        assert!(matches!(
+            ordinary,
+            std::borrow::Cow::Borrowed("original speech")
+        ));
+        let observed = TranscriptSource::SpokenUnmeasured.text_for_model("voice-only discussion");
+        assert!(observed.contains("voice-only discussion"));
+        assert!(observed.contains("UNMEASURED"));
+        assert!(observed.contains("Not proof"));
+        assert_eq!(TranscriptSource::SpokenUnmeasured.text_for_model(""), "");
+    }
+
+    #[test]
     fn test_transcript_source_roundtrip_snake_case() {
         let source = TranscriptSource::Spoken;
         let json = serde_json::to_string(&source).unwrap();

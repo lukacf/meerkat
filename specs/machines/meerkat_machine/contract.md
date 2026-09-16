@@ -224,6 +224,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_provider_turn_by_operation`: `Map<OperationId, String>`
 - `live_delegation_reconciliation_by_operation`: `Map<OperationId, LiveDelegationReconciliation>`
 - `live_delegation_worker_identity_by_operation`: `Map<OperationId, String>`
+- `live_delegation_existing_member_operations`: `Set<OperationId>`
 - `live_delegation_worker_phase_by_operation`: `Map<OperationId, LiveDelegationWorkerPhase>`
 - `live_delegation_cancellation_reason_by_operation`: `Map<OperationId, LiveDelegationCancellationReason>`
 - `live_delegation_worker_terminal_by_operation`: `Map<OperationId, LiveDelegationWorkerTerminalKind>`
@@ -595,7 +596,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
 - `PrioritizeInput`(input_id: String)
-- `DeferInputBehindBacklog`(input_id: String)
+- `DeferInputBehindBacklog`(input_id: String, cancelled_run_id: Option<RunId>)
 - `StageForRun`(input_id: String, run_id: RunId)
 - `IncrementAttemptCount`(input_id: String)
 - `RollbackStaged`(input_id: String, lane: InputLane)
@@ -665,7 +666,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
 - `AdmitLiveInteractionDelegation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
 - `ReconcileLiveDelegationTranscript`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, final_transcript_committed: Bool, normalized_digest_matches: Bool)
-- `AuthorizeLiveDelegationWorkerStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, worker_identity: String)
+- `AuthorizeLiveDelegationWorkerStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, worker_identity: String, worker_ownership: LiveDelegationWorkerOwnership)
 - `ResolveLiveDelegationWorkerStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, started: Bool)
 - `AuthorizeLiveDelegationTranscriptTerminalCancellation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String)
 - `SupersedeLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, superseding_interaction_id: String, operation_id: OperationId, worker_identity: String)
@@ -949,7 +950,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationAdmitted`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `LiveInteractionDelegationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `LiveDelegationTranscriptReconciled`(channel_id: String, interaction_id: String, operation_id: OperationId, reconciliation: LiveDelegationReconciliation, cancellation_required: Bool)
-- `LiveDelegationWorkerStartAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `LiveDelegationWorkerStartAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, worker_ownership: LiveDelegationWorkerOwnership)
 - `LiveDelegationWorkerStartResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, started: Bool)
 - `LiveDelegationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, reason: LiveDelegationCancellationReason, superseding_interaction_id: Option<String>)
 - `LiveDelegationCancellationResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
@@ -1301,6 +1302,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_pending_delegation_is_serialized_and_complete`
 - `live_delegation_operation_has_exact_join_identity`
 - `live_delegation_worker_binding_is_exact`
+- `live_delegation_existing_member_has_worker_binding`
 - `live_delegation_terminal_is_worker_bound`
 - `live_delegation_result_eligibility_is_terminal_and_confirmed`
 - `live_delegation_late_terminal_never_eligible`
@@ -11085,42 +11087,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeferInputBehindBacklogIdle`
 - From: `Idle`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_queued`
 - To: `Idle`
 
 ### `DeferInputBehindBacklogAttached`
 - From: `Attached`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_queued`
 - To: `Attached`
 
 ### `DeferInputBehindBacklogRunning`
 - From: `Running`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_queued`
 - To: `Running`
 
 ### `DeferInputBehindBacklogRetired`
 - From: `Retired`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_queued`
 - To: `Retired`
 
 ### `DeferInputBehindBacklogStopped`
 - From: `Stopped`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_queued`
 - To: `Stopped`
 
 ### `DeferInputBehindBacklogAlreadyResolvedIdle`
 - From: `Idle`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_tracked`
   - `input_not_in_lane`
@@ -11129,7 +11131,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeferInputBehindBacklogAlreadyResolvedAttached`
 - From: `Attached`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_tracked`
   - `input_not_in_lane`
@@ -11138,7 +11140,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeferInputBehindBacklogAlreadyResolvedRunning`
 - From: `Running`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_tracked`
   - `input_not_in_lane`
@@ -11147,7 +11149,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeferInputBehindBacklogAlreadyResolvedRetired`
 - From: `Retired`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_tracked`
   - `input_not_in_lane`
@@ -11156,11 +11158,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeferInputBehindBacklogAlreadyResolvedStopped`
 - From: `Stopped`
-- On: `DeferInputBehindBacklog`(input_id)
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
 - Guards:
   - `input_tracked`
   - `input_not_in_lane`
   - `input_resolved_past_queued`
+- To: `Stopped`
+
+### `DeferInputBehindBacklogAlreadyArchivedIdle`
+- From: `Idle`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `exact_cancelled_batch`
+  - `input_not_live`
+- To: `Idle`
+
+### `DeferInputBehindBacklogAlreadyArchivedAttached`
+- From: `Attached`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `exact_cancelled_batch`
+  - `input_not_live`
+- To: `Attached`
+
+### `DeferInputBehindBacklogAlreadyArchivedRunning`
+- From: `Running`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `exact_cancelled_batch`
+  - `input_not_live`
+- To: `Running`
+
+### `DeferInputBehindBacklogAlreadyArchivedRetired`
+- From: `Retired`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `exact_cancelled_batch`
+  - `input_not_live`
+- To: `Retired`
+
+### `DeferInputBehindBacklogAlreadyArchivedStopped`
+- From: `Stopped`
+- On: `DeferInputBehindBacklog`(input_id, cancelled_run_id)
+- Guards:
+  - `exact_cancelled_batch`
+  - `input_not_live`
 - To: `Stopped`
 
 ### `StageForRunIdle`
@@ -14540,7 +14582,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeLiveDelegationWorkerStartIdle`
 - From: `Idle`
-- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity, worker_ownership)
 - Guards:
   - `worker_identity_present`
   - `runtime_binding_matches`
@@ -14554,7 +14596,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeLiveDelegationWorkerStartAttached`
 - From: `Attached`
-- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity, worker_ownership)
 - Guards:
   - `worker_identity_present`
   - `runtime_binding_matches`
@@ -14568,7 +14610,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeLiveDelegationWorkerStartRunning`
 - From: `Running`
-- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity, worker_ownership)
 - Guards:
   - `worker_identity_present`
   - `runtime_binding_matches`
@@ -15265,7 +15307,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_worker_binding`
   - `durable_terminal_was_not_yet_recorded`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15275,7 +15317,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_worker_binding`
   - `durable_terminal_was_not_yet_recorded`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15285,7 +15327,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_worker_binding`
   - `durable_terminal_was_not_yet_recorded`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15295,7 +15337,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_worker_binding`
   - `durable_terminal_was_not_yet_recorded`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15305,7 +15347,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_worker_binding`
   - `durable_terminal_was_not_yet_recorded`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15315,7 +15357,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_terminal_worker_binding`
   - `restart_fence_is_not_already_complete`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15325,7 +15367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_terminal_worker_binding`
   - `restart_fence_is_not_already_complete`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15335,7 +15377,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_terminal_worker_binding`
   - `restart_fence_is_not_already_complete`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15345,7 +15387,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_terminal_worker_binding`
   - `restart_fence_is_not_already_complete`
 - Emits: `LiveDelegationWorkerRestartReconciled`
@@ -15355,7 +15397,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id, channel_id, interaction_id, operation_id, worker_identity, terminal)
 - Guards:
-  - `original_channel_is_revoked_and_noncurrent`
+  - `original_channel_is_unbound_and_noncurrent`
   - `exact_persisted_terminal_worker_binding`
   - `restart_fence_is_not_already_complete`
 - Emits: `LiveDelegationWorkerRestartReconciled`

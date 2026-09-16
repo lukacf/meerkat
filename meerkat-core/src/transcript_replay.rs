@@ -991,7 +991,7 @@ fn is_text_projection(source: &ContentBlock, projected: &ContentBlock) -> bool {
 
 fn source_text_projection(source: &AssistantBlock) -> String {
     match source {
-        AssistantBlock::Transcript { text, .. } => text.clone(),
+        AssistantBlock::Transcript { text, source, .. } => source.text_for_model(text).into_owned(),
         AssistantBlock::Reasoning { text, .. } => format!("[Reasoning: {text}]"),
         _ => String::new(),
     }
@@ -1004,13 +1004,21 @@ fn assistant_payload_eq(source: &AssistantBlock, projected: Option<&AssistantBlo
     match (source, projected) {
         (AssistantBlock::Text { text: left, .. }, AssistantBlock::Text { text: right, .. })
         | (
-            AssistantBlock::Transcript { text: left, .. },
-            AssistantBlock::Transcript { text: right, .. },
-        )
-        | (
             AssistantBlock::Reasoning { text: left, .. },
             AssistantBlock::Reasoning { text: right, .. },
         ) => left == right,
+        (
+            AssistantBlock::Transcript {
+                text: left,
+                source: left_source,
+                ..
+            },
+            AssistantBlock::Transcript {
+                text: right,
+                source: right_source,
+                ..
+            },
+        ) => left == right && left_source == right_source,
         (
             AssistantBlock::ToolUse {
                 id: left_id,
@@ -1118,6 +1126,69 @@ fn validate_tool_adjacency(messages: &[Message]) -> Result<(), ReplayPlanError> 
 mod tests {
     use super::*;
     use crate::{BlockAssistantMessage, StopReason, UserMessage};
+
+    #[test]
+    fn unmeasured_transcript_lowering_cannot_drop_the_source_qualifier() {
+        let source = AssistantBlock::Transcript {
+            text: "voice-only discussion".into(),
+            source: crate::TranscriptSource::SpokenUnmeasured,
+            meta: None,
+        };
+        let messages = [Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![source.clone()],
+            StopReason::EndTurn,
+        ))];
+        let plan = ReplayPlan::build(
+            &messages,
+            ReplayTarget::new(
+                ReplayWireFamily::OpenAi,
+                false,
+                false,
+                false,
+                ReplayToolResultProjection::CollapseToText,
+                ReplayReasoningProjection::Omit,
+            ),
+        )
+        .unwrap_or_else(|error| panic!("replay plan: {error}"));
+        for (text, valid) in [
+            ("voice-only discussion".to_string(), false),
+            (
+                crate::TranscriptSource::SpokenUnmeasured
+                    .text_for_model("voice-only discussion")
+                    .into_owned(),
+                true,
+            ),
+        ] {
+            let projected = AssistantBlock::Text { text, meta: None };
+            let mut application = plan.application();
+            application
+                .record_message(
+                    ReplaySubject::Message(ReplayMessageIndex(0)),
+                    &messages[0],
+                    Some(&messages[0]),
+                )
+                .unwrap_or_else(|error| panic!("message replay: {error}"));
+            assert_eq!(
+                application
+                    .record_assistant(
+                        ReplaySubject::AssistantBlock {
+                            message: ReplayMessageIndex(0),
+                            block: ReplayAssistantBlockIndex(0)
+                        },
+                        &source,
+                        Some(&projected),
+                    )
+                    .is_ok(),
+                valid
+            );
+        }
+        let relabelled = AssistantBlock::Transcript {
+            text: "voice-only discussion".into(),
+            source: crate::TranscriptSource::Spoken,
+            meta: None,
+        };
+        assert!(!assistant_payload_eq(&source, Some(&relabelled)));
+    }
 
     #[test]
     fn empty_text_native_replay_is_limited_to_openai_assistant_items() {

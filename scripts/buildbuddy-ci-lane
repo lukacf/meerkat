@@ -120,15 +120,17 @@ case "${mode}" in
     fi
     root_mode="fresh"
     ;;
-  changed|changed-committed|changed-paths|paths)
-    should_run=0
-    ;;
   "${lane}")
     should_run=1
     root_mode="fresh"
     ;;
   *)
-    should_run=0
+    # A mode this script does not implement must fail the lane, not skip it:
+    # a skip exits 0 and the gate reads that as a pass. `changed-paths` did
+    # exactly that for every code lane from 2026-08-28 to 2026-09-16.
+    printf 'error: BuildBuddy mode %s is not implemented for lane %s; refusing to report an unrun lane as passed\n' \
+      "${mode}" "${lane}" >&2
+    exit 2
     ;;
 esac
 

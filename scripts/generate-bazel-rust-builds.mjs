@@ -947,6 +947,16 @@ function testSourceInputs(target, pkg, packageRoot) {
 }
 
 const externalTestSourcesByOwner = new Map();
+function registerExternalInput(owner, consumer, absolute) {
+  let entry = externalTestSourcesByOwner.get(owner.id);
+  if (!entry) {
+    entry = { paths: new Set(), visibility: new Set() };
+    externalTestSourcesByOwner.set(owner.id, entry);
+  }
+  entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
+  entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+}
+const includeMacroRe = /\binclude_(?:str|bytes)!\(\s*"([^"]+)"\s*\)|\binclude!\(\s*"([^"]+)"\s*\)/g;
 for (const consumer of localPackages.values()) {
   const consumerRoot = packageDir(consumer);
   for (const target of consumer.targets) {
@@ -956,13 +966,26 @@ for (const consumer of localPackages.values()) {
       if (pathIsWithin(absolute, consumerRoot)) continue;
       const owner = localPackageOwningSource(absolute);
       if (!owner) continue;
-      let entry = externalTestSourcesByOwner.get(owner.id);
-      if (!entry) {
-        entry = { paths: new Set(), visibility: new Set() };
-        externalTestSourcesByOwner.set(owner.id, entry);
-      }
-      entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
-      entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+      registerExternalInput(owner, consumer, absolute);
+    }
+  }
+  // A crate that include_str!/include_bytes! a file of another workspace
+  // member (meerkat-contracts embeds meerkat-core's tool-policy fixtures)
+  // needs that member to export the file: Bazel sandboxes each package.
+  const sourceFiles = new Set([
+    ...consumer.targets.map((target) => target.src_path),
+    ...rustSourceFiles(consumerRoot, true),
+  ]);
+  for (const sourceFile of sourceFiles) {
+    const source = readFileSync(sourceFile, "utf8");
+    for (const match of source.matchAll(includeMacroRe)) {
+      const includePath = match[1] ?? match[2];
+      if (!includePath) continue;
+      const absolute = resolve(dirname(sourceFile), includePath);
+      if (!existsSync(absolute) || pathIsWithin(absolute, consumerRoot)) continue;
+      const owner = localPackageOwningSource(absolute);
+      if (!owner || owner.id === consumer.id) continue;
+      registerExternalInput(owner, consumer, absolute);
     }
   }
 }
@@ -1001,6 +1024,14 @@ function compileData(target, packageRoot, includeTests) {
       ) {
         const rel = relative(resolve(root, "meerkat-machine-kernels"), absolute).replaceAll("\\", "/");
         labels.add(`//meerkat-machine-kernels:${rel}`);
+      } else {
+        // Cross-package include: the owner exports the file (see the
+        // externalTestSourcesByOwner pre-pass) and this target names it.
+        const owner = localPackageOwningSource(absolute);
+        if (owner) {
+          const rel = relative(packageDir(owner), absolute).replaceAll("\\", "/");
+          labels.add(`//${packageKey(owner)}:${rel}`);
+        }
       }
     }
     if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
@@ -2190,18 +2221,6 @@ for (const pkg of localPackages.values()) {
             `exports_files(`,
             `    ${listExpr([...externalTestSources.paths].sort(), 8)},`,
             `    visibility = ${listExpr([...externalTestSources.visibility].sort(), 8)},`,
-            `)`,
-            "",
-          ]
-        : []),
-      ...(key === "meerkat-machine-kernels"
-        ? [
-            `exports_files(`,
-            `    [`,
-            `        "src/generated/meerkat.rs",`,
-            `        "src/generated/mob.rs",`,
-            `    ],`,
-            `    visibility = ["//meerkat-machine-codegen:__pkg__"],`,
             `)`,
             "",
           ]

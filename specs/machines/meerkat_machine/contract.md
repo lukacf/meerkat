@@ -681,7 +681,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveConsequentialEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String)
 - `AuthorizeLiveDelegationResultRelease`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `AuthorizeLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
-- `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, observation: LiveDelegationResultDeliveryObservation)
+- `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveDelegationResultDeliveryObservation)
 - `BindLiveDelegationResultRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
 - `AdmitLiveBridgeOperation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, structural_lineage_proven: Bool)
 - `ConfirmLiveBridgeFinalInput`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String)
@@ -703,7 +703,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
-- `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, observation: LiveContextAppendObservation)
+- `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
 - `BindLiveContextRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
@@ -15699,7 +15699,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveDelegationResultDeliveryIdle`
 - From: `Idle`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `observation_without_replacement`
   - `runtime_binding_matches`
@@ -15711,7 +15711,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveDelegationResultDeliveryAttached`
 - From: `Attached`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `observation_without_replacement`
   - `runtime_binding_matches`
@@ -15723,7 +15723,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveDelegationResultDeliveryRunning`
 - From: `Running`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `observation_without_replacement`
   - `runtime_binding_matches`
@@ -15735,7 +15735,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveDelegationResultDeliveryAmbiguousIdle`
 - From: `Idle`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `ambiguous_observation_and_fresh_replacement`
   - `runtime_binding_matches`
@@ -15743,12 +15743,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `pending_delivery_matches`
   - `recovery_facts_present`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
 - To: `Idle`
 
 ### `ResolveLiveDelegationResultDeliveryAmbiguousAttached`
 - From: `Attached`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `ambiguous_observation_and_fresh_replacement`
   - `runtime_binding_matches`
@@ -15756,12 +15757,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `pending_delivery_matches`
   - `recovery_facts_present`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
 - To: `Attached`
 
 ### `ResolveLiveDelegationResultDeliveryAmbiguousRunning`
 - From: `Running`
-- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `ambiguous_observation_and_fresh_replacement`
   - `runtime_binding_matches`
@@ -15769,6 +15771,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `pending_delivery_matches`
   - `recovery_facts_present`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
 - To: `Running`
 
@@ -16839,6 +16842,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
   - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
@@ -16856,6 +16860,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
   - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
@@ -16873,6 +16878,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
   - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
@@ -16936,6 +16942,66 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveContextAppendDeferred`
 - To: `Running`
 
+### `AuthorizeLiveContextAppendDeferredByCloseIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `close_revoked_delivery`
+- Emits: `LiveContextAppendDeferred`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendDeferredByCloseAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `close_revoked_delivery`
+- Emits: `LiveContextAppendDeferred`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendDeferredByCloseRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `close_revoked_delivery`
+- Emits: `LiveContextAppendDeferred`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendDeferredByRecoveryIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `recovery_owns_replacement`
+- Emits: `LiveContextAppendDeferred`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendDeferredByRecoveryAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `recovery_owns_replacement`
+- Emits: `LiveContextAppendDeferred`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendDeferredByRecoveryRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `recovery_owns_replacement`
+- Emits: `LiveContextAppendDeferred`
+- To: `Running`
+
 ### `AuthorizeLiveContextAppendDeliveredReplayIdle`
 - From: `Idle`
 - On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
@@ -16965,7 +17031,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendDeliveredIdle`
 - From: `Idle`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `delivery_observed`
@@ -16983,7 +17049,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendDeliveredAttached`
 - From: `Attached`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `delivery_observed`
@@ -17001,7 +17067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendDeliveredRunning`
 - From: `Running`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `delivery_observed`
@@ -17019,7 +17085,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendAmbiguousIdle`
 - From: `Idle`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `ambiguity_observed`
@@ -17033,12 +17099,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_matches_without_advance`
   - `ambiguity_not_recorded`
   - `append_not_already_delivered`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveContextAmbiguityRecoveryAuthorized`
 - To: `Idle`
 
 ### `ResolveLiveContextAppendAmbiguousAttached`
 - From: `Attached`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `ambiguity_observed`
@@ -17052,12 +17119,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_matches_without_advance`
   - `ambiguity_not_recorded`
   - `append_not_already_delivered`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveContextAmbiguityRecoveryAuthorized`
 - To: `Attached`
 
 ### `ResolveLiveContextAppendAmbiguousRunning`
 - From: `Running`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `ambiguity_observed`
@@ -17071,6 +17139,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cursor_matches_without_advance`
   - `ambiguity_not_recorded`
   - `append_not_already_delivered`
+  - `seed_is_exact_known_canonical_high_watermark`
 - Emits: `LiveContextAmbiguityRecoveryAuthorized`
 - To: `Running`
 
@@ -17127,7 +17196,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendInterruptedByCloseIdle`
 - From: `Idle`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - ``
 - Emits: `LiveContextAppendResolved`
@@ -17135,7 +17204,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendInterruptedByCloseAttached`
 - From: `Attached`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - ``
 - Emits: `LiveContextAppendResolved`
@@ -17143,7 +17212,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendInterruptedByCloseRunning`
 - From: `Running`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - ``
 - Emits: `LiveContextAppendResolved`
@@ -17151,7 +17220,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendRejectedIdle`
 - From: `Idle`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `rejection_observed`
@@ -17166,7 +17235,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendRejectedAttached`
 - From: `Attached`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `rejection_observed`
@@ -17181,7 +17250,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveLiveContextAppendRejectedRunning`
 - From: `Running`
-- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation)
 - Guards:
   - `append_present`
   - `rejection_observed`

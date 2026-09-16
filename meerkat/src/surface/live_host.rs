@@ -1899,8 +1899,10 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let profile_id = authority
             .bound_execution_profile_id(recovery.closing_channel_id(), recovery.session_id())
             .await?;
-        self.close_live_channel(Some(authority), recovery.closing_channel_id())
-            .await?;
+        self.orchestrator()
+            .close_experimental_live_channel_for_context_recovery(&self.host, authority, &recovery)
+            .await?
+            .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
 
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,

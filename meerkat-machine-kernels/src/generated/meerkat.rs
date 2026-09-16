@@ -14637,6 +14637,7 @@ pub mod inputs {
         pub operation_id: OperationId,
         pub result_digest: String,
         pub replacement_channel_id: String,
+        pub canonical_seed_cursor: u64,
         pub observation: LiveDelegationResultDeliveryObservation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14853,6 +14854,7 @@ pub mod inputs {
         pub previous_cursor: u64,
         pub next_cursor: u64,
         pub replacement_channel_id: String,
+        pub canonical_seed_cursor: u64,
         pub observation: LiveContextAppendObservation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -20655,6 +20657,12 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendDeferredByTurnIdle,
     AuthorizeLiveContextAppendDeferredByTurnAttached,
     AuthorizeLiveContextAppendDeferredByTurnRunning,
+    AuthorizeLiveContextAppendDeferredByCloseIdle,
+    AuthorizeLiveContextAppendDeferredByCloseAttached,
+    AuthorizeLiveContextAppendDeferredByCloseRunning,
+    AuthorizeLiveContextAppendDeferredByRecoveryIdle,
+    AuthorizeLiveContextAppendDeferredByRecoveryAttached,
+    AuthorizeLiveContextAppendDeferredByRecoveryRunning,
     AuthorizeLiveContextAppendDeliveredReplayIdle,
     AuthorizeLiveContextAppendDeliveredReplayAttached,
     AuthorizeLiveContextAppendDeliveredReplayRunning,

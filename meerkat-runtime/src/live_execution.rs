@@ -3703,6 +3703,7 @@ impl LiveContextAmbiguityRecoveryAuthority {
     pub(crate) fn from_generated_effect(
         append: &LiveContextAppendAuthority,
         replacement_channel_id: &LiveChannelId,
+        expected_canonical_seed_cursor: u64,
         effect: &MeerkatMachineEffect,
     ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
         let MeerkatMachineEffect::LiveContextAmbiguityRecoveryAuthorized {
@@ -3723,7 +3724,8 @@ impl LiveContextAmbiguityRecoveryAuthority {
             || closing_channel_id != append.channel_id.as_str()
             || effect_replacement != replacement_channel_id.as_str()
             || append_id != &append.append_id
-            || *canonical_seed_cursor != append.next_cursor
+            || *canonical_seed_cursor != expected_canonical_seed_cursor
+            || *canonical_seed_cursor < append.next_cursor
         {
             return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch);
         }

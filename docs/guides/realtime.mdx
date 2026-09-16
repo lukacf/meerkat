@@ -787,6 +787,23 @@ already acknowledged edge is not resent. A provider turn that wins the
 boundary also produces a typed deferral, not a projection failure. Local
 cursor/row bookkeeping is serialized only during projection and receipt
 realization, never while waiting for a provider acknowledgement.
+Enqueue acknowledges store-sealed canonical staging, not provider delivery.
+An owned, channel-scoped drain retains submission and error custody independently
+of the committing turn or any cancelled observer; exact close flushes that
+worker's quiescence before committing terminality. A historical post-commit
+delivery/recovery failure remains observable and is reported during close, but
+cannot block cleanup once its worker stopped and physical retirement is proven.
+This does not bypass failed canonical transcript projection: that still blocks
+the physical drain. A streamed service turn that promotes
+its provisional tail still projects the exact promoted store boundary.
+Provider turn-finish callbacks wake that owned task without awaiting it, including
+empty or idempotent transcript completions. Generated close revocation defers
+new sends; a generated ambiguity recovery realizes its own old-channel close
+without trying to join the worker that is performing that recovery.
+Assistant rows attributed by generated authority to an existing voice worker
+are executor trace for generic mirroring: their result has the separate
+delegation-specific delivery path. Later ordinary background interactions
+remain eligible for generic context delivery.
 
 Provider ingress routes append receipts before the control consumer, so a
 control task committing its final user transcript cannot wait on its own

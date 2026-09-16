@@ -823,6 +823,7 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
                 operation_id: operation_id(),
                 result_digest: "open-turn-result-digest".to_string(),
                 replacement_channel_id: String::new(),
+                canonical_seed_cursor: 0,
                 observation,
             },
         )
@@ -994,6 +995,7 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
             operation_id: operation_id(),
             result_digest: RESULT_DIGEST.to_string(),
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
         },
     )
@@ -1114,6 +1116,7 @@ fn newer_user_turn_suppresses_late_old_result_speech_without_cancelling_completi
             operation_id: operation_id(),
             result_digest: RESULT_DIGEST.to_string(),
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
         },
     )
@@ -1238,6 +1241,7 @@ fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
             operation_id: operation_id(),
             result_digest: "deferred-result-digest".to_string(),
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
         },
     )
@@ -1371,6 +1375,7 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
             operation_id: operation_id(),
             result_digest: "bounded-result-digest".to_string(),
             replacement_channel_id: "channel-result-recovery".to_string(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveDelegationResultDeliveryObservation::Ambiguous,
         },
     )
@@ -2069,6 +2074,7 @@ fn stale_fence_and_ambiguous_context_retry_are_rejected() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: "channel-live-recovery".to_string(),
+            canonical_seed_cursor: 1,
             observation: mm::LiveContextAppendObservation::Ambiguous,
         },
     )
@@ -2086,6 +2092,7 @@ fn stale_fence_and_ambiguous_context_retry_are_rejected() {
                 previous_cursor: 0,
                 next_cursor: 1,
                 replacement_channel_id: String::new(),
+                canonical_seed_cursor: 0,
                 observation: mm::LiveContextAppendObservation::Delivered,
             },
         )
@@ -2123,6 +2130,7 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: REPLACEMENT.to_string(),
+            canonical_seed_cursor: 1,
             observation: mm::LiveContextAppendObservation::Ambiguous,
         },
     )
@@ -2214,6 +2222,79 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
 }
 
 #[test]
+fn ambiguous_context_recovery_seeds_all_committed_rows_without_claiming_acknowledgement() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    enqueue_mirror_row(&mut authority, "queued-first", 1);
+    enqueue_mirror_row(&mut authority, "queued-later", 2);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "queued-first".to_string(),
+            previous_cursor: 0,
+            next_cursor: 1,
+        },
+    )
+    .expect("authorize exact first edge");
+    for canonical_seed_cursor in [1, 3] {
+        assert!(
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::ResolveLiveContextAppend {
+                    channel_id: CHANNEL.to_string(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    append_id: "queued-first".to_string(),
+                    previous_cursor: 0,
+                    next_cursor: 1,
+                    replacement_channel_id: "fresh-recovery".to_string(),
+                    canonical_seed_cursor,
+                    observation: mm::LiveContextAppendObservation::Ambiguous,
+                }
+            )
+            .is_err(),
+            "recovery cannot omit or invent canonical rows"
+        );
+    }
+    let resolved = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveContextAppend {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "queued-first".to_string(),
+            previous_cursor: 0,
+            next_cursor: 1,
+            replacement_channel_id: "fresh-recovery".to_string(),
+            canonical_seed_cursor: 2,
+            observation: mm::LiveContextAppendObservation::Ambiguous,
+        },
+    )
+    .expect("canonical recovery includes queued undelivered rows");
+    assert!(resolved.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveContextAmbiguityRecoveryAuthorized {
+            canonical_seed_cursor: 2,
+            ..
+        }
+    )));
+    assert_eq!(
+        authority
+            .state()
+            .live_context_cursor_by_channel
+            .get(CHANNEL),
+        Some(&0),
+        "a recovery seed is not a provider acknowledgement"
+    );
+}
+
+#[test]
 fn context_resolution_without_pre_send_authority_is_rejected() {
     let mut authority = opened_authority();
     bind_only(&mut authority);
@@ -2230,6 +2311,7 @@ fn context_resolution_without_pre_send_authority_is_rejected() {
                 previous_cursor: 0,
                 next_cursor: 1,
                 replacement_channel_id: String::new(),
+                canonical_seed_cursor: 0,
                 observation: mm::LiveContextAppendObservation::Delivered,
             },
         )
@@ -2263,6 +2345,7 @@ fn close_interrupted_context_spends_attempt_without_retry_or_replacement() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveContextAppendObservation::InterruptedByClose,
         },
     )
@@ -2325,6 +2408,7 @@ fn rejected_context_append_clears_pending_edge_without_advancing_cursor() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveContextAppendObservation::Rejected,
         },
     )
@@ -2374,22 +2458,26 @@ fn active_turn_defers_context_without_loss_and_rows_send_in_canonical_order() {
     )
     .expect("provider turn is active");
 
-    assert!(
-        apply(
-            &mut authority,
-            mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
-                channel_id: CHANNEL.to_string(),
-                runtime_id: runtime_id(),
-                fence_token: fence(),
-                generation: generation(),
-                append_id: "context-first".to_string(),
-                previous_cursor: 0,
-                next_cursor: 1,
-            },
-        )
-        .is_err(),
-        "active provider turn is not a safe append boundary"
-    );
+    let deferred = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "context-first".to_string(),
+            previous_cursor: 0,
+            next_cursor: 1,
+        },
+    )
+    .expect("active turn produces typed deferral without issuing send authority");
+    assert!(deferred.effects().iter().any(|effect| matches!(effect,
+        mm::MeerkatMachineEffect::LiveContextAppendDeferred { append_id, .. }
+            if append_id == "context-first")));
+    assert!(!deferred.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveContextAppendAuthorized { .. }
+    )));
     assert_eq!(
         authority
             .state()
@@ -2467,6 +2555,7 @@ fn active_turn_defers_context_without_loss_and_rows_send_in_canonical_order() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
             observation: mm::LiveContextAppendObservation::Delivered,
         },
     )

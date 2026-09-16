@@ -9756,6 +9756,7 @@ mod tests {
         enum ExitKind {
             ContextReceiptWhileControlBusy,
             ContextAppendPendingClose,
+            ContextRecoveryFailureThenClose,
             ProviderManaged,
             SnapshotCut,
             PrefixCut,
@@ -9783,6 +9784,7 @@ mod tests {
         for (ordinal, exit) in [
             ExitKind::ContextReceiptWhileControlBusy,
             ExitKind::ContextAppendPendingClose,
+            ExitKind::ContextRecoveryFailureThenClose,
             ExitKind::ProviderManaged,
             ExitKind::SnapshotCut,
             ExitKind::PrefixCut,
@@ -10061,7 +10063,9 @@ mod tests {
                 .expect("pump-exit adapter is retained");
             if matches!(
                 exit,
-                ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose
+                ExitKind::ContextReceiptWhileControlBusy
+                    | ExitKind::ContextAppendPendingClose
+                    | ExitKind::ContextRecoveryFailureThenClose
             ) {
                 sideband
                     .acknowledge_after_fragment_flood
@@ -10095,6 +10099,60 @@ mod tests {
                     Arc::new(canonical),
                 )
                 .expect("seal committed source");
+                if matches!(exit, ExitKind::ContextRecoveryFailureThenClose) {
+                    sideband
+                        .acknowledge_after_fragment_flood
+                        .store(false, Ordering::Release);
+                    sideband.fail_close.store(true, Ordering::Release);
+                    runtime
+                        .enqueue_committed_parent_session_boundary(&session_id, &committed, &token)
+                        .await
+                        .expect("canonical enqueue is independent of recovery I/O");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        runtime.drain_live_context_outbox_for_channel(&session_id, &channel_id),
+                    )
+                    .await
+                    .expect("recovery failure observation is bounded")
+                    .expect_err("first physical recovery close fails without losing error");
+                    sideband.fail_close.store(false, Ordering::Release);
+                    sideband
+                        .close()
+                        .await
+                        .expect("physical EOF now becomes observable");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        member_host.close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        ),
+                    )
+                    .await
+                    .expect("retry close joins quiescent worker")
+                    .expect(
+                        "historical recovery failure cannot poison a now-proven physical close",
+                    );
+                    runtime
+                        .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+                        .await
+                        .expect_err("delivery error remains observable after close");
+                    assert!(
+                        runtime
+                            .live_session_for_active_channel(&channel_id)
+                            .await
+                            .is_none()
+                    );
+                    assert!(
+                        !authority
+                            .transport
+                            .registered_by_channel
+                            .lock()
+                            .await
+                            .contains_key(&channel_id)
+                    );
+                    continue;
+                }
                 if matches!(exit, ExitKind::ContextAppendPendingClose) {
                     sideband.hold_context_ack.store(true, Ordering::Release);
                     let sending_runtime = Arc::clone(&runtime);
@@ -10159,6 +10217,13 @@ mod tests {
                         &committed,
                         &token,
                     ),
+                )
+                .await
+                .expect("enqueue cannot wait on busy control consumer")
+                .expect("canonical context is queued");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    runtime.drain_live_context_outbox_for_channel(&session_id, &channel_id),
                 )
                 .await
                 .expect("ACK cannot wait on busy control consumer or 128 duplicate fragments")
@@ -11224,6 +11289,7 @@ mod tests {
                 ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose => {
                     unreachable!()
                 }
+                ExitKind::ContextRecoveryFailureThenClose => unreachable!(),
                 ExitKind::ProviderManaged
                 | ExitKind::PrefixCut
                 | ExitKind::UnmeasuredCut
@@ -12401,14 +12467,19 @@ mod tests {
                 .expect("exact boundary for blocked recovery");
             let recovery_runtime = Arc::clone(&runtime);
             let recovery_session = session_id.clone();
+            let recovery_channel = stale_old_binding.channel_id().clone();
             let recovery_task = tokio::spawn(async move {
-                recovery_runtime
+                let rows = recovery_runtime
                     .enqueue_committed_parent_session_boundary(
                         &recovery_session,
                         &committed,
                         &store_authority,
                     )
-                    .await
+                    .await?;
+                recovery_runtime
+                    .drain_live_context_outbox_for_channel(&recovery_session, &recovery_channel)
+                    .await?;
+                Ok::<_, meerkat_runtime::RuntimeDriverError>(rows)
             });
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 if matches!(summary_case, Some(SummaryTestCase::BlockRegistration)) {
@@ -12557,6 +12628,10 @@ mod tests {
                 .expect("ambiguous append realizes replacement"),
             1
         );
+        runtime
+            .drain_live_context_outbox_for_channel(&session_id, stale_old_binding.channel_id())
+            .await
+            .expect("owned ambiguous append publishes its replacement");
 
         let replacement = mirror_host
             .pending_replacement_required(&session_id)
@@ -12827,7 +12902,8 @@ mod tests {
             .await
             .expect("admit exact result-recovery delegation");
         let final_transcript = service
-            .commit_live_user_transcript_final(
+            .commit_live_user_transcript_final_with_machine(
+                &runtime,
                 &session_id,
                 provisional.clone(),
                 Some(meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
@@ -13102,5 +13178,799 @@ mod tests {
                 .is_none(),
             "the production already-closed branch must not recreate provider custody"
         );
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        not(target_arch = "wasm32")
+    ))]
+    mod promoted_turn_context_regression {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use async_trait::async_trait;
+        use futures::StreamExt;
+        use meerkat_client::types::LlmStream;
+        use meerkat_client::{LlmClient, LlmError, LlmRequest, TestClient};
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+        use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+        use meerkat_core::{Message, SessionId};
+        use meerkat_runtime::input_state::{InputStatePersistenceRecord, StoredInputState};
+        use meerkat_runtime::live_context_mirror::LiveContextMirrorHost;
+        use meerkat_runtime::live_execution::{
+            LiveContextAmbiguityRecoveryAuthority, LiveContextAppendAuthority,
+            LiveDelegationResultAmbiguityRecoveryAuthority,
+        };
+        use meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot;
+        use meerkat_runtime::store::{
+            CommittedWholeBlobProvisionalTail, FencedMachineLifecycleCasOutcome,
+            InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+            MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
+            MachineLifecycleObservation, PreparedRecoveryInputSnapshot,
+            PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
+            PreparedRuntimeSessionCommitResult, PreparedWholeBlobRewriteStoreParts,
+            RecoveryInputSetRevision, RecoveryInputStateMutation, RuntimeSessionAuthorityOps,
+            RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError,
+            RuntimeStoreWriteFence, SerializedSessionSnapshot, UnregisterFinalizationCommit,
+            WholeBlobStoreAuthority,
+        };
+        use meerkat_runtime::{InMemoryRuntimeStore, LogicalRuntimeId};
+        use tokio::sync::{Mutex, Notify, Semaphore};
+
+        const PROMPT: &str = "Remember the delayed typed fact: the launch code is amber-713.";
+        const REPLY: &str = "Recorded: the launch code is amber-713.";
+        const DEADLINE: Duration = Duration::from_secs(5);
+
+        struct DelayedStreamClient {
+            inner: TestClient,
+            entered: Notify,
+            release: Notify,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LlmClient for DelayedStreamClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[Message],
+            ) -> Result<Vec<Message>, LlmError> {
+                self.inner.project_replay_messages(messages)
+            }
+
+            fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(
+                    futures::stream::once(async move {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        self.inner.stream(request)
+                    })
+                    .flatten(),
+                )
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                self.inner.provider()
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                self.inner.health_check().await
+            }
+        }
+
+        struct PromotionEvidence {
+            candidate: CommittedWholeBlobProvisionalTail,
+            receipt: RunBoundaryReceipt,
+        }
+
+        /// Observe the real store boundary without manufacturing a checkpoint or
+        /// replacing any store write. A body-free service-terminal request can
+        /// only be a provisional promotion, unlike a receipt-only success.
+        struct PromotionRecordingStore {
+            inner: InMemoryRuntimeStore,
+            promotion: Mutex<Option<PromotionEvidence>>,
+            entered: Notify,
+            release: Notify,
+        }
+
+        #[async_trait]
+        impl RuntimeStore for PromotionRecordingStore {
+            fn session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps {
+                &self.inner
+            }
+
+            async fn commit_prepared_session_boundary(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                request: PreparedRuntimeSessionCommit,
+            ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+                if request.kind() == PreparedRuntimeSessionCommitKind::ServiceTurnTerminal {
+                    assert!(
+                        request.session().is_none(),
+                        "the streamed turn must promote, not rewrite an inline session body"
+                    );
+                    let candidate =
+                        RuntimeStore::load_whole_blob_provisional_tail(&self.inner, runtime_id)
+                            .await?
+                            .expect(
+                                "actual agent checkpointer left a store-issued provisional tail",
+                            );
+                    let receipt = request
+                        .receipt()
+                        .expect("terminal boundary receipt")
+                        .clone();
+                    assert_eq!(candidate.authority().run_id(), &receipt.run_id);
+                    assert!(candidate.authority().candidate_sequence() > 0);
+                    assert!(
+                        self.promotion
+                            .lock()
+                            .await
+                            .replace(PromotionEvidence { candidate, receipt })
+                            .is_none(),
+                        "exactly one normal service-turn promotion"
+                    );
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner
+                    .commit_prepared_session_boundary(runtime_id, request)
+                    .await
+            }
+
+            async fn commit_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                session_delta: SerializedSessionSnapshot,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_session_snapshot(runtime_id, session_delta)
+                    .await
+            }
+
+            async fn commit_prepared_whole_blob_rewrite_boundary(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                boundary: PreparedWholeBlobRewriteStoreParts,
+            ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+                self.inner
+                    .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                    .await
+            }
+
+            async fn atomic_apply(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                session_delta: Option<SerializedSessionSnapshot>,
+                receipt: RunBoundaryReceipt,
+                input_updates: Vec<InputStatePersistenceRecord>,
+                session_store_key: Option<SessionId>,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .atomic_apply(
+                        runtime_id,
+                        session_delta,
+                        receipt,
+                        input_updates,
+                        session_store_key,
+                    )
+                    .await
+            }
+
+            async fn load_input_states(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Vec<InputStateRow>, RuntimeStoreError> {
+                self.inner.load_input_states(runtime_id).await
+            }
+
+            async fn load_input_states_with_versions(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
+                self.inner.load_input_states_with_versions(runtime_id).await
+            }
+
+            fn input_state_batch_cas_implementation_profile(
+                &self,
+            ) -> InputStateBatchCasImplementationProfile {
+                self.inner.input_state_batch_cas_implementation_profile()
+            }
+
+            async fn compare_and_swap_recovery_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_revision: RecoveryInputSetRevision,
+                mutations: &[RecoveryInputStateMutation],
+            ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_recovery_input_states_atomically(
+                        runtime_id,
+                        expected_revision,
+                        mutations,
+                    )
+                    .await
+            }
+
+            async fn load_pending_terminal_owner_ids_page(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                after: Option<&InputId>,
+                limit: usize,
+            ) -> Result<Vec<InputId>, RuntimeStoreError> {
+                self.inner
+                    .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+                    .await
+            }
+
+            async fn load_input_states_by_ids(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                input_ids: &[InputId],
+            ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+                self.inner
+                    .load_input_states_by_ids(runtime_id, input_ids)
+                    .await
+            }
+
+            async fn load_boundary_receipt(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                run_id: &RunId,
+                sequence: u64,
+            ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+                self.inner
+                    .load_boundary_receipt(runtime_id, run_id, sequence)
+                    .await
+            }
+
+            async fn load_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<Arc<Vec<u8>>>, RuntimeStoreError> {
+                self.inner.load_session_snapshot(runtime_id).await
+            }
+
+            async fn clear_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.clear_session_snapshot(runtime_id).await
+            }
+
+            async fn replace_session_snapshot_if_current(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_current: &[u8],
+                replacement: Vec<u8>,
+            ) -> Result<bool, RuntimeStoreError> {
+                self.inner
+                    .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                    .await
+            }
+
+            async fn clear_session_snapshot_if_current(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_current: &[u8],
+            ) -> Result<bool, RuntimeStoreError> {
+                self.inner
+                    .clear_session_snapshot_if_current(runtime_id, expected_current)
+                    .await
+            }
+
+            async fn persist_input_state(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                state: &InputStatePersistenceRecord,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.persist_input_state(runtime_id, state).await
+            }
+
+            async fn load_input_state(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                input_id: &InputId,
+            ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
+                self.inner.load_input_state(runtime_id, input_id).await
+            }
+
+            async fn load_machine_lifecycle_record(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+                self.inner.load_machine_lifecycle_record(runtime_id).await
+            }
+
+            async fn commit_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                commit: MachineLifecycleCommit,
+                input_states: &[InputStatePersistenceRecord],
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_machine_lifecycle(runtime_id, commit, input_states)
+                    .await
+            }
+
+            async fn observe_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
+                self.inner.observe_machine_lifecycle(runtime_id).await
+            }
+
+            async fn compare_and_swap_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: MachineLifecycleExpectedVersion,
+                replacement: MachineLifecycleCommit,
+            ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                    .await
+            }
+
+            async fn compare_and_swap_machine_lifecycle_with_fence(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: MachineLifecycleExpectedVersion,
+                replacement: MachineLifecycleCommit,
+                write_fence: Arc<dyn RuntimeStoreWriteFence>,
+            ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_machine_lifecycle_with_fence(
+                        runtime_id,
+                        expected,
+                        replacement,
+                        write_fence,
+                    )
+                    .await
+            }
+
+            async fn initialize_ops_lifecycle_if_absent(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                candidate: &PersistedOpsSnapshot,
+            ) -> Result<PersistedOpsSnapshot, RuntimeStoreError> {
+                self.inner
+                    .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                    .await
+            }
+
+            async fn persist_ops_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                snapshot: &PersistedOpsSnapshot,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+            }
+
+            async fn load_ops_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<PersistedOpsSnapshot>, RuntimeStoreError> {
+                self.inner.load_ops_lifecycle(runtime_id).await
+            }
+
+            async fn commit_unregister_finalization(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                finalization: UnregisterFinalizationCommit,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_unregister_finalization(runtime_id, finalization)
+                    .await
+            }
+
+            async fn load_pending_compaction_projections(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError>
+            {
+                self.inner
+                    .load_pending_compaction_projections(runtime_id)
+                    .await
+            }
+        }
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct MirroredText {
+            role: String,
+            text: String,
+        }
+
+        fn persisted_text(message: &Message) -> MirroredText {
+            match message {
+                Message::User(user) => MirroredText {
+                    role: "user".to_string(),
+                    text: user.text_content(),
+                },
+                Message::BlockAssistant(assistant) => MirroredText {
+                    role: "assistant".to_string(),
+                    text: assistant
+                        .blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            meerkat_core::AssistantBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                },
+                other => panic!("unexpected non-text canonical row: {other:?}"),
+            }
+        }
+
+        struct RecordingLiveContextMirrorHost {
+            store: Arc<PromotionRecordingStore>,
+            appends: Mutex<
+                Vec<(
+                    LiveContextAppendAuthority,
+                    MirroredText,
+                    WholeBlobStoreAuthority,
+                )>,
+            >,
+            entered: Notify,
+            acknowledgements: Semaphore,
+        }
+
+        #[async_trait]
+        impl LiveContextMirrorHost for RecordingLiveContextMirrorHost {
+            async fn append_context(
+                &self,
+                authority: LiveContextAppendAuthority,
+                context: String,
+            ) -> Result<
+                (
+                    LiveContextAppendAuthority,
+                    meerkat_core::LiveAppendDeliveryOutcome,
+                ),
+                String,
+            > {
+                let persisted = self
+                    .store
+                    .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(
+                        authority.session_id(),
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .expect("LIVE delivery observes a physically committed boundary");
+                let text: MirroredText =
+                    serde_json::from_str(&context).map_err(|error| error.to_string())?;
+                let row =
+                    usize::try_from(authority.next_cursor() - 1).expect("bounded test cursor");
+                assert_eq!(&text, &persisted_text(&persisted.session().messages()[row]));
+                self.appends.lock().await.push((
+                    authority.clone(),
+                    text,
+                    persisted.authority().clone(),
+                ));
+                self.entered.notify_one();
+                self.acknowledgements
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+                Ok((
+                    authority,
+                    meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+                ))
+            }
+
+            async fn recover_ambiguous_append(
+                &self,
+                _authority: LiveContextAmbiguityRecoveryAuthority,
+            ) -> Result<(), String> {
+                Err("acknowledged fixture must not recover ambiguous context".to_string())
+            }
+
+            async fn recover_ambiguous_delegation_result(
+                &self,
+                _authority: LiveDelegationResultAmbiguityRecoveryAuthority,
+            ) -> Result<(), String> {
+                Err("ordinary typed turn must not enter delegation recovery".to_string())
+            }
+        }
+
+        #[tokio::test]
+        async fn streamed_persistent_turn_promotes_exact_tail_into_live_context_once() {
+            let store = Arc::new(PromotionRecordingStore {
+                inner: InMemoryRuntimeStore::new(),
+                promotion: Mutex::new(None),
+                entered: Notify::new(),
+                release: Notify::new(),
+            });
+            assert_eq!(
+                store.session_persistence_profile(),
+                RuntimeSessionPersistenceProfile::WholeBlobV1
+            );
+            let persistence = crate::PersistenceBundle::new(
+                Arc::new(crate::MemoryStore::new()),
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            );
+            let client = Arc::new(DelayedStreamClient {
+                inner: TestClient::new(vec![
+                    meerkat_client::LlmEvent::TextDelta {
+                        delta: REPLY.to_string(),
+                        meta: None,
+                    },
+                    meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]),
+                entered: Notify::new(),
+                release: Notify::new(),
+                calls: AtomicUsize::new(0),
+            });
+            let factory = crate::AgentFactory::new(std::path::PathBuf::from(
+                ".rkat/promoted-turn-live-regression/sessions",
+            ))
+            .builtins(false);
+            let mut config = crate::Config::default();
+            config.realm.insert(
+                "default".to_string(),
+                meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+                    "openai",
+                    "test-openai-key",
+                )]),
+            );
+            let mut builder = crate::FactoryAgentBuilder::new(factory, config);
+            builder.default_llm_client = Some(client.clone());
+            let (service, runtime) =
+                crate::surface::build_runtime_backed_service(builder, 4, persistence);
+            let service = Arc::new(service);
+            let session = crate::Session::new();
+            let session_id = session.id().clone();
+            let executor_service = service.clone();
+            let executor_runtime = runtime.clone();
+            Box::pin(crate::surface::materialize_session(
+                &service,
+                &runtime,
+                session,
+                crate::CreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: "gpt-realtime-2".to_string(),
+                    prompt: meerkat_core::ContentInput::Text(String::new()),
+                    system_prompt: crate::SystemPromptOverride::Disable,
+                    max_tokens: None,
+                    event_tx: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions::default()),
+                    labels: None,
+                },
+                move |id| {
+                    crate::surface::default_persistent_executor(
+                        executor_service,
+                        executor_runtime,
+                        id,
+                    )
+                },
+            ))
+            .await
+            .expect("materialize a real persistent factory agent");
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let before = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .expect("initial store-sealed boundary");
+            let baseline_count = before.session().messages().len();
+            let baseline_cursor = u64::try_from(baseline_count).expect("bounded baseline cursor");
+            assert!(
+                before
+                    .session()
+                    .messages()
+                    .iter()
+                    .all(|message| matches!(message, Message::System(_))),
+                "factory baseline contains instructions, not prior conversational text"
+            );
+            // This fixture seeds cursor zero. Generated no-send coverage must
+            // advance over the persisted Systems before the two text appends.
+            let binding = runtime
+                .__test_open_live_context_channel(&session_id, 0)
+                .await
+                .expect("generated live execution binding with no provider connection");
+            let mirror = Arc::new(RecordingLiveContextMirrorHost {
+                store: store.clone(),
+                appends: Mutex::new(Vec::new()),
+                entered: Notify::new(),
+                acknowledgements: Semaphore::new(0),
+            });
+            runtime.set_live_context_mirror_host(mirror.clone());
+
+            let turn_service = service.clone();
+            let turn_runtime = runtime.clone();
+            let turn_session = session_id.clone();
+            let mut turn = tokio::spawn(async move {
+                let admission = turn_service
+                    .reserve_runtime_turn_admission(&turn_session)
+                    .await
+                    .unwrap();
+                turn_service
+                    .run_machine_committed_live_turn(
+                        crate::MachineServiceTurnCommitProtocol::from_machine(&turn_runtime),
+                        &turn_session,
+                        crate::StartTurnRequest {
+                            prompt: meerkat_core::ContentInput::Text(PROMPT.to_string()),
+                            injected_context: Vec::new(),
+                            system_prompt: None,
+                            event_tx: None,
+                            runtime: meerkat_core::service::StartTurnRuntimeSemantics {
+                                turn_metadata: Some(meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        },
+                        admission,
+                    )
+                    .await
+                    .map_err(|(error, _)| error)
+            });
+            tokio::select! {
+                () = client.entered.notified() => {}
+                result = &mut turn => panic!("service turn ended before LLM stream: {result:?}"),
+                () = tokio::time::sleep(DEADLINE) => panic!("service turn did not enter LLM stream"),
+            }
+            assert!(mirror.appends.lock().await.is_empty());
+            client.release.notify_one();
+            tokio::time::timeout(DEADLINE, store.entered.notified())
+                .await
+                .expect("real provisional promotion reached");
+            assert!(!turn.is_finished());
+            assert!(
+                mirror.appends.lock().await.is_empty(),
+                "uncommitted candidate is not LIVE context"
+            );
+            let still_committed = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(still_committed.bytes(), before.bytes());
+            assert_eq!(still_committed.authority(), before.authority());
+            store.release.notify_one();
+
+            let result = tokio::time::timeout(DEADLINE, turn)
+                .await
+                .expect("source commit must not wait for provider ACK")
+                .expect("turn task")
+                .expect("normal streamed persistent turn");
+            assert_eq!(result.session_id, session_id);
+            assert_eq!(result.text, REPLY);
+            assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+            tokio::time::timeout(DEADLINE, mirror.entered.notified())
+                .await
+                .expect("promoted boundary must reach LIVE even without another turn or refresh");
+            let committed = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(committed.session().id(), &session_id);
+            assert_eq!(committed.session().messages().len(), baseline_count + 2);
+            assert_eq!(
+                &committed.session().messages()[..baseline_count],
+                before.session().messages(),
+                "promotion preserves the exact factory baseline"
+            );
+            let promotion = store.promotion.lock().await;
+            let evidence = promotion.as_ref().expect("observed actual store promotion");
+            assert_eq!(committed.bytes(), evidence.candidate.candidate_bytes());
+            assert_eq!(
+                committed.authority().blob_sha256(),
+                evidence.candidate.authority().candidate_blob_sha256()
+            );
+            assert_eq!(
+                committed.authority().store_revision(),
+                evidence.candidate.authority().base_store_revision() + 1
+            );
+            assert_eq!(evidence.candidate.authority().session_id(), &session_id);
+            let receipt = evidence.receipt.clone();
+            drop(promotion);
+            assert!(
+                store
+                    .load_whole_blob_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                store
+                    .load_committed_boundary_receipts(&runtime_id, &receipt.run_id)
+                    .await
+                    .unwrap(),
+                vec![receipt.clone()]
+            );
+            assert_eq!(
+                mirror.appends.lock().await.len(),
+                1,
+                "first ACK is deliberately withheld"
+            );
+
+            let mut observer = Box::pin(runtime.drain_live_context_outbox(&session_id));
+            assert!(
+                futures::poll!(observer.as_mut()).is_pending(),
+                "delivery observer waits for the withheld provider ACK"
+            );
+            drop(observer);
+            mirror.acknowledgements.add_permits(2);
+            tokio::time::timeout(DEADLINE, runtime.drain_live_context_outbox(&session_id))
+                .await
+                .expect("owned delivery settles")
+                .expect("both context appends acknowledged");
+            {
+                let appends = mirror.appends.lock().await;
+                assert_eq!(
+                    appends.len(),
+                    2,
+                    "typed user and assistant rows each arrive exactly once"
+                );
+                for (index, (authority, text, observed_store_authority)) in
+                    appends.iter().enumerate()
+                {
+                    assert_eq!(authority.session_id(), &session_id);
+                    assert_eq!(authority.channel_id(), binding.channel_id());
+                    assert_eq!(authority.previous_cursor(), baseline_cursor + index as u64);
+                    assert_eq!(authority.next_cursor(), baseline_cursor + index as u64 + 1);
+                    assert_eq!(
+                        text,
+                        &persisted_text(&committed.session().messages()[baseline_count + index])
+                    );
+                    assert_eq!(observed_store_authority, committed.authority());
+                }
+                assert_eq!(appends[0].1.text, PROMPT);
+                assert_eq!(appends[1].1.text, REPLY);
+            }
+
+            // Replay only the exact store-returned session and its actual
+            // commit token, never a synthesized transcript or authority.
+            let replay = BoundSessionCommit::sealed(committed.session_arc())
+                .expect("seal persisted boundary for replay");
+            assert_eq!(
+                runtime
+                    .enqueue_committed_parent_session_boundary(
+                        &session_id,
+                        &replay,
+                        committed.authority().blob_sha256(),
+                    )
+                    .await
+                    .expect("replay exact canonical boundary"),
+                0
+            );
+            tokio::time::timeout(DEADLINE, runtime.drain_live_context_outbox(&session_id))
+                .await
+                .expect("replay drain settles")
+                .expect("replay is already covered");
+            assert_eq!(mirror.appends.lock().await.len(), 2);
+            let after_replay = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after_replay.bytes(), committed.bytes());
+            assert_eq!(after_replay.authority(), committed.authority());
+            assert_eq!(
+                store
+                    .load_committed_boundary_receipts(&runtime_id, &receipt.run_id)
+                    .await
+                    .unwrap(),
+                vec![receipt]
+            );
+            assert_eq!(
+                runtime
+                    .live_active_channel_for_session(&session_id)
+                    .await
+                    .as_ref(),
+                Some(binding.channel_id())
+            );
+        }
     }
 }

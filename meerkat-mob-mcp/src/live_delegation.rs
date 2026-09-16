@@ -2721,8 +2721,9 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             return Err("provider turn finish does not match the exact started turn".to_string());
         }
-        // The canonical transcript commit wakes context delivery. This
-        // lifecycle callback runs on ingress and cannot await its own ACK.
+        // Wake the owned delivery task even if the final transcript is empty
+        // or already committed; ingress must not await its own provider ACK.
+        self.runtime.wake_live_context_outbox(finished.binding());
         Ok(())
     }
 
@@ -2840,6 +2841,7 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             return Err("client delegation final duplicated completed-turn custody".to_string());
         }
+        self.runtime.wake_live_context_outbox(finished.binding());
         Ok(())
     }
 

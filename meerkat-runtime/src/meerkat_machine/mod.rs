@@ -7726,6 +7726,13 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_projection_gates:
         StdMutex<HashMap<SessionId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    #[cfg(feature = "live")]
+    live_context_drain_tasks: StdMutex<
+        HashMap<
+            (SessionId, meerkat_core::LiveChannelId),
+            Arc<crate::live_context_mirror::LiveContextDrainTask>,
+        >,
+    >,
     /// Process-local custody of generated assistant-output handles. Semantic
     /// identity was frozen by the generated Assistant TurnStarted transition;
     /// these maps provide only exact host addressability.
@@ -9137,6 +9144,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_id: StdMutex::new(HashMap::new()),
@@ -9219,6 +9228,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_id: StdMutex::new(HashMap::new()),
@@ -9300,6 +9311,8 @@ impl MeerkatMachine {
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]

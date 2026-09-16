@@ -7494,7 +7494,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 authority.committed_head_token().to_string()
             }
         };
-        if promotes_provisional_tail {
+        let acknowledgement = if promotes_provisional_tail {
             let (committed_store_revision, committed_authority_token) = match committed_authority {
                 RuntimeSessionAuthority::WholeBlob(authority) => (
                     authority.store_revision(),
@@ -7505,50 +7505,76 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     authority.committed_head_token().to_string(),
                 ),
             };
-            return self
-                .acknowledge_provisional_runtime_boundary_after_commit(
-                    id,
-                    committed_store_revision,
-                    &committed_authority_token,
-                )
-                .await;
-        }
-
-        let acknowledgement = match staged_boundary.profile {
-            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
-                let authority = committed_authority.whole_blob().ok_or_else(|| {
+            self.acknowledge_provisional_runtime_boundary_after_commit(
+                id,
+                committed_store_revision,
+                &committed_authority_token,
+            )
+            .await
+        } else {
+            match staged_boundary.profile {
+                RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                    let authority = committed_authority.whole_blob().ok_or_else(|| {
                     SessionError::Agent(AgentError::InternalError(format!(
                         "WholeBlob machine service-turn returned non-WholeBlob authority for session {id}"
                     )))
                 })?;
-                self.acknowledge_whole_blob_runtime_boundary_after_commit(
-                    id,
-                    authority.store_revision(),
-                    authority.blob_sha256(),
-                )
-                .await
-            }
-            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
-                self.acknowledge_head_canonical_runtime_boundary_after_commit(id, &durable_boundary)
+                    self.acknowledge_whole_blob_runtime_boundary_after_commit(
+                        id,
+                        authority.store_revision(),
+                        authority.blob_sha256(),
+                    )
                     .await
+                }
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                    self.acknowledge_head_canonical_runtime_boundary_after_commit(
+                        id,
+                        &durable_boundary,
+                    )
+                    .await
+                }
+                profile => Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "unsupported committed machine service-turn persistence profile {profile} for session {id}"
+                )))),
             }
-            profile => Err(SessionError::Agent(AgentError::InternalError(format!(
-                "unsupported committed machine service-turn persistence profile {profile} for session {id}"
-            )))),
         };
         acknowledgement?;
 
+        #[cfg(feature = "live")]
+        let promoted_projection = if promotes_provisional_tail
+            && protocol
+                .runtime_adapter
+                .has_live_context_projection_target(id)
+                .await
+        {
+            let projection = self.committed_realtime_projection_guarded(id).await?;
+            if projection.1 != committed_authority_token {
+                return Err(SessionError::Agent(AgentError::InternalError(
+                    "promoted live context projection no longer matches committed store authority"
+                        .to_string(),
+                )));
+            }
+            Some(projection)
+        } else {
+            None
+        };
         // Provider I/O must not hold either the exact commit lease or the
         // recovery gate. The committed boundary and store-issued authority
         // token remain sealed inputs after those serialization guards drop.
         drop(commit_lease);
         drop(turn_guard);
         #[cfg(feature = "live")]
-        protocol
-            .runtime_adapter
-            .enqueue_committed_parent_session_boundary(id, &committed, &committed_authority_token)
-            .await
-            .map_err(runtime_driver_error_to_session_error)?;
+        {
+            let (live_committed, live_token) = promoted_projection.as_ref().map_or(
+                (&committed, &committed_authority_token),
+                |(committed, token)| (committed, token),
+            );
+            protocol
+                .runtime_adapter
+                .enqueue_committed_parent_session_boundary(id, live_committed, live_token)
+                .await
+                .map_err(runtime_driver_error_to_session_error)?;
+        }
         #[cfg(not(feature = "live"))]
         let _ = (&committed, &committed_authority_token);
         Ok(())

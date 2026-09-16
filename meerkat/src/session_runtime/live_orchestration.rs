@@ -3003,6 +3003,56 @@ mod orchestrator {
             channel: &LiveChannelId,
         ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
         {
+            self.close_experimental_live_channel_inner(host, authority, channel, true)
+                .await
+        }
+
+        /// The sealed recovery proves its append already resolved ambiguous.
+        /// Its drain worker is realizing this close and cannot join itself.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel_for_context_recovery(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            recovery: &meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            let binding = self
+                .runtime_adapter
+                .live_delegation_runtime_binding(
+                    recovery.session_id(),
+                    recovery.closing_channel_id(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::surface::ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                        error.to_string(),
+                    )
+                })?;
+            if binding.runtime_id() != recovery.runtime_id()
+                || binding.fence_token() != recovery.fence_token()
+                || binding.generation() != recovery.generation()
+            {
+                return Err(crate::surface::ExperimentalLiveChannelCloseError::BindingMismatch);
+            }
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                recovery.closing_channel_id(),
+                false,
+            )
+            .await
+        }
+
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        async fn close_experimental_live_channel_inner(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+            flush_context_delivery: bool,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
             use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
             use crate::surface::ExperimentalLiveChannelCloseError;
 
@@ -3017,6 +3067,16 @@ mod orchestrator {
                 .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
                 return Ok(None);
+            }
+            if flush_context_delivery
+                && let meerkat_runtime::live_context_mirror::LiveContextDrainCompletion::Failed(
+                    error,
+                ) = self
+                    .runtime_adapter
+                    .quiesce_live_context_outbox_for_channel(&session, channel)
+                    .await
+            {
+                tracing::warn!(%error, %channel, "closing with retained post-commit context delivery failure");
             }
             // Output publication drains before taking the terminal lease.
             let _lease = self

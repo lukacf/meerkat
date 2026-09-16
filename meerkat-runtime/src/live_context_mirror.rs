@@ -2,6 +2,8 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_core::generated::session_document::{
     LiveContextCommittedRowDisposition, LiveContextCommittedRowKind,
     LiveContextCommittedTextProvenance, SessionDocumentEffect, SessionDocumentKey,
@@ -14,6 +16,78 @@ use crate::live_execution::{
     LiveContextAmbiguityRecoveryAuthority, LiveContextAppendAuthority,
     LiveDelegationResultAmbiguityRecoveryAuthority,
 };
+
+/// Owned observation of one drain realization, independent of the canonical
+/// commit caller. The generated outbox remains the delivery authority.
+#[cfg(feature = "live")]
+#[derive(Default)]
+pub(crate) struct LiveContextDrainTask {
+    pub generation: std::sync::atomic::AtomicU64,
+    pub outcome: std::sync::Mutex<Option<Result<(), std::sync::Arc<crate::RuntimeDriverError>>>>,
+    pub changed: tokio::sync::Notify,
+    pub task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// A stopped delivery worker, not evidence that the provider consumed context.
+#[cfg(feature = "live")]
+#[derive(Debug, Clone)]
+pub enum LiveContextDrainCompletion {
+    Succeeded,
+    Failed(std::sync::Arc<crate::RuntimeDriverError>),
+}
+
+#[cfg(feature = "live")]
+impl LiveContextDrainTask {
+    pub fn new() -> Self {
+        Self {
+            generation: std::sync::atomic::AtomicU64::new(0),
+            outcome: std::sync::Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+            task: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub async fn wait(&self) -> Result<(), crate::RuntimeDriverError> {
+        match self.wait_completion().await {
+            LiveContextDrainCompletion::Succeeded => Ok(()),
+            LiveContextDrainCompletion::Failed(error) => Err(crate::RuntimeDriverError::Internal(
+                format!("owned live context delivery failed: {error}"),
+            )),
+        }
+    }
+
+    pub async fn wait_completion(&self) -> LiveContextDrainCompletion {
+        loop {
+            let changed = self.changed.notified();
+            let outcome = self
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(outcome) = outcome {
+                return match outcome {
+                    Ok(()) => LiveContextDrainCompletion::Succeeded,
+                    Err(error) => LiveContextDrainCompletion::Failed(error),
+                };
+            }
+            changed.await;
+        }
+    }
+}
+
+#[cfg(feature = "live")]
+impl Drop for LiveContextDrainTask {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
 
 /// Provider-neutral shell seam for canonical context delivery and generated
 /// ambiguity recovery. Implementations may perform I/O, but receive no power
@@ -166,6 +240,7 @@ pub(crate) fn classify_committed_boundary_rows_after(
     canonical_cursor: u64,
     provenance: LiveContextCommittedTextProvenance,
     store_commit_authority: &str,
+    existing_member_interactions: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<CommittedLiveContextRow>, String> {
     let raw_rows = if let Some(session) = committed.session() {
         session
@@ -211,6 +286,16 @@ pub(crate) fn classify_committed_boundary_rows_after(
     raw_rows
         .into_iter()
         .map(|(sequence, message, serialized)| {
+            let provenance = if provenance
+                == LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+                && matches!(&message, Message::BlockAssistant(assistant)
+                    if assistant.identity.interaction_id.is_some_and(|interaction|
+                        existing_member_interactions.contains(&interaction.to_string())))
+            {
+                LiveContextCommittedTextProvenance::ExecutorTrace
+            } else {
+                provenance
+            };
             CommittedLiveContextRow::classify(
                 session_id,
                 sequence,
@@ -329,5 +414,47 @@ mod tests {
             LiveContextCommittedRowDisposition::ExcludedFromLiveContext
         );
         assert_eq!(row.provider_context(), None);
+    }
+
+    #[test]
+    fn existing_voice_assistant_is_excluded_but_later_ordinary_assistant_is_mirrored() {
+        let session_id = SessionId::new();
+        let voice_interaction = meerkat_core::InteractionId::new();
+        let ordinary_interaction = meerkat_core::InteractionId::new();
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        for interaction in [voice_interaction, ordinary_interaction] {
+            let mut assistant = meerkat_core::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "same factual result".to_string(),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::EndTurn,
+            );
+            assistant.identity.interaction_id = Some(interaction);
+            session.push(Message::BlockAssistant(assistant));
+        }
+        let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            std::sync::Arc::new(session),
+        )
+        .expect("seal exact committed messages");
+        let rows = classify_committed_boundary_rows_after(
+            &session_id,
+            &committed,
+            0,
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+            "store-receipt",
+            &std::collections::BTreeSet::from([voice_interaction.to_string()]),
+        )
+        .expect("classify source-owned interaction provenance");
+        assert_eq!(
+            rows[0].disposition(),
+            LiveContextCommittedRowDisposition::ExcludedFromLiveContext
+        );
+        assert!(rows[0].provider_context().is_none());
+        assert_eq!(
+            rows[1].disposition(),
+            LiveContextCommittedRowDisposition::MirrorParentText
+        );
+        assert!(rows[1].provider_context().is_some());
     }
 }

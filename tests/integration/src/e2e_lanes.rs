@@ -220,6 +220,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s95_cli_slow_mcp_resume_journey, 95);
             scenario(e2e_smoke_s96_gpt_live_client_context_vertical, 96);
             scenario(e2e_smoke_s97_gpt_live_public_client_context_vertical, 97);
+            scenario(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen, 98);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -4143,6 +4144,31 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        98 => Some(&Spec {
+            id: Some(98),
+            lane: Lane::Smoke,
+            title: "GPT Live public playback settlement, close drain and reopen history",
+            timeout_secs: 1200,
+            // The public Live API is reached with a plain OpenAI API key; the
+            // realm binding sources it from the environment.
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            // Same composition and stack budget as scenario 97.
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
         73 => Some(&Spec {
             id: Some(73),
             lane: Lane::Smoke,
@@ -6384,6 +6410,36 @@ mod tests {
                 .unwrap(),
             "tests/integration/gpt_live_public_e2e_test"
         );
+    }
+
+    #[test]
+    fn gpt_live_public_reopen_smoke_shares_scenario_97_composition() {
+        let spec = scenario_spec(98).unwrap();
+        let sibling = scenario_spec(97).unwrap();
+        assert_eq!(spec.lane, Lane::Smoke);
+        assert_eq!(spec.required_env, sibling.required_env);
+        assert_eq!(spec.cwd, sibling.cwd);
+        assert_eq!(spec.env, sibling.env);
+        assert_eq!(spec.pre_commands, sibling.pre_commands);
+        match spec.command {
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                features,
+                all_features,
+            } => {
+                assert_eq!(package, "meerkat-integration-tests");
+                assert_eq!(test_target, "gpt_live_public_e2e");
+                assert_eq!(
+                    test_name,
+                    "e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen"
+                );
+                assert_eq!(features, &["openai-live-e2e"]);
+                assert!(!all_features);
+            }
+            _ => panic!("scenario 98 must remain one sequential Cargo test shard"),
+        }
     }
 
     #[test]

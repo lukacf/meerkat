@@ -138,6 +138,17 @@ mod tests {
     }
 }
 
+/// A future built in its own frame: boxed, and `Send` wherever the runtime
+/// has worker threads. wasm32 is single-threaded and its futures hold
+/// `JsFuture` handles that are not `Send`, so the alias drops the bound there;
+/// callers name this alias instead of spelling the trait object.
+#[cfg(not(target_arch = "wasm32"))]
+pub type OwnFrameFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// wasm32 form of [`OwnFrameFuture`]: no `Send` bound.
+#[cfg(target_arch = "wasm32")]
+pub type OwnFrameFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + 'a>>;
+
 /// Build a future inside this function's own monomorphized frame and box it.
 ///
 /// At opt-level 0 every local in every branch of a function gets its own
@@ -152,13 +163,25 @@ mod tests {
 /// Same idiom as `meerkat_mob::runtime::actor::boxed_arm_future`; measured on
 /// the RPC router dispatch, which reserved 13.4 MiB of debug frame for 163
 /// inline arms (101 KiB in release).
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
-pub fn box_in_own_frame<'a, T, F, Fut>(
-    make: F,
-) -> std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>
+pub fn box_in_own_frame<'a, T, F, Fut>(make: F) -> OwnFrameFuture<'a, T>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T> + Send + 'a,
+{
+    Box::pin(make())
+}
+
+/// wasm32 form of [`box_in_own_frame`]: the same boxing, without the `Send`
+/// bound that wasm futures cannot meet. There is no worker stack to defend on
+/// wasm32; boxing keeps one code shape at the call sites.
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+pub fn box_in_own_frame<'a, T, F, Fut>(make: F) -> OwnFrameFuture<'a, T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T> + 'a,
 {
     Box::pin(make())
 }

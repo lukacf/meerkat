@@ -73,6 +73,11 @@ them.
 
 ### Fixed
 
+- `meerkat_runtime::stack_relief::box_in_own_frame` builds for wasm32 again. The
+  `Send` bound the native helper needs cannot be met by wasm futures (they hold
+  `JsFuture` handles), so the wasm32 form and the new `OwnFrameFuture` alias drop
+  it; call sites are unchanged. The break shipped in 0.8.38's stack fixes and
+  reached main because CI's wasm check was not running (see the CI entry).
 - Public GPT Live preserves one assistant output identity across long pauses
   and delayed delegated-result readouts instead of rejecting the continuation
   as an unsolicited new turn.

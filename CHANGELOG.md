@@ -44,7 +44,10 @@ them.
 - `LiveAssistantPlaybackEvidence`, `LiveAssistantPlaybackTruncationDisposition`,
   and `RealtimeTranscriptEvent` gain snapshot-playback variants. Update exhaustive
   matches; internal playback-authority events remain rejected at the public
-  wire-input boundary.
+  wire-input boundary. The new `RealtimeTranscriptEvent` variants are inserted
+  before `AssistantTurnCompleted` and `AssistantTurnInterrupted`, whose implicit
+  discriminants therefore move; nothing may rely on the numeric position of
+  these variants.
 - `GptLiveBrokerObservation` gains `SessionContextAppendRejected` and
   `DelegationContextAppendRejected`; `LiveSidebandObservationKind` gains
   `AppendRejected`. An explicit failed append is not an acknowledgement or

@@ -64,9 +64,62 @@ const EXPERIMENTAL_CLIENT_PROFILE: &str = "openai.gpt-live-1-codex.client-contex
 const DEFAULT_EXECUTOR_MODEL: &str = "gpt-5.6-sol";
 const OUTPUT_AVAILABLE: &str = "live/assistant_output_available";
 
-struct OutputDelivery {
-    output: LiveAssistantOutputAddress,
+struct OutputDelivery<T = LiveAssistantOutputAddress> {
+    output: T,
     received: oneshot::Sender<()>,
+}
+
+struct ReceivedOutputs<T> {
+    outputs: mpsc::Receiver<T>,
+    receipt_task: Option<tokio::task::JoinHandle<Result<(), &'static str>>>,
+}
+
+impl<T: Send + 'static> ReceivedOutputs<T> {
+    fn new(mut deliveries: mpsc::Receiver<OutputDelivery<T>>, capacity: usize) -> Self {
+        let (sender, outputs) = mpsc::channel(capacity);
+        // Playback settlement can publish another output. Its transport receipt
+        // must not depend on the task waiting for settlement; it is not playback.
+        let receipt_task = tokio::spawn(async move {
+            while let Some(delivery) = deliveries.recv().await {
+                sender
+                    .try_send(delivery.output)
+                    .map_err(|error| match error {
+                        mpsc::error::TrySendError::Full(_) => "output receipt buffer overflow",
+                        mpsc::error::TrySendError::Closed(_) => "output observer closed",
+                    })?;
+                delivery
+                    .received
+                    .send(())
+                    .map_err(|()| "output publisher cancelled before receipt")?;
+            }
+            Ok(())
+        });
+        Self {
+            outputs,
+            receipt_task: Some(receipt_task),
+        }
+    }
+
+    async fn poll(&mut self, wait: Duration) -> Result<Option<T>, Box<dyn std::error::Error>> {
+        match timeout(wait, self.outputs.recv()).await {
+            Err(_) => Ok(None),
+            Ok(Some(output)) => Ok(Some(output)),
+            Ok(None) => {
+                if let Some(task) = self.receipt_task.take() {
+                    task.await??;
+                }
+                Err("shared Live output publication channel closed".into())
+            }
+        }
+    }
+}
+
+impl<T> Drop for ReceivedOutputs<T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.receipt_task.take() {
+            task.abort();
+        }
+    }
 }
 
 struct MeasuredPlaybackPublisher {
@@ -111,7 +164,7 @@ struct SharedPublicLive {
     authority: Arc<ExperimentalGptLiveOpenAuthority>,
     transport: Arc<ExperimentalGptLiveWebrtcTransport>,
     binder: Arc<dyn LiveWebrtcBoundReadyBinder>,
-    outputs: mpsc::Receiver<OutputDelivery>,
+    outputs: ReceivedOutputs<LiveAssistantOutputAddress>,
 }
 
 impl SharedPublicLive {
@@ -187,18 +240,12 @@ impl SharedPublicLive {
         &mut self,
         wait: Duration,
     ) -> Result<Option<Value>, Box<dyn std::error::Error>> {
-        match timeout(wait, self.outputs.recv()).await {
-            Err(_) => Ok(None),
-            Ok(None) => Err("shared Live output publication channel closed".into()),
-            Ok(Some(delivery)) => {
-                let output = serde_json::to_value(delivery.output)?;
-                delivery
-                    .received
-                    .send(())
-                    .map_err(|()| "Live publisher dropped before receipt")?;
-                Ok(Some(output))
-            }
-        }
+        self.outputs
+            .poll(wait)
+            .await?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -426,16 +473,18 @@ impl PublicLiveHarness {
     async fn complete_output(&mut self, output: &Value) -> Result<(), Box<dyn std::error::Error>> {
         let (shared, exact) = self.shared()?;
         assert_eq!(output["channel_id"], json!(exact.id));
-        shared
-            .member_host
-            .complete_live_playback(
+        timeout(
+            Duration::from_secs(45),
+            shared.member_host.complete_live_playback(
                 &exact.id,
                 &exact.activation_receipt,
                 output["output_id"]
                     .as_str()
                     .ok_or("missing assistant output identity")?,
-            )
-            .await?;
+            ),
+        )
+        .await
+        .map_err(|_| "S98 playback completion exceeded its 45-second observation bound")??;
         Ok(())
     }
 
@@ -751,7 +800,7 @@ async fn open_public_live(
             authority: open_authority,
             transport: public_transport,
             binder,
-            outputs,
+            outputs: ReceivedOutputs::new(outputs, 64),
         })
     } else {
         server = server.with_experimental_live_open_authority(open_authority);
@@ -1274,22 +1323,36 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     })?;
     let recall_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
     println!("GPT_LIVE_PUBLIC_AUDIO phase=recall evidence={recall_audio:?}");
+    println!("GPT_LIVE_PUBLIC_STAGE stage=recall_playback_completion");
     live.complete_output(&recall_output).await?;
-    while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
-        live.complete_output(&output).await?;
-    }
+    println!("GPT_LIVE_PUBLIC_STAGE stage=recall_output_drain");
+    timeout(Duration::from_secs(60), async {
+        while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
+            live.complete_output(&output).await?;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "S98 recall output drain exceeded its 60-second observation bound")??;
+    println!("GPT_LIVE_PUBLIC_STAGE stage=existing_member_baseline");
     let recall_text = output_transcript_text(&recalled, before_recall);
 
     // Phase E: a real spoken request executes on the same pre-existing text
     // member. Generated operation custody, not the current roster alone,
     // distinguishes this from the default disposable fork.
     let runtime = live.shared()?.0.runtime.clone();
-    let baseline_operations: Vec<_> = runtime
-        .live_delegation_recovery_snapshots(&session_id)
-        .await?
-        .into_iter()
-        .map(|operation| operation.operation_id().clone())
-        .collect();
+    let baseline_operations: Vec<_> = timeout(
+        Duration::from_secs(15),
+        runtime.live_delegation_recovery_snapshots(&session_id),
+    )
+    .await
+    .map_err(
+        |_| "S98 existing-member operation baseline exceeded its 15-second observation bound",
+    )??
+    .into_iter()
+    .map(|operation| operation.operation_id().clone())
+    .collect();
+    println!("GPT_LIVE_PUBLIC_STAGE stage=existing_member_history");
     let history_before_work = live
         .rpc
         .call(
@@ -1499,6 +1562,85 @@ fn delegated_worker_lifecycle(events: &Value) -> DelegatedWorkerLifecycle {
 mod config_tests {
     use super::{API_KEY_ENV, BINDING, REALM, scenario_config};
     use meerkat_core::CredentialSourceSpec;
+
+    #[tokio::test]
+    async fn output_transport_receipts_do_not_wait_for_playback_or_test_polling() {
+        let (sender, deliveries) = tokio::sync::mpsc::channel(2);
+        let mut outputs = super::ReceivedOutputs::new(deliveries, 2);
+        for output in [1, 2] {
+            let (received, receipt) = tokio::sync::oneshot::channel();
+            sender
+                .send(super::OutputDelivery { output, received })
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), receipt)
+                .await
+                .expect("a control awaiting receipt must not need observer polling")
+                .expect("transport accepted the output");
+        }
+        for expected in [1, 2] {
+            assert_eq!(
+                outputs
+                    .poll(std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn output_receipt_overflow_refuses_ack_and_surfaces_the_error() {
+        let (sender, deliveries) = tokio::sync::mpsc::channel(2);
+        let mut outputs = super::ReceivedOutputs::new(deliveries, 1);
+        let (received, receipt) = tokio::sync::oneshot::channel();
+        sender
+            .send(super::OutputDelivery {
+                output: 1,
+                received,
+            })
+            .await
+            .unwrap();
+        receipt.await.expect("first output accepted");
+        let (received, receipt) = tokio::sync::oneshot::channel();
+        sender
+            .send(super::OutputDelivery {
+                output: 2,
+                received,
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receipt)
+                .await
+                .expect("overflow must fail rather than deadlock")
+                .is_err()
+        );
+        assert_eq!(
+            outputs
+                .poll(std::time::Duration::from_secs(1))
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            outputs
+                .poll(std::time::Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "output receipt buffer overflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_output_observer_retires_its_receipt_pump() {
+        let (sender, deliveries) = tokio::sync::mpsc::channel::<super::OutputDelivery<u8>>(1);
+        drop(super::ReceivedOutputs::new(deliveries, 1));
+        tokio::time::timeout(std::time::Duration::from_secs(1), sender.closed())
+            .await
+            .expect("owned receipt pump must not survive its observer");
+    }
 
     #[test]
     fn working_directory_proof_rejects_failed_unlinked_or_wrong_output() {

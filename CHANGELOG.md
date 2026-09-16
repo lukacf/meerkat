@@ -34,13 +34,64 @@ them.
 
 ### Breaking
 
+- `LiveChannelVerbError` gains `CloseSettlementBusy { channel_id, session_id }`:
+  a Live close whose owning session has a turn with pending tools is reported as
+  busy for retry (RPC `SESSION_BUSY`, mob `MemberLiveError::Unavailable`) instead
+  of an internal error. Update exhaustive matches.
 - Behavior-only: public GPT Live no longer synthesizes assistant completion
   after 1.5 seconds without transcript output or a fixed delegation-readout
   grace period. A quiet stream is not provider completion or playback evidence.
-- `LiveAssistantPlaybackEvidence`, `LiveAssistantPlaybackTruncationDisposition`,
-  and `RealtimeTranscriptEvent` gain snapshot-playback variants. Update exhaustive
-  matches; internal playback-authority events remain rejected at the public
-  wire-input boundary.
+- **Live playback settlement vocabulary (`meerkat-core`):**
+  `LiveAssistantPlaybackEvidence` gains `CallerConfirmedPrefix` and
+  `CallerConfirmedSnapshot`; `LiveAssistantPlaybackTerminalDisposition` gains
+  `CallerConfirmedSnapshot`; `LiveAssistantPlaybackTruncationDisposition` gains
+  `CommittedSnapshot`; `LiveAppendDeliveryOutcome` gains `InterruptedByClose`;
+  `RealtimeTranscriptEvent` gains `AssistantPlaybackSnapshotCommitted` and
+  `AssistantPlaybackTerminalSettled`; `SessionDocumentInput` gains
+  `ObserveLiveAssistantPlaybackSnapshot` and
+  `ResolveRealtimeAssistantPlaybackSnapshot`. Update exhaustive matches;
+  internal playback-authority events remain rejected at the public wire-input
+  boundary. The new variants are inserted in schema order, so the implicit
+  discriminants of the later variants of `RealtimeTranscriptEvent::*`
+  (`AssistantTurnCompleted`, `AssistantTurnInterrupted`),
+  `LiveAssistantPlaybackTruncationDisposition::*`, and `SessionDocumentInput::*`
+  move; nothing may rely on the numeric position of these variants.
+- **Generated machine authority (`meerkat-machine-schema`, `meerkat-runtime`,
+  `meerkat-machine-kernels`):** the session document gains the
+  `live_assistant_playback_segment_by_turn` field on `MeerkatMachineState` and
+  the kernel `State`. `MeerkatMachineInput` and `MeerkatMachineInputVariant`
+  gain `AdvanceLiveAssistantPlaybackSegment`; `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` gain `LiveAssistantPlaybackSegmentAdvanced`;
+  `SessionDocumentInputVariant` gains `ObserveLiveAssistantPlaybackSnapshot` and
+  `ResolveRealtimeAssistantPlaybackSnapshot`; `LiveContextAppendObservation` and
+  `LiveDelegationResultDeliveryObservation` gain `InterruptedByClose`;
+  `LiveDelegationResultSpeechDisposition` gains `Unmeasured`. The kernel `Input`
+  and `InputKind` gain `AdvanceLiveAssistantPlaybackSegment`,
+  `ObserveLiveAssistantPlaybackSnapshot`, and
+  `ResolveRealtimeAssistantPlaybackSnapshot`; `Effect` and `EffectKind` gain
+  `LiveAssistantPlaybackSegmentAdvanced`; `TransitionId` gains
+  `ObserveLiveAssistantPlaybackSnapshot`,
+  `ResolveRealtimeAssistantPlaybackSnapshot`, and the per-phase
+  `AdvanceLiveAssistantPlaybackSegmentIdle` /
+  `AdvanceLiveAssistantPlaybackSegmentAttached` /
+  `AdvanceLiveAssistantPlaybackSegmentRunning`,
+  `ReplayLiveAssistantPlaybackSegmentIdle` /
+  `ReplayLiveAssistantPlaybackSegmentAttached` /
+  `ReplayLiveAssistantPlaybackSegmentRunning`, and
+  `ResolveLiveContextAppendInterruptedByCloseIdle` /
+  `ResolveLiveContextAppendInterruptedByCloseAttached` /
+  `ResolveLiveContextAppendInterruptedByCloseRunning` transitions. Because the
+  generated enums are emitted in schema order, the implicit discriminants and
+  `PartialOrd` positions of every later variant of `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*`, `SessionDocumentInputVariant::*`,
+  `InputKind::*`, `EffectKind::*`, and `TransitionId::*` move. Discriminants of
+  generated machine enums are never a stable contract; match by name. Session
+  documents written by 0.8.38 load unchanged.
+- **Live broker and sideband observations (`meerkat-openai`, `meerkat-live`):**
+  the new variants are inserted in protocol order, so the implicit discriminants
+  of the later variants of `GptLiveBrokerObservation::*` and
+  `LiveSidebandObservationKind::*` move; match by name.
 - `GptLiveBrokerObservation` gains `SessionContextAppendRejected` and
   `DelegationContextAppendRejected`; `LiveSidebandObservationKind` gains
   `AppendRejected`. An explicit failed append is not an acknowledgement or

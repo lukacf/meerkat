@@ -44,6 +44,7 @@ pub trait LiveContextMirrorHost: Send + Sync {
 
     /// Release publication custody for this exact generated close, including
     /// replacements that never activated. This does not authorize closing.
+    #[cfg(feature = "live")]
     async fn retire_closed_channel(
         &self,
         _session_id: &SessionId,

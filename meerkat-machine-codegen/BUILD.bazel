@@ -155,6 +155,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/artifacts_semantic_model.rs",
@@ -208,6 +211,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/named_type_binding_respected.rs",
@@ -261,6 +267,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/render_contracts.rs",
@@ -319,6 +328,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/routed_effect_module_shape.rs",
@@ -374,6 +386,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/runtime_alphabet_parity.rs",

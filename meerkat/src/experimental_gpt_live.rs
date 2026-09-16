@@ -868,7 +868,10 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         self.transport
             .close_physical_if_bound(channel_id, canonical_session_id)
             .await
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)
+            .map_err(|error| {
+                tracing::warn!(%error, %channel_id, "experimental live physical close remains incomplete");
+                ExperimentalLiveOpenAuthorityError::ChannelBindingFailed
+            })
     }
 
     fn control_plane(&self) -> Option<Arc<dyn ExperimentalGptLiveControlPlane>> {
@@ -892,10 +895,105 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ExperimentalLivePhysicalClose {
     NotBound,
     Closed,
+    /// Local transport retirement, not a graceful provider close or model final.
+    Terminated(Arc<ExperimentalLiveTerminalCloseReceipt>),
+}
+
+/// Exact transport-owned fault retained until generated close and fault
+/// projection both complete. Callers cannot mint or rebind this receipt.
+pub struct ExperimentalLiveTerminalCloseReceipt {
+    binding: ProviderWebrtcBinding,
+    observation: LiveAdapterObservation,
+    _projection_custody: meerkat_live::LiveChannelCloseProjectionLease,
+    report: Mutex<ExperimentalLiveTerminalReport>,
+}
+
+#[derive(Default)]
+enum ExperimentalLiveTerminalReport {
+    #[default]
+    Pending,
+    Running(JoinHandle<Result<(), meerkat_live::LiveAdapterHostError>>),
+    Completed,
+    Failed(meerkat_live::LiveAdapterHostError),
+}
+
+impl fmt::Debug for ExperimentalLiveTerminalCloseReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExperimentalLiveTerminalCloseReceipt")
+            .field("channel_id", self.binding.channel_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExperimentalLiveTerminalCloseReceipt {
+    async fn report(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), meerkat_live::LiveAdapterHostError> {
+        if self.binding.session_id() != session_id || self.binding.channel_id() != channel_id {
+            return Err(meerkat_live::LiveAdapterHostError::CloseNotAuthorized);
+        }
+        let mut report = self.report.lock().await;
+        if matches!(*report, ExperimentalLiveTerminalReport::Pending) {
+            let host = Arc::clone(host);
+            let channel = channel_id.clone();
+            let observation = self.observation.clone();
+            // Cancellation of a close observer must not duplicate an already
+            // published fault. The receipt owns the in-flight handoff.
+            *report = ExperimentalLiveTerminalReport::Running(tokio::spawn(async move {
+                host.apply_observation(&channel, &observation).await?;
+                Ok(())
+            }));
+        }
+        let task = match &mut *report {
+            ExperimentalLiveTerminalReport::Running(task) => task,
+            ExperimentalLiveTerminalReport::Completed => return Ok(()),
+            ExperimentalLiveTerminalReport::Failed(error) => return Err(error.clone()),
+            ExperimentalLiveTerminalReport::Pending => {
+                return Err(meerkat_live::LiveAdapterHostError::CloseNotAuthorized);
+            }
+        };
+        let outcome = task.await;
+        match outcome {
+            Ok(Ok(())) => {
+                *report = ExperimentalLiveTerminalReport::Completed;
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                *report = ExperimentalLiveTerminalReport::Pending;
+                Err(error)
+            }
+            Err(error) => {
+                let error = meerkat_live::LiveAdapterHostError::ProjectionError(
+                    meerkat_live::LiveProjectionError::Rejected(format!(
+                        "terminal fault reporting task failed: {error}"
+                    )),
+                );
+                *report = ExperimentalLiveTerminalReport::Failed(error.clone());
+                Err(error)
+            }
+        }
+    }
+}
+
+impl ExperimentalLivePhysicalClose {
+    pub(crate) async fn report_terminal(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), meerkat_live::LiveAdapterHostError> {
+        if let Self::Terminated(receipt) = self {
+            receipt.report(host, session_id, channel_id).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2014,14 +2112,22 @@ struct ActiveExperimentalGptLiveBinding {
 struct ExperimentalGptLiveDrain {
     requested: AtomicBool,
     close_sent: AtomicBool,
-    unactivated_closed: AtomicBool,
+    physically_retired: AtomicBool,
     reader: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
     projection: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
+    terminal: std::sync::Mutex<Option<Arc<ExperimentalLiveTerminalCloseReceipt>>>,
     control_finished: AtomicBool,
     close_task: Mutex<Option<JoinHandle<Result<(), ProviderWebrtcBrokerError>>>>,
+    retirement_task: Mutex<Option<JoinHandle<()>>>,
     projection_retry: AtomicU64,
     projection_retryable: AtomicBool,
     changed: Notify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExperimentalGptLiveDrainOutcome {
+    Graceful,
+    Terminated,
 }
 
 impl Drop for ExperimentalGptLiveDrain {
@@ -2033,6 +2139,25 @@ impl Drop for ExperimentalGptLiveDrain {
 }
 
 impl ExperimentalGptLiveDrain {
+    async fn await_physical_retirement(&self) -> Result<(), ProviderWebrtcBrokerError> {
+        let mut pending = self.retirement_task.lock().await;
+        if self.physically_retired.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let task = pending
+            .as_mut()
+            .ok_or(ProviderWebrtcBrokerError::Unavailable)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        *pending = None;
+        if !self.physically_retired.load(Ordering::Acquire) {
+            return Err(ProviderWebrtcBrokerError::Unavailable);
+        }
+        Ok(())
+    }
+
     fn retry_projection(&self) {
         if self.projection_retryable.swap(false, Ordering::AcqRel) {
             if let Ok(mut receipt) = self.projection.lock() {
@@ -2081,7 +2206,7 @@ impl ExperimentalGptLiveDrain {
         Ok(())
     }
 
-    fn result(&self) -> Option<Result<(), ProviderWebrtcBrokerError>> {
+    fn result(&self) -> Option<Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError>> {
         let reader = match self.reader.lock() {
             Ok(receipt) => *receipt,
             Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
@@ -2090,13 +2215,46 @@ impl ExperimentalGptLiveDrain {
             Ok(receipt) => *receipt,
             Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
         };
+        let terminal = match self.terminal.lock() {
+            Ok(receipt) => receipt.is_some(),
+            Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
+        };
         match (reader, projection) {
-            (Some(Err(error)), _) | (_, Some(Err(error))) => Some(Err(error)),
-            (Some(Ok(())), Some(Ok(()))) if self.control_finished.load(Ordering::Acquire) => {
-                Some(Ok(()))
+            (_, Some(Err(error))) => Some(Err(error)),
+            (Some(reader), Some(Ok(()))) if self.control_finished.load(Ordering::Acquire) => {
+                Some(if terminal {
+                    Ok(ExperimentalGptLiveDrainOutcome::Terminated)
+                } else {
+                    reader.map(|()| ExperimentalGptLiveDrainOutcome::Graceful)
+                })
             }
             _ => None,
         }
+    }
+
+    async fn retain_terminal(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        binding: &ProviderWebrtcBinding,
+        observation: LiveAdapterObservation,
+    ) -> Result<(), ProviderWebrtcBrokerError> {
+        let projection_custody = host
+            .retain_channel_close_projection(binding.session_id(), binding.channel_id())
+            .await
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        let mut terminal = self
+            .terminal
+            .lock()
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        if terminal.is_none() {
+            *terminal = Some(Arc::new(ExperimentalLiveTerminalCloseReceipt {
+                binding: binding.clone(),
+                observation,
+                _projection_custody: projection_custody,
+                report: Mutex::new(ExperimentalLiveTerminalReport::default()),
+            }));
+        }
+        Ok(())
     }
 
     fn finish_reader(&self, result: Result<(), ProviderWebrtcBrokerError>) {
@@ -2113,7 +2271,7 @@ impl ExperimentalGptLiveDrain {
         self.changed.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<(), ProviderWebrtcBrokerError> {
+    async fn wait(&self) -> Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let changed = self.changed.notified();
@@ -3270,9 +3428,7 @@ impl LiveAdapter for ExperimentalGptLiveDeferredAdapter {
             })?;
         if let Some(drain) = drain.as_ref()
             && (!drain.requested.load(Ordering::Acquire)
-                || !drain.close_sent.load(Ordering::Acquire)
-                || (!drain.unactivated_closed.load(Ordering::Acquire)
-                    && drain.result() != Some(Ok(()))))
+                || !drain.physically_retired.load(Ordering::Acquire))
         {
             return Err(LiveAdapterError::ProviderError {
                 code: LiveAdapterErrorCode::InternalError,
@@ -3549,15 +3705,16 @@ impl ExperimentalGptLiveWebrtcTransport {
         channel_id: &meerkat_live::LiveChannelId,
         session_id: &meerkat_core::SessionId,
     ) -> Result<ExperimentalLivePhysicalClose, LiveWebrtcError> {
-        let owns_binding = self
+        let adapter = self
             .registered_by_channel
             .lock()
             .await
             .get(channel_id)
-            .is_some_and(|registration| registration.session_id == *session_id);
-        if !owns_binding {
+            .filter(|registration| registration.session_id == *session_id)
+            .map(|registration| Arc::clone(&registration.adapter));
+        let Some(adapter) = adapter else {
             return Ok(ExperimentalLivePhysicalClose::NotBound);
-        }
+        };
         let provider_binding = self
             .active_by_session
             .lock()
@@ -3569,6 +3726,30 @@ impl ExperimentalGptLiveWebrtcTransport {
             self.close_exact(&provider_binding, None)
                 .await
                 .map_err(provider_signaling_error)?;
+        }
+        let drain = adapter
+            .drain
+            .lock()
+            .map_err(|_| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                ))
+            })?
+            .clone();
+        if let Some(drain) = drain.as_ref() {
+            drain.await_physical_retirement().await.map_err(|error| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(error))
+            })?;
+            let terminal = drain.terminal.lock().map_err(|_| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                ))
+            })?;
+            if let Some(receipt) = terminal.as_ref() {
+                return Ok(ExperimentalLivePhysicalClose::Terminated(Arc::clone(
+                    receipt,
+                )));
+            }
         }
         Ok(ExperimentalLivePhysicalClose::Closed)
     }
@@ -4234,29 +4415,48 @@ impl ExperimentalGptLiveWebrtcTransport {
             return Ok(false);
         };
         drain.retry_projection();
-        drain
-            .request_close(sideband)
-            .await
-            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
-        if activated {
+        let close_result = drain.request_close(sideband).await;
+        let outcome = if activated {
             // Keep the exact binding reachable by the control consumer until
             // provider EOF and successful canonical projection are witnessed.
             drain
                 .wait()
                 .await
-                .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
+                .map_err(ProviderWebrtcSignalingError::SidebandClose)?
+        } else {
+            ExperimentalGptLiveDrainOutcome::Graceful
+        };
+        if outcome == ExperimentalGptLiveDrainOutcome::Graceful {
+            close_result.map_err(ProviderWebrtcSignalingError::SidebandClose)?;
+        } else {
+            if let Err(error) = close_result {
+                tracing::warn!(%error, "failed live transport retired locally without provider close acknowledgement");
+            }
+            if let Some(task) = drain.close_task.lock().await.take() {
+                task.abort();
+                let _ = task.await;
+            }
         }
+        let mut retirement = drain.retirement_task.lock().await;
         let active = self
             .active_by_session
             .lock()
             .await
             .remove(binding.session_id());
         if let Some(active) = active {
-            retire_sideband_actors(active).await;
+            let retired_drain = Arc::clone(&drain);
+            *retirement = Some(tokio::spawn(async move {
+                retire_sideband_actors(active).await;
+                retired_drain
+                    .physically_retired
+                    .store(true, Ordering::Release);
+            }));
         }
-        if !activated {
-            drain.unactivated_closed.store(true, Ordering::Release);
-        }
+        drop(retirement);
+        drain
+            .await_physical_retirement()
+            .await
+            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
         retire_pending_deliveries(self.pending_deliveries.as_ref(), binding.channel_id()).await;
         Ok(true)
     }
@@ -4322,7 +4522,6 @@ fn spawn_sideband_actors(
 
     let (observation_tx, observation_rx) = mpsc::channel(64);
     let observation_sideband = Arc::clone(&sideband);
-    let observation_binding = binding.clone();
     let observation_gate = Arc::clone(&activation_gate);
     let observation_adapter = Arc::clone(&adapter);
     let observation_drain = Arc::clone(&drain);
@@ -4406,10 +4605,6 @@ fn spawn_sideband_actors(
                 }
                 Err(error) => {
                     observation_drain.finish_reader(Err(error));
-                    let _ = observation_adapter.push_observation(LiveSidebandObservation::new(
-                        observation_binding.clone(),
-                        LiveSidebandObservationKind::UnsupportedProviderEvent,
-                    ));
                     observation_adapter.close_stream();
                     let _ = observation_tx.send(Err(error)).await;
                     break;
@@ -4470,7 +4665,26 @@ fn spawn_sideband_actors(
                 let observation = match next {
                     Ok(Some(observation)) => observation,
                     Ok(None) => {
-                        pump_drain.finish_projection(Ok(()));
+                        let reader = pump_drain
+                            .reader
+                            .lock()
+                            .map(|receipt| *receipt)
+                            .map_err(|_| ProviderWebrtcBrokerError::Unavailable);
+                        let result = match reader {
+                            Ok(Some(Err(error))) => pump_drain.retain_terminal(
+                                &activation.live_adapter_host,
+                                &pump_binding,
+                                LiveAdapterObservation::Error {
+                                    code: LiveAdapterErrorCode::ProviderError,
+                                    message: format!(
+                                        "live provider observation transport terminated: {error}"
+                                    ),
+                                },
+                            ).await,
+                            Ok(_) => Ok(()),
+                            Err(_) => Err(ProviderWebrtcBrokerError::Unavailable),
+                        };
+                        pump_drain.finish_projection(result);
                         tracing::warn!("experimental live adapter observation stream ended");
                         break;
                     }
@@ -4486,6 +4700,10 @@ fn spawn_sideband_actors(
                     )
                 {
                     tracing::warn!("experimental live adapter emitted a terminal observation");
+                    let retained = pump_drain
+                        .retain_terminal(&activation.live_adapter_host, &pump_binding, observation)
+                        .await;
+                    pump_drain.finish_projection(retained);
                     break;
                 }
                 pending_projection = Some((observation, None));
@@ -4616,11 +4834,13 @@ fn spawn_sideband_actors(
         {
             pump_drain.finish_projection(Err(ProviderWebrtcBrokerError::ProtocolDrift));
         }
-        if pump_drain.requested.load(Ordering::Acquire) {
-            return;
+        let closing = pump_drain.requested.load(Ordering::Acquire);
+        if !closing {
+            // Mark the exact binding nonselectable before any awaited close.
+            pump_gate.cancel();
         }
-        // Mark the exact binding nonselectable before any awaited close.
-        pump_gate.cancel();
+        // Playback observers hold lifecycle custody. A terminal pump must
+        // release them even when an explicit close is already draining.
         activation
             .live_adapter_host
             .fail_playback_waiters_for_channel(
@@ -4628,6 +4848,9 @@ fn spawn_sideband_actors(
                 "provider observation pump retired before playback terminal settlement",
             )
             .await;
+        if closing {
+            return;
+        }
         let _ = pump_retirement_tx
             .send(ExperimentalGptLivePumpRetirement {
                 activation,
@@ -4818,6 +5041,15 @@ impl LiveWebrtcAnswerTransport for ExperimentalGptLiveWebrtcTransport {
         self.close_exact(&provider_binding, None)
             .await
             .map_err(provider_signaling_error)?;
+        if matches!(
+            self.close_physical_if_bound(&binding.channel_id, &binding.session_id)
+                .await?,
+            ExperimentalLivePhysicalClose::Terminated(_)
+        ) {
+            return Err(LiveWebrtcError::RemoteSignaling {
+                reason: "terminal transport fault requires shared generated close and reporting",
+            });
+        }
         self.unbind_channel(&binding.channel_id, &binding.session_id)
             .await;
         Ok(())
@@ -6014,6 +6246,7 @@ mod tests {
     struct ControlledAmbiguousSideband {
         observation_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<ControlledSidebandEvent>>>,
         observation_rx: Mutex<mpsc::UnboundedReceiver<ControlledSidebandEvent>>,
+        fail_close: AtomicBool,
     }
 
     enum ControlledSidebandEvent {
@@ -6027,6 +6260,7 @@ mod tests {
             Self {
                 observation_tx: std::sync::Mutex::new(Some(observation_tx)),
                 observation_rx: Mutex::new(observation_rx),
+                fail_close: AtomicBool::new(false),
             }
         }
 
@@ -6069,6 +6303,9 @@ mod tests {
         }
 
         async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
+            if self.fail_close.load(Ordering::Acquire) {
+                return Err(ProviderWebrtcBrokerError::Unavailable);
+            }
             self.observation_tx
                 .lock()
                 .expect("controlled sideband sender")
@@ -9105,6 +9342,11 @@ mod tests {
             "a concurrent local close still requires the physical close call to succeed"
         );
         drain.close_sent.store(true, Ordering::Release);
+        assert!(
+            adapter.close().await.is_err(),
+            "a provider acknowledgement does not prove local actors were retired"
+        );
+        drain.physically_retired.store(true, Ordering::Release);
         adapter
             .close()
             .await
@@ -9350,6 +9592,10 @@ mod tests {
             Graceful,
             Eof,
             BrokerError,
+            BrokerErrorCloseRejected,
+            BrokerErrorReportRetry,
+            BrokerErrorReportReceiptLost,
+            BrokerErrorCloseObserverCancelled,
             PublicationRejected,
             ReceiptFailed,
         }
@@ -9368,6 +9614,10 @@ mod tests {
             ExitKind::Graceful,
             ExitKind::Eof,
             ExitKind::BrokerError,
+            ExitKind::BrokerErrorCloseRejected,
+            ExitKind::BrokerErrorReportRetry,
+            ExitKind::BrokerErrorReportReceiptLost,
+            ExitKind::BrokerErrorCloseObserverCancelled,
             ExitKind::PublicationRejected,
             ExitKind::ReceiptFailed,
         ]
@@ -9621,6 +9871,10 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            let mut terminal_events = service
+                .subscribe_session_events(&session_id)
+                .await
+                .expect("observe terminal fault projection");
             let mut snapshot_events = if matches!(exit, ExitKind::ProviderManaged) {
                 Some(
                     service
@@ -10615,6 +10869,45 @@ mod tests {
                     .expect("close pending replacement");
                 continue;
             }
+            if matches!(exit, ExitKind::BrokerErrorCloseRejected) {
+                sideband.fail_close.store(true, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry
+                    | ExitKind::BrokerErrorReportReceiptLost
+                    | ExitKind::BrokerErrorCloseObserverCancelled
+            ) {
+                adapter
+                    .drain
+                    .lock()
+                    .expect("drain")
+                    .as_ref()
+                    .expect("bound")
+                    .requested
+                    .store(true, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry | ExitKind::BrokerErrorReportReceiptLost
+            ) {
+                live_adapter_host
+                    .__fail_next_projection_for_test(
+                        channel_id.clone(),
+                        matches!(exit, ExitKind::BrokerErrorReportReceiptLost),
+                    )
+                    .await;
+            }
+            let close_barrier = if matches!(exit, ExitKind::BrokerErrorCloseObserverCancelled) {
+                Some(
+                    live_adapter_host
+                        .__block_next_close_commit_for_test(channel_id.clone())
+                        .await,
+                )
+            } else {
+                None
+            };
+            let provider_loss_started = std::time::Instant::now();
             match exit {
                 ExitKind::ProviderManaged
                 | ExitKind::PrefixCut
@@ -10630,12 +10923,125 @@ mod tests {
                 ExitKind::SnapshotCut => unreachable!(),
                 ExitKind::Graceful => unreachable!(),
                 ExitKind::Eof => sideband.close().await.expect("inject EOF"),
-                ExitKind::BrokerError => sideband.fail(ProviderWebrtcBrokerError::Unavailable),
+                ExitKind::BrokerError
+                | ExitKind::BrokerErrorCloseRejected
+                | ExitKind::BrokerErrorReportRetry
+                | ExitKind::BrokerErrorReportReceiptLost
+                | ExitKind::BrokerErrorCloseObserverCancelled => {
+                    sideband.fail(ProviderWebrtcBrokerError::Unavailable);
+                }
                 ExitKind::PublicationRejected => reject_release
                     .as_ref()
                     .expect("publication rejection release")
                     .notify_one(),
                 ExitKind::ReceiptFailed => {}
+            }
+            if let Some((entered, release)) = close_barrier {
+                let close_host = Arc::clone(&member_host);
+                let close_authority = Arc::clone(&authority);
+                let close_channel = channel_id.clone();
+                let receipt = opened.pending_receipt().to_string();
+                let mut observer = tokio::spawn(async move {
+                    close_host
+                        .close_experimental_live_pending_channel(
+                            close_authority.as_ref(),
+                            &close_channel,
+                            &receipt,
+                        )
+                        .await
+                });
+                tokio::select! {
+                    outcome = &mut observer => panic!("close returned before blocked host commit: {outcome:?}"),
+                    entered = entered => entered.expect("generated close reaches blocked host commit"),
+                    () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        let physical_retired = adapter.drain.lock().expect("drain").as_ref().expect("bound")
+                            .physically_retired.load(Ordering::Acquire);
+                        let active = runtime.live_session_for_active_channel(&channel_id).await.is_some();
+                        panic!("close did not reach host commit: physical_retired={physical_retired} active={active}");
+                    }
+                }
+                assert!(
+                    runtime
+                        .live_session_for_active_channel(&channel_id)
+                        .await
+                        .is_none(),
+                    "cancel at the exact generated-close/host-commit gap"
+                );
+                observer.abort();
+                assert!(
+                    observer
+                        .await
+                        .expect_err("close observer cancelled")
+                        .is_cancelled()
+                );
+                release
+                    .send(())
+                    .expect("owned commit continues after observer cancellation");
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if matches!(live_adapter_host.channel_status_observation(&channel_id).await,
+                            Ok(observation) if observation.status() == &LiveAdapterStatus::Closed)
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("owned close handoff commits despite observer cancellation");
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry | ExitKind::BrokerErrorReportReceiptLost
+            ) {
+                let error = member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect_err("fault reporting failure must remain visible");
+                assert!(matches!(
+                    error,
+                    crate::surface::ExperimentalLiveChannelCloseError::TerminalProjection(_)
+                ));
+                assert!(
+                    runtime
+                        .live_session_for_active_channel(&channel_id)
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .contains_key(&channel_id),
+                    "generated close cannot discard an unreported terminal fault"
+                );
+                assert!(
+                    authority
+                        .transport
+                        .active_by_session
+                        .lock()
+                        .await
+                        .is_empty(),
+                    "failed fault publication must not keep a dead transport selectable"
+                );
+                live_adapter_host
+                    .__expire_closed_projection_for_test(&channel_id)
+                    .await
+                    .expect("expire closed projection");
+                assert_eq!(
+                    live_adapter_host
+                        .channel_status_observation(&channel_id)
+                        .await
+                        .expect("pending report pins projection past TTL")
+                        .status(),
+                    &LiveAdapterStatus::Closed
+                );
             }
             let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completion)
                 .await
@@ -10650,7 +11056,140 @@ mod tests {
                 .err()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            if matches!(exit, ExitKind::BrokerError | ExitKind::PublicationRejected) {
+            if matches!(
+                exit,
+                ExitKind::BrokerError
+                    | ExitKind::BrokerErrorCloseRejected
+                    | ExitKind::BrokerErrorReportRetry
+                    | ExitKind::BrokerErrorReportReceiptLost
+                    | ExitKind::BrokerErrorCloseObserverCancelled
+            ) {
+                use futures::{FutureExt as _, StreamExt as _};
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .expect("terminal provider failure must allow exact local cleanup"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                assert!(
+                    provider_loss_started.elapsed() < std::time::Duration::from_secs(5),
+                    "terminal provider cleanup must confirm within the browser's five-second close bound"
+                );
+                let custody = member_host
+                    .validate_experimental_live_channel_custody(
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("terminal custody survives physical retirement");
+                assert!(matches!(
+                    custody.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Closed
+                ));
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .expect("exact close receipt replays after provider loss"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                assert!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            "wrong-receipt",
+                        )
+                        .await
+                        .is_err()
+                );
+                let mut faults = 0;
+                while let Some(Some(envelope)) = terminal_events.next().now_or_never() {
+                    match envelope.payload {
+                        meerkat_core::AgentEvent::RunFailed { .. } => faults += 1,
+                        meerkat_core::AgentEvent::TurnCompleted { .. }
+                        | meerkat_core::AgentEvent::TextComplete { .. } => {
+                            panic!("provider failure cannot fabricate turn completion")
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    faults, 1,
+                    "retained terminal fault must publish exactly once"
+                );
+                let before = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("session read")
+                    .expect("session");
+                let reopened = member_host
+                    .open_with_execution_identity(
+                        authority.as_ref(),
+                        &session_id,
+                        &execution_identity,
+                        None,
+                        None,
+                        Some(LiveOpenTransport::Webrtc),
+                    )
+                    .await
+                    .expect("failed provider no longer poisons source reopen");
+                assert_ne!(reopened.channel_id(), &channel_id);
+                drop(adapter);
+                live_adapter_host
+                    .__expire_closed_projection_for_test(&channel_id)
+                    .await
+                    .expect("expire completed projection");
+                assert!(
+                    live_adapter_host
+                        .channel_status_observation(&channel_id)
+                        .await
+                        .is_err(),
+                    "completed close replay must not rely on retained host cache"
+                );
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("old exact close replays after new open");
+                assert_eq!(
+                    runtime
+                        .live_session_for_active_channel(reopened.channel_id())
+                        .await,
+                    Some(session_id.clone())
+                );
+                let after = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("session read")
+                    .expect("session");
+                assert_eq!(
+                    before.messages(),
+                    after.messages(),
+                    "retirement/replay/reopen never rewrites background conversation"
+                );
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .expect("close newly opened channel");
+            }
+            if matches!(exit, ExitKind::PublicationRejected) {
                 assert!(
                     member_host
                         .close_live_channel(Some(authority.as_ref()), &channel_id)

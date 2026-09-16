@@ -13262,7 +13262,8 @@ mod tests {
             meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose,
             meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
         > {
-            Ok(meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose::NotBound)
+            self.log.lock().await.push("physical_close");
+            Ok(meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose::Closed)
         }
     }
 
@@ -13420,6 +13421,27 @@ mod tests {
             .expect("bound identity present");
         assert_eq!(bound.model, "gpt-realtime-2");
         assert_eq!(bound.provider, meerkat_core::Provider::OpenAI);
+        let close = router
+            .dispatch(make_request(
+                "live/close",
+                serde_json::json!({"channel_id": channel_id.as_str()}),
+            ))
+            .await
+            .expect("shared close response");
+        assert!(close.error.is_none(), "strict close failed: {close:?}");
+        assert_eq!(result_value(&close)["status"], "closed");
+        assert_eq!(
+            *log.lock().await,
+            vec!["prepare", "factory", "bind", "physical_close", "unbind"],
+            "RPC must use the same physical/generated/reporting coordinator as member hosts"
+        );
+        assert!(
+            router
+                .runtime_adapter
+                .live_session_for_active_channel(&channel_id)
+                .await
+                .is_none()
+        );
     }
 
     #[cfg(feature = "openai-live")]

@@ -781,10 +781,28 @@ An independently reported playback completion can join a final transcript
 that arrives during close; closing itself never proves playback or hearing.
 Output without playback evidence remains explicitly unmeasured.
 
-A provider/drain failure retains the exact channel custody and returns an
-error, rather than reporting a successful close. Retry the same channel after
-the blocking work or transport condition settles; a timeout does not cancel
-or repeat an in-flight provider close. An ordinary session turn
+A failed projection, missing drain receipt, or unconfirmed physical retirement
+retains the exact channel custody and returns an error. Retry the same channel
+after the blocking work settles; a timeout does not cancel or repeat an
+in-flight provider close.
+
+A terminal provider read failure (including a dropped sideband socket without
+`session.closed`) is different: the shared owner drains the known observation
+prefix, retires the failed local transport, commits generated channel close,
+then projects the retained terminal fault before releasing registration.
+This can return `Closed` without a graceful remote close acknowledgement; it
+does not assert a successful model turn, final transcript, or playback.
+If fault projection fails after generated close, exact close must still be
+retried: the owner retains the reporting obligation and replays it without
+duplicating a completed publication. Do not skip exact close just because
+status already says `Closed`, and do not infer terminality from a generic
+transport error in a surface handler.
+Pending fault reporting pins its transport projection past the normal
+post-close cache TTL. Once cleanup completes, exact receipt replay relies on
+generated custody, not that cache. The generated-close/host-commit handoff
+continues in an owned task if the close observer is cancelled.
+
+An ordinary session turn
 holding pending tools may return a busy close-settlement error; closing a live
 channel does not authorize cancellation or fabricate those tools' results.
 

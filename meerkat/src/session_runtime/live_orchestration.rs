@@ -2992,6 +2992,71 @@ mod orchestrator {
 
         // --- channel verbs -------------------------------------------------
 
+        /// Close exact experimental transport custody before generated close,
+        /// then acknowledge its retained terminal-fault publication. `None`
+        /// leaves an ordinary transport to its existing close coordinator.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
+            use crate::surface::ExperimentalLiveChannelCloseError;
+
+            let session = self
+                .runtime_adapter
+                .live_session_for_status_channel(channel)
+                .await
+                .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
+            let physical = authority
+                .close_physical_if_bound(channel, &session)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
+            if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
+                return Ok(None);
+            }
+            // Output publication drains before taking the terminal lease.
+            let _lease = self
+                .runtime_adapter
+                .acquire_live_open_lifecycle_lease(&session)
+                .await
+                .map_err(|error| {
+                    ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+                })?;
+            let result = if self
+                .runtime_adapter
+                .live_session_for_active_channel(channel)
+                .await
+                .as_ref()
+                == Some(&session)
+            {
+                self.close_live_channel(host, channel, Some(&session))
+                    .await?
+            } else {
+                if self
+                    .live_channel_status(host, channel, Some(&session))
+                    .await?
+                    != meerkat_contracts::WireLiveAdapterStatus::Closed
+                {
+                    return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
+                }
+                LiveCloseResult {
+                    status: meerkat_contracts::LiveCloseStatus::Closed,
+                }
+            };
+            physical
+                .report_terminal(host, &session, channel)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
+            self.runtime_adapter
+                .retire_live_assistant_output_handles(&session, channel);
+            authority.unbind_channel(channel, &session).await;
+            Ok(Some(result))
+        }
+
         /// `live/close`: reserve → generated close authority → host commit.
         pub async fn close_live_channel(
             &self,
@@ -3043,29 +3108,48 @@ mod orchestrator {
                         ),
                     },
                 })?;
-            let authority = self
-                .runtime_adapter
-                .resolve_live_close_result(&session_id, &observation)
-                .await
-                .map_err(|error| LiveChannelVerbError::ResultAuthority {
-                    message: format!("live close authority rejected result: {error}"),
-                })?;
-            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
-                return Err(LiveChannelVerbError::CommitOmitted);
-            };
-            host.commit_channel_close_observation(&observation, close_commit_authority)
+            let target = host
+                .channel_close_commit_target(&observation)
                 .await
                 .map_err(|error| LiveChannelVerbError::HostCommit {
                     message: error.to_string(),
                 })?;
-            host.fail_playback_waiters_for_channel(
-                channel_id,
-                "live channel closed before playback terminal settlement",
-            )
-            .await;
-            self.runtime_adapter
-                .retire_live_assistant_output_handles(&session_id, channel_id);
-            Ok(live_close_result_from_machine_authority(&authority))
+            let runtime = Arc::clone(self.runtime_adapter);
+            let channel = channel_id.clone();
+            // The generated commit and its host realization share one owned
+            // task. Cancelling an RPC observer cannot drop the accepted handoff.
+            let commit = tokio::spawn(async move {
+                let result = async {
+                    let authority = runtime
+                        .resolve_live_close_result(&session_id, &observation)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                            message: format!("live close authority rejected result: {error}"),
+                        })?;
+                    let Some(close_commit_authority) = authority.channel_close_commit_authority()
+                    else {
+                        return Err(LiveChannelVerbError::CommitOmitted);
+                    };
+                    target
+                        .commit(close_commit_authority)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::HostCommit {
+                            message: error.to_string(),
+                        })?;
+                    runtime.retire_live_assistant_output_handles(&session_id, &channel);
+                    Ok(live_close_result_from_machine_authority(&authority))
+                }
+                .await;
+                if let Err(error) = &result {
+                    tracing::warn!(%error, %channel, "live close realization remains incomplete");
+                }
+                result
+            });
+            commit
+                .await
+                .map_err(|error| LiveChannelVerbError::HostCommit {
+                    message: format!("live close realization task failed: {error}"),
+                })?
         }
 
         /// `live/status`: read-only point read over generated status

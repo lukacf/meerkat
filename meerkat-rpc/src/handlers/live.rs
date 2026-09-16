@@ -232,6 +232,8 @@ fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -
         RealtimeSessionOpenProjectionError::Llm(
             meerkat_client::error::LlmError::InvalidInputShape { .. },
         ) => crate::error::INVALID_PARAMS,
+        #[cfg(feature = "openai-live")]
+        RealtimeSessionOpenProjectionError::Summary(_) => crate::error::INTERNAL_ERROR,
         RealtimeSessionOpenProjectionError::Session(_)
         | RealtimeSessionOpenProjectionError::SessionMismatch { .. }
         | RealtimeSessionOpenProjectionError::Seed(
@@ -851,6 +853,11 @@ fn experimental_live_channel_open_error_response(
             id,
             live_open_projection_error_code(&projection_error),
             format!("failed to build session config: {projection_error}"),
+        ),
+        ExperimentalLiveChannelOpenError::Summary(summary_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to summarize live context: {summary_error}"),
         ),
         ExperimentalLiveChannelOpenError::Open(open_error) => {
             live_open_error_response(id, open_error)
@@ -1708,7 +1715,7 @@ pub async fn handle_live_status(
 pub async fn handle_live_close(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    host: &LiveAdapterHost,
+    host: &Arc<LiveAdapterHost>,
     runtime: &Arc<SessionRuntime>,
     #[cfg(feature = "live-webrtc")] answer_transport: Option<&dyn LiveWebrtcAnswerTransport>,
     #[cfg(feature = "openai-live")] experimental_live_open_authority: Option<
@@ -1720,6 +1727,33 @@ pub async fn handle_live_close(
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+
+    #[cfg(feature = "openai-live")]
+    if let Some(authority) = experimental_live_open_authority {
+        match runtime
+            .close_experimental_live_channel(host, authority, &channel_id)
+            .await
+        {
+            Ok(Some(result)) => {
+                return match serde_json::to_value(result) {
+                    Ok(body) => RpcResponse::success(id, body),
+                    Err(error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live close authority projection failed: {error}"),
+                    ),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("live close shared authority failed: {error}"),
+                );
+            }
+        }
+    }
 
     // Serialize the transport close with answer construction. Without this
     // existing session gate, close could observe no peer, then an in-flight

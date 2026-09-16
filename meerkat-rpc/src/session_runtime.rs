@@ -4446,6 +4446,24 @@ impl SessionRuntime {
             .await
     }
 
+    /// Experimental physical retirement and terminal reporting via the shared owner.
+    #[cfg(feature = "openai-live")]
+    pub async fn close_experimental_live_channel(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        authority: &dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        Option<meerkat_contracts::LiveCloseResult>,
+        meerkat::surface::ExperimentalLiveChannelCloseError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .close_experimental_live_channel(host, authority, channel_id)
+            .await
+    }
+
     /// Phase 6b: `live/status` via the shared pipeline.
     pub async fn live_channel_status(
         &self,

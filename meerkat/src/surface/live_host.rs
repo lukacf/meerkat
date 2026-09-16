@@ -40,9 +40,7 @@ use meerkat_runtime::member_live::{
 };
 
 #[cfg(feature = "openai-live")]
-use crate::experimental_gpt_live::{
-    ExperimentalLiveOpenAuthorityError, ExperimentalLivePhysicalClose,
-};
+use crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError;
 use crate::service_factory::FactoryAgentBuilder;
 use crate::session_runtime::admission::StagedCapacityAdmissions;
 use crate::session_runtime::errors::{LiveChannelVerbError, LiveIngressError, LiveOpenError};
@@ -427,6 +425,8 @@ pub enum ExperimentalLiveChannelCloseError {
     LifecycleAuthority(String),
     #[error("experimental live physical transport authority failed: {0}")]
     PhysicalAuthority(ExperimentalLiveOpenAuthorityError),
+    #[error("experimental live terminal fault projection remains incomplete: {0}")]
+    TerminalProjection(meerkat_live::LiveAdapterHostError),
     #[error(transparent)]
     Semantic(#[from] LiveChannelVerbError),
 }
@@ -2163,25 +2163,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         authority: Option<&dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
         channel: &LiveChannelId,
     ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
+        if let Some(authority) = authority
+            && let Some(result) = self
+                .orchestrator()
+                .close_experimental_live_channel(&self.host, authority, channel)
+                .await?
+        {
+            return Ok(result.status);
+        }
         let session = self
             .runtime_adapter
             .live_session_for_active_channel(channel)
             .await
             .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
-        if let Some(authority) = authority {
-            // Already-admitted publications acquire lifecycle custody at the
-            // writer. Drain them before taking the terminal commit lease.
-            match authority.close_physical_if_bound(channel, &session).await {
-                Ok(
-                    ExperimentalLivePhysicalClose::Closed | ExperimentalLivePhysicalClose::NotBound,
-                ) => {}
-                Err(error) => {
-                    // A missing provider/drain receipt is not terminality.
-                    // Preserve the exact binding and staged output for retry.
-                    return Err(ExperimentalLiveChannelCloseError::PhysicalAuthority(error));
-                }
-            }
-        }
         let lifecycle_lease = self
             .runtime_adapter
             .acquire_live_open_lifecycle_lease(&session)
@@ -2308,6 +2302,15 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         }
         if close_custody.already_closed() {
+            let physical = authority
+                .close_physical_if_bound(channel_id, &session_id)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
+            physical
+                .report_terminal(&self.host, &session_id, channel_id)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
+            authority.unbind_channel(channel_id, &session_id).await;
             return Ok(LiveCloseStatus::Closed);
         }
         self.close_live_channel(Some(authority), channel_id).await

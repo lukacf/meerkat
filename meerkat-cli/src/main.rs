@@ -3517,9 +3517,21 @@ fn init_tracing(cli: &Cli) {
         .init();
 }
 
-#[tokio::main]
+fn main() -> anyhow::Result<ExitCode> {
+    // One documented worker-stack budget for every host binary; the main
+    // future runs on a budgeted thread too, not the platform main thread
+    // (1 MiB on Windows).
+    match meerkat_runtime::host_stack::run_host("rkat", cli_main) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("rkat: {err}");
+            Ok(ExitCode::from(2))
+        }
+    }
+}
+
 #[allow(clippy::large_futures)]
-async fn main() -> anyhow::Result<ExitCode> {
+async fn cli_main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
     let auth_config_realm = if matches!(&cli.command, Some(Commands::Auth { .. })) {
         cli.realm.clone()

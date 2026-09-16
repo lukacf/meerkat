@@ -2178,11 +2178,10 @@ static MACHINE_CLEANUP_RUNTIME: OnceLock<StdMutex<Option<crate::tokio::runtime::
     OnceLock::new();
 
 // Machine cleanup can restore and reduce the same generated DSL state as the
-// host runtime. Keep its worker on the repository-wide runtime stack budget;
-// Tokio's platform default (2 MiB on the affected hosts) is not sufficient
-// for large fleet-restore authorities.
+// host runtime, so its worker runs on the same documented budget as every
+// host binary's workers (see `crate::host_stack`).
 #[cfg(not(target_arch = "wasm32"))]
-const MACHINE_CLEANUP_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+const MACHINE_CLEANUP_THREAD_STACK_SIZE: usize = crate::host_stack::HOST_WORKER_STACK_BUDGET;
 
 /// A durability-degradation caller must observe its canonical repair-blocked
 /// result even when a public custom interrupt handle never completes. The

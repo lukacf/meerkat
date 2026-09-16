@@ -117,14 +117,23 @@ fn init_tracing() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     init_tracing();
-    // Render the Display chain, not `Result`'s Debug: a storage refusal's
-    // remedy sentence lives only in Display.
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => report_fatal_error("rkat-mcp", err.as_ref()),
+    // One documented worker-stack budget for every host binary; the main
+    // future runs on a budgeted thread too, not the platform main thread.
+    match meerkat_runtime::host_stack::run_host("rkat-mcp", || async {
+        // Render the Display chain, not `Result`'s Debug: a storage refusal's
+        // remedy sentence lives only in Display.
+        match run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => report_fatal_error("rkat-mcp", err.as_ref()),
+        }
+    }) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("rkat-mcp: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

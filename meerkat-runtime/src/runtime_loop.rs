@@ -4644,7 +4644,8 @@ static RUNTIME_LOOP_SERVING_RUNTIME: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
-const RUNTIME_LOOP_SERVING_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+// Same budget as every host binary's workers (see `crate::host_stack`).
+const RUNTIME_LOOP_SERVING_THREAD_STACK_SIZE: usize = crate::host_stack::HOST_WORKER_STACK_BUDGET;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeLoopTaskSpawner {

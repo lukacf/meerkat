@@ -2,7 +2,7 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "live"))]
 use crate::tokio;
 use meerkat_core::generated::session_document::{
     LiveContextCommittedRowDisposition, LiveContextCommittedRowKind,

@@ -289,13 +289,9 @@ impl MeerkatMachine {
         // monomorphized frame and there is ONE await site: at opt-level 0 each
         // inline arm reserved its locals in this frame (2.4 MiB total) and each
         // `.await` on a boxed future reserves its own Poll/Result temporaries.
-        let arm: std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<MeerkatMachineCommandResult, RuntimeControlPlaneError>,
-                    > + Send
-                    + '_,
-            >,
+        let arm: crate::stack_relief::OwnFrameFuture<
+            '_,
+            Result<MeerkatMachineCommandResult, RuntimeControlPlaneError>,
         > = match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
                 crate::stack_relief::box_in_own_frame(|| async move {

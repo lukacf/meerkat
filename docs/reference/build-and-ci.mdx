@@ -70,6 +70,52 @@ The canonical e2e lane taxonomy lives in
 `tests/integration/src/e2e_lanes.rs`. Scripts and BuildBuddy targets route to
 that taxonomy rather than inventing separate lane names.
 
+### Public Live real-audio smoke
+
+Turbo S scenario 98 remains the existing
+`e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen` selector:
+
+```bash
+./scripts/repo-cargo e2e-smoke \
+  -E 'test(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen)'
+```
+
+This is a paid public `gpt-live-1`/OpenAI test, not a mock or a readiness
+probe. It requires `OPENAI_API_KEY` (or `RKAT_OPENAI_API_KEY`) with Live
+voice-session access, Node/npm, Chromium, and working provider WebRTC.
+Missing credentials, refused transport, and absent speech fail the selected
+test; none becomes a successful skip. The canonical lane installs the
+browser prerequisites.
+
+The existing browser peer sends checked-in synthetic WAV speech through a
+WebAudio media track, never a microphone or user recording. Every checked
+exchange requires new inbound RTP and measured non-silent decoded audio
+(at least 100 ms) or non-silent WebAudio analyser windows. RTP energy is
+diagnostic only; an absent browser statistic remains absent, never a measured
+zero or successful audio evidence.
+Signaling, transcript deltas, and provider completion events cannot satisfy
+that evidence gate. Numeric `GPT_LIVE_PUBLIC_AUDIO` records report measured
+audio. The scenario verifies exact close/reopen on the same durable session,
+with a five-second exact-close ceiling and a 90-second open/reconnect ceiling,
+spoken code-word recall after reopening, and real tool execution through the
+feature-owned `ExistingMember` background-delegation policy. Generated
+operation custody must identify the original member and report a completed
+turn; its canonical history must contain a successful `pwd` result linked to
+the exact `shell` tool call (zero exit, no timeout, and the actual project
+directory), followed by a provider assistant answer. Error-only tool results
+cannot satisfy this gate. No disposable fork is spawned. Its ordinary text model
+and session identity remain unchanged. S98 calls `ServiceMemberLiveHost`'s
+shared, exact-receipt lifecycle directly; S97 retains the RPC/durable-fork
+vertical. After the initial delegation completes, S98 commits a later ordinary
+background turn that changes the code word, then requires the unchanged live
+channel to speak that new word using fresh measured audio. This is separate
+from delivery of the initial delegation's result.
+The existing executor model defaults to `gpt-5.6-sol`; an operator
+may select another available ordinary text model with
+`GPT_LIVE_E2E_EXECUTOR_MODEL` without changing the Live channel's `gpt-live-1`.
+S98's Bazel shard remains
+`//:e2e_smoke_turbo_s_s98`; both backends use the same Rust catalog and test.
+
 The dense Mob topology stress has a dedicated GitHub-hosted Linux workflow,
 `.github/workflows/mob-dense-topology.yml`. The active top-level CI calls it
 and requires its result alongside BuildBuddy, while the full Cargo workflow

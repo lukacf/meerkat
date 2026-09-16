@@ -383,7 +383,9 @@ impl BrowserPeer {
             .arg(protocol.harness_flag())
             .env_remove("MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_API_KEY_OLD")
             .env_remove("RKAT_OPENAI_API_KEY")
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -438,13 +440,7 @@ impl BrowserPeer {
 
     pub async fn audio_evidence(&mut self) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
         let snapshot = self.snapshot().await?;
-        let audio = &snapshot["audio"];
-        Ok(AudioEvidence {
-            decoded_non_silent_frames: audio["decoded_non_silent_frames"].as_u64().unwrap_or(0),
-            non_silent_frames: audio["non_silent_frames"].as_u64().unwrap_or(0),
-            total_audio_energy: audio["total_audio_energy"].as_f64().unwrap_or(0.0),
-            total_samples_received: audio["total_samples_received"].as_u64().unwrap_or(0),
-        })
+        Ok(serde_json::from_value(snapshot["audio"].clone())?)
     }
 
     /// Payload-free summary of `events` under this peer's protocol.
@@ -458,34 +454,104 @@ impl BrowserPeer {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct AudioEvidence {
     pub decoded_non_silent_frames: u64,
+    pub decoded_non_silent_seconds: f64,
     pub non_silent_frames: u64,
-    pub total_audio_energy: f64,
-    pub total_samples_received: u64,
+    pub total_audio_energy: Option<f64>,
+    pub total_samples_received: Option<u64>,
+    pub total_samples_duration: Option<f64>,
+    pub bytes_received: u64,
+    pub packets_received: u64,
+}
+
+impl AudioEvidence {
+    /// Require new remote RTP plus measured non-silent media, never protocol
+    /// events or counters accumulated before this exchange.
+    pub fn has_spoken_since(self, baseline: Self) -> bool {
+        self.bytes_received > baseline.bytes_received
+            && self.packets_received > baseline.packets_received
+            && (self.decoded_non_silent_seconds - baseline.decoded_non_silent_seconds >= 0.1
+                || self
+                    .non_silent_frames
+                    .saturating_sub(baseline.non_silent_frames)
+                    >= 2)
+    }
+}
+
+#[cfg(test)]
+mod audio_evidence_tests {
+    use super::AudioEvidence;
+
+    #[test]
+    fn silence_rtp_readiness_and_stale_audio_are_not_spoken_output() {
+        let silence = AudioEvidence {
+            bytes_received: 10_000,
+            packets_received: 100,
+            total_samples_received: Some(48_000),
+            total_samples_duration: Some(1.0),
+            ..AudioEvidence::default()
+        };
+        assert!(!silence.has_spoken_since(AudioEvidence::default()));
+        let energy_only = AudioEvidence {
+            total_audio_energy: Some(0.01),
+            ..silence
+        };
+        assert!(!energy_only.has_spoken_since(AudioEvidence::default()));
+        let spoken = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..energy_only
+        };
+        assert!(spoken.has_spoken_since(AudioEvidence::default()));
+        assert!(!spoken.has_spoken_since(spoken));
+        let stale = AudioEvidence {
+            bytes_received: spoken.bytes_received + 100,
+            packets_received: spoken.packets_received + 1,
+            total_samples_duration: Some(2.0),
+            ..spoken
+        };
+        assert!(!stale.has_spoken_since(spoken));
+    }
+
+    #[test]
+    fn decoded_audio_requires_remote_rtp_and_a_measured_duration() {
+        let mut evidence = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..AudioEvidence::default()
+        };
+        assert!(!evidence.has_spoken_since(AudioEvidence::default()));
+        evidence.bytes_received = 5_000;
+        evidence.packets_received = 10;
+        assert!(evidence.has_spoken_since(AudioEvidence::default()));
+        evidence.decoded_non_silent_seconds = 0.001;
+        assert!(!evidence.has_spoken_since(AudioEvidence::default()));
+    }
+
+    #[test]
+    fn missing_browser_audio_measurement_is_an_error_not_a_zero_default() {
+        assert!(serde_json::from_value::<AudioEvidence>(serde_json::json!({})).is_err());
+    }
 }
 
 pub async fn wait_for_spoken_output(
     peer: &mut BrowserPeer,
     baseline: AudioEvidence,
     timeout_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    const REQUIRED_NEW_FRAMES: u64 = 2;
+) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         let snapshot = peer.snapshot().await?;
         let audio = &snapshot["audio"];
+        let evidence: AudioEvidence = serde_json::from_value(audio.clone())?;
         let non_silent_frames = audio["non_silent_frames"].as_u64().unwrap_or(0);
         let decoded_non_silent_frames = audio["decoded_non_silent_frames"].as_u64().unwrap_or(0);
-        let total_audio_energy = audio["total_audio_energy"].as_f64().unwrap_or(0.0);
-        let total_samples_received = audio["total_samples_received"].as_u64().unwrap_or(0);
-        if decoded_non_silent_frames > baseline.decoded_non_silent_frames
-            || non_silent_frames.saturating_sub(baseline.non_silent_frames) >= REQUIRED_NEW_FRAMES
-            || (total_audio_energy > baseline.total_audio_energy
-                && total_samples_received > baseline.total_samples_received)
-        {
-            return Ok(());
+        let total_audio_energy = evidence.total_audio_energy;
+        let total_samples_received = evidence.total_samples_received;
+        if evidence.has_spoken_since(baseline) {
+            return Ok(evidence);
         }
         if Instant::now() >= deadline {
             let sampled_frames = audio["sampled_frames"].as_u64().unwrap_or(0);
@@ -497,7 +563,7 @@ pub async fn wait_for_spoken_output(
             let bytes_received = audio["bytes_received"].as_u64().unwrap_or(0);
             let packets_received = audio["packets_received"].as_u64().unwrap_or(0);
             return Err(format!(
-                "timed out waiting for spoken output; decoded_frames={decoded_frames}, decoded_non_silent_frames={decoded_non_silent_frames}, max_decoded_rms={max_decoded_rms:.6}, processor_supported={processor_supported}, processor_errors={processor_errors}, sampled_frames={sampled_frames}, non_silent_frames={non_silent_frames}, max_rms={max_rms:.6}, bytes_received={bytes_received}, packets_received={packets_received}, total_audio_energy={total_audio_energy:.6}, total_samples_received={total_samples_received}"
+                "timed out waiting for spoken output; decoded_frames={decoded_frames}, decoded_non_silent_frames={decoded_non_silent_frames}, max_decoded_rms={max_decoded_rms:.6}, processor_supported={processor_supported}, processor_errors={processor_errors}, sampled_frames={sampled_frames}, non_silent_frames={non_silent_frames}, max_rms={max_rms:.6}, bytes_received={bytes_received}, packets_received={packets_received}, total_audio_energy={total_audio_energy:?}, total_samples_received={total_samples_received:?}"
             )
             .into());
         }

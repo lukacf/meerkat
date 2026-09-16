@@ -1,7 +1,7 @@
 #![cfg(all(feature = "openai-live-e2e", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Scenario 97: public GPT Live (`gpt-live-1`) client-context vertical.
+//! Scenarios 97/98: public GPT Live (`gpt-live-1`) real-audio verticals.
 //!
 //! Twin of scenario 96 on the public OpenAI Live API: a plain OpenAI API key
 //! from the environment is the configured realm binding, the host composes
@@ -9,6 +9,8 @@
 //! admission, or Gate0 evidence, the RPC client selects the public
 //! client-context profile, and the browser peer speaks the public `session.*`
 //! event vocabulary on the `oai-events` data channel.
+//! Scenario 98 uses the same runtime and synthetic speech, with the shared
+//! exact-receipt host and an identity-preserving ExistingMember executor.
 
 #[path = "support/gpt_live_e2e.rs"]
 mod support;
@@ -18,13 +20,27 @@ use std::sync::Arc;
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
+    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePublicObservation,
+    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationPublisher,
     GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL,
     PublicGptLiveOpenAuthorityConfig,
+};
+use meerkat::surface::{
+    ExperimentalGptLiveContextMirrorHost, ExperimentalLiveChannelPhaseStatus,
+    LiveWebrtcBoundReadyBinder, ServiceMemberLiveHost, ServiceMemberLiveHostConfig,
+};
+use meerkat_contracts::{
+    LiveCloseStatus, LiveOpenTransport, WireAssistantBlock, WireLiveTransportBootstrap,
+    WireSessionMessage, WireToolResultContent,
 };
 use meerkat_core::{
     AuthBindingRef, AuthProfileConfig, BackendProfileConfig, BindingId, BindingOrigin,
     BindingPolicy, BlobStore, Config, ConfigRuntime, ConfigStore, CredentialSourceSpec,
     MemoryConfigStore, ProviderBindingConfig, RealmConfigSection, RealmId,
+};
+use meerkat_live::{LiveAssistantOutputAddress, LiveChannelId};
+use meerkat_mob_mcp::live_delegation::{
+    LiveDelegationExecutionPolicy, compose_experimental_live_delegation_coordinator_with_policy,
 };
 use meerkat_rpc::router::NotificationSink;
 use meerkat_rpc::server::RpcServer;
@@ -32,7 +48,8 @@ use meerkat_rpc::session_runtime::SessionRuntime;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::BufReader;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Duration, Instant, sleep, timeout};
 
 use support::{
     BrowserPeer, BrowserPeerProtocol, ExplicitScenarioBindingAuthority, FixedConfigSource,
@@ -47,9 +64,221 @@ const EXPERIMENTAL_CLIENT_PROFILE: &str = "openai.gpt-live-1-codex.client-contex
 const DEFAULT_EXECUTOR_MODEL: &str = "gpt-5.6-sol";
 const OUTPUT_AVAILABLE: &str = "live/assistant_output_available";
 
+struct OutputDelivery {
+    output: LiveAssistantOutputAddress,
+    received: oneshot::Sender<()>,
+}
+
+struct MeasuredPlaybackPublisher {
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    output: mpsc::Sender<OutputDelivery>,
+}
+
+#[async_trait::async_trait]
+impl ExperimentalLivePublicObservationPublisher for MeasuredPlaybackPublisher {
+    async fn publish(
+        &self,
+        observation: ExperimentalLivePublicObservation,
+    ) -> Result<(), ExperimentalLivePublicObservationDeliveryError> {
+        let _custody = self
+            .runtime
+            .acquire_live_binding_publication_custody(observation.binding())
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        let (received, delivery) = oneshot::channel();
+        self.output
+            .send(OutputDelivery {
+                output: observation.into_output(),
+                received,
+            })
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Closed)?;
+        delivery
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)
+    }
+}
+
+struct ExactChannel {
+    id: LiveChannelId,
+    pending_receipt: String,
+    activation_receipt: String,
+}
+
+struct SharedPublicLive {
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    member_host: Arc<ServiceMemberLiveHost>,
+    authority: Arc<ExperimentalGptLiveOpenAuthority>,
+    transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+    binder: Arc<dyn LiveWebrtcBoundReadyBinder>,
+    outputs: mpsc::Receiver<OutputDelivery>,
+}
+
+impl SharedPublicLive {
+    async fn connect(
+        &self,
+        peer: &mut BrowserPeer,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<ExactChannel, Box<dyn std::error::Error>> {
+        let pending = self
+            .member_host
+            .open_with_execution_identity(
+                self.authority.as_ref(),
+                session_id,
+                &serde_json::from_value(execution_identity(
+                    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                ))?,
+                None,
+                None,
+                Some(LiveOpenTransport::Webrtc),
+            )
+            .await?;
+        let WireLiveTransportBootstrap::Webrtc { token, .. } = &pending.open().transport else {
+            return Err("public audio smoke requires real WebRTC transport, not a fallback".into());
+        };
+        let readiness = self
+            .member_host
+            .register_experimental_live_playback_owner(
+                pending.channel_id(),
+                pending.pending_receipt(),
+            )
+            .await?;
+        let offer = peer.call(json!({"type":"prepare"})).await?;
+        assert_eq!(offer["protocol"], "public");
+        let answer = self
+            .member_host
+            .answer_experimental_live_webrtc_offer(
+                self.transport.clone(),
+                self.binder.clone(),
+                pending.channel_id().clone(),
+                pending.pending_receipt(),
+                readiness.readiness_receipt(),
+                token.clone(),
+                offer["offer_sdp"]
+                    .as_str()
+                    .ok_or("browser produced no offer")?
+                    .to_string(),
+            )
+            .await?;
+        assert_eq!(&answer.session_id, session_id);
+        peer.call(json!({"type":"answer","answer_sdp":answer.answer_sdp}))
+            .await?;
+        answer.delivery_custody.delivered().await?;
+        let custody = self
+            .member_host
+            .validate_experimental_live_channel_custody(
+                pending.channel_id(),
+                pending.pending_receipt(),
+            )
+            .await?;
+        let activation_receipt = custody
+            .phase()
+            .activation_receipt()
+            .ok_or("provider answer did not activate the exact pending channel")?
+            .to_string();
+        Ok(ExactChannel {
+            id: pending.channel_id().clone(),
+            pending_receipt: pending.pending_receipt().to_string(),
+            activation_receipt,
+        })
+    }
+
+    async fn poll_output(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+        match timeout(wait, self.outputs.recv()).await {
+            Err(_) => Ok(None),
+            Ok(None) => Err("shared Live output publication channel closed".into()),
+            Ok(Some(delivery)) => {
+                let output = serde_json::to_value(delivery.output)?;
+                delivery
+                    .received
+                    .send(())
+                    .map_err(|()| "Live publisher dropped before receipt")?;
+                Ok(Some(output))
+            }
+        }
+    }
+}
+
 fn executor_model() -> String {
     std::env::var("GPT_LIVE_E2E_EXECUTOR_MODEL")
         .unwrap_or_else(|_| DEFAULT_EXECUTOR_MODEL.to_string())
+}
+
+fn successful_working_directory_result(
+    messages: &[WireSessionMessage],
+    expected_directory: &std::path::Path,
+) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct ShellInvocation {
+        command: String,
+    }
+
+    let expected_directory = expected_directory.canonicalize().ok()?;
+    messages.iter().enumerate().find_map(|(index, message)| {
+        let WireSessionMessage::ToolResults { results, .. } = message else {
+            return None;
+        };
+        results
+            .iter()
+            .any(|result| {
+                if result.is_error {
+                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK result_error=true");
+                    return false;
+                }
+                let invoked_pwd = messages[..index].iter().any(|message| {
+                    let WireSessionMessage::BlockAssistant { blocks, .. } = message else {
+                        return false;
+                    };
+                    blocks.iter().any(|block| {
+                        if let WireAssistantBlock::ToolUse { id, name, args, .. } = block
+                            && id == &result.tool_use_id {
+                            println!("GPT_LIVE_PUBLIC_TOOL_CALL name={name} pwd_command={}",
+                                serde_json::from_str::<ShellInvocation>(args.get())
+                                    .is_ok_and(|call| matches!(call.command.trim(), "pwd" | "pwd -P" | "/bin/pwd" | "/bin/pwd -P")));
+                        }
+                        matches!(block,
+                            WireAssistantBlock::ToolUse { id, name, args, .. }
+                                if id == &result.tool_use_id && name == "shell"
+                                    && serde_json::from_str::<ShellInvocation>(args.get())
+                                        .is_ok_and(|call| matches!(call.command.trim(), "pwd" | "pwd -P" | "/bin/pwd" | "/bin/pwd -P"))
+                        )
+                    })
+                });
+                let shell_output = match &result.content {
+                    WireToolResultContent::Text(content) =>
+                        serde_json::from_str::<meerkat_tools::builtin::shell::ShellOutput>(content),
+                    WireToolResultContent::Blocks(blocks) => match blocks.as_slice() {
+                        [meerkat_contracts::WireContentBlock::Structured { data }] =>
+                            serde_json::from_value(data.clone()),
+                        [meerkat_contracts::WireContentBlock::Text { text }] =>
+                            serde_json::from_str(text),
+                        _ => {
+                            println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} structured_shell_result=false");
+                            return false;
+                        }
+                    },
+                };
+                if let Ok(output) = &shell_output {
+                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} exit_code={:?} timed_out={} absolute_stdout={} expected_directory={}",
+                        output.exit_code, output.timed_out, std::path::Path::new(output.stdout.trim()).is_absolute(),
+                        std::path::Path::new(output.stdout.trim()).canonicalize().is_ok_and(|path| path == expected_directory));
+                } else {
+                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} shell_output=false");
+                }
+                invoked_pwd && shell_output.is_ok_and(|output| {
+                            output.exit_code == Some(0)
+                                && !output.timed_out
+                                && std::path::Path::new(output.stdout.trim()).is_absolute()
+                                && std::path::Path::new(output.stdout.trim())
+                                    .canonicalize()
+                                    .is_ok_and(|directory| directory == expected_directory)
+                        })
+            })
+            .then_some(index)
+    })
 }
 
 fn auth_binding() -> AuthBindingRef {
@@ -72,7 +301,7 @@ fn require_api_key() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     Err(format!(
-        "{API_KEY_ENV} (or RKAT_{API_KEY_ENV}) is required: scenario 97 drives the public OpenAI Live API through an API-key realm binding and does not skip"
+        "{API_KEY_ENV} (or RKAT_{API_KEY_ENV}) is required: public GPT Live smoke drives real WebRTC audio through an API-key realm binding and does not skip"
     )
     .into())
 }
@@ -168,45 +397,116 @@ struct PublicLiveHarness {
     session_id: meerkat_core::SessionId,
     mob_id: String,
     server_task: tokio::task::AbortHandle,
+    shared: Option<(SharedPublicLive, ExactChannel)>,
     _temp: tempfile::TempDir,
 }
 
 impl PublicLiveHarness {
+    fn shared(
+        &mut self,
+    ) -> Result<&mut (SharedPublicLive, ExactChannel), Box<dyn std::error::Error>> {
+        self.shared
+            .as_mut()
+            .ok_or_else(|| "scenario 98 requires the shared ExistingMember host".into())
+    }
+
+    async fn poll_output(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+        self.shared()?.0.poll_output(wait).await
+    }
+
+    async fn output(&mut self) -> Result<Value, Box<dyn std::error::Error>> {
+        self.poll_output(Duration::from_secs(60))
+            .await?
+            .ok_or_else(|| "no shared-host assistant output within 60 seconds".into())
+    }
+
+    async fn complete_output(&mut self, output: &Value) -> Result<(), Box<dyn std::error::Error>> {
+        let (shared, exact) = self.shared()?;
+        assert_eq!(output["channel_id"], json!(exact.id));
+        shared
+            .member_host
+            .complete_live_playback(
+                &exact.id,
+                &exact.activation_receipt,
+                output["output_id"]
+                    .as_str()
+                    .ok_or("missing assistant output identity")?,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn close_exact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (shared, exact) = self.shared()?;
+        let started = Instant::now();
+        let result = timeout(
+            Duration::from_secs(5),
+            shared.member_host.close_experimental_live_active_channel(
+                shared.authority.as_ref(),
+                &exact.id,
+                &exact.activation_receipt,
+            ),
+        )
+        .await??;
+        assert_eq!(result, LiveCloseStatus::Closed);
+        println!(
+            "GPT_LIVE_PUBLIC_EXACT_CLOSE elapsed_ms={} ceiling_ms=5000",
+            started.elapsed().as_millis()
+        );
+        let custody = shared
+            .member_host
+            .validate_experimental_live_channel_custody(&exact.id, &exact.pending_receipt)
+            .await?;
+        assert_eq!(custody.phase(), &ExperimentalLiveChannelPhaseStatus::Closed);
+        Ok(())
+    }
+
+    async fn assert_existing_text_identity(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let session = self
+            .rpc
+            .call("session/read", json!({"session_id":self.session_id}), 30)
+            .await?;
+        assert_eq!(session["session_id"], json!(self.session_id));
+        assert_eq!(session["model"], executor_model());
+        assert_eq!(session["provider"], "openai");
+        let member = self
+            .rpc
+            .call(
+                "mob/member_status",
+                json!({"mob_id":self.mob_id,"agent_identity":"voice-executor"}),
+                30,
+            )
+            .await?;
+        assert_eq!(member["current_session_id"], json!(self.session_id));
+        Ok(())
+    }
+
     /// Close the current browser peer, open a second Live channel on the same
     /// session and answer its offer with a fresh peer. The runtime seeds the
     /// canonical dialogue into the new provider session at creation.
     async fn reopen(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let old_peer = std::mem::replace(
-            &mut self.peer,
-            BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+        let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+        let (shared, exact) = self.shared.as_mut().ok_or("shared host missing")?;
+        let replacement = timeout(
+            Duration::from_secs(90),
+            shared.connect(&mut peer, &self.session_id),
+        )
+        .await??;
+        assert_ne!(replacement.id, exact.id);
+        assert!(
+            shared
+                .member_host
+                .validate_experimental_live_activation(&replacement.id, &exact.activation_receipt,)
+                .await
+                .is_err(),
+            "old activation must not control the replacement channel"
         );
-        old_peer.close().await;
-        let open = self
-            .rpc
-            .call(
-                "live/open",
-                json!({"session_id":self.session_id,"transport":"webrtc",
-                    "execution_identity":execution_identity(GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID)}),
-                60,
-            )
-            .await?;
-        self.channel_id = open["channel_id"].clone();
-        let offer = self.peer.call(json!({"type":"prepare"})).await?;
-        assert_eq!(offer["protocol"], "public");
-        let answer = self
-            .rpc
-            .call(
-                open["transport"]["answer_method"]
-                    .as_str()
-                    .unwrap_or("live/webrtc/answer"),
-                json!({"channel_id":self.channel_id,"token":open["transport"]["token"],
-                    "offer_sdp":offer["offer_sdp"]}),
-                90,
-            )
-            .await?;
-        self.peer
-            .call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
-            .await?;
+        self.channel_id = json!(replacement.id);
+        *exact = replacement;
+        std::mem::replace(&mut self.peer, peer).close().await;
         Ok(())
     }
 }
@@ -214,6 +514,7 @@ impl PublicLiveHarness {
 async fn open_public_live(
     temp_prefix: &str,
     operator_principal: &'static str,
+    execution_policy: LiveDelegationExecutionPolicy,
 ) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
     let temp = tempfile::Builder::new()
         .prefix(temp_prefix)
@@ -311,10 +612,13 @@ async fn open_public_live(
         60,
     )
     .await?;
+    let execution_instructions = matches!(execution_policy, LiveDelegationExecutionPolicy::ExistingMember)
+        .then(|| vec!["For each request to check the current working directory, execute the shell tool with command exactly pwd in its default working directory, even if a previous answer is already in context. Return the actual stdout after the tool succeeds.".to_string()]);
     rpc.call(
         "mob/spawn",
         json!({"mob_id":mob_id,"profile":"executor","agent_identity":"voice-executor",
             "runtime_mode":"turn_driven",
+            "additional_instructions":execution_instructions,
             "auth_binding":{"realm":REALM,"binding":BINDING}}),
         60,
     )
@@ -373,7 +677,7 @@ async fn open_public_live(
     );
     let live_host = Arc::new(meerkat_live::LiveAdapterHost::new(projection.clone()));
     let webrtc = Arc::new(meerkat_live::LiveWebrtcState::new(
-        live_host,
+        live_host.clone(),
         projection.clone(),
         projection,
     ));
@@ -397,13 +701,83 @@ async fn open_public_live(
         Arc::clone(&mobs),
         callback_rx,
     )
-    .with_live_session_factory_opt(Some(live_factory))
-    .with_live_webrtc(webrtc)
-    .with_live_webrtc_answer_transport(public_transport)
-    .with_experimental_live_open_authority(open_authority);
+    .with_live_session_factory_opt(Some(live_factory.clone()))
+    .with_live_webrtc(webrtc.clone())
+    .with_live_webrtc_answer_transport(public_transport.clone());
+    let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember {
+        let member_host = Arc::new(
+            ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
+                service: runtime.inner().service.clone(),
+                runtime_adapter: runtime.runtime_adapter(),
+                host: live_host.clone(),
+                ws_state: None,
+                base_url: None,
+                session_factory: live_factory,
+                realm_id: runtime.realm_id(),
+                instance_id: runtime.instance_id(),
+                backend: runtime.backend(),
+            })
+            .with_webrtc_cleanup_state(webrtc),
+        );
+        let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
+            runtime.runtime_adapter(),
+            mobs.clone(),
+            execution_policy,
+        );
+        let context_host = ExperimentalGptLiveContextMirrorHost::new(
+            runtime.runtime_adapter(),
+            member_host.clone(),
+            open_authority.clone(),
+            coordinator,
+        );
+        runtime
+            .runtime_adapter()
+            .set_member_live_host(member_host.clone());
+        mobs.set_member_live_host(member_host.clone());
+        let (publisher, outputs) = mpsc::channel(32);
+        let binder = open_authority
+            .bound_ready_binder_for(
+                context_host,
+                live_host,
+                Arc::new(MeasuredPlaybackPublisher {
+                    runtime: runtime.runtime_adapter(),
+                    output: publisher,
+                }),
+            )
+            .ok_or("public audio host has no complete WebRTC answer binder")?;
+        Some(SharedPublicLive {
+            runtime: runtime.runtime_adapter(),
+            member_host,
+            authority: open_authority,
+            transport: public_transport,
+            binder,
+            outputs,
+        })
+    } else {
+        server = server.with_experimental_live_open_authority(open_authority);
+        None
+    };
     let server_task = tokio::spawn(async move { server.run().await });
     rpc.call("initialize", json!({}), 60).await?;
 
+    if let Some(shared) = shared {
+        let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+        let exact = timeout(
+            Duration::from_secs(90),
+            shared.connect(&mut peer, &session_id),
+        )
+        .await??;
+        return Ok(PublicLiveHarness {
+            rpc,
+            peer,
+            channel_id: json!(exact.id),
+            session_id,
+            mob_id,
+            server_task: server_task.abort_handle(),
+            shared: Some((shared, exact)),
+            _temp: temp,
+        });
+    }
     let rejected = rpc
         .call_raw(
             "live/open",
@@ -459,6 +833,7 @@ async fn open_public_live(
         session_id,
         mob_id,
         server_task: server_task.abort_handle(),
+        shared: None,
         _temp: temp,
     })
 }
@@ -481,7 +856,12 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         mob_id,
         server_task,
         ..
-    } = open_public_live("gpt-live-public-e2e-", "scenario-97-operator").await?;
+    } = open_public_live(
+        "gpt-live-public-e2e-",
+        "scenario-97-operator",
+        LiveDelegationExecutionPolicy::DurableFork,
+    )
+    .await?;
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -749,10 +1129,18 @@ fn history_text(history: &Value) -> String {
 /// 4. Reopening the same session seeds the canonical dialogue as native
 ///    startup input with roles intact: the voice model recalls a code word
 ///    told to it before the close.
+/// 5. Spoken delegation executes real tools on the existing ordinary text
+///    member and returns a completed generated operation without a fork.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
+    timeout(Duration::from_secs(480), run_s98_real_audio_and_context())
+        .await
+        .map_err(|_| "S98 overall deadline expired; no completed real-audio qualification")?
+}
+
+async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug",
@@ -760,8 +1148,14 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
         .with_test_writer()
         .try_init();
     require_api_key()?;
-    let mut live = open_public_live("gpt-live-public-reopen-e2e-", "scenario-98-operator").await?;
+    let mut live = open_public_live(
+        "gpt-live-public-reopen-e2e-",
+        "scenario-98-operator",
+        LiveDelegationExecutionPolicy::ExistingMember,
+    )
+    .await?;
     let session_id = live.session_id.clone();
+    live.assert_existing_text_identity().await?;
 
     // Phase A: tell the model a code word and confirm playback of its reply.
     let before = live.peer.events().await?.len();
@@ -769,11 +1163,12 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
     live.peer
         .call(json!({"type":"play","name":"remember"}))
         .await?;
-    let first_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    let first_output = live.output().await?;
     assert_eq!(first_output["channel_id"], live.channel_id);
-    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    let remember_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    println!("GPT_LIVE_PUBLIC_AUDIO phase=remember evidence={remember_audio:?}");
     let confirmed_at = Instant::now();
-    complete_playback(&mut live.rpc, &live.channel_id, &first_output).await?;
+    live.complete_output(&first_output).await?;
     // The snapshot cut commits without a provider final: the assistant text
     // must be in canonical history promptly, bounded well under the retired
     // 1.5 s quiet heuristic plus its 2.5 s readout grace.
@@ -821,21 +1216,18 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
     live.peer
         .call(json!({"type":"play","name":"greeting"}))
         .await?;
-    let second_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    let second_output = live.output().await?;
     assert_eq!(second_output["channel_id"], live.channel_id);
     assert_ne!(
         second_output["output_id"], first_output["output_id"],
         "continuation after a settled snapshot cut must carry a fresh one-use playback handle"
     );
-    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
-    complete_playback(&mut live.rpc, &live.channel_id, &second_output).await?;
+    let greeting_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    println!("GPT_LIVE_PUBLIC_AUDIO phase=greeting evidence={greeting_audio:?}");
+    live.complete_output(&second_output).await?;
     // Any further outputs (the model may split its reply) settle the same way.
-    while let Some(output) = live
-        .rpc
-        .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(3))
-        .await?
-    {
-        complete_playback(&mut live.rpc, &live.channel_id, &output).await?;
+    while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
+        live.complete_output(&output).await?;
     }
     let events = live.peer.events().await?;
     assert!(
@@ -845,31 +1237,7 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
     );
 
     // Phase C: close drains provider observations and confirms closure.
-    let status = live
-        .rpc
-        .call("live/status", json!({"channel_id":live.channel_id}), 30)
-        .await?;
-    assert_eq!(status["channel_id"], live.channel_id);
-    let closed = live
-        .rpc
-        .call("live/close", json!({"channel_id":live.channel_id}), 60)
-        .await?;
-    assert_eq!(
-        closed["status"], "closed",
-        "live/close must report a confirmed closure"
-    );
-    let after_close = live
-        .rpc
-        .call_raw("live/status", json!({"channel_id":live.channel_id}), 30)
-        .await?;
-    assert!(
-        !after_close["error"].is_null()
-            || after_close["result"]["status"]
-                .to_string()
-                .to_lowercase()
-                .contains("closed"),
-        "a closed channel must not report as live: {after_close}"
-    );
+    live.close_exact().await?;
     let history_after_close = live
         .rpc
         .call(
@@ -887,12 +1255,13 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
     // Phase D: reopen the same session; the canonical dialogue is seeded as
     // native startup input, so the model can answer from it.
     live.reopen().await?;
+    live.assert_existing_text_identity().await?;
     let before_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
     live.peer
         .call(json!({"type":"play","name":"recall"}))
         .await?;
-    let recall_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    let recall_output = live.output().await?;
     assert_eq!(recall_output["channel_id"], live.channel_id);
     let recalled = wait_for_events(&mut live.peer, 60, |events| {
         output_transcript_text(events, before_recall)
@@ -903,25 +1272,188 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
     .map_err(|error| {
         format!("reopened session did not recall the code word from the seeded dialogue: {error}")
     })?;
-    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
-    complete_playback(&mut live.rpc, &live.channel_id, &recall_output).await?;
-    while let Some(output) = live
-        .rpc
-        .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(3))
-        .await?
-    {
-        complete_playback(&mut live.rpc, &live.channel_id, &output).await?;
+    let recall_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    println!("GPT_LIVE_PUBLIC_AUDIO phase=recall evidence={recall_audio:?}");
+    live.complete_output(&recall_output).await?;
+    while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
+        live.complete_output(&output).await?;
     }
     let recall_text = output_transcript_text(&recalled, before_recall);
-    let closed = live
+
+    // Phase E: a real spoken request executes on the same pre-existing text
+    // member. Generated operation custody, not the current roster alone,
+    // distinguishes this from the default disposable fork.
+    let runtime = live.shared()?.0.runtime.clone();
+    let baseline_operations: Vec<_> = runtime
+        .live_delegation_recovery_snapshots(&session_id)
+        .await?
+        .into_iter()
+        .map(|operation| operation.operation_id().clone())
+        .collect();
+    let history_before_work = live
         .rpc
-        .call("live/close", json!({"channel_id":live.channel_id}), 60)
+        .call(
+            "session/history",
+            json!({"session_id":session_id,"offset":0,"limit":200}),
+            30,
+        )
         .await?;
-    assert_eq!(closed["status"], "closed");
+    let message_count = history_before_work["messages"]
+        .as_array()
+        .ok_or("missing session history")?
+        .len();
+    let before_work = live.peer.events().await?.len();
+    let audio_baseline = live.peer.audio_evidence().await?;
+    let sent = live
+        .peer
+        .call(json!({"type":"play","name":"delegation"}))
+        .await?;
+    assert!(
+        sent["input"]["bytes_sent"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    println!(
+        "GPT_LIVE_PUBLIC_INPUT phase=existing_member evidence={}",
+        sent["input"]
+    );
+    wait_for_events(&mut live.peer, 120, |events| {
+        events[before_work..].iter().any(is_client_delegation)
+    })
+    .await?;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let operation = loop {
+        if let Some(output) = live.poll_output(Duration::from_millis(500)).await? {
+            live.complete_output(&output).await?;
+        }
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&session_id)
+            .await?;
+        let current = snapshots
+            .into_iter()
+            .find(|snapshot| !baseline_operations.contains(snapshot.operation_id()));
+        if let Some(snapshot) = current {
+            use meerkat_runtime::live_execution::{
+                LiveDelegationWorkerOwnership, LiveDelegationWorkerTerminalKind,
+            };
+            assert_eq!(snapshot.worker_identity(), "voice-executor");
+            assert_eq!(
+                snapshot.worker_ownership(),
+                LiveDelegationWorkerOwnership::ExistingMember
+            );
+            assert_eq!(snapshot.session_id(), &session_id);
+            assert_eq!(json!(snapshot.channel_id()), live.channel_id);
+            if let Some(terminal) = snapshot.terminal() {
+                assert_eq!(
+                    terminal,
+                    LiveDelegationWorkerTerminalKind::Completed,
+                    "the real existing-member provider turn did not complete"
+                );
+                break snapshot.operation_id().clone();
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for the real existing-member delegated turn".into());
+        }
+    };
+    let history_after_work = live
+        .rpc
+        .call(
+            "session/history",
+            json!({"session_id":session_id,"offset":0,"limit":200}),
+            30,
+        )
+        .await?;
+    let messages: Vec<WireSessionMessage> =
+        serde_json::from_value(history_after_work["messages"].clone())?;
+    let new_messages = &messages[message_count..];
+    let tool_index = successful_working_directory_result(
+        new_messages, &live._temp.path().join("project"),
+    ).ok_or("spoken delegation produced no successful, call-linked pwd result for the existing member's project")?;
+    assert!(
+        new_messages[tool_index + 1..]
+            .iter()
+            .any(|message| matches!(message,
+                WireSessionMessage::BlockAssistant { blocks, stop_reason: Some(_), .. }
+                    if blocks.iter().any(|block| matches!(block,
+                        WireAssistantBlock::Text { text, .. } if !text.trim().is_empty()
+                    ))
+            )),
+        "existing member must commit its real provider answer after tool execution"
+    );
+    let work_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 60).await?;
+    println!("GPT_LIVE_PUBLIC_AUDIO phase=existing_member evidence={work_audio:?}");
+    while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
+        live.complete_output(&output).await?;
+    }
+    let mob_events = live
+        .rpc
+        .call(
+            "mob/events",
+            json!({"mob_id":live.mob_id,"after_cursor":0,"limit":200,"strict":true}),
+            30,
+        )
+        .await?;
+    assert!(
+        delegated_worker_lifecycle(&mob_events).spawned.is_none(),
+        "ExistingMember policy must not spawn a live-delegation fork"
+    );
+    live.assert_existing_text_identity().await?;
+    // A later ordinary background turn is a new canonical context update,
+    // not another result for the already completed voice delegation.
+    let before_update = live.peer.events().await?.len();
+    live.rpc.call(
+        "turn/start",
+        json!({
+            "session_id":session_id,
+            "prompt":"A delayed background update changes the code word you must remember from Tangerine to Violet. Acknowledge the new code word Violet briefly. Do not use tools or start another task."
+        }),
+        120,
+    ).await?;
+    live.assert_existing_text_identity().await?;
+    let updated = live
+        .rpc
+        .call(
+            "session/history",
+            json!({"session_id":session_id,"offset":0,"limit":200}),
+            30,
+        )
+        .await?;
+    assert!(
+        updated["messages"].to_string().contains("Violet"),
+        "delayed update must first commit to the unchanged background session"
+    );
+    let before_updated_recall = live.peer.events().await?.len();
+    let audio_baseline = live.peer.audio_evidence().await?;
+    live.peer
+        .call(json!({"type":"play","name":"recall"}))
+        .await?;
+    let recalled_update = wait_for_events(&mut live.peer, 90, |events| {
+        output_transcript_text(events, before_updated_recall)
+            .to_lowercase()
+            .contains("violet")
+    })
+    .await
+    .map_err(|error| {
+        format!("Live did not recall the later canonical background update: {error}")
+    })?;
+    let update_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    println!("GPT_LIVE_PUBLIC_AUDIO phase=delayed_background_update evidence={update_audio:?}");
+    assert!(live.peer.events().await?.len() > before_update);
+    assert!(
+        output_transcript_text(&recalled_update, before_updated_recall)
+            .to_lowercase()
+            .contains("violet")
+    );
+    while let Some(output) = live.poll_output(Duration::from_secs(3)).await? {
+        live.complete_output(&output).await?;
+    }
+    live.close_exact().await?;
+    live.assert_existing_text_identity().await?;
     live.peer.close().await;
     live.server_task.abort();
     println!(
-        "GPT_LIVE_PUBLIC_REOPEN_E2E_OK settled_after_ms={} recall_transcript={:?} mob={}",
+        "GPT_LIVE_PUBLIC_REOPEN_E2E_OK settled_after_ms={} recall_transcript={:?} mob={} existing_member_operation={operation}",
         settled_after.as_millis(),
         recall_text.trim(),
         live.mob_id
@@ -967,6 +1499,91 @@ fn delegated_worker_lifecycle(events: &Value) -> DelegatedWorkerLifecycle {
 mod config_tests {
     use super::{API_KEY_ENV, BINDING, REALM, scenario_config};
     use meerkat_core::CredentialSourceSpec;
+
+    #[test]
+    fn working_directory_proof_rejects_failed_unlinked_or_wrong_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = serde_json::json!({
+            "exit_code":0,"stdout":format!("{}\n", directory.path().display()),
+            "stderr":"","timed_out":false,"duration_secs":0.01,
+        });
+        let fixture = serde_json::json!([
+            {"role":"block_assistant","created_at":"2026-01-01T00:00:00Z",
+             "blocks":[{"block_type":"tool_use","data":{"id":"pwd-call","name":"shell","args":{"command":"pwd"}}}]},
+            {"role":"tool_results","created_at":"2026-01-01T00:00:00Z",
+             "results":[{"tool_use_id":"pwd-call","content":output.to_string(),"is_error":false}]}
+        ]);
+        let messages =
+            serde_json::from_value::<Vec<meerkat_contracts::WireSessionMessage>>(fixture.clone())
+                .unwrap();
+        assert_eq!(
+            super::successful_working_directory_result(&messages, directory.path()),
+            Some(1)
+        );
+        let mut structured = messages.clone();
+        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut structured[1]
+        else {
+            panic!("fixture tool result");
+        };
+        results[0].content = meerkat_contracts::WireToolResultContent::Blocks(vec![
+            meerkat_contracts::WireContentBlock::Structured {
+                data: output.clone(),
+            },
+        ]);
+        assert_eq!(
+            super::successful_working_directory_result(&structured, directory.path()),
+            Some(1)
+        );
+        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut structured[1]
+        else {
+            panic!("fixture tool result");
+        };
+        results[0].is_error = true;
+        assert_eq!(
+            super::successful_working_directory_result(&structured, directory.path()),
+            None
+        );
+        for (pointer, invalid) in [
+            ("/1/results/0/is_error", serde_json::json!(true)),
+            (
+                "/1/results/0/tool_use_id",
+                serde_json::json!("unrelated-call"),
+            ),
+            ("/0/blocks/0/data/name", serde_json::json!("not-shell")),
+            (
+                "/0/blocks/0/data/args/command",
+                serde_json::json!("echo pretend"),
+            ),
+            ("/1/results/0/content", serde_json::json!("access_denied")),
+        ] {
+            let mut negative = fixture.clone();
+            *negative.pointer_mut(pointer).unwrap() = invalid;
+            let messages: Vec<meerkat_contracts::WireSessionMessage> =
+                serde_json::from_value(negative).unwrap();
+            assert_eq!(
+                super::successful_working_directory_result(&messages, directory.path()),
+                None,
+                "{pointer}"
+            );
+        }
+        for (field, invalid) in [
+            ("exit_code", serde_json::json!(1)),
+            ("timed_out", serde_json::json!(true)),
+            ("stdout", serde_json::json!("/nonexistent-pwd-proof")),
+        ] {
+            let mut invalid_output = output.clone();
+            invalid_output[field] = invalid;
+            let mut negative = fixture.clone();
+            negative[1]["results"][0]["content"] = serde_json::json!(invalid_output.to_string());
+            let messages: Vec<meerkat_contracts::WireSessionMessage> =
+                serde_json::from_value(negative).unwrap();
+            assert_eq!(
+                super::successful_working_directory_result(&messages, directory.path()),
+                None,
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn realm_binding_sources_the_api_key_from_the_environment() {

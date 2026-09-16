@@ -1078,7 +1078,7 @@ async fn run_spec_with_mode(
         }
     };
     if let Some(message) = prereq_failure(spec, execution_mode) {
-        if strict_prereqs_enabled() {
+        if strict_prereqs_for(spec) {
             return Err(format!("{}: {message}", run_label(spec)));
         }
         eprintln!("skipping {}: {message}", run_label(spec));
@@ -2763,6 +2763,13 @@ pub fn strict_prereqs_enabled() -> bool {
     )
 }
 
+fn strict_prereqs_for(spec: &Spec) -> bool {
+    // These public-Live scenarios promise real provider audio. Selecting one
+    // cannot become a successful readiness-only run when credentials or the
+    // browser toolchain are missing.
+    matches!(spec.id, Some(97 | 98)) || strict_prereqs_enabled()
+}
+
 fn clean_e2e_scenario_targets_enabled() -> bool {
     matches!(
         std::env::var("MEERKAT_CLEAN_E2E_SCENARIO_TARGETS").as_deref(),
@@ -4147,7 +4154,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         98 => Some(&Spec {
             id: Some(98),
             lane: Lane::Smoke,
-            title: "GPT Live public playback settlement, close drain and reopen history",
+            title: "GPT Live public real-audio shared-host close/reopen and existing-member execution",
             timeout_secs: 1200,
             // The public Live API is reached with a plain OpenAI API key; the
             // realm binding sources it from the environment.
@@ -6417,6 +6424,9 @@ mod tests {
         let spec = scenario_spec(98).unwrap();
         let sibling = scenario_spec(97).unwrap();
         assert_eq!(spec.lane, Lane::Smoke);
+        assert!(super::strict_prereqs_for(spec));
+        assert!(super::strict_prereqs_for(sibling));
+        assert!(spec.title.contains("real-audio"));
         assert_eq!(spec.required_env, sibling.required_env);
         assert_eq!(spec.cwd, sibling.cwd);
         assert_eq!(spec.env, sibling.env);

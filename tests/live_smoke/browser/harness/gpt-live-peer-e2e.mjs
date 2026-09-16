@@ -47,7 +47,13 @@ async function prepare() {
     const fixtureBuffers = {};
     for (const [name, fixture] of Object.entries(fixtures)) {
       const response = await fetch(fixture);
-      fixtureBuffers[name] = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const buffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const samples = buffer.getChannelData(0);
+      const nonSilentSamples = samples.reduce((count, sample) => count + (Math.abs(sample) >= 0.002 ? 1 : 0), 0);
+      if (buffer.duration < 0.1 || nonSilentSamples < buffer.sampleRate * 0.1) {
+        throw new Error(`speech fixture ${name} is empty, silent, or too short`);
+      }
+      fixtureBuffers[name] = buffer;
     }
     const destination = audioContext.createMediaStreamDestination();
     const oscillator = audioContext.createOscillator();
@@ -61,6 +67,7 @@ async function prepare() {
     const remoteAudio = {
       decodedFrames: 0,
       decodedNonSilentFrames: 0,
+      decodedNonSilentSeconds: 0,
       maxDecodedRms: 0,
       processorErrors: 0,
       processorSupported: typeof MediaStreamTrackProcessor === 'function',
@@ -110,7 +117,10 @@ async function prepare() {
                 const rms = Math.sqrt(squareSum / Math.max(samples.length, 1));
                 remoteAudio.decodedFrames += audioData.numberOfFrames;
                 remoteAudio.maxDecodedRms = Math.max(remoteAudio.maxDecodedRms, rms);
-                if (rms >= 0.002) remoteAudio.decodedNonSilentFrames += audioData.numberOfFrames;
+                if (rms >= 0.002) {
+                  remoteAudio.decodedNonSilentFrames += audioData.numberOfFrames;
+                  remoteAudio.decodedNonSilentSeconds += audioData.numberOfFrames / audioData.sampleRate;
+                }
               } finally {
                 audioData.close();
               }
@@ -209,11 +219,29 @@ async function answer(sdp) {
 }
 
 async function play(name) {
-  await page.evaluate(
-    async (fixtureName) => globalThis.__gptLivePeer.startFixture(fixtureName, true),
+  const input = await page.evaluate(
+    async (fixtureName) => {
+      const state = globalThis.__gptLivePeer;
+      if (state.peer.connectionState !== 'connected') throw new Error('speech requires connected WebRTC');
+      const sentBytes = async () => {
+        let bytes = 0;
+        for (const report of (await state.peer.getStats()).values()) {
+          if (report.type === 'outbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+            bytes += Number(report.bytesSent || 0);
+          }
+        }
+        return bytes;
+      };
+      const before = await sentBytes();
+      await state.startFixture(fixtureName, true);
+      const bytesSent = (await sentBytes()) - before;
+      if (bytesSent <= 0) throw new Error('speech fixture produced no outbound WebRTC audio');
+      const buffer = state.fixtureBuffers[fixtureName];
+      return { duration_seconds: buffer.duration, samples: buffer.length, bytes_sent: bytesSent };
+    },
     name,
   );
-  return { played: name };
+  return { played: name, input };
 }
 
 async function armBargeIn(name) {
@@ -232,8 +260,9 @@ async function snapshot() {
     const inboundAudio = {
       bytes_received: 0,
       packets_received: 0,
-      total_audio_energy: 0,
-      total_samples_received: 0,
+      total_audio_energy: null,
+      total_samples_received: null,
+      total_samples_duration: null,
     };
     for (const report of (await state.peer.getStats()).values()) {
       if (report.type !== 'inbound-rtp' || (report.kind !== 'audio' && report.mediaType !== 'audio')) {
@@ -241,13 +270,21 @@ async function snapshot() {
       }
       inboundAudio.bytes_received += Number(report.bytesReceived || 0);
       inboundAudio.packets_received += Number(report.packetsReceived || 0);
-      inboundAudio.total_audio_energy += Number(report.totalAudioEnergy || 0);
-      inboundAudio.total_samples_received += Number(report.totalSamplesReceived || 0);
+      for (const [key, value] of [
+        ['total_audio_energy', report.totalAudioEnergy],
+        ['total_samples_received', report.totalSamplesReceived],
+        ['total_samples_duration', report.totalSamplesDuration],
+      ]) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          inboundAudio[key] = (inboundAudio[key] ?? 0) + value;
+        }
+      }
     }
     return {
       audio: {
         decoded_frames: state.remoteAudio.decodedFrames,
         decoded_non_silent_frames: state.remoteAudio.decodedNonSilentFrames,
+        decoded_non_silent_seconds: state.remoteAudio.decodedNonSilentSeconds,
         max_decoded_rms: state.remoteAudio.maxDecodedRms,
         processor_errors: state.remoteAudio.processorErrors,
         processor_supported: state.remoteAudio.processorSupported,

@@ -4781,6 +4781,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveContextAppendRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveContextAppendDeliveredIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7679,6 +7706,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextAppendAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendDeferred`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendAlreadyCovered`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextRowQueued`

@@ -781,6 +781,22 @@ An independently reported playback completion can join a final transcript
 that arrives during close; closing itself never proves playback or hearing.
 Output without playback evidence remains explicitly unmeasured.
 
+Canonical context appends are claimed by generated authority. A concurrent
+drain of the same pending edge defers without reminting send authority; an
+already acknowledged edge is not resent. A provider turn that wins the
+boundary also produces a typed deferral, not a projection failure. Local
+cursor/row bookkeeping is serialized only during projection and receipt
+realization, never while waiting for a provider acknowledgement.
+
+Provider ingress routes append receipts before the control consumer, so a
+control task committing its final user transcript cannot wait on its own
+receive loop. Duplicate high-volume transcript notifications stay on the
+adapter projection path rather than filling the control queue. Canonical
+delegation-final commits include live-provenance context projection before
+releasing their evidence to the worker. The `MobSessionService` method
+`commit_live_delegation_final_transcript` requires the same `MeerkatMachine`
+reference explicitly; decorators must forward it, not inherit a default.
+
 A failed projection, missing drain receipt, or unconfirmed physical retirement
 retains the exact channel custody and returns an error. Retry the same channel
 after the blocking work settles; a timeout does not cancel or repeat an

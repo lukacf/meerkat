@@ -990,6 +990,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBridgeSubmissionResolved`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
 - `LiveBridgeSubmissionRecoveredAmbiguous`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
 - `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `LiveContextAppendDeferred`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `LiveContextAppendAlreadyCovered`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextRowQueued`(session_id: String, channel_id: String, append_id: String, canonical_cursor: u64, disposition: LiveContextRowDisposition)
 - `LiveContextCanonicalCoverageAdvanced`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `LiveContextAppendResolved`(channel_id: String, append_id: String, cursor: u64, observation: LiveContextAppendObservation, retry_allowed: Bool)
@@ -16875,6 +16877,90 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendPendingReplayIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `same_pending_edge`
+- Emits: `LiveContextAppendDeferred`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendPendingReplayAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `same_pending_edge`
+- Emits: `LiveContextAppendDeferred`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendPendingReplayRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `same_pending_edge`
+- Emits: `LiveContextAppendDeferred`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendDeferredByTurnIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `provider_turn_owns_boundary`
+- Emits: `LiveContextAppendDeferred`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendDeferredByTurnAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `provider_turn_owns_boundary`
+- Emits: `LiveContextAppendDeferred`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendDeferredByTurnRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `provider_turn_owns_boundary`
+- Emits: `LiveContextAppendDeferred`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendDeliveredReplayIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `delivered_edge_is_covered`
+- Emits: `LiveContextAppendAlreadyCovered`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendDeliveredReplayAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `delivered_edge_is_covered`
+- Emits: `LiveContextAppendAlreadyCovered`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendDeliveredReplayRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `delivered_edge_is_covered`
+- Emits: `LiveContextAppendAlreadyCovered`
 - To: `Running`
 
 ### `ResolveLiveContextAppendDeliveredIdle`

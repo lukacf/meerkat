@@ -2721,10 +2721,9 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             return Err("provider turn finish does not match the exact started turn".to_string());
         }
-        self.runtime
-            .drain_live_context_outbox(finished.binding().session_id())
-            .await
-            .map_err(|error| error.to_string())
+        // The canonical transcript commit wakes context delivery. This
+        // lifecycle callback runs on ingress and cannot await its own ACK.
+        Ok(())
     }
 
     async fn observe_delegation_turn_finished(
@@ -2841,10 +2840,7 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             return Err("client delegation final duplicated completed-turn custody".to_string());
         }
-        self.runtime
-            .drain_live_context_outbox(finished.binding().session_id())
-            .await
-            .map_err(|error| error.to_string())
+        Ok(())
     }
 
     /// Close exact previous execution custody before either admitting a new
@@ -2989,7 +2985,12 @@ impl ExperimentalLiveDelegationCoordinator {
         let final_evidence = self
             .mobs
             .session_service()
-            .commit_live_delegation_final_transcript(session_id, provisional.clone(), final_event)
+            .commit_live_delegation_final_transcript(
+                &self.runtime,
+                session_id,
+                provisional.clone(),
+                final_event,
+            )
             .await
             .map_err(|error| error.to_string())?;
         tracing::debug!(

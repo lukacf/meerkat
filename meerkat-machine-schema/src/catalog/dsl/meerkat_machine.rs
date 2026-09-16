@@ -7125,6 +7125,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_cursor: u64,
                 next_cursor: u64,
             },
+            LiveContextAppendDeferred {
+                channel_id: String,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+            },
+            LiveContextAppendAlreadyCovered {
+                channel_id: String,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+            },
             LiveContextRowQueued {
                 session_id: String,
                 channel_id: String,
@@ -7635,6 +7647,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBridgeSubmissionResolved => local seam OwnerRealizationOnly,
         disposition LiveBridgeSubmissionRecoveredAmbiguous => external seam OwnerRealizationOnly,
         disposition LiveContextAppendAuthorized => external seam OwnerRealizationOnly,
+        disposition LiveContextAppendDeferred => local seam OwnerRealizationOnly,
+        disposition LiveContextAppendAlreadyCovered => local seam OwnerRealizationOnly,
         disposition LiveContextRowQueued => local seam OwnerRealizationOnly,
         disposition LiveContextCanonicalCoverageAdvanced => local seam OwnerRealizationOnly,
         disposition LiveContextAppendResolved => external seam OwnerRealizationOnly,
@@ -26836,6 +26850,93 @@ macro_rules! meerkat_catalog_machine_dsl {
                 append_id: append_id,
                 previous_cursor: previous_cursor,
                 next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendPendingReplay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "same_pending_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_pending_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_pending_channel_by_append.get_cloned(append_id) == Some(channel_id)
+                && self.live_context_pending_previous_cursor_by_append.get_copied(append_id) == Some(previous_cursor)
+                && self.live_context_pending_next_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeferredByTurn {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_queued_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "provider_turn_owns_boundary" {
+                self.live_provider_turn_by_channel.contains_key(channel_id)
+                && !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeliveredReplay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "delivered_edge_is_covered" {
+                next_cursor == previous_cursor + 1
+                && self.live_context_delivered_append_ids.contains(append_id)
+                && self.live_context_cursor_by_channel.get_copied(channel_id).get("value") >= next_cursor
+                && !self.live_context_queued_session_by_append.contains_key(append_id)
+                && !self.live_context_pending_channel_by_append.contains_key(append_id)
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+            }
+            to Idle
+            emit LiveContextAppendAlreadyCovered {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
             }
         }
 

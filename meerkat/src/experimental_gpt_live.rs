@@ -2106,7 +2106,11 @@ struct ActiveExperimentalGptLiveBinding {
     answer_observation_sequence: u64,
     command_tx: mpsc::Sender<SidebandCommandEnvelope>,
     observation_rx: Arc<
-        Mutex<mpsc::Receiver<Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError>>>,
+        Mutex<
+            mpsc::Receiver<
+                Result<Option<ExperimentalGptLiveControlObservation>, ProviderWebrtcBrokerError>,
+            >,
+        >,
     >,
     command_actor: JoinHandle<()>,
     observation_actor: JoinHandle<()>,
@@ -4036,16 +4040,21 @@ impl ExperimentalGptLiveWebrtcTransport {
             Arc::clone(&current.observation_rx)
         };
         let mut receiver = receiver.lock().await;
-        let observation = receiver
+        receiver
             .recv()
             .await
-            .unwrap_or(Err(ProviderWebrtcBrokerError::Unavailable))?;
-        let Some(observation) = observation else {
-            return Ok(None);
-        };
+            .unwrap_or(Err(ProviderWebrtcBrokerError::Unavailable))
+    }
+
+    async fn route_append_delivery(
+        pending_deliveries: &Mutex<
+            HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>,
+        >,
+        observation: LiveSidebandObservation,
+    ) -> Result<Option<ExperimentalGptLiveControlObservation>, ProviderWebrtcBrokerError> {
         let observed_delivery = Self::observed_append_delivery(observation.kind());
         if let Some((attempt, outcome)) = observed_delivery {
-            let pending = self.pending_deliveries.lock().await.remove(attempt);
+            let pending = pending_deliveries.lock().await.remove(attempt);
             let Some(pending) = pending else {
                 return if matches!(
                     observation.kind(),
@@ -4396,6 +4405,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             adapter,
             answer_observation_sequence,
             pump_retirement_tx,
+            Arc::clone(&self.pending_deliveries),
         );
         self.active_by_session
             .lock()
@@ -4539,6 +4549,9 @@ fn spawn_sideband_actors(
     adapter: Arc<ExperimentalGptLiveDeferredAdapter>,
     answer_observation_sequence: u64,
     pump_retirement_tx: mpsc::Sender<ExperimentalGptLivePumpRetirement>,
+    pending_deliveries: Arc<
+        Mutex<HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>>,
+    >,
 ) -> ActiveExperimentalGptLiveBinding {
     let activation_gate = Arc::new(ExperimentalGptLiveActivationGate::new());
     let drain = Arc::new(ExperimentalGptLiveDrain::default());
@@ -4556,6 +4569,7 @@ fn spawn_sideband_actors(
 
     let (observation_tx, observation_rx) = mpsc::channel(64);
     let observation_sideband = Arc::clone(&sideband);
+    let observation_binding = binding.clone();
     let observation_gate = Arc::clone(&activation_gate);
     let observation_adapter = Arc::clone(&adapter);
     let observation_drain = Arc::clone(&drain);
@@ -4574,12 +4588,7 @@ fn spawn_sideband_actors(
                 Ok(Some(observation)) => {
                     let control_observation = matches!(
                         observation.kind(),
-                        LiveSidebandObservationKind::UserTranscriptFragment { .. }
-                            | LiveSidebandObservationKind::AssistantTranscriptFragment { .. }
-                            | LiveSidebandObservationKind::TurnStarted { .. }
-                            | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
-                            | LiveSidebandObservationKind::TurnFinished { .. }
-                            | LiveSidebandObservationKind::DelegationRequested { .. }
+                        LiveSidebandObservationKind::DelegationRequested { .. }
                             | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. }
                             | LiveSidebandObservationKind::AppendAcknowledged { .. }
                             | LiveSidebandObservationKind::AppendRejected { .. }
@@ -4625,22 +4634,40 @@ fn spawn_sideband_actors(
                     {
                         break;
                     }
-                    if control_observation
-                        && observation_tx.send(Ok(Some(observation))).await.is_err()
-                    {
-                        break;
+                    if control_observation {
+                        // Delivery receipts must reach their owned waiter even
+                        // while the control consumer commits a transcript.
+                        let routed = ExperimentalGptLiveWebrtcTransport::route_append_delivery(
+                            &pending_deliveries,
+                            observation,
+                        )
+                        .await;
+                        if let Err(error) = observation_tx.try_send(routed) {
+                            tracing::warn!(%error, "live control ingress capacity exhausted or consumer closed");
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
                     observation_drain.finish_reader(Ok(observation_sideband.eof_evidence()));
+                    resolve_pending_deliveries(
+                        &pending_deliveries,
+                        observation_binding.channel_id(),
+                        if observation_drain.requested.load(Ordering::Acquire) {
+                            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+                        } else {
+                            meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+                        },
+                    )
+                    .await;
                     observation_adapter.close_stream();
-                    let _ = observation_tx.send(Ok(None)).await;
+                    let _ = observation_tx.try_send(Ok(None));
                     break;
                 }
                 Err(error) => {
                     observation_drain.finish_reader(Err(error));
                     observation_adapter.close_stream();
-                    let _ = observation_tx.send(Err(error)).await;
+                    let _ = observation_tx.try_send(Err(error));
                     break;
                 }
             }
@@ -4652,6 +4679,16 @@ fn spawn_sideband_actors(
         {
             observation_drain.finish_reader(Err(ProviderWebrtcBrokerError::ProtocolDrift));
         }
+        resolve_pending_deliveries(
+            &pending_deliveries,
+            observation_binding.channel_id(),
+            if observation_drain.requested.load(Ordering::Acquire) {
+                meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+            } else {
+                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+            },
+        )
+        .await;
         observation_adapter.close_stream();
     });
 
@@ -4923,6 +4960,21 @@ async fn retire_pending_deliveries(
     >,
     channel_id: &meerkat_live::LiveChannelId,
 ) {
+    resolve_pending_deliveries(
+        pending_deliveries,
+        channel_id,
+        meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
+    )
+    .await;
+}
+
+async fn resolve_pending_deliveries(
+    pending_deliveries: &Mutex<
+        HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>,
+    >,
+    channel_id: &meerkat_live::LiveChannelId,
+    outcome: meerkat_core::LiveAppendDeliveryOutcome,
+) {
     let mut pending_deliveries = pending_deliveries.lock().await;
     let retired_attempts = pending_deliveries
         .iter()
@@ -4936,10 +4988,8 @@ async fn retire_pending_deliveries(
                     authority,
                     resolution_tx,
                 } => {
-                    let _ = resolution_tx.send(ExperimentalGptLiveAppendResolution {
-                        authority,
-                        outcome: meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
-                    });
+                    let _ = resolution_tx
+                        .send(ExperimentalGptLiveAppendResolution { authority, outcome });
                 }
                 PendingExperimentalGptLiveDelivery::DelegationResult {
                     authority,
@@ -4947,7 +4997,12 @@ async fn retire_pending_deliveries(
                 } => {
                     let _ = resolution_tx.send(ExperimentalGptLiveResultDeliveryResolution {
                         authority,
-                        observation: LiveDelegationResultDeliveryObservation::Ambiguous,
+                        observation: match outcome {
+                            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose => {
+                                LiveDelegationResultDeliveryObservation::InterruptedByClose
+                            }
+                            _ => LiveDelegationResultDeliveryObservation::Ambiguous,
+                        },
                     });
                 }
             }
@@ -6297,6 +6352,8 @@ mod tests {
         confirmed_eof: AtomicBool,
         block_close: AtomicBool,
         close_started: AtomicBool,
+        acknowledge_after_fragment_flood: AtomicBool,
+        hold_context_ack: AtomicBool,
     }
 
     enum ControlledSidebandEvent {
@@ -6314,6 +6371,8 @@ mod tests {
                 confirmed_eof: AtomicBool::new(true),
                 block_close: AtomicBool::new(false),
                 close_started: AtomicBool::new(false),
+                acknowledge_after_fragment_flood: AtomicBool::new(false),
+                hold_context_ack: AtomicBool::new(false),
             }
         }
 
@@ -6348,8 +6407,36 @@ mod tests {
 
         async fn send_command(
             &self,
-            _command: LiveSidebandCommand,
+            command: LiveSidebandCommand,
         ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
+            if self.hold_context_ack.load(Ordering::Acquire) {
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
+            if self
+                .acknowledge_after_fragment_flood
+                .load(Ordering::Acquire)
+            {
+                for ordinal in 0..128 {
+                    self.push(LiveSidebandObservation::new(
+                        command.binding().clone(),
+                        LiveSidebandObservationKind::UserTranscriptFragment {
+                            item: LiveSidebandTranscriptItemRef::__from_provider_observation(
+                                format!("fragment-{ordinal}"),
+                                format!("private-fragment-{ordinal}"),
+                            )
+                            .expect("fixture fragment identity"),
+                            text: "provisional fragment".to_string(),
+                        },
+                    ));
+                }
+                self.push(LiveSidebandObservation::new(
+                    command.binding().clone(),
+                    LiveSidebandObservationKind::AppendAcknowledged {
+                        attempt: command.attempt(),
+                    },
+                ));
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
             Ok(LiveSidebandCommandDelivery::AmbiguousTerminal)
         }
 
@@ -6450,6 +6537,7 @@ mod tests {
     struct SerializedLifecycleTestActivator {
         runtime: Arc<meerkat_runtime::MeerkatMachine>,
         rejected_appends: Arc<AtomicUsize>,
+        control_release: Option<Arc<Notify>>,
     }
 
     #[async_trait]
@@ -6467,6 +6555,9 @@ mod tests {
             binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
             control: Arc<dyn ExperimentalGptLiveControlPlane>,
         ) {
+            if let Some(release) = &self.control_release {
+                release.notified().await;
+            }
             let provider_binding = control
                 .active_binding(binding.session_id())
                 .await
@@ -8449,8 +8540,14 @@ mod tests {
             meerkat_live::LiveRuntimeBindingFence::new(1),
         );
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active =
-            spawn_sideband_actors(binding, sideband, test_deferred_adapter(), 1, retirement_tx);
+        let active = spawn_sideband_actors(
+            binding,
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
 
         for _ in 0..32 {
             tokio::task::yield_now().await;
@@ -9247,6 +9344,7 @@ mod tests {
             test_deferred_adapter(),
             1,
             retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
         );
         let drain = Arc::clone(&active.drain);
         active.observation_actor.abort();
@@ -9312,6 +9410,7 @@ mod tests {
             Arc::clone(&adapter),
             1,
             retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
         );
         transport
             .active_by_session
@@ -9454,7 +9553,14 @@ mod tests {
         let pump_retirement_tx = transport.pump_retirement_sender().await;
         transport.active_by_session.lock().await.insert(
             session_id.clone(),
-            spawn_sideband_actors(binding.clone(), sideband, adapter, 13, pump_retirement_tx),
+            spawn_sideband_actors(
+                binding.clone(),
+                sideband,
+                adapter,
+                13,
+                pump_retirement_tx,
+                Arc::clone(&transport.pending_deliveries),
+            ),
         );
 
         assert!(transport.close_exact(&binding, Some(13)).await.is_err());
@@ -9648,6 +9754,8 @@ mod tests {
 
         #[derive(Clone, Copy)]
         enum ExitKind {
+            ContextReceiptWhileControlBusy,
+            ContextAppendPendingClose,
             ProviderManaged,
             SnapshotCut,
             PrefixCut,
@@ -9673,6 +9781,8 @@ mod tests {
         }
 
         for (ordinal, exit) in [
+            ExitKind::ContextReceiptWhileControlBusy,
+            ExitKind::ContextAppendPendingClose,
             ExitKind::ProviderManaged,
             ExitKind::SnapshotCut,
             ExitKind::PrefixCut,
@@ -9824,6 +9934,8 @@ mod tests {
             let authority = Arc::new(authority);
             let authority_trait: Arc<dyn ExperimentalLiveOpenAuthorityProvider> = authority.clone();
             let rejected_appends = Arc::new(AtomicUsize::new(0));
+            let control_release = matches!(exit, ExitKind::ContextReceiptWhileControlBusy)
+                .then(|| Arc::new(Notify::new()));
             let mirror_host = crate::surface::ExperimentalGptLiveContextMirrorHost::new(
                 Arc::clone(&runtime),
                 Arc::clone(&member_host),
@@ -9831,6 +9943,7 @@ mod tests {
                 Arc::new(SerializedLifecycleTestActivator {
                     runtime: Arc::clone(&runtime),
                     rejected_appends: Arc::clone(&rejected_appends),
+                    control_release: control_release.clone(),
                 }),
             );
             let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
@@ -9946,6 +10059,121 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            if matches!(
+                exit,
+                ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose
+            ) {
+                sideband
+                    .acknowledge_after_fragment_flood
+                    .store(true, Ordering::Release);
+                service
+                    .append_external_user_content(
+                        &session_id,
+                        meerkat_core::ContentInput::Text("typed background context".to_string()),
+                    )
+                    .await
+                    .expect("persist real background user row");
+                let canonical = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("canonical snapshot")
+                    .expect("session");
+                let persisted = service
+                    .observe_persisted_session_authority(&session_id)
+                    .await
+                    .expect("store authority")
+                    .expect("persisted");
+                let token = match persisted {
+                    meerkat_runtime::store::RuntimeSessionAuthority::WholeBlob(value) => {
+                        value.blob_sha256().to_string()
+                    }
+                    meerkat_runtime::store::RuntimeSessionAuthority::HeadCanonical(value) => {
+                        value.committed_head_token().to_string()
+                    }
+                };
+                let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+                    Arc::new(canonical),
+                )
+                .expect("seal committed source");
+                if matches!(exit, ExitKind::ContextAppendPendingClose) {
+                    sideband.hold_context_ack.store(true, Ordering::Release);
+                    let sending_runtime = Arc::clone(&runtime);
+                    let sending_session = session_id.clone();
+                    let sending = tokio::spawn(async move {
+                        sending_runtime
+                            .enqueue_committed_parent_session_boundary(
+                                &sending_session,
+                                &committed,
+                                &token,
+                            )
+                            .await
+                    });
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        while authority
+                            .transport
+                            .pending_deliveries
+                            .lock()
+                            .await
+                            .is_empty()
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("exact authorized context append awaits provider ACK");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        member_host.close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        ),
+                    )
+                    .await
+                    .expect("close with pending context ACK is bounded")
+                    .expect("close resolves pending delivery without fake acknowledgement");
+                    sending
+                        .await
+                        .expect("context sender joins")
+                        .expect("generated InterruptedByClose");
+                    assert!(
+                        runtime
+                            .live_session_for_active_channel(&channel_id)
+                            .await
+                            .is_none()
+                    );
+                    assert!(
+                        authority
+                            .transport
+                            .pending_deliveries
+                            .lock()
+                            .await
+                            .is_empty()
+                    );
+                    continue;
+                }
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    runtime.enqueue_committed_parent_session_boundary(
+                        &session_id,
+                        &committed,
+                        &token,
+                    ),
+                )
+                .await
+                .expect("ACK cannot wait on busy control consumer or 128 duplicate fragments")
+                .expect("exact provider ACK advances canonical context");
+                control_release.expect("busy control release").notify_one();
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("close after independent ACK handoff");
+                continue;
+            }
             let mut terminal_events = service
                 .subscribe_session_events(&session_id)
                 .await
@@ -10993,6 +11221,9 @@ mod tests {
             };
             let provider_loss_started = std::time::Instant::now();
             match exit {
+                ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose => {
+                    unreachable!()
+                }
                 ExitKind::ProviderManaged
                 | ExitKind::PrefixCut
                 | ExitKind::UnmeasuredCut
@@ -11827,6 +12058,7 @@ mod tests {
             Arc::new(SerializedLifecycleTestActivator {
                 runtime: Arc::clone(&runtime),
                 rejected_appends: Arc::new(AtomicUsize::new(0)),
+                control_release: None,
             });
         let mirror_host = crate::surface::ExperimentalGptLiveContextMirrorHost::new(
             Arc::clone(&runtime),

@@ -1156,12 +1156,14 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
     #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
+        machine: &meerkat_runtime::MeerkatMachine,
         session_id: &SessionId,
         provisional: meerkat_core::ProvisionalLiveHandoff,
         final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
         <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript(
             &self.service,
+            machine,
             session_id,
             provisional,
             final_event,

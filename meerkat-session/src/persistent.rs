@@ -6215,6 +6215,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Persist canonical provider-final live user input before releasing the
     /// SessionDocument-sealed commit evidence to runtime authority.
+    #[cfg(feature = "live")]
+    pub async fn commit_live_user_transcript_final_with_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<meerkat_core::RealtimeTranscriptEvent>,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let evidence = self
+            .commit_live_user_transcript_final_guarded(id, provisional, final_event)
+            .await?;
+        let (committed, token) = self.committed_realtime_projection_guarded(id).await?;
+        drop(mutation_guard);
+        machine
+            .enqueue_committed_live_transcript_boundary(id, &committed, &token)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        Ok(evidence)
+    }
+
     pub async fn commit_live_user_transcript_final(
         &self,
         id: &SessionId,
@@ -6222,6 +6243,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         final_event: Option<meerkat_core::RealtimeTranscriptEvent>,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        self.commit_live_user_transcript_final_guarded(id, provisional, final_event)
+            .await
+    }
+
+    async fn commit_live_user_transcript_final_guarded(
+        &self,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<meerkat_core::RealtimeTranscriptEvent>,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
         let evidence = self
             .inner
             .commit_live_user_transcript_final(id, provisional, final_event)

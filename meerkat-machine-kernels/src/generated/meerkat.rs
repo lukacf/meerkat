@@ -17839,6 +17839,20 @@ pub mod effects {
         pub next_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextAppendDeferred {
+        pub channel_id: String,
+        pub append_id: String,
+        pub previous_cursor: u64,
+        pub next_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextAppendAlreadyCovered {
+        pub channel_id: String,
+        pub append_id: String,
+        pub previous_cursor: u64,
+        pub next_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextRowQueued {
         pub session_id: String,
         pub channel_id: String,
@@ -18383,6 +18397,8 @@ pub enum Effect {
     LiveBridgeSubmissionResolved(effects::LiveBridgeSubmissionResolved),
     LiveBridgeSubmissionRecoveredAmbiguous(effects::LiveBridgeSubmissionRecoveredAmbiguous),
     LiveContextAppendAuthorized(effects::LiveContextAppendAuthorized),
+    LiveContextAppendDeferred(effects::LiveContextAppendDeferred),
+    LiveContextAppendAlreadyCovered(effects::LiveContextAppendAlreadyCovered),
     LiveContextRowQueued(effects::LiveContextRowQueued),
     LiveContextCanonicalCoverageAdvanced(effects::LiveContextCanonicalCoverageAdvanced),
     LiveContextAppendResolved(effects::LiveContextAppendResolved),
@@ -18619,6 +18635,8 @@ pub enum EffectKind {
     LiveBridgeSubmissionResolved,
     LiveBridgeSubmissionRecoveredAmbiguous,
     LiveContextAppendAuthorized,
+    LiveContextAppendDeferred,
+    LiveContextAppendAlreadyCovered,
     LiveContextRowQueued,
     LiveContextCanonicalCoverageAdvanced,
     LiveContextAppendResolved,
@@ -20631,6 +20649,15 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendIdle,
     AuthorizeLiveContextAppendAttached,
     AuthorizeLiveContextAppendRunning,
+    AuthorizeLiveContextAppendPendingReplayIdle,
+    AuthorizeLiveContextAppendPendingReplayAttached,
+    AuthorizeLiveContextAppendPendingReplayRunning,
+    AuthorizeLiveContextAppendDeferredByTurnIdle,
+    AuthorizeLiveContextAppendDeferredByTurnAttached,
+    AuthorizeLiveContextAppendDeferredByTurnRunning,
+    AuthorizeLiveContextAppendDeliveredReplayIdle,
+    AuthorizeLiveContextAppendDeliveredReplayAttached,
+    AuthorizeLiveContextAppendDeliveredReplayRunning,
     ResolveLiveContextAppendDeliveredIdle,
     ResolveLiveContextAppendDeliveredAttached,
     ResolveLiveContextAppendDeliveredRunning,

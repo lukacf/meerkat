@@ -3569,6 +3569,14 @@ pub struct LiveContextAppendAuthority {
     provider_dispatch_consumed: Arc<AtomicBool>,
 }
 
+/// Generated disposition of one exact queued context-append attempt.
+#[derive(Debug)]
+pub enum LiveContextAppendAdmission {
+    Authorized(LiveContextAppendAuthority),
+    Deferred,
+    AlreadyCovered,
+}
+
 /// Sealed custody for one SessionDocument-classified row admitted into the
 /// generated per-session live-context outbox.
 #[derive(Debug, Clone)]

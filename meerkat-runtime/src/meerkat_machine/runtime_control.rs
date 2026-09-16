@@ -160,6 +160,12 @@ mod live_context_mirror_tests {
     #[derive(Default)]
     struct RecordingMirrorHost {
         appends: std::sync::Mutex<Vec<(String, String)>>,
+        first_append_barrier: Option<Arc<MirrorAppendBarrier>>,
+    }
+
+    struct MirrorAppendBarrier {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
     }
 
     #[derive(Default)]
@@ -183,10 +189,23 @@ mod live_context_mirror_tests {
             ),
             String,
         > {
-            self.appends
-                .lock()
-                .map_err(|_| "append record lock poisoned".to_string())?
-                .push((authority.channel_id().to_string(), context));
+            let first = {
+                let mut appends = self
+                    .appends
+                    .lock()
+                    .map_err(|_| "append record lock poisoned".to_string())?;
+                appends.push((authority.channel_id().to_string(), context));
+                appends.len() == 1
+            };
+            if first && let Some(barrier) = &self.first_append_barrier {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
             Ok((
                 authority,
                 meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
@@ -2567,6 +2586,234 @@ mod live_context_mirror_tests {
             host.appends.lock().expect("append record lock").len(),
             1,
             "the exact canonical suffix reaches the provider once"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_live_and_delayed_parent_commits_do_not_reauthorize_pending_context() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let machine = Arc::new(machine);
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            first_append_barrier: Some(Arc::clone(&barrier)),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("delayed background peer result"),
+        ));
+        let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            Arc::new(session.clone()),
+        )
+        .expect("seal parent boundary");
+        let sending_machine = Arc::clone(&machine);
+        let sending_session = session_id.clone();
+        let sending = tokio::spawn(async move {
+            sending_machine
+                .enqueue_committed_parent_session_boundary(
+                    &sending_session,
+                    &committed,
+                    "parent-commit-before-delivery",
+                )
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("first append is authorized and awaiting provider acknowledgement");
+
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("voice row already present in provider"),
+        ));
+        let voice = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+            session.clone(),
+        ))
+        .expect("seal concurrent voice boundary");
+        machine
+            .enqueue_committed_live_transcript_boundary(
+                &session_id,
+                &voice,
+                "voice-commit-during-pending-append",
+            )
+            .await
+            .expect("concurrent committed voice projection must defer, not fail its guard");
+
+        barrier.release.add_permits(1);
+        sending
+            .await
+            .expect("sending task")
+            .expect("original append completes");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("drain deferred voice coverage");
+        assert_eq!(host.appends.lock().expect("appends").len(), 1);
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel
+                .get(channel_id.as_str()),
+            Some(&2)
+        );
+
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text(
+                "later asynchronous background update after initial work",
+            ),
+        ));
+        let later =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal later boundary");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &later, "later-peer-commit")
+            .await
+            .expect("later background update remains deliverable");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("drain delayed context");
+        assert_eq!(host.appends.lock().expect("appends").len(), 2);
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel
+                .get(channel_id.as_str()),
+            Some(&3)
+        );
+    }
+
+    #[tokio::test]
+    async fn context_append_authorization_defers_at_a_new_provider_turn_without_reminting() {
+        use crate::live_execution::LiveContextAppendAdmission;
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("typed background update"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal canonical background update");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-commit")
+            .await
+            .expect("enqueue without provider host");
+        let queued = machine
+            .shared
+            .live_context_queued_rows
+            .lock()
+            .expect("queued")
+            .get(&(session_id.clone(), 1))
+            .expect("exact row")
+            .clone();
+        let binding = queued.binding();
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
+            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "new-user-turn".into(),
+            "private-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("new provider turn wins after row selection");
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("typed deferral"),
+            LiveContextAppendAdmission::Deferred
+        ));
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "new spoken input".into(),
+                },
+            ))
+            .await
+            .expect("finish exact provider turn");
+        let LiveContextAppendAdmission::Authorized(authority) = machine
+            .authorize_queued_live_context_append(&queued)
+            .await
+            .expect("authorized after finish")
+        else {
+            panic!("safe boundary must authorize exact queue head")
+        };
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("pending replay"),
+            LiveContextAppendAdmission::Deferred
+        ));
+        machine
+            .resolve_live_context_append(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &authority,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("delivery receipt");
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("delivered replay"),
+            LiveContextAppendAdmission::AlreadyCovered
+        ));
+        // A different channel cannot use the delivered-append set as authority.
+        let conflict = crate::live_execution::LiveContextQueuedRow::from_generated_effect(
+            &crate::live_execution::LiveDelegationRuntimeBinding::new(
+                session_id.clone(),
+                meerkat_core::LiveChannelId::new("wrong-channel"),
+                binding.runtime_id().clone(),
+                binding.fence_token(),
+                binding.generation(),
+            ),
+            queued.append_id(),
+            queued.row().clone(),
+            &crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveContextRowQueued {
+                session_id: session_id.to_string(),
+                channel_id: "wrong-channel".into(),
+                append_id: queued.append_id().into(),
+                canonical_cursor: 1,
+                disposition:
+                    crate::meerkat_machine::dsl::LiveContextRowDisposition::MirrorParentText,
+            },
+        )
+        .expect("test emitted exact foreign binding")
+        .expect("foreign row");
+        assert!(
+            machine
+                .authorize_queued_live_context_append(&conflict)
+                .await
+                .is_err()
         );
     }
 
@@ -7591,6 +7838,22 @@ impl MeerkatMachine {
     }
 
     #[cfg(feature = "live")]
+    fn live_context_projection_gate(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .shared
+            .live_context_projection_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(session_id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(session_id.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
+    #[cfg(feature = "live")]
     async fn enqueue_committed_session_boundary_with_provenance(
         &self,
         session_id: &SessionId,
@@ -7598,6 +7861,8 @@ impl MeerkatMachine {
         store_commit_authority: &str,
         provenance: meerkat_core::generated::session_document::LiveContextCommittedTextProvenance,
     ) -> Result<usize, RuntimeDriverError> {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let projection_guard = projection_gate.lock().await;
         let Some(channel_id) = self.live_active_channel_for_session(session_id).await else {
             return Ok(0);
         };
@@ -7779,6 +8044,7 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert((session_id.clone(), sequence), queued);
         }
+        drop(projection_guard);
         self.drain_live_context_outbox(session_id).await?;
         Ok(row_count)
     }
@@ -7793,6 +8059,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
         loop {
+            let projection_gate = self.live_context_projection_gate(session_id);
+            let projection_guard = projection_gate.lock().await;
             let Some(channel_id) = self.live_active_channel_for_session(session_id).await else {
                 return Ok(());
             };
@@ -7848,20 +8116,29 @@ impl MeerkatMachine {
                 continue;
             };
 
-            if state
-                .live_provider_turn_by_channel
-                .contains_key(channel_id.as_str())
-            {
-                return Ok(());
-            }
             let Some(host) = self.live_context_mirror_host() else {
                 return Ok(());
             };
-            let authority = self.authorize_queued_live_context_append(&queued).await?;
+            let authority = match self.authorize_queued_live_context_append(&queued).await? {
+                crate::live_execution::LiveContextAppendAdmission::Authorized(authority) => {
+                    authority
+                }
+                crate::live_execution::LiveContextAppendAdmission::Deferred => return Ok(()),
+                crate::live_execution::LiveContextAppendAdmission::AlreadyCovered => {
+                    self.shared
+                        .live_context_queued_rows
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&key);
+                    continue;
+                }
+            };
+            drop(projection_guard);
             let (returned_authority, outcome) = host
                 .append_context(authority, context)
                 .await
                 .map_err(RuntimeDriverError::Internal)?;
+            let projection_guard = projection_gate.lock().await;
             let resolution = self
                 .resolve_live_context_append(
                     binding.runtime_id(),
@@ -7911,6 +8188,7 @@ impl MeerkatMachine {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&key);
+                    drop(projection_guard);
                     host.recover_ambiguous_append(recovery)
                         .await
                         .map_err(RuntimeDriverError::Internal)?;
@@ -8065,7 +8343,7 @@ impl MeerkatMachine {
     pub async fn authorize_queued_live_context_append(
         &self,
         queued: &crate::live_execution::LiveContextQueuedRow,
-    ) -> Result<crate::live_execution::LiveContextAppendAuthority, RuntimeDriverError> {
+    ) -> Result<crate::live_execution::LiveContextAppendAdmission, RuntimeDriverError> {
         if queued.row().provider_context().is_none() {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: "queued live-context row has no provider context payload".to_string(),
@@ -8105,6 +8383,34 @@ impl MeerkatMachine {
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
+            use crate::meerkat_machine::dsl::MeerkatMachineEffect;
+            match effect {
+                MeerkatMachineEffect::LiveContextAppendDeferred {
+                    channel_id,
+                    append_id,
+                    previous_cursor: previous,
+                    next_cursor: next,
+                } if channel_id == binding.channel_id().as_str()
+                    && append_id == queued.append_id()
+                    && *previous == previous_cursor
+                    && *next == next_cursor =>
+                {
+                    return Ok(crate::live_execution::LiveContextAppendAdmission::Deferred);
+                }
+                MeerkatMachineEffect::LiveContextAppendAlreadyCovered {
+                    channel_id,
+                    append_id,
+                    previous_cursor: previous,
+                    next_cursor: next,
+                } if channel_id == binding.channel_id().as_str()
+                    && append_id == queued.append_id()
+                    && *previous == previous_cursor
+                    && *next == next_cursor =>
+                {
+                    return Ok(crate::live_execution::LiveContextAppendAdmission::AlreadyCovered);
+                }
+                _ => {}
+            }
             if let Some(authority) =
                 crate::live_execution::LiveContextAppendAuthority::from_generated_effect(
                     binding.session_id(),
@@ -8116,7 +8422,9 @@ impl MeerkatMachine {
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
             {
-                return Ok(authority);
+                return Ok(
+                    crate::live_execution::LiveContextAppendAdmission::Authorized(authority),
+                );
             }
         }
         Err(RuntimeDriverError::Internal(

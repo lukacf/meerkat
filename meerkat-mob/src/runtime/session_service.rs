@@ -911,7 +911,8 @@ pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
     /// Commit one provider-final client-delegation transcript through the
-    /// canonical session actor and SessionDocument authority.
+    /// canonical session actor, SessionDocument authority, and runtime-backed
+    /// persistent projection.
     ///
     /// The provider observation is not executor authority. Only the sealed
     /// evidence returned by this method may be reconciled by the live runtime
@@ -919,14 +920,11 @@ pub trait MobSessionService:
     #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
-        _session_id: &SessionId,
-        _provisional: meerkat_core::ProvisionalLiveHandoff,
-        _final_event: meerkat_core::RealtimeTranscriptEvent,
-    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
-        Err(SessionError::Unsupported(
-            "session service cannot commit a live delegation final transcript".into(),
-        ))
-    }
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError>;
 
     /// Validate the exact current durable member's bridge policy and isolated
     /// client capability before any live channel/provider open.
@@ -1731,12 +1729,15 @@ where
     #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
-        session_id: &SessionId,
-        provisional: meerkat_core::ProvisionalLiveHandoff,
-        final_event: meerkat_core::RealtimeTranscriptEvent,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
-        self.commit_live_user_transcript_final(session_id, provisional, Some(final_event))
-            .await
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires a runtime-backed persistent session service"
+                .into(),
+        ))
     }
 
     #[cfg(feature = "openai-live")]
@@ -2204,12 +2205,18 @@ where
     #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
+        machine: &meerkat_runtime::MeerkatMachine,
         session_id: &SessionId,
         provisional: meerkat_core::ProvisionalLiveHandoff,
         final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
-        self.commit_live_user_transcript_final(session_id, provisional, Some(final_event))
-            .await
+        self.commit_live_user_transcript_final_with_machine(
+            machine,
+            session_id,
+            provisional,
+            Some(final_event),
+        )
+        .await
     }
 
     #[cfg(feature = "openai-live")]

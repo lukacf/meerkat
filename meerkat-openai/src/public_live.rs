@@ -2149,66 +2149,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_eof_without_session_closed_never_finishes_output() {
-        async fn attach_unconfirmed(upgrade: WebSocketUpgrade) -> Response {
-            upgrade.on_upgrade(|mut socket| async move {
-                send_json(
+    async fn transport_eof_before_or_during_close_without_session_closed_never_finishes_output() {
+        for during_close in [false, true] {
+            let attach_unconfirmed = move |upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    send_json(
                     &mut socket,
                     json!({"type":"session.started","event_id":"s","session":{
                         "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
                     }}),
                 )
                 .await;
-                send_json(&mut socket, output_delta("unfinished")).await;
-                socket.send(AxumMessage::Close(None)).await.unwrap();
-            })
-        }
-        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
-        let app = Router::new()
-            .route("/v1/live/sessions", post(create_session))
-            .route(
-                "/v1/live/sessions/{session_id}/attach",
-                get(attach_unconfirmed),
+                    send_json(&mut socket, output_delta("unfinished")).await;
+                    if during_close {
+                        let message = socket.recv().await.unwrap().unwrap();
+                        let AxumMessage::Text(text) = message else {
+                            panic!("expected close request");
+                        };
+                        let request: Value = serde_json::from_str(&text).unwrap();
+                        assert_eq!(request["type"], "session.close");
+                    }
+                    socket.send(AxumMessage::Close(None)).await.unwrap();
+                })
+            };
+            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            let app = Router::new()
+                .route("/v1/live/sessions", post(create_session))
+                .route(
+                    "/v1/live/sessions/{session_id}/attach",
+                    get(attach_unconfirmed),
+                )
+                .with_state(capture);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                &format!("http://{address}/v1/"),
             )
-            .with_state(capture);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
-            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
-            &format!("http://{address}/v1/"),
-        )
-        .unwrap();
-        let (_, session) = factory
-            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
-            .await
-            .unwrap()
-            .into_parts();
-        for _ in 0..3 {
-            let observation = session.next_observation().await.unwrap().unwrap();
-            assert!(!matches!(
-                observation,
-                GptLiveBrokerObservation::TurnFinished { .. }
+            .unwrap();
+            let (_, session) = factory
+                .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+                .await
+                .unwrap()
+                .into_parts();
+            for _ in 0..3 {
+                let observation = session.next_observation().await.unwrap().unwrap();
+                assert!(!matches!(
+                    observation,
+                    GptLiveBrokerObservation::TurnFinished { .. }
+                ));
+            }
+            if during_close {
+                session
+                    .close()
+                    .await
+                    .expect("request close before bare transport EOF");
+            }
+            assert!(matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    session.next_observation()
+                )
+                .await
+                .expect("closed socket is observed"),
+                Err(GptLiveBrokerError::Transport {
+                    class: GptLiveBrokerTerminalClass::WebSocket
+                })
             ));
+            let state = session.state.lock().await;
+            assert!(!state.closed_observed);
+            assert_eq!(state.close_requested, during_close);
+            assert_eq!(
+                join_segments(&state.open_turn.as_ref().unwrap().segments),
+                "unfinished"
+            );
+            server.abort();
         }
-        assert!(matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                session.next_observation()
-            )
-            .await
-            .expect("closed socket is observed"),
-            Err(GptLiveBrokerError::Transport { .. })
-        ));
-        let state = session.state.lock().await;
-        assert!(!state.closed_observed);
-        assert_eq!(
-            join_segments(&state.open_turn.as_ref().unwrap().segments),
-            "unfinished"
-        );
-        server.abort();
     }
 
     #[tokio::test]

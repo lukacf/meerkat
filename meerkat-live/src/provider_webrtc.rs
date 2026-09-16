@@ -987,6 +987,15 @@ impl fmt::Debug for LiveSidebandObservation {
     }
 }
 
+/// Provider-owned evidence attached to sideband EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderWebrtcEofEvidence {
+    /// The provider owner observed an explicit protocol closure receipt.
+    ProviderConfirmed,
+    /// Stream absence alone does not prove a provider-confirmed close.
+    Unconfirmed,
+}
+
 /// Opaque provider sideband session. The answer strategy is its sole physical
 /// owner; semantic callers interact only through authorized commands and
 /// sanitized observations.
@@ -1000,6 +1009,12 @@ pub trait ProviderWebrtcSidebandSession: Send + Sync {
     async fn next_observation(
         &self,
     ) -> Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError>;
+
+    /// Evidence for the most recently returned EOF, never for a close request
+    /// or a transport error. Implementations without a receipt fail closed.
+    fn eof_evidence(&self) -> ProviderWebrtcEofEvidence {
+        ProviderWebrtcEofEvidence::Unconfirmed
+    }
 
     /// Mechanical cleanup invoked by the answer strategy. This is not a
     /// semantic context release and therefore carries no release authority.

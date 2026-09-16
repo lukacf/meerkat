@@ -801,6 +801,13 @@ Pending fault reporting pins its transport projection past the normal
 post-close cache TTL. Once cleanup completes, exact receipt replay relies on
 generated custody, not that cache. The generated-close/host-commit handoff
 continues in an owned task if the close observer is cancelled.
+The sideband owner declares `ProviderWebrtcEofEvidence`: EOF defaults to
+`Unconfirmed`, while `ProviderConfirmed` requires its explicit protocol receipt.
+An unconfirmed clean EOF is retained as a `ConnectionLost` fault, not a graceful
+provider close. The public OpenAI broker rejects both pre-close and mid-close
+WebSocket EOF lacking `session.closed` as transport failure. Known terminal
+drain evidence can retire a hung close request locally; an unfinished
+projection or control consumer still blocks successful cleanup.
 
 An ordinary session turn
 holding pending tools may return a busy close-settlement error; closing a live

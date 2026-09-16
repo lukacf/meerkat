@@ -1697,6 +1697,10 @@ impl ProviderWebrtcPendingBoundReadyResolver for ExperimentalGptLivePendingBound
 
 #[async_trait]
 trait ExperimentalGptLiveBrokerSession: Send + Sync {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed
+    }
+
     async fn await_ready_and_seed_session_context(
         &self,
         commentary: Option<String>,
@@ -1758,6 +1762,11 @@ impl ExperimentalGptLiveBrokerSession for GptLiveBrokerSession {
 
 #[async_trait]
 impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        // PublicLiveBrokerSession rejects EOF lacking `session.closed`.
+        meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed
+    }
+
     async fn await_ready_and_seed_session_context(
         &self,
         commentary: Option<String>,
@@ -2113,7 +2122,9 @@ struct ExperimentalGptLiveDrain {
     requested: AtomicBool,
     close_sent: AtomicBool,
     physically_retired: AtomicBool,
-    reader: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
+    reader: std::sync::Mutex<
+        Option<Result<meerkat_live::ProviderWebrtcEofEvidence, ProviderWebrtcBrokerError>>,
+    >,
     projection: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
     terminal: std::sync::Mutex<Option<Arc<ExperimentalLiveTerminalCloseReceipt>>>,
     control_finished: AtomicBool,
@@ -2225,7 +2236,14 @@ impl ExperimentalGptLiveDrain {
                 Some(if terminal {
                     Ok(ExperimentalGptLiveDrainOutcome::Terminated)
                 } else {
-                    reader.map(|()| ExperimentalGptLiveDrainOutcome::Graceful)
+                    reader.and_then(|evidence| match evidence {
+                        meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed => {
+                            Ok(ExperimentalGptLiveDrainOutcome::Graceful)
+                        }
+                        meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed => {
+                            Err(ProviderWebrtcBrokerError::ProtocolDrift)
+                        }
+                    })
                 })
             }
             _ => None,
@@ -2257,7 +2275,10 @@ impl ExperimentalGptLiveDrain {
         Ok(())
     }
 
-    fn finish_reader(&self, result: Result<(), ProviderWebrtcBrokerError>) {
+    fn finish_reader(
+        &self,
+        result: Result<meerkat_live::ProviderWebrtcEofEvidence, ProviderWebrtcBrokerError>,
+    ) {
         if let Ok(mut receipt) = self.reader.lock() {
             *receipt = Some(result);
         }
@@ -4415,21 +4436,33 @@ impl ExperimentalGptLiveWebrtcTransport {
             return Ok(false);
         };
         drain.retry_projection();
-        let close_result = drain.request_close(sideband).await;
-        let outcome = if activated {
+        let (outcome, close_result) = if activated {
             // Keep the exact binding reachable by the control consumer until
             // provider EOF and successful canonical projection are witnessed.
-            drain
-                .wait()
-                .await
-                .map_err(ProviderWebrtcSignalingError::SidebandClose)?
+            tokio::select! {
+                result = drain.wait() => (
+                    result.map_err(ProviderWebrtcSignalingError::SidebandClose)?,
+                    None,
+                ),
+                result = drain.request_close(Arc::clone(&sideband)) => (
+                    drain.wait().await.map_err(ProviderWebrtcSignalingError::SidebandClose)?,
+                    Some(result),
+                ),
+            }
         } else {
-            ExperimentalGptLiveDrainOutcome::Graceful
+            (
+                ExperimentalGptLiveDrainOutcome::Graceful,
+                Some(drain.request_close(Arc::clone(&sideband)).await),
+            )
         };
         if outcome == ExperimentalGptLiveDrainOutcome::Graceful {
-            close_result.map_err(ProviderWebrtcSignalingError::SidebandClose)?;
+            match close_result {
+                Some(result) => result,
+                None => drain.request_close(Arc::clone(&sideband)).await,
+            }
+            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
         } else {
-            if let Err(error) = close_result {
+            if let Some(Err(error)) = close_result {
                 tracing::warn!(%error, "failed live transport retired locally without provider close acknowledgement");
             }
             if let Some(task) = drain.close_task.lock().await.take() {
@@ -4437,6 +4470,7 @@ impl ExperimentalGptLiveWebrtcTransport {
                 let _ = task.await;
             }
         }
+        drop(sideband);
         let mut retirement = drain.retirement_task.lock().await;
         let active = self
             .active_by_session
@@ -4598,7 +4632,7 @@ fn spawn_sideband_actors(
                     }
                 }
                 Ok(None) => {
-                    observation_drain.finish_reader(Ok(()));
+                    observation_drain.finish_reader(Ok(observation_sideband.eof_evidence()));
                     observation_adapter.close_stream();
                     let _ = observation_tx.send(Ok(None)).await;
                     break;
@@ -4671,6 +4705,15 @@ fn spawn_sideband_actors(
                             .map(|receipt| *receipt)
                             .map_err(|_| ProviderWebrtcBrokerError::Unavailable);
                         let result = match reader {
+                            Ok(Some(Ok(meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed))) =>
+                                pump_drain.retain_terminal(
+                                    &activation.live_adapter_host,
+                                    &pump_binding,
+                                    LiveAdapterObservation::Error {
+                                        code: LiveAdapterErrorCode::ConnectionLost,
+                                        message: "live provider stream ended without provider closure confirmation".to_string(),
+                                    },
+                                ).await,
                             Ok(Some(Err(error))) => pump_drain.retain_terminal(
                                 &activation.live_adapter_host,
                                 &pump_binding,
@@ -5292,6 +5335,10 @@ impl fmt::Debug for ExperimentalGptLiveSideband {
 
 #[async_trait]
 impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        self.session.eof_evidence()
+    }
+
     async fn send_command(
         &self,
         command: LiveSidebandCommand,
@@ -6247,6 +6294,9 @@ mod tests {
         observation_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<ControlledSidebandEvent>>>,
         observation_rx: Mutex<mpsc::UnboundedReceiver<ControlledSidebandEvent>>,
         fail_close: AtomicBool,
+        confirmed_eof: AtomicBool,
+        block_close: AtomicBool,
+        close_started: AtomicBool,
     }
 
     enum ControlledSidebandEvent {
@@ -6261,6 +6311,9 @@ mod tests {
                 observation_tx: std::sync::Mutex::new(Some(observation_tx)),
                 observation_rx: Mutex::new(observation_rx),
                 fail_close: AtomicBool::new(false),
+                confirmed_eof: AtomicBool::new(true),
+                block_close: AtomicBool::new(false),
+                close_started: AtomicBool::new(false),
             }
         }
 
@@ -6285,6 +6338,14 @@ mod tests {
 
     #[async_trait]
     impl ProviderWebrtcSidebandSession for ControlledAmbiguousSideband {
+        fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+            if self.confirmed_eof.load(Ordering::Acquire) {
+                meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed
+            } else {
+                meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed
+            }
+        }
+
         async fn send_command(
             &self,
             _command: LiveSidebandCommand,
@@ -6303,6 +6364,10 @@ mod tests {
         }
 
         async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
+            self.close_started.store(true, Ordering::Release);
+            if self.block_close.load(Ordering::Acquire) {
+                return futures::future::pending().await;
+            }
             if self.fail_close.load(Ordering::Acquire) {
                 return Err(ProviderWebrtcBrokerError::Unavailable);
             }
@@ -9196,7 +9261,9 @@ mod tests {
             .lock()
             .await
             .insert(binding.session_id().clone(), active);
-        drain.finish_reader(Ok(()));
+        drain.finish_reader(Ok(
+            meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed,
+        ));
         assert!(transport.close_exact(&binding, None).await.is_err());
         assert_eq!(
             transport.active_binding(binding.session_id()).await,
@@ -9334,7 +9401,9 @@ mod tests {
         drain.requested.store(true, Ordering::Release);
         adapter.close_stream();
         assert_eq!(adapter.status(), LiveAdapterStatus::Closing);
-        drain.finish_reader(Ok(()));
+        drain.finish_reader(Ok(
+            meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed,
+        ));
         drain.finish_projection(Ok(()));
         drain.control_finished.store(true, Ordering::Release);
         assert!(
@@ -9591,8 +9660,11 @@ mod tests {
             PublicationRetry,
             Graceful,
             Eof,
+            UnconfirmedEof,
+            UnconfirmedEofDuringClose,
             BrokerError,
             BrokerErrorCloseRejected,
+            BrokerErrorDuringPendingClose,
             BrokerErrorReportRetry,
             BrokerErrorReportReceiptLost,
             BrokerErrorCloseObserverCancelled,
@@ -9613,8 +9685,11 @@ mod tests {
             ExitKind::PublicationRetry,
             ExitKind::Graceful,
             ExitKind::Eof,
+            ExitKind::UnconfirmedEof,
+            ExitKind::UnconfirmedEofDuringClose,
             ExitKind::BrokerError,
             ExitKind::BrokerErrorCloseRejected,
+            ExitKind::BrokerErrorDuringPendingClose,
             ExitKind::BrokerErrorReportRetry,
             ExitKind::BrokerErrorReportReceiptLost,
             ExitKind::BrokerErrorCloseObserverCancelled,
@@ -10872,6 +10947,15 @@ mod tests {
             if matches!(exit, ExitKind::BrokerErrorCloseRejected) {
                 sideband.fail_close.store(true, Ordering::Release);
             }
+            if matches!(exit, ExitKind::BrokerErrorDuringPendingClose) {
+                sideband.block_close.store(true, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::UnconfirmedEof | ExitKind::UnconfirmedEofDuringClose
+            ) {
+                sideband.confirmed_eof.store(false, Ordering::Release);
+            }
             if matches!(
                 exit,
                 ExitKind::BrokerErrorReportRetry
@@ -10923,6 +11007,12 @@ mod tests {
                 ExitKind::SnapshotCut => unreachable!(),
                 ExitKind::Graceful => unreachable!(),
                 ExitKind::Eof => sideband.close().await.expect("inject EOF"),
+                ExitKind::UnconfirmedEof => sideband
+                    .close()
+                    .await
+                    .expect("inject unconfirmed stream EOF"),
+                ExitKind::UnconfirmedEofDuringClose => {}
+                ExitKind::BrokerErrorDuringPendingClose => {}
                 ExitKind::BrokerError
                 | ExitKind::BrokerErrorCloseRejected
                 | ExitKind::BrokerErrorReportRetry
@@ -10935,6 +11025,47 @@ mod tests {
                     .expect("publication rejection release")
                     .notify_one(),
                 ExitKind::ReceiptFailed => {}
+            }
+            if matches!(exit, ExitKind::BrokerErrorDuringPendingClose) {
+                let close_host = Arc::clone(&member_host);
+                let close_authority = Arc::clone(&authority);
+                let close_channel = channel_id.clone();
+                let receipt = opened.pending_receipt().to_string();
+                let close = tokio::spawn(async move {
+                    close_host
+                        .close_experimental_live_pending_channel(
+                            close_authority.as_ref(),
+                            &close_channel,
+                            &receipt,
+                        )
+                        .await
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !sideband.close_started.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("provider close request starts and remains pending");
+                sideband.fail(ProviderWebrtcBrokerError::Unavailable);
+                tokio::time::timeout(std::time::Duration::from_secs(3), close)
+                    .await
+                    .expect("known failed stream cannot wait for hung remote close")
+                    .expect("close task")
+                    .expect("exact local close");
+            }
+            if matches!(exit, ExitKind::UnconfirmedEofDuringClose) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    member_host.close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    ),
+                )
+                .await
+                .expect("unconfirmed EOF during close is bounded")
+                .expect("unconfirmed EOF retires locally through shared close");
             }
             if let Some((entered, release)) = close_barrier {
                 let close_host = Arc::clone(&member_host);
@@ -11059,7 +11190,10 @@ mod tests {
             if matches!(
                 exit,
                 ExitKind::BrokerError
+                    | ExitKind::UnconfirmedEof
+                    | ExitKind::UnconfirmedEofDuringClose
                     | ExitKind::BrokerErrorCloseRejected
+                    | ExitKind::BrokerErrorDuringPendingClose
                     | ExitKind::BrokerErrorReportRetry
                     | ExitKind::BrokerErrorReportReceiptLost
                     | ExitKind::BrokerErrorCloseObserverCancelled

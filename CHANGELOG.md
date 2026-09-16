@@ -73,6 +73,13 @@ them.
 
 ### Fixed
 
+- CI: the GCP BuildBuddy lane was called with `mode: changed-paths`, a mode
+  `scripts/buildbuddy-ci-lane` never implemented and treated as "skip", so from
+  2026-08-28 every code lane (clippy, unit, integration-fast, wasm-check) exited
+  0 without compiling anything while the CI gate reported green. CI now runs
+  `full-fresh`, and an unimplemented mode fails the lane instead of skipping it.
+  Found because the Turbo S smoke lane hit a wasm32 build break that CI had
+  passed twice.
 - Public GPT Live preserves one assistant output identity across long pauses
   and delayed delegated-result readouts instead of rejecting the continuation
   as an unsolicited new turn.

@@ -74,7 +74,9 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="https://crates.io/api/v1/crates/meerkat-core/${VERSION}"
-          if curl -fsSL \
+          # crates.io answers bursts with 429; curl treats 429 (and 5xx) as
+          # transient under --retry, while a 404 (unpublished) returns at once.
+          if curl -fsSL --retry 6 --retry-delay 10 \
             -H 'User-Agent: meerkat-release-readiness (https://github.com/lukacf/meerkat)' \
             "${endpoint}" >/dev/null 2>&1; then
             echo "needed=false" >> "${GITHUB_OUTPUT}"

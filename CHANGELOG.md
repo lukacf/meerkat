@@ -73,6 +73,9 @@ them.
 
 ### Fixed
 
+- Release semver readiness retries its two crates.io lookups (baseline version,
+  candidate-published check) on transient errors such as 429 instead of failing
+  the run; a 404 still answers immediately.
 - Public Live no longer aborts the session task when the provider starts its
   next response before the caller reported playback of the previous one (a
   barge-in answer, or a follow-up the model volunteers). The transcript

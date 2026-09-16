@@ -33,7 +33,13 @@ jobs:
     name: GCP BuildBuddy
     uses: ./.github/workflows/buildbuddy.yml
     with:
-      mode: changed-paths
+      # full-fresh runs every Bazel lane on the remote executors. The lane
+      # script never implemented changed-paths; it treated it as "skip", and
+      # from 2026-08-28 to 2026-09-16 every code lane (clippy, unit,
+      # integration-fast, wasm-check) exited 0 without compiling anything
+      # while the gate reported green. Do not reintroduce a subset mode
+      # without implementing it in scripts/buildbuddy-ci-lane.
+      mode: full-fresh
       machine_authority_base_sha: >-
         ${{
           github.event_name == 'pull_request' && github.event.pull_request.base.sha ||

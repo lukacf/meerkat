@@ -34,6 +34,10 @@ them.
 
 ### Breaking
 
+- `LiveChannelVerbError` gains `CloseSettlementBusy { channel_id, session_id }`:
+  a Live close whose owning session has a turn with pending tools is reported as
+  busy for retry (RPC `SESSION_BUSY`, mob `MemberLiveError::Unavailable`) instead
+  of an internal error. Update exhaustive matches.
 - Behavior-only: public GPT Live no longer synthesizes assistant completion
   after 1.5 seconds without transcript output or a fixed delegation-readout
   grace period. A quiet stream is not provider completion or playback evidence.

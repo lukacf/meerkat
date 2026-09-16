@@ -731,6 +731,27 @@ where
 pub enum TranscriptSource {
     /// Spoken-audio transcript (provider audio output → text).
     Spoken,
+    /// Observed assistant speech without measured playback or hearing
+    /// evidence. Provider termination is independent: the enclosing message's
+    /// optional stop reason is absent for nonterminal snapshots.
+    SpokenUnmeasured,
+}
+
+impl TranscriptSource {
+    /// Preserve transcript provenance when a text-only model protocol cannot
+    /// carry the typed source field. Ordinary speech is unchanged.
+    pub fn text_for_model<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if text.is_empty() {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        match self {
+            Self::Spoken => std::borrow::Cow::Borrowed(text),
+            Self::SpokenUnmeasured => std::borrow::Cow::Owned(format!(
+                "[Observed assistant speech; playback UNMEASURED. Not proof of \
+                 played/heard text or a provider-final utterance.]\n{text}"
+            )),
+        }
+    }
 }
 
 /// Typed semantic kind of a provider-executed (server-side) tool.
@@ -833,7 +854,7 @@ pub enum AssistantBlock {
     /// same human-readable text stream.
     Transcript {
         text: String,
-        /// Origin lane (today: `Spoken`).
+        /// Origin lane, including explicitly unmeasured speech observations.
         source: TranscriptSource,
         /// Provider continuity metadata, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2763,13 +2784,15 @@ impl UserMessage {
 /// Assistant message with ordered blocks - no billing metadata.
 ///
 /// The canonical transcript representation for assistant output: an ordered
-/// sequence of typed [`AssistantBlock`]s plus the stop reason.
+/// sequence of typed [`AssistantBlock`]s plus any observed stop reason.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockAssistantMessage {
     /// Ordered sequence of content blocks
     pub blocks: Vec<AssistantBlock>,
-    /// How the turn ended
-    pub stop_reason: StopReason,
+    /// How the provider turn ended, when that boundary was observed. A
+    /// canonical transcript snapshot may have content without stop evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub identity: TranscriptMessageIdentity,
     /// When this assistant message was committed to the transcript.
@@ -2785,7 +2808,17 @@ impl BlockAssistantMessage {
     pub fn new(blocks: Vec<AssistantBlock>, stop_reason: StopReason) -> Self {
         Self {
             blocks,
-            stop_reason,
+            stop_reason: Some(stop_reason),
+            identity: TranscriptMessageIdentity::default(),
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Commit observed content without manufacturing provider terminality.
+    pub fn snapshot(blocks: Vec<AssistantBlock>) -> Self {
+        Self {
+            blocks,
+            stop_reason: None,
             identity: TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         }

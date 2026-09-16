@@ -581,7 +581,7 @@ mod tests {
                 text: text.to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         })
@@ -804,7 +804,7 @@ mod tests {
                 .expect("valid args"),
                 meta: None,
             }],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });

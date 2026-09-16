@@ -41,6 +41,15 @@ pub trait LiveContextMirrorHost: Send + Sync {
         &self,
         authority: LiveDelegationResultAmbiguityRecoveryAuthority,
     ) -> Result<(), String>;
+
+    /// Release publication custody for this exact generated close, including
+    /// replacements that never activated. This does not authorize closing.
+    async fn retire_closed_channel(
+        &self,
+        _session_id: &SessionId,
+        _authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+    ) {
+    }
 }
 
 /// One exact store-committed canonical row classified by SessionDocument.

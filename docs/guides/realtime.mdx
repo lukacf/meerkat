@@ -605,6 +605,144 @@ Meerkat does not silently trim the selected seed to fit: select a bounded histor
 window at the shared open-projection seam, or resolve an oversize-seed rejection
 before retrying. The canonical session history itself is unchanged.
 
+### Generated context summaries for an existing agent
+
+A dedicated host can opt in to a **generated factual summary**, rather than a
+replayed history window. This is a Rust host composition seam, not a caller
+prompt field and not transcript compaction:
+
+```rust
+use meerkat::session_runtime::live_summary::LiveContextSummaryPolicy;
+use std::time::Duration;
+
+let policy = LiveContextSummaryPolicy::new(
+    summary_service, // Arc<dyn LiveContextSummarizer>
+    256 * 1024,      // maximum serialized input bytes
+    8 * 1024,        // maximum returned UTF-8 bytes
+    Duration::from_secs(20),
+)?;
+let member_host = member_host.with_context_summary_policy(policy);
+```
+
+Implement `LiveContextSummarizer::summarize(LiveContextSummarySnapshot<'_>)`
+as an asynchronous, tool-free model call returning `Result<String,
+LiveContextSummaryError>`. The snapshot exposes `session_id()`, `messages()`,
+`llm_identity()`, `canonical_message_cursor()`, and `max_output_bytes()`.
+`messages()` contains the entire current model-boundary context window,
+including context and tool-result rows and canonical voice transcript blocks
+marked `TranscriptSource::SpokenUnmeasured`. Media remains typed references
+rather than newly hydrated images. Observed speech is not a new user request
+or proof of playback. Treat all source text as data; produce facts, decisions, ongoing
+work, and uncertainties, not executable instructions or assurances that the
+user heard unmeasured speech.
+
+`llm_identity()` is the existing background text identity before the voice
+override. A host can build a separate client using
+`AgentFactory::build_llm_client_for_identity(&config, snapshot.llm_identity())`.
+This resolves the configured binding through the factory/auth owner without
+changing the agent's model, running its tools, or adding a transcript turn.
+An independently configured summary model must likewise resolve through that
+factory seam.
+
+Use the ordinary `open_with_execution_identity` method with `seed_window: None`.
+The host policy also regenerates summaries for both canonical-context and
+delegation-result replacement opens. Combining a summary policy with a replay
+window is rejected. Input overflow, empty or oversized output, timeout, source
+change during generation, and producer errors refuse opening without falling
+back to raw history. Limits count bytes, not characters or provider tokens;
+the provider's independent startup token limit still applies.
+
+The shared owner seals the summary to the source session, exact body revision,
+rewrite generation, text identity, canonical cursor, and complete projected
+context digest. The deferred provider open and seed acknowledgement recheck the
+exact canonical source prefix. Observed transcript rows also advance the
+canonical revision/cursor and follow ordinary append-only catch-up. A
+conflicting body or rewrite cannot be disguised by an unchanged row count.
+The summary enters public Live
+as explicitly factual, unprivileged startup `session.input`, never
+`session.instructions`. Continuity is `degraded`, not a claim of lossless replay.
+`ExperimentalGptLiveWebrtcTransport::bound_context_summary(channel, session)`
+exposes read-only, channel-scoped summary provenance until unbinding.
+
+For an availability indicator, call
+`ExperimentalLiveOpenAuthorityProvider::probe_execution_readiness(session,
+execution_identity)`. Unlike catalog capability atoms, this checks the exact
+durable source and configured credential binding. It prepares and drops an
+unbound factory: no summary generation, text-model call, channel reservation, or
+provider session is started. Auth resolution can acquire or refresh its normal
+lease/credential, so this is not a zero-I/O status getter. Opening always
+revalidates; a previous successful probe is not an admission receipt.
+
+### Delegate to the selected existing member
+
+The normal live delegation composer continues to create an isolated durable
+fork. A console host that intentionally wants the selected agent to perform
+voice-delegated work in its existing session can opt in at the mob feature
+boundary:
+
+```rust
+use meerkat_mob_mcp::live_delegation::{
+    compose_experimental_live_delegation_coordinator_with_policy,
+    LiveDelegationExecutionPolicy,
+};
+
+let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
+    runtime,
+    mobs,
+    LiveDelegationExecutionPolicy::ExistingMember,
+);
+```
+
+The coordinator resolves the source member from the channel's authoritative
+session binding; the browser does not select a worker or supply an execution
+session. Voice work uses the member's ordinary text model and generated input
+admission. Concurrent ordinary text remains independent work. Close and
+supersession cancel the exact voice operation, never retire the existing member
+or interrupt whichever unrelated user turn happens to be running. Operation
+ownership is retained with recovery evidence rather than reconstructed from the
+host's current policy. Compose the returned coordinator into the same shared
+context-mirror/activation host as the default coordinator.
+
+### Continuous media without fabricated playback completion
+
+Direct public Live WebRTC provides no per-utterance rendered-completion event
+or mapping from media samples to Meerkat's opaque output handles. Neither
+transcript grouping, `response.done`, audio-element `ended`, analyser silence,
+nor output-address publication establishes playback completion.
+
+For continuous console voice, opt in on the same public authority used by
+initial and replacement opens:
+
+```rust
+use meerkat::experimental_gpt_live::PublicGptLivePlaybackPolicy;
+
+let authority = authority.with_public_playback_policy(
+    PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured,
+)?;
+```
+
+The default `CallerConfirmedSnapshots` mode remains available for hosts that
+can genuinely measure playback. In `ProviderManagedUnmeasured`, generated
+document authority settles each observed segment internally as unmeasured; it
+does not publish an actionable playback output handle or wait for a browser
+`playback_complete` call. Strict media-owner registration and activation still
+apply. Ordinary observation transport acknowledgement is never playback or
+hearing evidence.
+
+Observed assistant text is retained as canonical `Transcript`
+blocks with `TranscriptSource::SpokenUnmeasured`, through a distinct
+`AssistantUnmeasuredSnapshotCommitted` event. Committed-live provenance advances
+coverage without echo before segment advancement. Ordinary
+`messages_for_model_boundary()`, summaries, compaction, and reload therefore
+consume the same canonical history; there is no separate observation-position
+ledger or `messages_for_live_context()` overlay. The source marker must remain
+unmeasured when rendering or summarizing these rows. An observed snapshot has
+`BlockAssistantMessage.stop_reason: None`: it does not manufacture
+`StopReason::EndTurn`. Independently observed provider stop evidence remains
+optional throughout persistence and wire projection. Normal completed model
+responses still use `Some(stop_reason)`; consumers must not substitute a
+completion for an absent value.
+
 Public admission diagnostics include the failing stage and typed cause (for
 example, `missing_default_binding`, `lease_absent`, or
 `openai-live-openai-api-backend`) without logging credentials, provider payloads,
@@ -653,6 +791,34 @@ channel does not authorize cancellation or fabricate those tools' results.
 Ambiguous-delivery replacement bootstraps retain their machine-issued
 `pending_receipt`. Register the replacement playback owner with that receipt
 before answering its offer, just as for an initial strict open.
+The shared `ExperimentalLiveReplacementRequired` value exposes `open()`,
+`pending_receipt()`, and `canonical_seed_cursor()`. Project it to a strict pending
+handle, register the new media owner, answer that replacement's offer, publish
+answer-delivery custody, and obtain its active receipt from status. Do not issue
+a second fresh open or reuse the old channel's activation receipt. Ordinary text
+updates do not switch the durable text model; a lost replacement notification
+can be recovered by pulling the same pending bootstrap until its answer binds
+or that exact channel closes.
+
+Explicit user close must call the shared exact-receipt close even when the
+known channel already reports `Closed` or `Revoked`. Recovery can have closed
+its old transport while a summary or credential preparation is still pending.
+`close_experimental_live_pending_channel` accepts the original pending receipt;
+`close_experimental_live_active_channel` accepts its activation receipt. Generated
+close authority cancels only that channel's outstanding recovery candidates,
+refuses their late admission or activation, and retires any admitted candidate.
+It cannot cancel a later independent open on the same session. The internal
+recovery handoff close does not cancel its own replacement. Retained replacement
+bootstraps are mechanical publication custody: closing a never-activated
+replacement removes its entry, and delayed old close feedback cannot remove a
+newer entry.
+
+Cancellation invalidates generated recovery authority; it does not forcibly
+drop an arbitrary host summary or credential future. Until that bounded
+preparation finishes or times out, its existing projection-memory reservation
+may temporarily backpressure another open. Hosts should surface that refusal
+and retry within their own bound, not infer a new channel or bypass the shared
+reservation.
 
 The private ChatGPT-brokered path (`experimental-gpt-live`, `gpt-live-1-codex`)
 is deprecated and will be removed after the public path has shipped for at

@@ -2676,6 +2676,7 @@ fn submit_work_payload(
         bounded_result_spec,
         llm_identity_applied_tx,
         ack_mode,
+        content_attribution,
     } = *cmd;
     if let Some(context) = spec.transient_turn_context {
         let mut metadata = turn_metadata.unwrap_or_default();
@@ -2712,6 +2713,7 @@ fn submit_work_payload(
         bounded_result_spec,
         llm_identity_applied_tx,
         ack_mode,
+        content_attribution,
     }))
 }
 
@@ -10487,6 +10489,7 @@ impl MobHandle {
             bounded_result_spec: observers.bounded_result_spec,
             llm_identity_applied_tx: observers.llm_identity_applied_tx,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
@@ -10518,13 +10521,14 @@ impl MobHandle {
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
         Ok((runtime_id, fence_token))
     }
 
-    async fn resolve_submit_work_runtime_binding(
+    pub(super) async fn resolve_submit_work_runtime_binding(
         &self,
         agent_identity: &AgentIdentity,
         origin: WorkOrigin,
@@ -10841,6 +10845,8 @@ impl MobHandle {
             handling_mode,
             None,
             None,
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            crate::mob_machine::WorkContentAttribution::Conversational,
         )
         .await
     }
@@ -10873,6 +10879,8 @@ impl MobHandle {
             handling_mode,
             Some(delivery_identity),
             None,
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            crate::mob_machine::WorkContentAttribution::Conversational,
         )
         .await
     }
@@ -10894,6 +10902,8 @@ impl MobHandle {
             handling_mode,
             None,
             Some(result_spec),
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            crate::mob_machine::WorkContentAttribution::Conversational,
         )
         .await
     }
@@ -10985,6 +10995,40 @@ impl MobHandle {
             handling_mode,
             Some(delivery_identity),
             Some(result_spec),
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            crate::mob_machine::WorkContentAttribution::Conversational,
+        )
+        .await
+    }
+
+    /// Exact runtime-input custody, independently of the member's ordinary
+    /// inbox mode. The live execution service supplies the generated admission.
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) async fn start_runtime_work_with_delivery_identity_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        result_spec: BoundedResultSpec,
+        content_attribution: crate::mob_machine::WorkContentAttribution,
+    ) -> Result<WorkTurnHandle, MobError> {
+        delivery_identity.validate()?;
+        let work_ref = WorkRef::for_delivery(
+            &self.definition.id,
+            &runtime_id.identity,
+            &delivery_identity.idempotency_key,
+        );
+        self.start_work_with_mode_inner(
+            runtime_id,
+            fence_token,
+            work_ref,
+            spec,
+            HandlingMode::Queue,
+            Some(delivery_identity),
+            Some(result_spec),
+            crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted,
+            content_attribution,
         )
         .await
     }
@@ -10999,6 +11043,8 @@ impl MobHandle {
         handling_mode: HandlingMode,
         external_delivery_identity: Option<crate::store::MobDeliveryIdentity>,
         bounded_result_spec: Option<BoundedResultSpec>,
+        ack_mode: crate::mob_machine::SubmitWorkAckMode,
+        content_attribution: crate::mob_machine::WorkContentAttribution,
     ) -> Result<WorkTurnHandle, MobError> {
         let admitted_session_id = {
             let machine_state = self.machine_state_watch_rx.borrow();
@@ -11023,7 +11069,8 @@ impl MobHandle {
             completion_tx: Some(completion_tx),
             bounded_result_spec: bounded_result_spec.clone(),
             llm_identity_applied_tx: None,
-            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            ack_mode,
+            content_attribution,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -11072,6 +11119,7 @@ impl MobHandle {
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -11119,6 +11167,7 @@ impl MobHandle {
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -11170,6 +11219,7 @@ impl MobHandle {
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         self.submit_work_command_bounded(cmd, deadline).await
     }
@@ -11204,6 +11254,7 @@ impl MobHandle {
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         self.submit_work_command_bounded(cmd, deadline).await
     }

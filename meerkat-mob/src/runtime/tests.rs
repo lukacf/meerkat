@@ -1,4 +1,7 @@
 use super::*;
+
+#[cfg(feature = "openai-live")]
+mod existing_live_delegation;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
@@ -4649,7 +4652,13 @@ impl MobSessionService for MockSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        let exact_result_text = req.prompt.text_content();
+        let exact_result_text = if req.runtime.typed_turn_appends.is_empty() {
+            req.prompt.text_content()
+        } else {
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &req.runtime.typed_turn_appends,
+            ).text_content()
+        };
         let replaced = self
             .runtime_apply_runs
             .write()

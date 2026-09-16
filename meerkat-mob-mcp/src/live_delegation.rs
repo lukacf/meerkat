@@ -5,7 +5,8 @@
 //! members. A Responses call waits for exact final-user transcript authority,
 //! then persists a real durable fork of the channel-bound member and runs one
 //! bounded child turn. The live endpoint itself never owns callback or effect
-//! execution.
+//! execution. ClientContext callers may explicitly borrow the existing member
+//! instead; operation-scoped custody never confers member retirement authority.
 
 use std::sync::Arc;
 
@@ -67,6 +68,46 @@ const CLIENT_CONTEXT_RESTART_RETRY_MAX_DELAY: std::time::Duration =
     std::time::Duration::from_secs(1);
 
 type ActiveChannelKey = (SessionId, meerkat_core::LiveChannelId);
+
+fn live_worker_failure_terminal(
+    failure: &meerkat_mob::BoundedTurnFailure,
+) -> LiveDelegationWorkerTerminalKind {
+    match failure {
+        meerkat_mob::BoundedTurnFailure::Cancelled { .. } => {
+            LiveDelegationWorkerTerminalKind::Cancelled
+        }
+        _ => LiveDelegationWorkerTerminalKind::Failed,
+    }
+}
+
+/// Feature-owned execution placement for confirmed ClientContext delegations.
+/// This never changes the chosen member's text model or build configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LiveDelegationExecutionPolicy {
+    #[default]
+    DurableFork,
+    ExistingMember,
+}
+
+impl LiveDelegationExecutionPolicy {
+    fn worker_identity(self, source: &AgentIdentity, operation: &OperationId) -> AgentIdentity {
+        match self {
+            Self::DurableFork => AgentIdentity::from(format!("live-delegation-{operation}")),
+            Self::ExistingMember => source.clone(),
+        }
+    }
+
+    fn worker_ownership(self) -> meerkat_runtime::live_execution::LiveDelegationWorkerOwnership {
+        match self {
+            Self::DurableFork => {
+                meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::OwnedMember
+            }
+            Self::ExistingMember => {
+                meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember
+            }
+        }
+    }
+}
 
 fn live_bridge_execution_result_digest(terminal: &LiveBridgeOperationTerminal) -> Option<String> {
     terminal.output().map(|output| {
@@ -820,6 +861,7 @@ async fn release_bound_channel(
 pub struct ExperimentalLiveDelegationCoordinator {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
+    execution_policy: LiveDelegationExecutionPolicy,
     responses_projection_shutdown: Arc<ResponsesProjectionShutdown>,
     responses_prepared: Arc<Mutex<PreparedResponsesMap>>,
     responses_active: Arc<Mutex<ActiveResponsesMap>>,
@@ -1071,7 +1113,24 @@ pub fn compose_experimental_live_delegation_coordinator(
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
 ) -> Arc<ExperimentalLiveDelegationCoordinator> {
-    let coordinator = Arc::new(ExperimentalLiveDelegationCoordinator::new(runtime, mobs));
+    compose_experimental_live_delegation_coordinator_with_policy(
+        runtime,
+        mobs,
+        LiveDelegationExecutionPolicy::default(),
+    )
+}
+
+/// Compose an opt-in execution strategy at the feature owner, not in a host
+/// callback. Recovery uses each operation's persisted custody, not this policy.
+#[must_use]
+pub fn compose_experimental_live_delegation_coordinator_with_policy(
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    mobs: Arc<crate::MobMcpState>,
+    policy: LiveDelegationExecutionPolicy,
+) -> Arc<ExperimentalLiveDelegationCoordinator> {
+    let coordinator = Arc::new(
+        ExperimentalLiveDelegationCoordinator::new(runtime, mobs).with_execution_policy(policy),
+    );
     coordinator.arm_client_context_restart_reconciler();
     coordinator
 }
@@ -1103,6 +1162,7 @@ impl ExperimentalLiveDelegationCoordinator {
         Self {
             runtime,
             mobs,
+            execution_policy: LiveDelegationExecutionPolicy::default(),
             responses_projection_shutdown: Arc::new(ResponsesProjectionShutdown {
                 cancellation: CancellationToken::new(),
             }),
@@ -1125,6 +1185,12 @@ impl ExperimentalLiveDelegationCoordinator {
                 ClientContextRestartInventoryReady::default(),
             ),
         }
+    }
+
+    #[must_use]
+    pub fn with_execution_policy(mut self, policy: LiveDelegationExecutionPolicy) -> Self {
+        self.execution_policy = policy;
+        self
     }
 
     fn arm_client_context_restart_reconciler(self: &Arc<Self>) -> bool {
@@ -1357,9 +1423,11 @@ impl ExperimentalLiveDelegationCoordinator {
         observe_until: tokio::time::Instant,
     ) -> ExperimentalClientContextRestartDisposition {
         if snapshot.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Retired
-            && snapshot.late()
             && !snapshot.result_eligible()
+            && (snapshot.late() || snapshot.terminal().is_none())
         {
+            // A retired worker without a turn terminal is generated
+            // failed-start cleanup, not a missing durable work obligation.
             return ExperimentalClientContextRestartDisposition::AlreadyReconciled;
         }
         if snapshot.phase() == meerkat_runtime::live_execution::LiveDelegationRecoveryPhase::Failed
@@ -1432,13 +1500,10 @@ impl ExperimentalLiveDelegationCoordinator {
                     tokio::time::sleep(CLIENT_CONTEXT_RESTART_OBSERVE_INTERVAL).await;
                     continue;
                 }
-                DurableBoundedWorkState::Terminal { result, .. } => {
-                    if result.is_ok() {
-                        LiveDelegationWorkerTerminalKind::Completed
-                    } else {
-                        LiveDelegationWorkerTerminalKind::Failed
-                    }
-                }
+                DurableBoundedWorkState::Terminal { result, .. } => match result {
+                    Ok(_) => LiveDelegationWorkerTerminalKind::Completed,
+                    Err(failure) => live_worker_failure_terminal(&failure),
+                },
                 _ => {
                     return ExperimentalClientContextRestartDisposition::Broken {
                         reason: "durable ClientContext recovery returned an unsupported work state"
@@ -1450,7 +1515,9 @@ impl ExperimentalLiveDelegationCoordinator {
             match member {
                 DurableBoundedMemberState::Active { .. }
                 | DurableBoundedMemberState::Retiring { .. } => {
-                    if let Err(error) = mob_handle.retire(child_identity.clone()).await {
+                    if snapshot.worker_ownership()
+                        == meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::OwnedMember
+                        && let Err(error) = mob_handle.retire(child_identity.clone()).await {
                         return ExperimentalClientContextRestartDisposition::Broken {
                             reason: format!(
                                 "durable ClientContext executor retirement remains pending: {error}"
@@ -2727,6 +2794,12 @@ impl ExperimentalLiveDelegationCoordinator {
         // while the generated interaction is still active, then close the
         // conversational turn. Canonical transcript reconciliation and all
         // executor authority remain control-owned below.
+        self.supersede_previous_delegation(
+            &channel_key,
+            &runtime_binding,
+            operation.domain_correlation().interaction_id(),
+        )
+        .await?;
         self.runtime
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
@@ -2772,6 +2845,73 @@ impl ExperimentalLiveDelegationCoordinator {
             .drain_live_context_outbox(finished.binding().session_id())
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Close exact previous execution custody before either admitting a new
+    /// delegation or acquiring the source session's transcript mutation lane.
+    async fn supersede_previous_delegation(
+        &self,
+        channel_key: &ActiveChannelKey,
+        runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        superseding_interaction_id: meerkat_core::InteractionId,
+    ) -> Result<(), String> {
+        let previous = self.active.lock().await.remove(channel_key);
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        if !previous.task.is_finished() {
+            let directive = match self
+                .runtime
+                .supersede_live_delegation(
+                    runtime_binding.runtime_id(),
+                    runtime_binding.fence_token(),
+                    runtime_binding.generation(),
+                    &previous.retained.admission,
+                    superseding_interaction_id,
+                )
+                .await
+            {
+                Ok(directive) => Some(directive),
+                Err(_) if previous.task.is_finished() => None,
+                Err(error) => {
+                    self.active
+                        .lock()
+                        .await
+                        .insert(channel_key.clone(), previous);
+                    return Err(error.to_string());
+                }
+            };
+            if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(cancellation)) =
+                directive
+            {
+                let outcome = previous
+                    .cancellation
+                    .cancel(&cancellation)
+                    .await
+                    .unwrap_or(LiveDelegationCancellationOutcome::Failed);
+                if let Err(error) = self
+                    .runtime
+                    .resolve_live_delegation_cancellation(
+                        runtime_binding.runtime_id(),
+                        runtime_binding.fence_token(),
+                        runtime_binding.generation(),
+                        &cancellation,
+                        outcome,
+                    )
+                    .await
+                {
+                    self.active
+                        .lock()
+                        .await
+                        .insert(channel_key.clone(), previous);
+                    return Err(error.to_string());
+                }
+            }
+        }
+        previous
+            .task
+            .await
+            .map_err(|error| format!("live delegation terminal task failed: {error}"))
     }
 
     /// Client-context capability only. The provider-final transcript remains
@@ -2831,6 +2971,15 @@ impl ExperimentalLiveDelegationCoordinator {
             .ok_or_else(|| {
                 "live delegation requires a durable Meerkat-Mob member owner".to_string()
             })?;
+        // Existing-member execution holds this same session's finalization
+        // boundary. Cancellation must run before waiting to append the next
+        // canonical user transcript; it must never interrupt unrelated text.
+        self.supersede_previous_delegation(
+            &channel_key,
+            &runtime_binding,
+            operation.domain_correlation().interaction_id(),
+        )
+        .await?;
         let final_event = meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
             item_id: turn.adapter_key().to_string(),
             previous_item_id: None,
@@ -2848,61 +2997,6 @@ impl ExperimentalLiveDelegationCoordinator {
             "client-context control committed canonical final transcript"
         );
 
-        if let Some(previous) = self.active.lock().await.remove(&channel_key) {
-            if previous.task.is_finished() {
-                previous
-                    .task
-                    .await
-                    .map_err(|error| format!("live delegation terminal task failed: {error}"))?;
-            } else {
-                let directive = match self
-                    .runtime
-                    .supersede_live_delegation(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &previous.retained.admission,
-                        operation.domain_correlation().interaction_id(),
-                    )
-                    .await
-                {
-                    Ok(directive) => Some(directive),
-                    Err(_error) if previous.task.is_finished() => None,
-                    Err(error) => {
-                        self.active.lock().await.insert(channel_key, previous);
-                        return Err(error.to_string());
-                    }
-                };
-                if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(
-                    cancellation,
-                )) = directive
-                {
-                    let outcome = previous
-                        .cancellation
-                        .cancel(&cancellation)
-                        .await
-                        .unwrap_or(LiveDelegationCancellationOutcome::Failed);
-                    if let Err(error) = self
-                        .runtime
-                        .resolve_live_delegation_cancellation(
-                            runtime_binding.runtime_id(),
-                            runtime_binding.fence_token(),
-                            runtime_binding.generation(),
-                            &cancellation,
-                            outcome,
-                        )
-                        .await
-                    {
-                        self.active.lock().await.insert(channel_key, previous);
-                        return Err(error.to_string());
-                    }
-                }
-                previous
-                    .task
-                    .await
-                    .map_err(|error| format!("live delegation terminal task failed: {error}"))?;
-            }
-        }
         let reconciliation = self
             .runtime
             .reconcile_live_delegation_transcript(
@@ -2980,15 +3074,16 @@ impl ExperimentalLiveDelegationCoordinator {
                 "confirmed live delegation is missing its exact transcript boundary".to_string()
             })?;
 
-        let worker_identity =
-            AgentIdentity::from(format!("live-delegation-{}", operation.operation_id()));
+        let worker_identity = self
+            .execution_policy
+            .worker_identity(&source_identity, operation.operation_id());
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "client-context control requesting generated worker-start authority"
         );
         let admission = self
             .runtime
-            .authorize_live_delegation_worker_start(
+            .authorize_live_delegation_worker_start_with_ownership(
                 session_id,
                 runtime_binding.runtime_id(),
                 runtime_binding.fence_token(),
@@ -2996,6 +3091,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 &operation,
                 &provisional,
                 worker_identity.as_str(),
+                self.execution_policy.worker_ownership(),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -3031,8 +3127,13 @@ impl ExperimentalLiveDelegationCoordinator {
             provisional.executor_input(),
             result_spec,
             admission.clone(),
-        )
-        .with_durable_fork(source_identity, Some(committed_message_count));
+        );
+        let request = match self.execution_policy {
+            LiveDelegationExecutionPolicy::DurableFork => {
+                request.with_durable_fork(source_identity, Some(committed_message_count))
+            }
+            LiveDelegationExecutionPolicy::ExistingMember => request.with_existing_member(),
+        };
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "client-context control entering durable delegation service"
@@ -4000,7 +4101,7 @@ async fn realize_terminal(
 ) -> RealizedDelegationTerminal {
     let terminal_kind = match terminalized.terminal() {
         DelegationTurnTerminal::Completed(_) => LiveDelegationWorkerTerminalKind::Completed,
-        DelegationTurnTerminal::Failed(_) => LiveDelegationWorkerTerminalKind::Failed,
+        DelegationTurnTerminal::Failed(error) => live_worker_failure_terminal(error.failure()),
         _ => LiveDelegationWorkerTerminalKind::Failed,
     };
     let result_text = match terminalized.terminal() {
@@ -4072,6 +4173,189 @@ mod tests {
     use super::*;
     use meerkat_core::exact_operation::ExactOperationIdentity;
     use meerkat_core::interaction::InteractionId;
+
+    #[cfg(all(
+        feature = "experimental-gpt-live-gate0-harness",
+        not(target_arch = "wasm32")
+    ))]
+    mod supersession;
+
+    #[test]
+    fn live_and_recovered_cancelled_terminals_keep_the_same_typed_class() {
+        assert_eq!(
+            live_worker_failure_terminal(&meerkat_mob::BoundedTurnFailure::Cancelled {
+                session_id: SessionId::new(),
+            }),
+            LiveDelegationWorkerTerminalKind::Cancelled,
+        );
+        assert_eq!(
+            live_worker_failure_terminal(
+                &meerkat_mob::BoundedTurnFailure::CompletedWithoutResult {
+                    session_id: SessionId::new(),
+                }
+            ),
+            LiveDelegationWorkerTerminalKind::Failed,
+        );
+    }
+
+    #[test]
+    fn execution_policy_defaults_to_fork_and_existing_member_is_identity_preserving() {
+        let source = AgentIdentity::from("selected-console-agent");
+        let operation = OperationId::new();
+        assert_eq!(
+            LiveDelegationExecutionPolicy::default(),
+            LiveDelegationExecutionPolicy::DurableFork
+        );
+        assert_ne!(
+            LiveDelegationExecutionPolicy::default().worker_identity(&source, &operation),
+            source
+        );
+        assert_eq!(
+            LiveDelegationExecutionPolicy::ExistingMember.worker_identity(&source, &operation),
+            source
+        );
+        assert_eq!(
+            LiveDelegationExecutionPolicy::ExistingMember.worker_ownership(),
+            meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember
+        );
+    }
+
+    #[tokio::test]
+    async fn restarted_default_coordinator_retains_borrowed_member_and_never_resubmits() {
+        let mut sessions = crate::LocalSessionService::new();
+        sessions.runtime_adapter =
+            Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            ));
+        let runtime = Arc::clone(&sessions.runtime_adapter);
+        let sessions = Arc::new(sessions);
+        let mobs = Arc::new(crate::MobMcpState::new(
+            sessions.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let mob = meerkat_mob::MobBuilder::new(
+            meerkat_mob::MobDefinition::implicit("existing-member-restart", "claude-sonnet-4-5"),
+            meerkat_mob::MobStorage::in_memory(),
+        )
+        .with_session_service(sessions)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("mob");
+        let identity = AgentIdentity::from("existing-console-agent");
+        let mut spec = meerkat_mob::SpawnMemberSpec::new("delegate", identity.as_str());
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        mob.spawn_spec(spec).await.expect("existing source");
+        let session_id = mob
+            .resolve_bridge_session_id(&identity)
+            .await
+            .expect("source session");
+        let admission = runtime
+            .__test_admit_confirmed_live_delegation(
+                &session_id,
+                identity.as_str(),
+                meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+                "retained voice work",
+            )
+            .await
+            .expect("generated existing admission");
+        let execution = DelegationExecutionService::new(mob.clone())
+            .start(
+                DelegationExecutionRequest::new_live(
+                    identity.clone(),
+                    "retained voice work",
+                    BoundedResultSpec::new("voice", 256).expect("bound"),
+                    admission.clone(),
+                )
+                .with_existing_member(),
+            )
+            .await
+            .expect("existing work");
+        let binding = runtime
+            .live_delegation_runtime_binding(
+                &session_id,
+                admission.operation().domain_correlation().channel_id(),
+            )
+            .await
+            .expect("binding");
+        runtime
+            .resolve_live_delegation_worker_start(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &admission,
+                true,
+            )
+            .await
+            .expect("worker running");
+        assert!(matches!(
+            execution.await_terminal().await.terminal(),
+            DelegationTurnTerminal::Completed(_)
+        ));
+        let snapshot = runtime
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("retained recovery snapshot")
+            .remove(0);
+        runtime
+            .abandon_live_open_admission(&session_id, binding.channel_id())
+            .await
+            .expect("revoke original provider binding");
+
+        // The replacement host deliberately uses the old/default fork policy.
+        // Per-operation durable custody, not host config, controls cleanup.
+        let coordinator = ExperimentalLiveDelegationCoordinator::new(Arc::clone(&runtime), mobs);
+        let disposition = coordinator
+            .reconcile_one_client_context_snapshot(
+                &mob,
+                &snapshot,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert!(
+            matches!(
+                disposition,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true }
+            ),
+            "{disposition:?}"
+        );
+        assert_eq!(
+            mob.resolve_bridge_session_id(&identity).await,
+            Some(session_id.clone())
+        );
+        let reconciled = runtime
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("reconciled snapshot")
+            .remove(0);
+        assert!(reconciled.late());
+        assert!(!reconciled.result_eligible());
+        assert!(matches!(
+            coordinator
+                .reconcile_one_client_context_snapshot(
+                    &mob,
+                    &reconciled,
+                    tokio::time::Instant::now(),
+                )
+                .await,
+            ExperimentalClientContextRestartDisposition::AlreadyReconciled
+        ));
+        mob.start_work_for_identity_bounded(
+            identity,
+            meerkat_mob::WorkSpec::new(
+                "ordinary text after recovery",
+                meerkat_mob::WorkOrigin::Internal,
+            ),
+            meerkat_core::types::HandlingMode::Queue,
+            BoundedResultSpec::new("text", 256).expect("bound"),
+        )
+        .await
+        .expect("admit text after recovery")
+        .wait_bounded(BoundedResultSpec::new("text", 256).expect("bound"))
+        .await
+        .expect("text completes on retained source");
+        mob.shutdown().await.expect("shutdown");
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum RestartRecoveryInvocation {
@@ -5076,6 +5360,19 @@ mod tests {
     #[tokio::test]
     async fn retained_terminal_result_runs_control_ack_and_runtime_resolution_chain()
     -> Result<(), Box<dyn std::error::Error>> {
+        for ownership in [
+            meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::OwnedMember,
+            meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+        ] {
+            assert_retained_terminal_result_chain(ownership).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    async fn assert_retained_terminal_result_chain(
+        ownership: meerkat_runtime::live_execution::LiveDelegationWorkerOwnership,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_core::service::{
             CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
         };
@@ -5264,7 +5561,7 @@ mod tests {
             .await
             .expect("reconcile exact final transcript");
         let admission = runtime
-            .authorize_live_delegation_worker_start(
+            .authorize_live_delegation_worker_start_with_ownership(
                 &session_id,
                 &runtime_id,
                 fence_token,
@@ -5272,6 +5569,7 @@ mod tests {
                 &operation,
                 &provisional,
                 "exact-result-projection-worker",
+                ownership,
             )
             .await
             .expect("authorize exact bounded worker");

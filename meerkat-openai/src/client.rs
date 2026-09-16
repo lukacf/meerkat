@@ -320,8 +320,8 @@ fn project_openai_assistant_blocks(
             // OpenAI Responses API sees the assistant's visible output
             // regardless of capture lane.
             AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
-            AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
-                text: text.clone(),
+            AssistantBlock::Transcript { text, source, .. } => Some(AssistantBlock::Text {
+                text: source.text_for_model(text).into_owned(),
                 meta: None,
             }),
             AssistantBlock::Reasoning { meta, .. }
@@ -3312,6 +3312,42 @@ mod tests {
             .expect("build request")
     }
 
+    #[test]
+    fn text_followup_keeps_unmeasured_voice_provenance_in_provider_request() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::User(UserMessage::text("listen")),
+                Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                    AssistantBlock::Transcript {
+                        text: "ordinary speech".into(),
+                        source: meerkat_core::TranscriptSource::Spoken,
+                        meta: None,
+                    },
+                    AssistantBlock::Transcript {
+                        text: "voice-only discussion".into(),
+                        source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                        meta: None,
+                    },
+                ])),
+                Message::User(UserMessage::text("follow up on what we discussed")),
+            ],
+        );
+        let body = build_projected_request_body(&client, &request);
+        let assistant = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant[0]["content"], "ordinary speech");
+        let observed = assistant[1]["content"].as_str().unwrap();
+        assert!(observed.contains("voice-only discussion") && observed.contains("UNMEASURED"));
+        assert!(observed.contains("Not proof"));
+        assert!(body.to_string().contains("follow up on what we discussed"));
+    }
+
     async fn responses_sse(State(payload): State<String>) -> impl IntoResponse {
         ([("content-type", "text/event-stream")], payload)
     }
@@ -5562,7 +5598,7 @@ mod tests {
                             .expect("valid args"),
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5949,7 +5985,7 @@ mod tests {
                         text: "Hi there!".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5989,7 +6025,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -6024,7 +6060,7 @@ mod tests {
                         args,
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -6177,7 +6213,7 @@ mod tests {
                             .expect("valid args"),
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7339,7 +7375,7 @@ mod tests {
                             response_id: None,
                         })),
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7375,7 +7411,7 @@ mod tests {
                             response_id: None,
                         })),
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7411,7 +7447,7 @@ mod tests {
                         args,
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7426,7 +7462,7 @@ mod tests {
                             response_id: None,
                         })),
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7481,7 +7517,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7520,7 +7556,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7558,7 +7594,7 @@ mod tests {
                             response_id: None,
                         })),
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7572,7 +7608,7 @@ mod tests {
                             response_id: None,
                         })),
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7650,7 +7686,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7693,7 +7729,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),

@@ -224,10 +224,16 @@ pub enum ExperimentalLiveContextRecoveryError {
     Authority(#[from] crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError),
     #[error("failed to project canonical replacement seed: {0}")]
     Projection(#[from] RealtimeSessionOpenProjectionError),
+    #[error(transparent)]
+    Summary(#[from] crate::session_runtime::live_summary::LiveContextSummaryError),
     #[error("failed to open exact replacement live channel: {0}")]
     Open(#[from] LiveOpenError),
     #[error("replacement canonical seed cursor did not match generated recovery authority")]
     SeedCursorMismatch,
+    #[error("replacement channel closed before publication")]
+    ClosedBeforePublication,
+    #[error("replacement custody validation failed: {0}")]
+    Custody(#[from] meerkat_runtime::RuntimeDriverError),
     #[error("replacement provider binding failed: {binding}; cleanup failed: {cleanup}")]
     BindingCleanup {
         binding: crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
@@ -844,6 +850,8 @@ pub struct ServiceMemberLiveHost<B: SessionAgentBuilder + 'static = FactoryAgent
     realm_id: Option<RealmId>,
     instance_id: Option<String>,
     backend: Option<String>,
+    #[cfg(feature = "openai-live")]
+    context_summary_policy: Option<crate::session_runtime::live_summary::LiveContextSummaryPolicy>,
 }
 
 /// Shared production composition for canonical context mirroring. It wraps
@@ -897,12 +905,47 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
     }
 
     /// Read the pending client renegotiation bootstrap for this session. The
-    /// exact same value remains available until its replacement answer binds.
+    /// exact same value remains available until its replacement answer binds
+    /// or generated close authority retires that exact channel.
     pub async fn pending_replacement_required(
         &self,
         session_id: &SessionId,
     ) -> Option<ExperimentalLiveReplacementRequired> {
         self.replacements.lock().await.get(session_id).cloned()
+    }
+
+    async fn publish_replacement(
+        &self,
+        session_id: SessionId,
+        replacement: ExperimentalLiveReplacementRequired,
+    ) -> Result<(), String> {
+        // Serialize with close feedback, then consult the generated receipt:
+        // close may have completed after open returned but before publication.
+        let mut replacements = self.replacements.lock().await;
+        let custody = self
+            .runtime
+            .validate_live_channel_custody_by_pending_receipt(
+                &session_id,
+                &LiveChannelId::new(&replacement.open().channel_id),
+                replacement.pending_receipt(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            custody.state(),
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
+        ) {
+            drop(replacements);
+            self.open_authority
+                .unbind_channel(
+                    &LiveChannelId::new(&replacement.open().channel_id),
+                    &session_id,
+                )
+                .await;
+            return Err(ExperimentalLiveContextRecoveryError::ClosedBeforePublication.to_string());
+        }
+        replacements.insert(session_id, replacement);
+        Ok(())
     }
 }
 
@@ -1108,11 +1151,7 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
             .open_live_context_replacement(self.open_authority.as_ref(), authority)
             .await
             .map_err(|error| error.to_string())?;
-        self.replacements
-            .lock()
-            .await
-            .insert(session_id, replacement);
-        Ok(())
+        self.publish_replacement(session_id, replacement).await
     }
 
     async fn recover_ambiguous_delegation_result(
@@ -1129,11 +1168,21 @@ impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::Liv
             .open_live_result_replacement(self.open_authority.as_ref(), authority)
             .await
             .map_err(|error| error.to_string())?;
-        self.replacements
-            .lock()
-            .await
-            .insert(session_id, replacement);
-        Ok(())
+        self.publish_replacement(session_id, replacement).await
+    }
+
+    async fn retire_closed_channel(
+        &self,
+        session_id: &SessionId,
+        authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+    ) {
+        let mut replacements = self.replacements.lock().await;
+        if replacements
+            .get(session_id)
+            .is_some_and(|replacement| replacement.open().channel_id == authority.channel_id())
+        {
+            replacements.remove(session_id);
+        }
     }
 }
 
@@ -1157,7 +1206,22 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             realm_id: config.realm_id,
             instance_id: config.instance_id,
             backend: config.backend,
+            #[cfg(feature = "openai-live")]
+            context_summary_policy: None,
         }
+    }
+
+    /// Apply one host-owned summary policy to strict initial and replacement
+    /// opens. Use a dedicated host for opt-in console voice; stock live opens
+    /// and the durable background session remain unchanged.
+    #[cfg(feature = "openai-live")]
+    #[must_use]
+    pub fn with_context_summary_policy(
+        mut self,
+        policy: crate::session_runtime::live_summary::LiveContextSummaryPolicy,
+    ) -> Self {
+        self.context_summary_policy = Some(policy);
+        self
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -1691,6 +1755,21 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         seed_window: Option<LiveSeedWindow>,
         transport: Option<LiveOpenTransport>,
     ) -> Result<ExperimentalLivePendingChannel, ExperimentalLiveChannelOpenError> {
+        if let Some(policy) = &self.context_summary_policy {
+            if seed_window.is_some() {
+                return Err(crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingSeedPolicy.into());
+            }
+            return self
+                .open_with_execution_identity_and_summary(
+                    authority,
+                    session,
+                    execution_identity,
+                    turning_mode,
+                    policy,
+                    transport,
+                )
+                .await;
+        }
         self.orchestrator()
             .open_live_channel_with_execution_identity(
                 &self.host,
@@ -1703,6 +1782,60 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 transport,
             )
             .await
+    }
+
+    /// Opt-in voice open with a generated factual summary of the selected
+    /// agent's exact current window, without changing its transcript or model.
+    #[cfg(feature = "openai-live")]
+    async fn open_with_execution_identity_and_summary(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        session: &SessionId,
+        execution_identity: &WireLiveExecutionIdentityOverrideV1,
+        turning_mode: Option<RealtimeTurningMode>,
+        summary: &crate::session_runtime::live_summary::LiveContextSummaryPolicy,
+        transport: Option<LiveOpenTransport>,
+    ) -> Result<ExperimentalLivePendingChannel, ExperimentalLiveChannelOpenError> {
+        self.orchestrator()
+            .open_live_channel_with_execution_identity_and_summary(
+                &self.host,
+                self.transport_context(),
+                authority,
+                session,
+                execution_identity,
+                turning_mode,
+                summary,
+                transport,
+            )
+            .await
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn prepare_strict_replacement_projection(
+        &self,
+        session: &SessionId,
+        pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+    ) -> Result<RealtimeSessionOpenProjection, ExperimentalLiveContextRecoveryError> {
+        let mut projection = match &self.context_summary_policy {
+            Some(policy) => {
+                self.orchestrator()
+                    .live_open_summary_projection_for_session(
+                        session,
+                        RealtimeTurningMode::ProviderManaged,
+                        policy,
+                    )
+                    .await?
+            }
+            None => {
+                self.prepare_open_projection(session, RealtimeTurningMode::ProviderManaged, None)
+                    .await?
+            }
+        };
+        if let Some(summary) = projection.context_summary() {
+            pending.set_context_summary(summary.clone())?;
+        }
+        pending.apply_execution_identity(&mut projection);
+        Ok(projection)
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -1722,6 +1855,34 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         self.runtime_adapter
             .stage_experimental_live_execution(session_id, channel_id, canonical_seed_cursor)
             .await
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    async fn validate_bound_replacement(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        stage: &meerkat_runtime::meerkat_machine::ExperimentalLiveExecutionStageAuthority,
+    ) -> Result<(), ExperimentalLiveContextRecoveryError> {
+        let custody = self
+            .runtime_adapter
+            .validate_live_channel_custody_by_pending_receipt(
+                stage.binding().session_id(),
+                stage.binding().channel_id(),
+                stage.pending_receipt(),
+            )
+            .await?;
+        if matches!(
+            custody.state(),
+            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
+        ) {
+            // Registration may have completed after the exact close observed
+            // no provider custody. Retire only these newly arrived mechanics.
+            authority
+                .unbind_channel(stage.binding().channel_id(), stage.binding().session_id())
+                .await;
+            return Err(ExperimentalLiveContextRecoveryError::ClosedBeforePublication);
+        }
+        Ok(())
     }
 
     /// Realize generated ambiguity recovery without pretending an existing
@@ -1745,20 +1906,15 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
         };
-        let pending = authority
+        let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let mut projection = self
-            .prepare_open_projection(
-                recovery.session_id(),
-                RealtimeTurningMode::ProviderManaged,
-                None,
-            )
+        let projection = self
+            .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         if projection.open_config.canonical_message_cursor() != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
-        pending.apply_execution_identity(&mut projection);
         let result = self
             .orchestrator()
             .open_live_channel_from_projection_for_recovery(
@@ -1849,6 +2005,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 cleanup: cleanup.err().unwrap_or_default(),
             });
         }
+        self.validate_bound_replacement(authority, &stage).await?;
         Ok(ExperimentalLiveReplacementRequired::CanonicalContext {
             open: result,
             canonical_seed_cursor: recovery.canonical_seed_cursor(),
@@ -1875,20 +2032,15 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
         };
-        let pending = authority
+        let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let mut projection = self
-            .prepare_open_projection(
-                recovery.session_id(),
-                RealtimeTurningMode::ProviderManaged,
-                None,
-            )
+        let projection = self
+            .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         if projection.open_config.canonical_message_cursor() != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
-        pending.apply_execution_identity(&mut projection);
         let result = self
             .orchestrator()
             .open_live_channel_from_projection_for_result_recovery(
@@ -1979,6 +2131,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 cleanup: cleanup.err().unwrap_or_default(),
             });
         }
+        self.validate_bound_replacement(authority, &stage).await?;
         Ok(ExperimentalLiveReplacementRequired::DelegationResult {
             open: result,
             canonical_seed_cursor: recovery.canonical_seed_cursor(),
@@ -2015,13 +2168,13 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .live_session_for_active_channel(channel)
             .await
             .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
-        let mut physical_bound = false;
         if let Some(authority) = authority {
             // Already-admitted publications acquire lifecycle custody at the
             // writer. Drain them before taking the terminal commit lease.
             match authority.close_physical_if_bound(channel, &session).await {
-                Ok(ExperimentalLivePhysicalClose::Closed) => physical_bound = true,
-                Ok(ExperimentalLivePhysicalClose::NotBound) => {}
+                Ok(
+                    ExperimentalLivePhysicalClose::Closed | ExperimentalLivePhysicalClose::NotBound,
+                ) => {}
                 Err(error) => {
                     // A missing provider/drain receipt is not terminality.
                     // Preserve the exact binding and staged output for retry.
@@ -2051,7 +2204,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await?;
         self.runtime_adapter
             .retire_live_assistant_output_handles(&session, channel);
-        if physical_bound && let Some(authority) = authority {
+        if let Some(authority) = authority {
             authority.unbind_channel(channel, &session).await;
         }
         drop(lifecycle_lease);
@@ -2107,7 +2260,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .map_err(|error| {
                 ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
             })?;
-        let current = match receipt {
+        match receipt {
             meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Pending(value) => {
                 self.runtime_adapter
                     .validate_live_channel_custody_by_pending_receipt(
@@ -2130,12 +2283,6 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         .map_err(|error| {
             ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
         })?;
-        if matches!(
-            current.state(),
-            meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
-        ) {
-            return Ok(LiveCloseStatus::Closed);
-        }
         let close_custody = self
             .runtime_adapter
             .revoke_live_channel_close_custody(&session_id, channel_id, receipt)
@@ -2147,6 +2294,18 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             return Err(ExperimentalLiveChannelCloseError::LifecycleAuthority(
                 "generated close custody did not match the exact channel binding".to_string(),
             ));
+        }
+        for recovery_channel in close_custody.recovery_channel_ids() {
+            if self
+                .runtime_adapter
+                .live_session_for_active_channel(recovery_channel)
+                .await
+                .as_ref()
+                == Some(&session_id)
+            {
+                self.close_live_channel(Some(authority), recovery_channel)
+                    .await?;
+            }
         }
         if close_custody.already_closed() {
             return Ok(LiveCloseStatus::Closed);

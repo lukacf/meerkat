@@ -54,6 +54,7 @@ pub enum RealtimeTranscriptLaneKind {
     #[default]
     Display,
     Spoken,
+    SpokenUnmeasured,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -403,6 +404,7 @@ pub enum SessionDocumentInput {
         snapshot_present: bool,
         response_discarded: bool,
         item_materialized: bool,
+        requested_lane: RealtimeTranscriptLaneKind,
     },
     ResolveRealtimeMaterializeCandidate {
         item_materialized: bool,
@@ -502,6 +504,7 @@ pub enum SessionDocumentInput {
         canonical_chars: u64,
         canonical_digest: String,
         prefix_matches_snapshot: bool,
+        observation_only: bool,
     },
     ObserveLiveAssistantPlaybackFinal {
         session_id: SessionDocumentKey,
@@ -635,6 +638,9 @@ pub enum SessionDocumentInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentEffect {
+    RealtimeAssistantSnapshotMaterializationAuthorized {
+        lane: RealtimeTranscriptLaneKind,
+    },
     SessionFirstTurnPhaseResolved {
         phase: SessionFirstTurnPhase,
         was_pending: bool,
@@ -777,6 +783,8 @@ pub enum SessionDocumentEffect {
         canonical_chars: Option<u64>,
         canonical_text_digest: Option<String>,
         biological_hearing_claimed: bool,
+        continues_provider_group: bool,
+        observed_snapshot_digest: Option<String>,
     },
     LiveContextCommittedRowClassified {
         session_id: SessionDocumentKey,
@@ -2826,13 +2834,16 @@ impl SessionDocumentMachineAuthority {
                 snapshot_present,
                 response_discarded,
                 item_materialized,
+                requested_lane,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((target_matches)
                         && (snapshot_present)
                         && (response_discarded == false)
-                        && (item_materialized == false))
+                        && (item_materialized == false)
+                        && ((requested_lane == RealtimeTranscriptLaneKind::Spoken)
+                            || (requested_lane == RealtimeTranscriptLaneKind::SpokenUnmeasured)))
                 {
                     matches
                         .push(SessionDocumentTransition::ResolveRealtimeAssistantPlaybackSnapshot);
@@ -2843,22 +2854,7 @@ impl SessionDocumentMachineAuthority {
                     SessionDocumentTransition::ResolveRealtimeAssistantPlaybackSnapshot => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::RealtimeTranscriptEventResolved {
-                                observe_item: true,
-                                observe_skipped: false,
-                                write_user_segment: false,
-                                append_assistant_segment: false,
-                                replace_assistant_segment: true,
-                                promote_lane: true,
-                                mark_item_ready: true,
-                                record_delta_id: false,
-                                remove_completion: false,
-                                record_completion: true,
-                                discard_response: false,
-                                discard_response_by_lane: false,
-                                mark_response_ready: false,
-                                materialize_ready_items: true,
-                            },
+                            SessionDocumentEffect::RealtimeAssistantSnapshotMaterializationAuthorized { lane: requested_lane, },
                         ])
                     }
                     #[allow(unreachable_patterns)]
@@ -3575,6 +3571,8 @@ impl SessionDocumentMachineAuthority {
                                 canonical_chars: None,
                                 canonical_text_digest: None,
                                 biological_hearing_claimed: false,
+                                continues_provider_group: false,
+                                observed_snapshot_digest: None,
                             },
                         ])
                     }
@@ -3596,14 +3594,20 @@ impl SessionDocumentMachineAuthority {
                 canonical_chars,
                 canonical_digest,
                 prefix_matches_snapshot,
+                observation_only,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((snapshot_chars > 0)
                         && (snapshot_digest.clone() != "".to_string())
-                        && (prefix_matches_snapshot)
-                        && (canonical_chars <= snapshot_chars)
-                        && (canonical_digest.clone() != "".to_string())
+                        && (((observation_only)
+                            && (canonical_chars == 0)
+                            && (canonical_digest.clone() == "".to_string())
+                            && (!(prefix_matches_snapshot)))
+                            || ((!(observation_only))
+                                && (prefix_matches_snapshot)
+                                && (canonical_chars <= snapshot_chars)
+                                && (canonical_digest.clone() != "".to_string())))
                         && (if self.state.session_live_channel_id.contains_key(&session_id) {
                             Some(self.session_live_channel_id_value(&session_id)?)
                         } else {
@@ -3681,7 +3685,36 @@ impl SessionDocumentMachineAuthority {
                             .remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,  canonical_chars: Some(canonical_chars),  canonical_text_digest: Some(canonical_digest.clone()),  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
+                                session_id: session_id.clone(),
+                                channel_id: channel_id.clone(),
+                                interaction_id: interaction_id.clone(),
+                                response_id: response_id.clone(),
+                                item_id: item_id.clone(),
+                                content_index: content_index,
+                                disposition: if observation_only {
+                                    LiveAssistantPlaybackTerminalDisposition::Unmeasured
+                                } else {
+                                    LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot
+                                },
+                                canonical_chars: if observation_only {
+                                    None
+                                } else {
+                                    Some(canonical_chars)
+                                },
+                                canonical_text_digest: if observation_only {
+                                    None
+                                } else {
+                                    Some(canonical_digest.clone())
+                                },
+                                biological_hearing_claimed: false,
+                                continues_provider_group: true,
+                                observed_snapshot_digest: if observation_only {
+                                    Some(snapshot_digest.clone())
+                                } else {
+                                    None
+                                },
+                            },
                         ])
                     }
                     #[allow(unreachable_patterns)]
@@ -4016,6 +4049,8 @@ impl SessionDocumentMachineAuthority {
                                 canonical_chars: Some(authoritative_assistant_chars),
                                 canonical_text_digest: Some(authoritative_text_digest.clone()),
                                 biological_hearing_claimed: false,
+                                continues_provider_group: false,
+                                observed_snapshot_digest: None,
                             },
                         ])
                     }
@@ -4040,7 +4075,7 @@ impl SessionDocumentMachineAuthority {
                             .remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(pending_reported_prefix_chars),  canonical_text_digest: Some(pending_reported_prefix_digest.clone()),  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(pending_reported_prefix_chars),  canonical_text_digest: Some(pending_reported_prefix_digest.clone()),  biological_hearing_claimed: false,  continues_provider_group: false,  observed_snapshot_digest: None, },
                         ])
                     }
                     #[allow(unreachable_patterns)]
@@ -4523,7 +4558,7 @@ impl SessionDocumentMachineAuthority {
                         self.state.session_live_assistant_final_digest.remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,  canonical_chars: Some(authoritative_assistant_chars),  canonical_text_digest: Some(authoritative_text_digest.clone()),  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,  canonical_chars: Some(authoritative_assistant_chars),  canonical_text_digest: Some(authoritative_text_digest.clone()),  biological_hearing_claimed: false,  continues_provider_group: false,  observed_snapshot_digest: None, },
                         ])
                     }
                     SessionDocumentTransition::ObserveLiveAssistantPlaybackTerminalJoinsPrefix => {
@@ -4534,7 +4569,7 @@ impl SessionDocumentMachineAuthority {
                         self.state.session_live_assistant_final_digest.remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(reported_prefix_chars),  canonical_text_digest: Some(reported_prefix_digest.clone()),  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,  canonical_chars: Some(reported_prefix_chars),  canonical_text_digest: Some(reported_prefix_digest.clone()),  biological_hearing_claimed: false,  continues_provider_group: false,  observed_snapshot_digest: None, },
                         ])
                     }
                     SessionDocumentTransition::ObserveLiveAssistantPlaybackUnmeasured => {
@@ -4545,7 +4580,7 @@ impl SessionDocumentMachineAuthority {
                         self.state.session_live_assistant_final_digest.remove(&session_id);
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,  canonical_chars: None,  canonical_text_digest: None,  biological_hearing_claimed: false, },
+                            SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved { session_id: session_id.clone(),  channel_id: channel_id.clone(),  interaction_id: interaction_id.clone(),  response_id: response_id.clone(),  item_id: item_id.clone(),  content_index: content_index,  disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,  canonical_chars: None,  canonical_text_digest: None,  biological_hearing_claimed: false,  continues_provider_group: false,  observed_snapshot_digest: None, },
                         ])
                     }
                     #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ObserveLiveAssistantPlaybackTerminal_transition" }),
@@ -5721,6 +5756,7 @@ impl SessionDocumentMachineAuthority {
         snapshot_present: bool,
         response_discarded: bool,
         item_materialized: bool,
+        requested_lane: RealtimeTranscriptLaneKind,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(
             SessionDocumentInput::ResolveRealtimeAssistantPlaybackSnapshot {
@@ -5728,6 +5764,7 @@ impl SessionDocumentMachineAuthority {
                 snapshot_present,
                 response_discarded,
                 item_materialized,
+                requested_lane,
             },
         )
     }
@@ -5946,6 +5983,7 @@ impl SessionDocumentMachineAuthority {
         canonical_chars: u64,
         canonical_digest: String,
         prefix_matches_snapshot: bool,
+        observation_only: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ObserveLiveAssistantPlaybackSnapshot {
             session_id,
@@ -5959,6 +5997,7 @@ impl SessionDocumentMachineAuthority {
             canonical_chars,
             canonical_digest,
             prefix_matches_snapshot,
+            observation_only,
         })
     }
 

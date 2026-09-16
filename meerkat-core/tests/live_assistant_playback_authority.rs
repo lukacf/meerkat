@@ -58,6 +58,112 @@ fn assistant_first_target_without_foreground_interaction_is_rejected() {
 }
 
 #[test]
+fn unmeasured_continuation_is_generated_and_cannot_claim_played_text() {
+    for continues in [false, true] {
+        let observation = LiveAssistantPlaybackTerminalObservation::Unmeasured;
+        let mut authority = interaction_authority();
+        for segment in 0..4 {
+            let response = format!("{RESPONSE}-{segment}");
+            let item = format!("{ITEM}-{segment}");
+            authority
+                .admit_live_assistant_playback_target(
+                    key(),
+                    CHANNEL.to_string(),
+                    INTERACTION.to_string(),
+                    response.clone(),
+                    item.clone(),
+                    CONTENT_INDEX,
+                )
+                .expect("exact next observation target");
+            assert!(
+                authority
+                    .observe_live_assistant_playback_terminal(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response.clone(),
+                        item.clone(),
+                        CONTENT_INDEX,
+                        observation,
+                        1,
+                        "fabricated-played-prefix".to_string(),
+                        0,
+                        String::new(),
+                        false,
+                        true,
+                    )
+                    .is_err(),
+                "unmeasured release refuses any played-prefix claim"
+            );
+            let effects = if continues {
+                assert!(
+                    authority
+                        .observe_live_assistant_playback_snapshot(
+                            key(),
+                            CHANNEL.to_string(),
+                            INTERACTION.to_string(),
+                            response.clone(),
+                            item.clone(),
+                            CONTENT_INDEX,
+                            12,
+                            "observed-digest".to_string(),
+                            1,
+                            "forged-played-digest".to_string(),
+                            true,
+                            true,
+                        )
+                        .is_err()
+                );
+                authority
+                    .observe_live_assistant_playback_snapshot(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response,
+                        item,
+                        CONTENT_INDEX,
+                        12,
+                        "observed-digest".to_string(),
+                        0,
+                        String::new(),
+                        false,
+                        true,
+                    )
+                    .expect("generated observation release binds exact source digest")
+            } else {
+                authority
+                    .observe_live_assistant_playback_terminal(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response,
+                        item,
+                        CONTENT_INDEX,
+                        observation,
+                        0,
+                        String::new(),
+                        0,
+                        String::new(),
+                        false,
+                        false,
+                    )
+                    .expect("unmeasured release needs neither playback-complete nor provider-final")
+            };
+            assert!(matches!(effects.as_slice(), [
+                SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
+                    disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
+                    canonical_chars: None,
+                    canonical_text_digest: None,
+                    biological_hearing_claimed: false,
+                    continues_provider_group,
+                    ..
+                }
+            ] if *continues_provider_group == continues));
+        }
+    }
+}
+
+#[test]
 fn final_then_terminal_joins_once_and_validates_exact_prefix() {
     let mut authority = interaction_authority();
     admit_target(&mut authority);

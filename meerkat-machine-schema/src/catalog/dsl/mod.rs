@@ -721,7 +721,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // Realtime-transcript region typed vocabulary (folded from the
             // retired SessionRealtimeTranscriptAuthorityMachine).
             NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
-            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptLaneKind",
+                &["Display", "Spoken", "SpokenUnmeasured"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveContextCommittedRowKind",
                 &["UserText", "AssistantText", "NonText"],
@@ -1193,6 +1196,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Retired",
                     "Failed",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationWorkerOwnership",
+                &["OwnedMember", "ExistingMember"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationCancellationReason",

@@ -369,6 +369,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Effects
+- `RealtimeAssistantSnapshotMaterializationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionFirstTurnPhaseResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`

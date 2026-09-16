@@ -151,8 +151,8 @@ fn project_gemini_assistant_blocks(
                     meerkat_core::ReplayWireFamily::Gemini.strip_foreign_metadata(block.clone()),
                 ),
                 AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
-                AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
-                    text: text.clone(),
+                AssistantBlock::Transcript { text, source, .. } => Some(AssistantBlock::Text {
+                    text: source.text_for_model(text).into_owned(),
                     meta: None,
                 }),
                 AssistantBlock::Reasoning { text, .. } if !text.is_empty() => {
@@ -3585,7 +3585,7 @@ mod tests {
                             thought_signature: "sig_123".to_string(),
                         })),
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5650,7 +5650,7 @@ mod tests {
                             thought_signature: "sig_123".to_string(),
                         })),
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5929,7 +5929,7 @@ mod tests {
                         args: args_raw,
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -6104,14 +6104,18 @@ mod tests {
             "gemini-3.5-flash",
             vec![
                 Message::User(UserMessage::text("listen")),
-                Message::BlockAssistant(BlockAssistantMessage::new(
-                    vec![AssistantBlock::Transcript {
+                Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                    AssistantBlock::Transcript {
                         text: "spoken replay".to_string(),
                         source: meerkat_core::TranscriptSource::Spoken,
                         meta: None,
-                    }],
-                    StopReason::EndTurn,
-                )),
+                    },
+                    AssistantBlock::Transcript {
+                        text: "voice-only discussion".to_string(),
+                        source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                        meta: None,
+                    },
+                ])),
                 Message::User(UserMessage::text("continue")),
             ],
         );
@@ -6126,9 +6130,12 @@ mod tests {
             .find(|message| message["role"] == "model")
             .expect("projected model message");
         assert_eq!(
-            assistant["parts"],
-            serde_json::json!([{"text": "spoken replay"}])
+            assistant["parts"][0],
+            serde_json::json!({"text": "spoken replay"})
         );
+        let observed = assistant["parts"][1]["text"].as_str().unwrap();
+        assert!(observed.contains("voice-only discussion") && observed.contains("UNMEASURED"));
+        assert!(observed.contains("Not proof"));
         server.abort();
     }
 

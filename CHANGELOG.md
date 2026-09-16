@@ -30,6 +30,45 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Shared existing-member live delegation with explicit `ExistingMember` policy;
+  the default remains `DurableFork`. Execution context is injected without
+  duplicating conversational input, and supersession cancels the exact prior
+  voice operation before committing the next transcript.
+- `ServiceMemberLiveHost::with_context_summary_policy` applies bounded,
+  source-validated factual summaries to initial and recovery voice opens without
+  compacting or mutating the durable conversation. Producer failure has no raw
+  transcript fallback.
+- Public GPT Live `ProviderManagedUnmeasured` playback policy retains marked
+  observed dialogue as normal model context without claiming playback or
+  synthesizing provider completion.
+
+### Fixed
+
+- Exact receipt-close retires never-activated replacement bootstraps and cancels
+  only the known channel's in-flight recovery lineage, including an already
+  closed origin whose summary or provider registration is still preparing.
+  Delayed cleanup cannot close a newer independent same-session channel.
+- Active live readiness revalidates current configuration and credentials
+  without creating a second channel or invoking the summary producer.
+- Runtime-applied live transcripts preserve actual run attribution while
+  rejecting conflicting requested run identities.
+
+### Breaking
+
+- `BlockAssistantMessage::stop_reason` is now `Option<StopReason>`:
+  observation-only snapshots use `None`; ordinary completed runs retain required
+  stop evidence. `TranscriptSource::SpokenUnmeasured` marks observed speech
+  without asserting playback. Update exhaustive matches and snapshot consumers.
+- `ExperimentalLiveContextRecoveryError` gains `ClosedBeforePublication` and
+  `Custody`. `LiveChannelCloseCustodyRevoked` gains exact context/result recovery
+  candidate fields, and generated machine state gains
+  `live_cancelled_recovery_channels`.
+- Behavior-only: hosts must invoke the shared exact pending/activation-receipt
+  close even for `Closed` or `Revoked` channels to cancel outstanding recovery;
+  transport-only close does not represent that user intent.
+
 ## [0.8.39] - 2026-09-16
 
 ### Breaking

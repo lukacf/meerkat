@@ -7332,6 +7332,8 @@ pub struct LiveChannelCloseCustodyAuthority {
     session_id: SessionId,
     channel_id: meerkat_core::LiveChannelId,
     already_closed: bool,
+    context_recovery_channel_id: Option<meerkat_core::LiveChannelId>,
+    result_recovery_channel_id: Option<meerkat_core::LiveChannelId>,
 }
 
 #[cfg(feature = "live")]
@@ -7349,6 +7351,13 @@ impl LiveChannelCloseCustodyAuthority {
     #[must_use]
     pub const fn already_closed(&self) -> bool {
         self.already_closed
+    }
+
+    /// Exact cancelled recovery candidates, never a later unrelated open.
+    pub fn recovery_channel_ids(&self) -> impl Iterator<Item = &meerkat_core::LiveChannelId> {
+        self.context_recovery_channel_id
+            .iter()
+            .chain(self.result_recovery_channel_id.iter())
     }
 }
 

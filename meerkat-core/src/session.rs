@@ -3531,6 +3531,14 @@ impl Session {
         messages: Vec<Message>,
         authority: &crate::agent::compact::ValidatedCompactionRewrite,
     ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError> {
+        let observations =
+            crate::agent::compact::CompactionObservationSource::from_session(self)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if !authority.authorizes_observations(&observations) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction witness does not cover the current voice observations".into(),
+            ));
+        }
         // Authority first. The parent side binds against the session
         // accumulator (O(delta), byte-identical to
         // `transcript_messages_digest(self.messages())`); the rebuilt side
@@ -8042,7 +8050,7 @@ mod tests {
                     text: "answer one".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity {
                     interaction_id: None,
                     run_id: Some(crate::lifecycle::RunId::new()),
@@ -9924,7 +9932,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -9965,7 +9973,7 @@ mod tests {
                 text: "unchanged".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10002,7 +10010,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10017,7 +10025,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10032,7 +10040,7 @@ mod tests {
                 text: "follow-up answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10070,7 +10078,7 @@ mod tests {
                         text: "no tool after all".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10094,7 +10102,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10111,7 +10119,7 @@ mod tests {
                             .expect("valid args"),
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10135,7 +10143,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10180,7 +10188,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10195,7 +10203,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10235,7 +10243,7 @@ mod tests {
                 text: "verbose first answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10249,7 +10257,7 @@ mod tests {
                         text: "compact first answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10265,7 +10273,7 @@ mod tests {
                 text: "verbose second answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10289,7 +10297,7 @@ mod tests {
                         text: "compact second answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10322,7 +10330,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10337,7 +10345,7 @@ mod tests {
                         text: "first compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10360,7 +10368,7 @@ mod tests {
                         text: "second compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10395,7 +10403,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10409,7 +10417,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10459,7 +10467,7 @@ mod tests {
                             text: "compacted answer".to_string(),
                             meta: None,
                         }],
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: Some(StopReason::EndTurn),
                         identity: crate::types::TranscriptMessageIdentity::default(),
                         created_at: crate::types::message_timestamp_now(),
                     }),
@@ -10490,7 +10498,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10504,7 +10512,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10570,7 +10578,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10584,7 +10592,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10641,7 +10649,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10655,7 +10663,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10671,7 +10679,7 @@ mod tests {
                 text: "verbose follow-up".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10686,7 +10694,7 @@ mod tests {
                         text: "compact follow-up".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -12714,7 +12722,7 @@ mod tests {
                 text: "Hi!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -13346,7 +13354,7 @@ mod tests {
                 text: "Hi!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));

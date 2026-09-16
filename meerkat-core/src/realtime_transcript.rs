@@ -53,6 +53,7 @@ pub enum TranscriptLane {
     #[default]
     Display,
     Spoken,
+    SpokenUnmeasured,
 }
 
 /// Durable identity binding for one committed non-text user input.
@@ -297,6 +298,18 @@ pub enum RealtimeTranscriptEvent {
         text: String,
         evidence: crate::LiveAssistantPlaybackEvidence,
     },
+    /// Canonical observed assistant text, explicitly unmeasured. This records
+    /// a snapshot, not an AssistantTurnCompleted or a played/heard prefix.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    AssistantUnmeasuredSnapshotCommitted {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        text: String,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+    },
     /// Provider turn reached a terminal boundary. The session decides which
     /// staged assistant items, if any, are now canonical.
     AssistantTurnCompleted {
@@ -435,7 +448,7 @@ pub enum RealtimeTranscriptMaterializedMessage {
         item_id: String,
         response_id: String,
         text: String,
-        stop_reason: StopReason,
+        stop_reason: Option<StopReason>,
         usage: Option<crate::types::TurnUsage>,
         /// T9/T10: which output lane the staged content arrived on.
         /// Drives whether the materializer flushes

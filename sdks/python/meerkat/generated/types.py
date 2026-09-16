@@ -6872,11 +6872,14 @@ WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted
 class WireTranscriptSourceSpoken(TypedDict, total=False):
     kind: Required[Literal['spoken']]
 
+class WireTranscriptSourceSpokenUnmeasured(TypedDict, total=False):
+    kind: Required[Literal['spoken_unmeasured']]
+
 class WireTranscriptSourceUnknown(TypedDict, total=False):
     debug: Required[str]
     kind: Required[Literal['unknown']]
 
-WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
+WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceSpokenUnmeasured | WireTranscriptSourceUnknown
 
 # Transcript block inside a block-assistant message.
 #
@@ -7294,7 +7297,7 @@ class TranscriptRewriteMessageBlockAssistant(TypedDict, total=False):
     blocks: Required[list[WireAssistantBlock]]
     created_at: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
-    stop_reason: NotRequired[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class TranscriptRewriteMessageToolResults(TypedDict, total=False):
     created_at: NotRequired[Optional[str]]
@@ -8292,7 +8295,7 @@ class WireSessionMessageBlockAssistant(TypedDict, total=False):
     interaction_id: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
     run_id: NotRequired[Optional[RunId]]
-    stop_reason: Required[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class WireSessionMessageToolResults(TypedDict, total=False):
     created_at: Required[str]

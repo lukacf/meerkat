@@ -3128,6 +3128,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DeferInputBehindBacklogAlreadyResolvedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7873,6 +7888,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_worker_binding_is_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_existing_member_has_worker_binding`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_terminal_is_worker_bound`

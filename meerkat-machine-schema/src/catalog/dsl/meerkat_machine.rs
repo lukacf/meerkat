@@ -1657,6 +1657,14 @@ pub enum LiveDelegationWorkerPhase {
     Failed,
 }
 
+/// Whether delegation owns the member lifecycle or only one admitted turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationWorkerOwnership {
+    #[default]
+    OwnedMember,
+    ExistingMember,
+}
+
 /// Machine-derived reason for cancelling one exact live delegation worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveDelegationCancellationReason {
@@ -3656,6 +3664,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel: Map<String, Generation>,
             live_execution_phase_by_channel: Map<String, Enum<LiveExecutionChannelPhase>>,
             live_revoked_execution_channels: Set<String>,
+            live_cancelled_recovery_channels: Set<String>,
             live_execution_profile_by_channel: Map<String, String>,
             live_execution_mode_by_channel: Map<String, Enum<LiveExecutionMode>>,
             live_function_bridge_capable_channels: Set<String>,
@@ -3692,6 +3701,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_provider_turn_by_operation: Map<OperationId, String>,
             live_delegation_reconciliation_by_operation: Map<OperationId, Enum<LiveDelegationReconciliation>>,
             live_delegation_worker_identity_by_operation: Map<OperationId, String>,
+            live_delegation_existing_member_operations: Set<OperationId>,
             live_delegation_worker_phase_by_operation: Map<OperationId, Enum<LiveDelegationWorkerPhase>>,
             live_delegation_cancellation_reason_by_operation: Map<OperationId, Enum<LiveDelegationCancellationReason>>,
             live_delegation_worker_terminal_by_operation: Map<OperationId, Enum<LiveDelegationWorkerTerminalKind>>,
@@ -4234,6 +4244,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel = EmptyMap,
             live_execution_phase_by_channel = EmptyMap,
             live_revoked_execution_channels = EmptySet,
+            live_cancelled_recovery_channels = EmptySet,
             live_execution_profile_by_channel = EmptyMap,
             live_execution_mode_by_channel = EmptyMap,
             live_function_bridge_capable_channels = EmptySet,
@@ -4266,6 +4277,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_provider_turn_by_operation = EmptyMap,
             live_delegation_reconciliation_by_operation = EmptyMap,
             live_delegation_worker_identity_by_operation = EmptyMap,
+            live_delegation_existing_member_operations = EmptySet,
             live_delegation_worker_phase_by_operation = EmptyMap,
             live_delegation_cancellation_reason_by_operation = EmptyMap,
             live_delegation_worker_terminal_by_operation = EmptyMap,
@@ -5162,7 +5174,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
             PrioritizeInput { input_id: String },
-            DeferInputBehindBacklog { input_id: String },
+            DeferInputBehindBacklog { input_id: String, cancelled_run_id: Option<RunId> },
             StageForRun { input_id: String, run_id: RunId },
             IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String, lane: Enum<InputLane> },
@@ -5468,6 +5480,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 provider_turn_correlation: String,
                 worker_identity: String,
+                worker_ownership: Enum<LiveDelegationWorkerOwnership>,
             },
             ResolveLiveDelegationWorkerStart {
                 channel_id: String,
@@ -6801,6 +6814,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: String,
                 phase: Enum<LiveExecutionChannelPhase>,
                 already_closed: bool,
+                context_recovery_channel_id: Option<String>,
+                result_recovery_channel_id: Option<String>,
             },
             LiveInteractionAdmitted {
                 session_id: String,
@@ -6832,6 +6847,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: String,
                 operation_id: OperationId,
                 worker_identity: String,
+                worker_ownership: Enum<LiveDelegationWorkerOwnership>,
             },
             LiveDelegationWorkerStartResolved {
                 channel_id: String,
@@ -8427,6 +8443,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_delegation_interaction_by_operation.contains_key(operation_id)
                 && self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationReconciliation::Confirmed))
+        }
+
+        invariant live_delegation_existing_member_has_worker_binding {
+            for_all(operation_id in self.live_delegation_existing_member_operations,
+                self.live_delegation_worker_identity_by_operation.contains_key(operation_id))
         }
 
         invariant live_delegation_terminal_is_worker_bound {
@@ -20885,7 +20906,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // before retrying the failed batch.
         transition DeferInputBehindBacklog {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DeferInputBehindBacklog { input_id }
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
             guard "input_queued" { self.input_lane.contains_key(input_id) }
             update {
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
@@ -20909,11 +20930,32 @@ macro_rules! meerkat_catalog_machine_dsl {
         // corruption, not a resolved member.
         transition DeferInputBehindBacklogAlreadyResolved {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DeferInputBehindBacklog { input_id }
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             guard "input_not_in_lane" { !self.input_lane.contains_key(input_id) }
             guard "input_resolved_past_queued" {
                 self.input_phases.get(input_id).get("value") != InputPhase::Queued
+            }
+            update {}
+            to Idle
+        }
+
+        // Terminal publication may archive the completed input before the
+        // post-cancellation backlog sweep. Absence is an idempotent no-op,
+        // never permission to stop unrelated queued work.
+        transition DeferInputBehindBacklogAlreadyArchived {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
+            guard "exact_cancelled_batch" {
+                cancelled_run_id != None
+                && self.turn_terminal_run_id == cancelled_run_id
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            guard "input_not_live" {
+                !self.input_phases.contains_key(input_id)
+                && !self.input_lane.contains_key(input_id)
+                && !self.input_recovery_lanes.contains_key(input_id)
+                && !self.input_run_associations.contains_key(input_id)
             }
             update {}
             to Idle
@@ -22969,7 +23011,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
-            guard "channel_id_not_revoked" { !self.live_revoked_execution_channels.contains(channel_id) }
+            guard "channel_id_not_revoked" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+                && !self.live_cancelled_recovery_channels.contains(channel_id)
+            }
             update {
                 self.live_open_admission_sequence += 1;
                 self.live_active_channel_by_session.insert(session_id, channel_id);
@@ -23047,7 +23092,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
-            guard "channel_id_revoked" { self.live_revoked_execution_channels.contains(channel_id) }
+            guard "channel_id_revoked" {
+                self.live_revoked_execution_channels.contains(channel_id)
+                || self.live_cancelled_recovery_channels.contains(channel_id)
+            }
             update {
                 self.live_open_admission_sequence += 1;
             }
@@ -23311,6 +23359,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 canonical_seed_cursor, pending_receipt
             }
             guard "pending_receipt_present" { pending_receipt != "" }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(channel_id) }
             guard "channel_binding_matches" {
                 self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
                 && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
@@ -23574,6 +23623,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                         == Some(LiveExecutionChannelPhase::Revoked))
             }
             update {
+                if self.live_context_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_context_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+                if self.live_result_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_result_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
                 self.live_execution_phase_by_channel.insert(
                     channel_id,
                     LiveExecutionChannelPhase::Revoked
@@ -23635,12 +23694,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id: session_id,
                 channel_id: channel_id,
                 phase: LiveExecutionChannelPhase::Revoked,
-                already_closed: false
+                already_closed: false,
+                context_recovery_channel_id: self.live_context_recovery_replacement_by_channel.get_cloned(channel_id),
+                result_recovery_channel_id: self.live_result_recovery_replacement_by_channel.get_cloned(channel_id)
             }
         }
 
         // A lost close response is replay-safe from the retained opaque
-        // tombstone and generated closed status. No provider effect is minted.
+        // tombstone and generated closed status. Explicit close also cancels
+        // a still-preparing recovery, unlike its internal close handoff.
         transition RevokeLiveChannelCloseCustodyClosedReplay {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RevokeLiveChannelCloseCustody {
@@ -23660,12 +23722,26 @@ macro_rules! meerkat_catalog_machine_dsl {
                         && self.live_activation_receipt_by_channel.get_cloned(channel_id)
                             == Some(activation_receipt.get("value"))))
             }
+            update {
+                if self.live_context_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_context_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+                if self.live_result_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_result_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+            }
             to Idle
             emit LiveChannelCloseCustodyRevoked {
                 session_id: session_id,
                 channel_id: channel_id,
                 phase: LiveExecutionChannelPhase::Revoked,
-                already_closed: true
+                already_closed: true,
+                context_recovery_channel_id: self.live_context_recovery_replacement_by_channel.get_cloned(channel_id),
+                result_recovery_channel_id: self.live_result_recovery_replacement_by_channel.get_cloned(channel_id)
             }
         }
 
@@ -24022,7 +24098,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationWorkerStart {
                 channel_id, runtime_id, fence_token, generation, interaction_id,
-                operation_id, provider_turn_correlation, worker_identity
+                operation_id, provider_turn_correlation, worker_identity, worker_ownership
             }
             guard "worker_identity_present" { worker_identity != "" }
             guard "runtime_binding_matches" {
@@ -24049,6 +24125,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.live_delegation_worker_identity_by_operation.insert(operation_id, worker_identity);
+                if worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
+                    self.live_delegation_existing_member_operations.insert(operation_id);
+                }
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
                     LiveDelegationWorkerPhase::StartAuthorized
@@ -24059,7 +24138,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 interaction_id: interaction_id,
                 operation_id: operation_id,
-                worker_identity: worker_identity
+                worker_identity: worker_identity,
+                worker_ownership: worker_ownership
             }
         }
 
@@ -24743,9 +24823,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // A host restart loses process-local executor and provider custody.
-        // The caller first observes the exact durable Mob terminal and retires
-        // that child. This edge then converges only operation-indexed generated
-        // truth after the original channel is revoked. It cannot authorize a
+        // The caller first observes the exact durable Mob terminal and releases
+        // executor custody (retiring an owned child, retaining a borrowed member).
+        // This edge then converges only operation-indexed generated truth after
+        // all original live binding atoms are gone, including cold recovery.
+        // Revocation is recorded here rather than fabricated by the store.
+        // It cannot authorize a
         // retry or make the result eligible for provider delivery.
         transition ReconcileRevokedLiveDelegationWorkerAfterRestartFresh {
             per_phase [Idle, Attached, Running, Retired, Stopped]
@@ -24753,9 +24836,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, interaction_id, operation_id,
                 worker_identity, terminal
             }
-            guard "original_channel_is_revoked_and_noncurrent" {
-                self.live_revoked_execution_channels.contains(channel_id)
-                && self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
+            guard "original_channel_is_unbound_and_noncurrent" {
+                self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
                 && !self.live_channel_session_by_channel.contains_key(channel_id)
                 && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                 && !self.live_execution_fence_by_channel.contains_key(channel_id)
@@ -24779,6 +24861,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                         == Some(LiveDelegationWorkerPhase::CancelAuthorized))
             }
             update {
+                self.live_revoked_execution_channels.insert(channel_id);
+                self.live_execution_phase_by_channel.insert(channel_id, LiveExecutionChannelPhase::Revoked);
                 self.live_delegation_worker_terminal_by_operation.insert(operation_id, terminal);
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
@@ -24807,9 +24891,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, interaction_id, operation_id,
                 worker_identity, terminal
             }
-            guard "original_channel_is_revoked_and_noncurrent" {
-                self.live_revoked_execution_channels.contains(channel_id)
-                && self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
+            guard "original_channel_is_unbound_and_noncurrent" {
+                self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
                 && !self.live_channel_session_by_channel.contains_key(channel_id)
                 && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                 && !self.live_execution_fence_by_channel.contains_key(channel_id)
@@ -24836,6 +24919,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_delegation_result_eligible_operations.contains(operation_id)
             }
             update {
+                self.live_revoked_execution_channels.insert(channel_id);
+                self.live_execution_phase_by_channel.insert(channel_id, LiveExecutionChannelPhase::Revoked);
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
                     LiveDelegationWorkerPhase::Retired
@@ -25291,6 +25376,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation, operation_id, result_digest, canonical_seed_cursor
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
             guard "recovery_obligation_matches" {
                 self.live_result_recovery_replacement_by_channel.get_cloned(closing_channel_id)
                     == Some(replacement_channel_id)
@@ -26893,6 +26979,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 canonical_seed_cursor
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
             guard "recovery_obligation_matches" {
                 self.live_context_recovery_replacement_by_channel.get_cloned(closing_channel_id)
                     == Some(replacement_channel_id)

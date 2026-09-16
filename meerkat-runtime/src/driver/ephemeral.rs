@@ -2038,11 +2038,13 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
+        cancelled_run_id: Option<&RunId>,
     ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::DeferInputBehindBacklog {
                     input_id: Self::dsl_key(input_id),
+                    cancelled_run_id: cancelled_run_id.map(mm_dsl::RunId::from_domain),
                 },
                 "DeferInputBehindBacklog",
             )?;
@@ -4839,7 +4841,7 @@ mod tests {
         driver.accept_input(second).await.unwrap();
 
         driver
-            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&first_id))
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&first_id), None)
             .unwrap();
 
         assert_eq!(
@@ -4893,7 +4895,7 @@ mod tests {
         );
 
         driver
-            .defer_queued_inputs_behind_backlog(&[poison_id.clone(), innocent_id.clone()])
+            .defer_queued_inputs_behind_backlog(&[poison_id.clone(), innocent_id.clone()], None)
             .expect(
                 "defer sweep must be total over batch members the machine already resolved \
                  terminally",
@@ -4960,7 +4962,7 @@ mod tests {
         );
 
         driver
-            .defer_queued_inputs_behind_backlog(&[applied_id.clone(), staged_id.clone()])
+            .defer_queued_inputs_behind_backlog(&[applied_id.clone(), staged_id.clone()], None)
             .expect("defer sweep must be total over boundary-applied batch members");
         assert_eq!(
             driver.input_phase(&applied_id),
@@ -4981,7 +4983,7 @@ mod tests {
 
         let untracked = InputId::new();
         driver
-            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&untracked))
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&untracked), None)
             .expect_err("an untracked input in the defer sweep is authority corruption");
     }
 

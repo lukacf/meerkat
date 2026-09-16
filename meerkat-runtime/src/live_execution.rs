@@ -246,6 +246,29 @@ pub(crate) const MAX_DURABLE_LIVE_BRIDGE_OPERATIONS: usize = 128;
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveBridgeRecoveryImage {
     operations: Vec<LiveBridgeRecoveryOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    delegations: Vec<LiveDelegationRecoveryOperation>,
+}
+
+/// Payload-free persisted image of generated ClientContext execution custody.
+/// No provider output capability or process-local tool gate is recoverable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveDelegationRecoveryOperation {
+    operation_id: String,
+    channel_id: String,
+    channel_revoked: bool,
+    interaction_id: String,
+    provider_turn_ref: String,
+    worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
+    phase: crate::meerkat_machine::dsl::LiveDelegationWorkerPhase,
+    reconciliation: LiveDelegationReconciliation,
+    terminal: Option<DslLiveDelegationWorkerTerminalKind>,
+    cancellation_reason: Option<DslLiveDelegationCancellationReason>,
+    abandoned: bool,
+    late: bool,
+    result_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -436,7 +459,78 @@ impl LiveBridgeRecoveryImage {
                 channel_revoked: state.live_revoked_execution_channels.contains(channel_id),
             });
         }
-        Ok(Self { operations })
+        let mut delegations =
+            Vec::with_capacity(state.live_delegation_worker_identity_by_operation.len());
+        for (operation_id, worker_identity) in &state.live_delegation_worker_identity_by_operation {
+            let key = operation_id.0.as_str();
+            let interaction_id = required(
+                state
+                    .live_delegation_interaction_by_operation
+                    .get(operation_id)
+                    .cloned(),
+                key,
+                "delegation interaction",
+            )?;
+            let channel_id = required(
+                state
+                    .live_interaction_channel_by_id
+                    .get(&interaction_id)
+                    .cloned(),
+                key,
+                "delegation channel",
+            )?;
+            delegations.push(LiveDelegationRecoveryOperation {
+                operation_id: operation_id.0.clone(),
+                channel_revoked: state.live_revoked_execution_channels.contains(&channel_id),
+                channel_id,
+                abandoned: state.live_abandoned_interactions.contains(&interaction_id),
+                interaction_id,
+                provider_turn_ref: required(
+                    state
+                        .live_delegation_provider_turn_by_operation
+                        .get(operation_id)
+                        .cloned(),
+                    key,
+                    "delegation provider turn",
+                )?,
+                worker_identity: worker_identity.clone(),
+                worker_ownership: if state
+                    .live_delegation_existing_member_operations
+                    .contains(operation_id)
+                {
+                    LiveDelegationWorkerOwnership::ExistingMember
+                } else {
+                    LiveDelegationWorkerOwnership::OwnedMember
+                },
+                phase: *state
+                    .live_delegation_worker_phase_by_operation
+                    .get(operation_id)
+                    .ok_or_else(|| format!("delegation {key} has no generated worker phase"))?,
+                reconciliation: *state
+                    .live_delegation_reconciliation_by_operation
+                    .get(operation_id)
+                    .ok_or_else(|| format!("delegation {key} has no generated reconciliation"))?,
+                terminal: state
+                    .live_delegation_worker_terminal_by_operation
+                    .get(operation_id)
+                    .copied(),
+                cancellation_reason: state
+                    .live_delegation_cancellation_reason_by_operation
+                    .get(operation_id)
+                    .copied(),
+                late: state
+                    .live_delegation_late_terminal_operations
+                    .contains(operation_id),
+                result_eligible: state
+                    .live_delegation_result_eligible_operations
+                    .contains(operation_id),
+            });
+        }
+        delegations.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        Ok(Self {
+            operations,
+            delegations,
+        })
     }
 
     pub(crate) fn restore_into(
@@ -604,6 +698,79 @@ impl LiveBridgeRecoveryImage {
                     operation.channel_id.clone(),
                     crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
                 );
+            }
+        }
+        for delegation in &self.delegations {
+            let operation = DslOperationId(delegation.operation_id.clone());
+            if delegation.channel_revoked {
+                state
+                    .live_revoked_execution_channels
+                    .insert(delegation.channel_id.clone());
+                state.live_execution_phase_by_channel.insert(
+                    delegation.channel_id.clone(),
+                    crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
+                );
+            }
+            if state
+                .live_delegation_worker_identity_by_operation
+                .insert(operation.clone(), delegation.worker_identity.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "durable live image duplicates delegation {}",
+                    delegation.operation_id
+                ));
+            }
+            if let Some(channel) = state.live_interaction_channel_by_id.insert(
+                delegation.interaction_id.clone(),
+                delegation.channel_id.clone(),
+            ) && channel != delegation.channel_id
+            {
+                return Err(
+                    "durable delegation interaction has conflicting channel custody".to_string(),
+                );
+            }
+            state
+                .live_delegation_interaction_by_operation
+                .insert(operation.clone(), delegation.interaction_id.clone());
+            state
+                .live_delegation_provider_turn_by_operation
+                .insert(operation.clone(), delegation.provider_turn_ref.clone());
+            state
+                .live_delegation_reconciliation_by_operation
+                .insert(operation.clone(), delegation.reconciliation);
+            state
+                .live_delegation_worker_phase_by_operation
+                .insert(operation.clone(), delegation.phase);
+            if delegation.worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
+                state
+                    .live_delegation_existing_member_operations
+                    .insert(operation.clone());
+            }
+            if let Some(terminal) = delegation.terminal {
+                state
+                    .live_delegation_worker_terminal_by_operation
+                    .insert(operation.clone(), terminal);
+            }
+            if let Some(reason) = delegation.cancellation_reason {
+                state
+                    .live_delegation_cancellation_reason_by_operation
+                    .insert(operation.clone(), reason);
+            }
+            if delegation.abandoned {
+                state
+                    .live_abandoned_interactions
+                    .insert(delegation.interaction_id.clone());
+            }
+            if delegation.late {
+                state
+                    .live_delegation_late_terminal_operations
+                    .insert(operation.clone());
+            }
+            if delegation.result_eligible {
+                state
+                    .live_delegation_result_eligible_operations
+                    .insert(operation);
             }
         }
         Ok(())
@@ -2425,6 +2592,7 @@ pub struct LiveDelegationExecutionAdmission {
     session_id: SessionId,
     operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
     worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
     tool_gate: Arc<LiveToolExecutionAdmissionGate>,
 }
 
@@ -2460,6 +2628,7 @@ impl LiveDelegationExecutionAdmission {
             interaction_id,
             operation_id,
             worker_identity: authorized_worker_identity,
+            worker_ownership,
         } = effect
         else {
             return Ok(None);
@@ -2477,6 +2646,7 @@ impl LiveDelegationExecutionAdmission {
             session_id: session_id.clone(),
             operation: operation.clone(),
             worker_identity: worker_identity.to_string(),
+            worker_ownership: *worker_ownership,
             tool_gate: Arc::new(LiveToolExecutionAdmissionGate::new(operation.clone())),
         }))
     }
@@ -2499,6 +2669,24 @@ impl LiveDelegationExecutionAdmission {
     #[must_use]
     pub fn worker_identity(&self) -> &str {
         &self.worker_identity
+    }
+
+    #[must_use]
+    pub fn worker_ownership(&self) -> LiveDelegationWorkerOwnership {
+        self.worker_ownership
+    }
+
+    /// Existing-member admission must cross final-input authority before any
+    /// work is queued; its session-wide tool gate cannot be replaced.
+    pub fn require_released_execution(&self) -> Result<(), LiveExecutionAuthorityError> {
+        match &*self.tool_gate.state_tx.borrow() {
+            LiveToolExecutionAdmissionState::Released(witness)
+                if witness.authorizes(&self.session_id, &self.operation) =>
+            {
+                Ok(())
+            }
+            _ => Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal),
+        }
     }
 
     #[must_use]
@@ -2787,6 +2975,8 @@ pub enum LiveDelegationRecoveryPhase {
     Failed,
 }
 
+pub use crate::meerkat_machine::dsl::LiveDelegationWorkerOwnership;
+
 /// Read-only durable projection of one ClientContext worker operation.
 ///
 /// Provider delegation identity is deliberately absent. After restart the
@@ -2800,6 +2990,7 @@ pub struct LiveDelegationRecoverySnapshot {
     operation_id: meerkat_core::OperationId,
     interaction_id: meerkat_core::InteractionId,
     worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
     phase: LiveDelegationRecoveryPhase,
     terminal: Option<LiveDelegationWorkerTerminalKind>,
     late: bool,
@@ -2814,6 +3005,7 @@ impl LiveDelegationRecoverySnapshot {
         operation_id: meerkat_core::OperationId,
         interaction_id: meerkat_core::InteractionId,
         worker_identity: String,
+        worker_ownership: LiveDelegationWorkerOwnership,
         phase: LiveDelegationRecoveryPhase,
         terminal: Option<LiveDelegationWorkerTerminalKind>,
         late: bool,
@@ -2825,6 +3017,7 @@ impl LiveDelegationRecoverySnapshot {
             operation_id,
             interaction_id,
             worker_identity,
+            worker_ownership,
             phase,
             terminal,
             late,
@@ -2855,6 +3048,11 @@ impl LiveDelegationRecoverySnapshot {
     #[must_use]
     pub fn worker_identity(&self) -> &str {
         &self.worker_identity
+    }
+
+    #[must_use]
+    pub fn worker_ownership(&self) -> LiveDelegationWorkerOwnership {
+        self.worker_ownership
     }
 
     #[must_use]

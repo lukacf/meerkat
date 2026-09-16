@@ -1661,8 +1661,10 @@ impl PersistentRuntimeDriver {
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
+        cancelled_run_id: Option<&RunId>,
     ) -> Result<(), RuntimeDriverError> {
-        self.inner.defer_queued_inputs_behind_backlog(input_ids)
+        self.inner
+            .defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
     }
 
     pub(crate) fn absorb_post_admission_effects(
